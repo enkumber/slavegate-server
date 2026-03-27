@@ -26,7 +26,7 @@ export const agentConfig = {
     stepTimeoutMs: 15_000,    // 15s per action on device (was 30s)
     screenshotDelayMs: 300,   // 300ms settle time (was 500ms)
     screenshotTimeoutMs: 8_000, // 8s — screencap on rooted OnePlus can take 2-3s + WS transfer
-    maxStepsPerTask: 50,
+    maxStepsPerTask: 250, // Increased for complex tasks (35 likes + 7 comments + 3 follows)
     abortOnConsecutiveFailures: 3,
   },
 } as const;

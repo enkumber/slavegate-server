@@ -22,6 +22,11 @@ const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "";
 const ANTHROPIC_ENDPOINT = process.env.ANTHROPIC_ENDPOINT || "https://api.anthropic.com/v1";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
+// Local vision: Ollama with LLaVA for image processing (faster, no rate limits)
+const OLLAMA_ENDPOINT = process.env.OLLAMA_ENDPOINT || "http://192.168.50.185:11434";
+const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "llava:13b";
+const USE_LOCAL_VISION = process.env.USE_LOCAL_VISION !== "false"; // default: true
+
 const REQUEST_TIMEOUT_MS = 120_000; // 2min — large screenshots (400KB+) can take longer via gateway
 const MAX_RETRIES = 2;
 
@@ -49,9 +54,22 @@ export class LlmClient {
   }
 
   async complete(req: LlmCompletionRequest): Promise<LlmCompletionResponse> {
-    // NOTE: Gateway doesn't support vision, but direct Anthropic key (oat01) doesn't have model access.
-    // We MUST use gateway for all requests. Vision support needs to be fixed in gateway.
-    // For now, images will fail until gateway is updated.
+    // Route ONLY simple vision requests to Ollama (not planning which needs JSON)
+    // Planning prompts mention "JSON" or "steps" — those need structured output from Anthropic
+    const hasImages = req.userContent.some(c => c.type === "image");
+    const needsStructuredOutput = req.systemPrompt?.toLowerCase().includes("json") || 
+                                   req.systemPrompt?.toLowerCase().includes("steps") ||
+                                   req.userContent.some(c => c.type === "text" && c.text.toLowerCase().includes("json"));
+    
+    // Force Ollama for llava model or simple vision requests
+    const forceOllama = req.model.startsWith("llava");
+    
+    console.log(`[llm-client] hasImages=${hasImages}, needsStructuredOutput=${needsStructuredOutput}, forceOllama=${forceOllama}`);
+    
+    if (forceOllama || (hasImages && USE_LOCAL_VISION && !needsStructuredOutput)) {
+      console.log("[llm-client] Vision request → using local Ollama LLaVA");
+      return await this.completeViaOllama(req);
+    }
 
     if (this.useGateway) {
       try {
@@ -199,6 +217,66 @@ export class LlmClient {
       inputTokens: data.usage?.input_tokens ?? 0,
       outputTokens: data.usage?.output_tokens ?? 0,
       model: data.model,
+    };
+  }
+
+  // ─── Local Ollama path (vision via LLaVA) ──────────────────────────────────
+
+  private async completeViaOllama(req: LlmCompletionRequest): Promise<LlmCompletionResponse> {
+    // Extract text and images
+    const textParts: string[] = [];
+    const images: string[] = [];
+
+    for (const c of req.userContent) {
+      if (c.type === "text") {
+        textParts.push(c.text);
+      } else if (c.type === "image" && c.base64) {
+        images.push(c.base64);
+        console.log(`[llm-client] Ollama image: ${(c.base64.length / 1024).toFixed(0)}KB`);
+      }
+    }
+
+    const prompt = textParts.join("\n");
+
+    const body = {
+      model: OLLAMA_VISION_MODEL,
+      messages: [
+        ...(req.systemPrompt ? [{ role: "system", content: req.systemPrompt }] : []),
+        {
+          role: "user",
+          content: prompt,
+          images: images,
+        },
+      ],
+      stream: false,
+      options: {
+        temperature: req.temperature ?? 0.7,
+      },
+    };
+
+    const resp = await this.fetchWithRetry(
+      `${OLLAMA_ENDPOINT}/api/chat`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+
+    const data = await resp.json() as {
+      message?: { content: string };
+      prompt_eval_count?: number;
+      eval_count?: number;
+      model?: string;
+    };
+
+    const text = data.message?.content ?? "";
+
+    return {
+      text,
+      inputTokens: data.prompt_eval_count ?? 0,
+      outputTokens: data.eval_count ?? 0,
+      model: data.model ?? OLLAMA_VISION_MODEL,
     };
   }
 
