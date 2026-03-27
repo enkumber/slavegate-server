@@ -131,6 +131,11 @@ export class LlmClient {
   // ─── Direct Anthropic path (fallback) ─────────────────────────────────────
 
   private async completeViaAnthropic(req: LlmCompletionRequest): Promise<LlmCompletionResponse> {
+    // Strip "anthropic/" prefix for direct API — gateway uses "anthropic/model" but Anthropic API expects just "model"
+    const anthropicModel = req.model.startsWith("anthropic/")
+      ? req.model.replace("anthropic/", "")
+      : req.model;
+
     const content = req.userContent.map((c) => {
       if (c.type === "text") {
         return { type: "text" as const, text: c.text };
@@ -146,7 +151,7 @@ export class LlmClient {
     });
 
     const body = {
-      model: req.model,
+      model: anthropicModel,
       max_tokens: req.maxTokens,
       temperature: req.temperature,
       system: req.systemPrompt,
