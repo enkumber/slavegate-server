@@ -29,6 +29,8 @@ export interface TaskRow {
   status: string;
   started_at?: Date;
   completed_at?: Date;
+  retry_count?: number;
+  updated_at?: Date;
 }
 
 export interface TaskRunnerConfig {
@@ -43,8 +45,8 @@ const DEFAULT_CONFIG: TaskRunnerConfig = {
   pollIntervalMs: 30_000,           // 30 seconds
   minGapBetweenTasksMs: 60_000,     // 1 minute gap between tasks on same device
   batchSize: 10,
-  maxRetries: 2,
-  retryBackoffMs: 5_000,
+  maxRetries: 3,                    // 3 retries: 5s, 15s, 45s (exponential backoff)
+  retryBackoffMs: 5_000,            // Base backoff: 5 * 3^retry_count seconds
 };
 
 // ─── Task Runner State ────────────────────────────────────────────────────────
@@ -139,21 +141,31 @@ async function runPollCycle(): Promise<void> {
   
   const db = getDb();
   
-  // Fetch queued tasks ready to run
+  // Fetch queued tasks + failed tasks eligible for retry
+  // Exponential backoff: 5 * 3^retry_count seconds (5s, 15s, 45s)
   const result = await db.query<TaskRow>(`
-    SELECT id, account_id, device_id, routine, params, scheduled_time, status
+    SELECT id, account_id, device_id, routine, params, scheduled_time, status, retry_count, updated_at
     FROM tasks
-    WHERE status = 'queued'
-    AND scheduled_time <= NOW()
-    ORDER BY scheduled_time ASC
+    WHERE 
+      (status = 'queued' AND scheduled_time <= NOW())
+      OR (
+        status = 'failed' 
+        AND COALESCE(retry_count, 0) < $2
+        AND updated_at < NOW() - (INTERVAL '1 second' * (5 * POWER(3, COALESCE(retry_count, 0))))
+      )
+    ORDER BY 
+      CASE WHEN status = 'queued' THEN 0 ELSE 1 END,
+      scheduled_time ASC
     LIMIT $1
-  `, [config.batchSize]);
+  `, [config.batchSize, config.maxRetries]);
   
   if (result.rows.length === 0) {
     return; // Nothing to do
   }
   
-  console.log(`[task-runner] Found ${result.rows.length} queued tasks`);
+  const queuedCount = result.rows.filter(t => t.status === 'queued').length;
+  const retryCount = result.rows.filter(t => t.status === 'failed').length;
+  console.log(`[task-runner] Found ${queuedCount} queued + ${retryCount} retry-eligible tasks`);
   
   // Process each task (respecting device locks)
   for (const task of result.rows) {
@@ -256,11 +268,19 @@ async function executeTask(task: TaskRow): Promise<void> {
       
       console.log(`[task-runner] Task ${taskId.slice(0, 8)} completed ✓ (${result.stepsCompleted}/${result.totalSteps} steps)`);
     } else {
+      const currentRetryCount = task.retry_count ?? 0;
+      const newRetryCount = currentRetryCount + 1;
+      
       await db.query(`
         UPDATE tasks 
-        SET status = 'failed', completed_at = NOW(), result = $2, error = $3
+        SET status = 'failed', 
+            completed_at = NOW(), 
+            updated_at = NOW(),
+            result = $2, 
+            error = $3,
+            retry_count = $4
         WHERE id = $1
-      `, [taskId, JSON.stringify(resultJson), result.failReason || "Unknown error"]);
+      `, [taskId, JSON.stringify(resultJson), result.failReason || "Unknown error", newRetryCount]);
       
       // Also log to execution_logs for detailed debugging
       await db.query(`
@@ -273,17 +293,31 @@ async function executeTask(task: TaskRow): Promise<void> {
         totalSteps: result.totalSteps,
         tokenUsage: result.tokenUsage,
         durationMs: result.durationMs,
+        retryCount: newRetryCount,
       })]);
       
-      console.error(`[task-runner] Task ${taskId.slice(0, 8)} failed: ${result.failReason}`);
+      if (newRetryCount < config.maxRetries) {
+        const nextRetryDelay = 5 * Math.pow(3, newRetryCount);
+        console.error(`[task-runner] Task ${taskId.slice(0, 8)} failed (retry ${newRetryCount}/${config.maxRetries}, next in ${nextRetryDelay}s): ${result.failReason}`);
+      } else {
+        console.error(`[task-runner] Task ${taskId.slice(0, 8)} failed permanently (${newRetryCount} retries exhausted): ${result.failReason}`);
+      }
     }
     
   } catch (err) {
-    // Mark as failed on exception
+    // Mark as failed on exception, increment retry_count
+    const currentRetryCount = task.retry_count ?? 0;
+    const newRetryCount = currentRetryCount + 1;
+    
     await db.query(`
-      UPDATE tasks SET status = 'failed', completed_at = NOW()
+      UPDATE tasks 
+      SET status = 'failed', 
+          completed_at = NOW(), 
+          updated_at = NOW(),
+          error = $2,
+          retry_count = $3
       WHERE id = $1
-    `, [taskId]);
+    `, [taskId, (err as Error).message, newRetryCount]);
     
     await db.query(`
       INSERT INTO execution_logs (task_id, device_id, log_data)
@@ -291,9 +325,15 @@ async function executeTask(task: TaskRow): Promise<void> {
     `, [taskId, deviceId, JSON.stringify({
       error: (err as Error).message,
       stack: (err as Error).stack,
+      retryCount: newRetryCount,
     })]);
     
-    console.error(`[task-runner] Task ${taskId.slice(0, 8)} exception:`, err);
+    if (newRetryCount < config.maxRetries) {
+      const nextRetryDelay = 5 * Math.pow(3, newRetryCount);
+      console.error(`[task-runner] Task ${taskId.slice(0, 8)} exception (retry ${newRetryCount}/${config.maxRetries}, next in ${nextRetryDelay}s):`, err);
+    } else {
+      console.error(`[task-runner] Task ${taskId.slice(0, 8)} exception (${newRetryCount} retries exhausted):`, err);
+    }
     
   } finally {
     // Unlock device & update last task time
@@ -471,6 +511,69 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
   }
 }
 
+// ─── Retry Failed Tasks ───────────────────────────────────────────────────────
+
+/**
+ * Reset all failed tasks to queued state for immediate retry.
+ * Returns the number of tasks reset.
+ */
+export async function retryFailedTasks(): Promise<{ resetCount: number }> {
+  const db = getDb();
+  
+  const result = await db.query(`
+    UPDATE tasks 
+    SET status = 'queued', 
+        retry_count = 0,
+        error = NULL,
+        updated_at = NOW()
+    WHERE status = 'failed'
+    RETURNING id
+  `);
+  
+  const resetCount = result.rowCount ?? 0;
+  
+  if (resetCount > 0) {
+    console.log(`[task-runner] Reset ${resetCount} failed tasks to queued`);
+  }
+  
+  return { resetCount };
+}
+
+/**
+ * Get failed tasks count and details.
+ */
+export async function getFailedTasksStats(): Promise<{
+  totalFailed: number;
+  retryableCount: number;
+  exhaustedCount: number;
+}> {
+  const db = getDb();
+  
+  const result = await db.query<{ retry_count: number; count: string }>(`
+    SELECT COALESCE(retry_count, 0) as retry_count, COUNT(*) as count
+    FROM tasks
+    WHERE status = 'failed'
+    GROUP BY COALESCE(retry_count, 0)
+  `);
+  
+  let totalFailed = 0;
+  let retryableCount = 0;
+  let exhaustedCount = 0;
+  
+  for (const row of result.rows) {
+    const count = parseInt(row.count, 10);
+    totalFailed += count;
+    
+    if (row.retry_count < config.maxRetries) {
+      retryableCount += count;
+    } else {
+      exhaustedCount += count;
+    }
+  }
+  
+  return { totalFailed, retryableCount, exhaustedCount };
+}
+
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
 export const taskRunnerService = {
@@ -478,4 +581,6 @@ export const taskRunnerService = {
   stop: stopTaskRunner,
   status: getTaskRunnerStatus,
   executeNow: executeTaskNow,
+  retryFailed: retryFailedTasks,
+  getFailedStats: getFailedTasksStats,
 };

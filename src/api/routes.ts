@@ -1250,6 +1250,26 @@ router.post("/task-runner/execute/:taskId", requireAuth, async (req, res) => {
   }
 });
 
+router.post("/task-runner/retry-failed", requireAuth, async (_req, res) => {
+  try {
+    const { retryFailedTasks } = await import("../modules/task-runner");
+    const result = await retryFailedTasks();
+    res.json({ ok: true, data: result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.get("/task-runner/failed-stats", requireAuth, async (_req, res) => {
+  try {
+    const { getFailedTasksStats } = await import("../modules/task-runner");
+    const stats = await getFailedTasksStats();
+    res.json({ ok: true, data: stats });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 // ─── Tasks Management ─────────────────────────────────────────────────────────
 
 router.get("/tasks", requireAuth, async (req, res) => {

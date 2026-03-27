@@ -8,6 +8,8 @@ export {
   stopTaskRunner,
   getTaskRunnerStatus,
   executeTaskNow,
+  retryFailedTasks,
+  getFailedTasksStats,
   taskRunnerService,
 } from "./task-runner.service";
 
