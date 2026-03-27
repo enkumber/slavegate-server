@@ -49,6 +49,13 @@ export class LlmClient {
   }
 
   async complete(req: LlmCompletionRequest): Promise<LlmCompletionResponse> {
+    // Force direct Anthropic for image requests (gateway doesn't support vision)
+    const hasImages = req.userContent.some(c => c.type === "image");
+    if (hasImages && this.anthropicKey) {
+      console.log("[llm-client] Image detected → using direct Anthropic (gateway doesn't support vision)");
+      return await this.completeViaAnthropic(req);
+    }
+
     if (this.useGateway) {
       try {
         return await this.completeViaGateway(req);
