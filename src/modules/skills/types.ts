@@ -94,7 +94,7 @@ export interface SkillFile {
   
   flows?: Record<string, any>;  // business flows, not auto-modified
   
-  learned_coords?: Record<string, { x: number; y: number; confidence?: number }>;  // auto-learned coordinates
+  learned_coords?: Record<string, { x: number; y: number; confidence?: number; learned_at?: string; device?: string }>;  // auto-learned coordinates
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

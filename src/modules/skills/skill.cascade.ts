@@ -593,17 +593,58 @@ async function updateSkillCoords(
     const element = skillService.getElement(skill, elementName);
     if (!element || element.type === "variable") return;
 
-    // Update coords with high confidence
-    if (skill.button_map.fixed_elements?.[elementName]) {
-      const elem = skill.button_map.fixed_elements[elementName];
-      elem.coords = newCoords;
-      elem.confidence = 0.95;
-      elem.last_verified = new Date();
-    } else if (skill.button_map.contextual_elements?.[elementName]) {
-      const elem = skill.button_map.contextual_elements[elementName];
-      elem.coords = newCoords;
-      elem.confidence = 0.95;
-      elem.last_verified = new Date();
+    // B7 fix: support nested button_map structure (e.g., "nav.home" → button_map.nav.home)
+    // Old code only looked in fixed_elements/contextual_elements flat keys — always missed.
+    // Strategy: use learned_coords section as the canonical store for auto-learned values.
+    // This avoids mutating nested button_map structure and survives YAML round-trips.
+    if (!skill.learned_coords) {
+      skill.learned_coords = {};
+    }
+
+    // B3 guard: never persist nav coords in Android nav bar zone
+    if (elementName.startsWith("nav.") && newCoords.y > 0.94) {
+      console.warn(`[cascade] B3: Skipping auto-learn for ${elementName} y=${newCoords.y.toFixed(3)} (Android nav bar zone)`);
+      return;
+    }
+
+    skill.learned_coords[elementName] = {
+      x: newCoords.x,
+      y: newCoords.y,
+      confidence: 0.95,
+      learned_at: new Date().toISOString(),
+    };
+
+    // Also try to update nested button_map in-place for legacy flat structures
+    const parts = elementName.split(".");
+    let current: Record<string, unknown> = skill.button_map as unknown as Record<string, unknown>;
+    let found = false;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (current[part] && typeof current[part] === "object") {
+        current = current[part] as Record<string, unknown>;
+      } else {
+        break;
+      }
+      if (i === parts.length - 2) {
+        const leaf = current[parts[parts.length - 1]];
+        if (leaf && typeof leaf === "object") {
+          (leaf as Record<string, unknown>).coords = newCoords;
+          (leaf as Record<string, unknown>).confidence = 0.95;
+          found = true;
+        }
+      }
+    }
+    // Fallback: legacy flat structures
+    if (!found) {
+      if (skill.button_map.fixed_elements?.[elementName]) {
+        const elem = skill.button_map.fixed_elements[elementName] as unknown as Record<string, unknown>;
+        elem.coords = newCoords;
+        elem.confidence = 0.95;
+      } else if (skill.button_map.contextual_elements?.[elementName]) {
+        const elem = skill.button_map.contextual_elements[elementName] as unknown as Record<string, unknown>;
+        elem.coords = newCoords;
+        elem.confidence = 0.95;
+      }
     }
 
     skill.updated_at = new Date();
