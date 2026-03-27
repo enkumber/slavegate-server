@@ -49,12 +49,9 @@ export class LlmClient {
   }
 
   async complete(req: LlmCompletionRequest): Promise<LlmCompletionResponse> {
-    // Force direct Anthropic for image requests (gateway doesn't support vision)
-    const hasImages = req.userContent.some(c => c.type === "image");
-    if (hasImages && this.anthropicKey) {
-      console.log("[llm-client] Image detected → using direct Anthropic (gateway doesn't support vision)");
-      return await this.completeViaAnthropic(req);
-    }
+    // NOTE: Gateway doesn't support vision, but direct Anthropic key (oat01) doesn't have model access.
+    // We MUST use gateway for all requests. Vision support needs to be fixed in gateway.
+    // For now, images will fail until gateway is updated.
 
     if (this.useGateway) {
       try {
@@ -87,10 +84,18 @@ export class LlmClient {
       if (c.type === "text") {
         userContent.push({ type: "text", text: c.text });
       } else {
+        // Image content
+        const imageData = (c as { base64?: string }).base64;
+        const mediaType = (c as { mediaType?: string }).mediaType || "image/jpeg";
+        if (!imageData) {
+          console.warn(`[llm-client] Image content has no base64 data:`, JSON.stringify(c).slice(0, 200));
+          continue;
+        }
+        console.log(`[llm-client] Adding image: ${(imageData.length / 1024).toFixed(0)}KB, type=${mediaType}`);
         userContent.push({
           type: "image_url",
           image_url: {
-            url: `data:${c.mediaType || "image/jpeg"};base64,${c.base64}`,
+            url: `data:${mediaType};base64,${imageData}`,
           },
         });
       }
