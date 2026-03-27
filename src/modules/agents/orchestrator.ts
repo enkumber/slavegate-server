@@ -9,6 +9,7 @@ import { executorAgent } from "./executor.agent";
 import { verifierAgent } from "./verifier.agent";
 import { getCachedPlan, savePlanToCache, recordPlanOutcome } from "./plan-cache";
 import { learnFromSuccess, learnFromFailure } from "./self-evolution";
+import { getLlmClient } from "./llm-client";
 import { agentConfig } from "../../config/agents.config";
 import { wsServer } from "../../ws/ws.server";
 import { getDb } from "../../db/client";
@@ -670,24 +671,51 @@ export class AgentOrchestrator {
     // Wait for app to fully load (splash → feed)
     await sleep(3500);
 
-    // Phase 2: tap nav.home via A11y (works even when nav bar is visually hidden on Reels).
-    // A11y Service sees all nodes in the tree regardless of visual overlay.
-    // Tries contentDescription "Home" to navigate to feed where nav bar is always visible.
-    console.log(`[orchestrator] Preamble P2: a11y_find_tap Home`);
-    const a11yId = uuidv4();
-    const a11yP = awaitAction(a11yId, 5_000);
-    wsServer.sendJob(deviceId, {
-      jobId: a11yId,
-      type: "a11y_find_tap" as import("../../../../shared/protocol/messages").JobType,
-      params: {
-        contentDescription: "Home",
-        partialMatch: false,
-      } as Record<string, unknown>,
-      timeoutMs: 5_000,
-    });
-    const a11yOk = await a11yP;
-    console.log(`[orchestrator] Preamble P2: a11y Home tab ${a11yOk ? "OK" : "TIMEOUT/NOT FOUND"}`);
-    await sleep(1000);
+    // Phase 2: VLM screen check — identify current screen after open_app_fresh.
+    // Instagram may restore last-viewed screen (Reels, Profile, DMs) instead of Home feed.
+    // We ask the VLM to classify the screen, then navigate to Home if needed.
+    console.log(`[orchestrator] Preamble P2: screenshot + VLM screen identification`);
+    const isOnHome = await this.ensureHomeFeedVLM(deviceId, platform);
+    console.log(`[orchestrator] Preamble P2: VLM screen check — on Home: ${isOnHome}`);
+
+    if (!isOnHome) {
+      // Not on Home feed — press BACK x3 to dismiss overlays/Reels, then tap nav.home
+      console.log(`[orchestrator] Preamble P2: not on Home — pressing BACK x3`);
+      for (let i = 0; i < 3; i++) {
+        const backId = uuidv4();
+        const backP = awaitAction(backId, 3_000);
+        wsServer.sendJob(deviceId, {
+          jobId: backId,
+          type: "press_key" as import("../../../../shared/protocol/messages").JobType,
+          params: { key: "back" } as Record<string, unknown>,
+          timeoutMs: 3_000,
+        });
+        await backP;
+        await sleep(400);
+      }
+
+      // Explicit tap on nav.home coordinate (0.1, 0.912)
+      console.log(`[orchestrator] Preamble P2: tapping nav.home (0.1, 0.912)`);
+      const dims2 = await getScreenDims(deviceId);
+      const navId2 = uuidv4();
+      const navP2 = awaitAction(navId2, 5_000);
+      wsServer.sendJob(deviceId, {
+        jobId: navId2,
+        type: "tap" as import("../../../../shared/protocol/messages").JobType,
+        params: {
+          x: Math.round(0.1 * dims2.w),
+          y: Math.round(0.912 * dims2.h),
+        } as Record<string, unknown>,
+        timeoutMs: 5_000,
+      });
+      await navP2;
+      await sleep(1200);
+
+      // Re-verify after navigation
+      console.log(`[orchestrator] Preamble P2: re-verify screen after nav.home tap`);
+      const isOnHome2 = await this.ensureHomeFeedVLM(deviceId, platform);
+      console.log(`[orchestrator] Preamble P2: re-verify — on Home: ${isOnHome2}`);
+    }
 
     // Phase 3: coordinate-based tap on nav.home as safety net
     // A11y may fail if Home node is absent from tree on certain sub-pages.
@@ -712,6 +740,67 @@ export class AgentOrchestrator {
 
     console.log(`[orchestrator] Preamble: complete ✓`);
     return true;
+  }
+
+  /**
+   * Uses VLM to identify whether the current screen is the Instagram Home/Feed screen.
+   * Takes a screenshot, asks VLM to classify the current screen type.
+   * Returns true if on Home feed, false otherwise (Reels, Profile, DMs, Search, etc.)
+   */
+  private async ensureHomeFeedVLM(deviceId: string, platform: string): Promise<boolean> {
+    try {
+      const screenshot = await this.captureScreenshot(deviceId);
+      if (!screenshot) {
+        console.warn(`[orchestrator] ensureHomeFeedVLM: no screenshot — assuming Home`);
+        return true; // fail-open: assume home, let task proceed
+      }
+
+      const llm = getLlmClient();
+      const response = await llm.complete({
+        model: agentConfig.planner.model,
+        systemPrompt: "",
+        userContent: [
+          { type: "image", base64: screenshot },
+          {
+            type: "text",
+            text: `You are a mobile UI classifier for ${platform} automation.
+
+Look at this screenshot and identify the current screen.
+
+Reply with EXACTLY ONE of these labels (no other text):
+- HOME_FEED
+- REELS
+- PROFILE
+- DMS
+- SEARCH
+- STORIES
+- POST_DETAIL
+- OTHER
+
+Rules:
+- HOME_FEED: vertical scrollable feed of posts from followed accounts, nav bar visible at bottom with Home tab highlighted
+- REELS: fullscreen vertical video player (nav bar hidden or partially visible)
+- PROFILE: profile page showing bio, stats, grid of posts
+- DMS: direct messages inbox or conversation
+- SEARCH: search/explore page
+- STORIES: fullscreen story viewer
+- POST_DETAIL: single post expanded view
+- OTHER: anything else
+
+Respond with ONLY the label, nothing else.`,
+          },
+        ],
+        temperature: 0.0,
+        maxTokens: 20,
+      });
+
+      const label = response.text.trim().toUpperCase();
+      console.log(`[orchestrator] ensureHomeFeedVLM: VLM classified screen as "${label}"`);
+      return label === "HOME_FEED";
+    } catch (err) {
+      console.warn(`[orchestrator] ensureHomeFeedVLM: VLM error — ${(err as Error).message} — assuming Home`);
+      return true; // fail-open
+    }
   }
 
   // ─── Cache invalidation ──────────────────────────────────────────────────────
