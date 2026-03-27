@@ -678,8 +678,9 @@ export class AgentOrchestrator {
 
     // Phase 3: coordinate-based tap on nav.home as safety net
     // A11y may fail if Home node is absent from tree on certain sub-pages.
-    // Hard tap at (0.1, 0.965) = bottom-left nav.home position.
-    console.log(`[orchestrator] Preamble P3: coord tap nav.home (0.1, 0.965)`);
+    // Hard tap at (0.1, 0.912) = bottom-left nav.home position.
+    // NOTE: y=0.965 was hitting Android nav bar, y=0.912 is correct for Instagram nav
+    console.log(`[orchestrator] Preamble P3: coord tap nav.home (0.1, 0.912)`);
     const dims = await getScreenDims(deviceId);
     const navHomeId = uuidv4();
     const navHomeP = awaitAction(navHomeId, 5_000);
@@ -688,7 +689,7 @@ export class AgentOrchestrator {
       type: "tap" as import("../../../../shared/protocol/messages").JobType,
       params: {
         x: Math.round(0.1 * dims.w),
-        y: Math.round(0.965 * dims.h),
+        y: Math.round(0.912 * dims.h),
       } as Record<string, unknown>,
       timeoutMs: 5_000,
     });
