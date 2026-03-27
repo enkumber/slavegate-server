@@ -13,15 +13,26 @@ import { PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt } from "./prompts/planner
 import { extractJson } from "../../utils/json-extract";
 import type { PlannerInput, PlannerOutput, LlmContent } from "./types";
 
-const SCREEN_DESCRIBE_PROMPT = `Describe this mobile app screenshot concisely for an automation planner.
-Include:
-- What app is shown and what screen/page (home feed, profile, search, etc.)
-- Main visible UI elements (buttons, tabs, icons, text fields)
-- Current state (e.g., "logged in as @username", "showing search results for X")
-- Bottom navigation tabs if visible
-- Any popups, dialogs, or overlays
+const SCREEN_DESCRIBE_PROMPT = `You are a UI automation assistant. Describe ONLY the app interface, NOT the content of photos/videos.
 
-Be factual and brief. Focus on actionable UI elements.`;
+Focus on:
+1. APP SCREEN TYPE: home feed, profile page, search, reels, stories, DMs, etc.
+2. NAVIGATION: What tabs/buttons are visible at bottom? (home, search, reels, shop, profile icons)
+3. CURRENT LOCATION: Which nav tab is highlighted/selected?
+4. UI ELEMENTS: Follow/Unfollow buttons, like buttons, comment fields, settings icons
+5. OVERLAYS: Any popups, modals, ads, or dialogs blocking the screen?
+6. USERNAMES: Any visible @username that indicates whose profile this is
+
+DO NOT describe:
+- What's IN the photos (people, objects, scenes)
+- The aesthetic or mood of images
+- What the posts are about
+
+Example good output: "Instagram profile page for @incitographer. Bottom nav shows: home, search, reels, shop, profile (profile selected). Stats visible: 1,234 posts, 5.6K followers, 890 following. Edit Profile and Share Profile buttons visible. Grid of posts below."
+
+Example bad output: "A woman in a red dress standing near a window with natural lighting..."
+
+Be concise. Focus on UI state for automation.`;
 
 export class PlannerAgent {
   async plan(input: PlannerInput): Promise<{ output: PlannerOutput; tokens: { input: number; output: number } }> {
