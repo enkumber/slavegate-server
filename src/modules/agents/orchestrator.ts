@@ -242,12 +242,17 @@ export class AgentOrchestrator {
     // A cached plan assumes screen state from when it was created. If device is on
     // Reels instead of Feed, the plan taps wrong elements from step 1.
     // TODO: re-enable after getCachedPlan() validates currentScreenshot vs plan entry screen.
-    const cached = null; // await getCachedPlan(task, platform);
+    //
+    // When re-enabling: validate that initialScreenshot matches the plan's entry screen
+    // before using the cached plan. Otherwise: always replan.
+    /* DISABLED B4
+    const cached = await getCachedPlan(task, platform);
     if (cached) {
       plan = cached.plan;
       planCacheId = cached.id;
       console.log(`[orchestrator] ⏱ Planner: ${Date.now() - tPlan}ms (CACHE HIT, hits=${cached.hitCount})`);
-    } else {
+    } else { */
+    {
       // Cache miss — call LLM planner
       try {
         const planResult = await plannerAgent.plan({
