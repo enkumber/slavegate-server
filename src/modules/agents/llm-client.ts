@@ -22,12 +22,12 @@ const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "";
 const ANTHROPIC_ENDPOINT = process.env.ANTHROPIC_ENDPOINT || "https://api.anthropic.com/v1";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
-// Local Ollama models (faster, no rate limits)
+// Local Ollama (disabled for now - using Anthropic)
 const OLLAMA_ENDPOINT = process.env.OLLAMA_ENDPOINT || "http://192.168.50.185:11434";
-const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "qwen3.5:9b";
-const OLLAMA_PLANNING_MODEL = process.env.OLLAMA_PLANNING_MODEL || "qwen3.5:9b";
-const USE_LOCAL_VISION = process.env.USE_LOCAL_VISION !== "false"; // default: true
-const USE_LOCAL_PLANNING = process.env.USE_LOCAL_PLANNING !== "false"; // default: true
+const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "llava:34b";
+const OLLAMA_PLANNING_MODEL = process.env.OLLAMA_PLANNING_MODEL || "qwen3:14b";
+const USE_LOCAL_VISION = process.env.USE_LOCAL_VISION === "true"; // default: false (use Anthropic)
+const USE_LOCAL_PLANNING = process.env.USE_LOCAL_PLANNING === "true"; // default: false
 
 const REQUEST_TIMEOUT_MS = 120_000; // 2min — large screenshots (400KB+) can take longer via gateway
 const MAX_RETRIES = 2;
@@ -313,13 +313,14 @@ export class LlmClient {
         ...(req.systemPrompt ? [{ role: "system", content: req.systemPrompt }] : []),
         {
           role: "user",
-          content: prompt,
+          content: prompt + " /no_think", // Disable thinking mode for speed/memory
           images: images,
         },
       ],
       stream: false,
       options: {
         temperature: req.temperature ?? 0.7,
+        num_ctx: 4096, // Limit context to save VRAM
       },
     };
 

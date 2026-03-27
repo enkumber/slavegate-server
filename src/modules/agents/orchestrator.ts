@@ -181,7 +181,9 @@ function awaitAction(jobId: string, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const timeoutHandle = setTimeout(() => {
       pendingActions.delete(jobId);
-      resolve(true); // assume success on timeout (device might be slow)
+      // B6 fix: timeout = failure, not success. Silently resolving true caused
+      // the chain to continue on dead/offline/slow devices with no real feedback.
+      resolve(false);
     }, timeoutMs);
     pendingActions.set(jobId, { resolve, timeoutHandle });
   });

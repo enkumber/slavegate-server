@@ -1272,6 +1272,28 @@ router.get("/task-runner/failed-stats", requireAuth, async (_req, res) => {
 
 // ─── Tasks Management ─────────────────────────────────────────────────────────
 
+router.post("/tasks", requireAuth, async (req, res) => {
+  try {
+    const db = getDb();
+    const { account_id, device_id, routine, params, scheduled_time } = req.body;
+    
+    if (!account_id || !device_id || !routine) {
+      return res.status(400).json({ ok: false, error: "Missing required fields: account_id, device_id, routine" });
+    }
+    
+    const id = crypto.randomUUID();
+    await db.query(
+      `INSERT INTO tasks (id, account_id, device_id, routine, params, scheduled_time, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'queued', NOW())`,
+      [id, account_id, device_id, routine, JSON.stringify(params || {}), scheduled_time || new Date().toISOString()]
+    );
+    
+    res.json({ ok: true, data: { id } });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 router.get("/tasks", requireAuth, async (req, res) => {
   try {
     const db = getDb();

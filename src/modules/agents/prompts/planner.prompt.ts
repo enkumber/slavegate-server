@@ -15,6 +15,12 @@ Rules:
 - Order steps logically — navigate first, then interact
 - For repeating tasks (e.g., "unfollow 10 users"), decompose into individual steps — do NOT use params.repeat
 
+Instagram-specific rules:
+- To navigate between posts in a feed, use SCROLL (swipe up) — NOT swipe left/right
+- To like a post, use double_tap on the image center OR tap the heart icon
+- Search results show accounts first, then hashtags below — scroll down in search results to find hashtags if needed
+- After typing in search, hashtag results appear with "#" prefix — tap the one starting with "#"
+
 Output ONLY valid JSON matching this schema:
 {
   "steps": [

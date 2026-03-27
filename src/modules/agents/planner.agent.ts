@@ -41,11 +41,12 @@ export class PlannerAgent {
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
 
-    // Step 1: If screenshot provided, describe it with Ollama (vision)
+    // Step 1: If screenshot provided, describe it with vision model
+    // llm-client routes based on USE_LOCAL_VISION env var
     if (input.currentScreenshot) {
-      console.log(`[planner] Step 1: Describing screenshot with local vision...`);
+      console.log(`[planner] Step 1: Describing screenshot with vision model...`);
       const describeResponse = await llm.complete({
-        model: "qwen3.5:9b", // Multimodal model for vision
+        model: agentConfig.planner.model, // Let llm-client decide routing
         systemPrompt: "",
         userContent: [
           { type: "image", base64: input.currentScreenshot },
