@@ -126,6 +126,13 @@ class CoordCacheService {
    * Only overwrites coords if new confidence >= existing confidence.
    */
   async learnCoord(input: LearnCoordInput): Promise<void> {
+    // B3 guard: reject nav.* coordinates with y > 0.94 (Android system nav bar zone).
+    // Instagram nav bar is at y≈0.912. y > 0.94 is the Android home/back/recents bar.
+    // Any such coordinate hitting our DB is contaminated and must never be stored.
+    if (input.elementName.startsWith("nav.") && input.y > 0.94) {
+      console.warn(`[coord-cache] B3: Rejecting contaminated nav coord ${input.elementName} y=${input.y.toFixed(3)} (> 0.94 = Android nav bar zone)`);
+      return;
+    }
     try {
       await getDb().query(
         `INSERT INTO coordinate_cache
