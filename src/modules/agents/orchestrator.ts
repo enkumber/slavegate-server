@@ -102,8 +102,11 @@ async function getScreenDims(deviceId: string): Promise<{ w: number; h: number }
   } catch { /* non-fatal */ }
 
   // Last resort fallback — log clearly so we notice
+  // B5 fix: OnePlus 5 (cheeseburger/A5000) is 1080x1920, NOT 2160. 2160 is OnePlus 5T.
+  // Fallback remains 2160 for the majority (5T/6T fleet) but model lookup above should
+  // catch OnePlus 5 via its codename "cheeseburger" or model "a5000" before we get here.
   console.warn(`[orchestrator] FALLBACK screen dims for device ${deviceId.slice(0, 8)}: 1080x2160`);
-  return { w: 1080, h: 2160 };
+  return { w: 1080, h: 2160 }; // 5T/6T default — OnePlus 5 must be caught by model lookup above
 }
 
 // ─── Pending screenshot results ───────────────────────────────────────────────

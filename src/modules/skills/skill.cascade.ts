@@ -1038,8 +1038,13 @@ async function executeUnifiedTapAtCoords(
   coords: NormalizedCoords,
   timeoutMs: number
 ): Promise<boolean> {
-  const screenWidth = 1080;
-  const screenHeight = 2160;
+  // B5 fix: coords are already normalized (0-1). Multiply by device screen dims.
+  // Use device info from cache if available; fall back to OnePlus 5T default (1080x2160).
+  // OnePlus 5 (1080x1920) will need its model in MODEL_SCREEN_DIMS to be correct.
+  const devInfo = await getDeviceInfoAsync(deviceId, "unknown").catch(() => null);
+  const resParts = devInfo?.resolution?.split("x");
+  const screenWidth = resParts && resParts.length === 2 ? parseInt(resParts[0], 10) : 1080;
+  const screenHeight = resParts && resParts.length === 2 ? parseInt(resParts[1], 10) : 2160;
   const pixelX = Math.round(coords.x * screenWidth);
   const pixelY = Math.round(coords.y * screenHeight);
 
