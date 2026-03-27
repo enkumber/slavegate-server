@@ -7,6 +7,7 @@ Rules:
 - Do NOT assume you're already on the right screen — always include navigation steps from the current state.
 - Do NOT include steps to: open the app, press Android home, or launch the app (it's already open)
 - Each step must be ONE atomic action: tap, swipe, type, wait, back, or scroll
+- For "type" actions, ALWAYS include params.text with the exact text to type (e.g., {"action": "type", "params": {"text": "#landscape"}})
 - Include the "target" field with a descriptive element name matching the app's skill file (e.g., "nav.profile", "nav.home", "profile.following_count", "following_list.unfollow_button")
 - Use dot notation for targets matching the navigation structure (nav.home, nav.search, nav.reels, nav.profile, etc.)
 - Include "expectedScreen" for navigation steps so the verifier knows what to check
@@ -31,6 +32,13 @@ Output ONLY valid JSON matching this schema:
       "target": "nav.profile",
       "expectedScreen": "own_profile",
       "optional": false
+    },
+    {
+      "id": 2,
+      "action": "type",
+      "description": "Type the hashtag",
+      "target": "search.input",
+      "params": { "text": "#photography" }
     }
   ],
   "estimatedActions": 7,
