@@ -22,10 +22,12 @@ const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "";
 const ANTHROPIC_ENDPOINT = process.env.ANTHROPIC_ENDPOINT || "https://api.anthropic.com/v1";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
-// Local vision: Ollama with LLaVA for image processing (faster, no rate limits)
+// Local Ollama models (faster, no rate limits)
 const OLLAMA_ENDPOINT = process.env.OLLAMA_ENDPOINT || "http://192.168.50.185:11434";
-const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "llava:13b";
+const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "llava:34b";
+const OLLAMA_PLANNING_MODEL = process.env.OLLAMA_PLANNING_MODEL || "qwen3:14b";
 const USE_LOCAL_VISION = process.env.USE_LOCAL_VISION !== "false"; // default: true
+const USE_LOCAL_PLANNING = process.env.USE_LOCAL_PLANNING !== "false"; // default: true
 
 const REQUEST_TIMEOUT_MS = 120_000; // 2min — large screenshots (400KB+) can take longer via gateway
 const MAX_RETRIES = 2;
@@ -62,13 +64,20 @@ export class LlmClient {
                                    req.userContent.some(c => c.type === "text" && c.text.toLowerCase().includes("json"));
     
     // Force Ollama for llava model or simple vision requests
-    const forceOllama = req.model.startsWith("llava");
+    const forceOllamaVision = req.model.startsWith("llava");
     
-    console.log(`[llm-client] hasImages=${hasImages}, needsStructuredOutput=${needsStructuredOutput}, forceOllama=${forceOllama}`);
+    console.log(`[llm-client] hasImages=${hasImages}, needsStructuredOutput=${needsStructuredOutput}, forceOllamaVision=${forceOllamaVision}`);
     
-    if (forceOllama || (hasImages && USE_LOCAL_VISION && !needsStructuredOutput)) {
+    // Route vision requests to Ollama LLaVA
+    if (forceOllamaVision || (hasImages && USE_LOCAL_VISION && !needsStructuredOutput)) {
       console.log("[llm-client] Vision request → using local Ollama LLaVA");
       return await this.completeViaOllama(req);
+    }
+    
+    // Route text-only planning (JSON) to Ollama Qwen3 for speed and reliability
+    if (!hasImages && needsStructuredOutput && USE_LOCAL_PLANNING) {
+      console.log("[llm-client] Planning request → using local Ollama Qwen3");
+      return await this.completeViaOllamaPlanning(req);
     }
 
     if (this.useGateway) {
@@ -217,6 +226,66 @@ export class LlmClient {
       inputTokens: data.usage?.input_tokens ?? 0,
       outputTokens: data.usage?.output_tokens ?? 0,
       model: data.model,
+    };
+  }
+
+  // ─── Local Ollama path (planning via Qwen3) ─────────────────────────────────
+
+  private async completeViaOllamaPlanning(req: LlmCompletionRequest): Promise<LlmCompletionResponse> {
+    const textParts: string[] = [];
+    for (const c of req.userContent) {
+      if (c.type === "text") {
+        textParts.push(c.text);
+      }
+    }
+    const prompt = textParts.join("\n");
+
+    console.log(`[llm-client] Ollama planning with ${OLLAMA_PLANNING_MODEL}`);
+
+    const body = {
+      model: OLLAMA_PLANNING_MODEL,
+      messages: [
+        ...(req.systemPrompt ? [{ role: "system", content: req.systemPrompt }] : []),
+        { role: "user", content: prompt },
+      ],
+      stream: false,
+      options: {
+        temperature: req.temperature ?? 0.3,
+        num_predict: req.maxTokens ?? 4000,
+      },
+    };
+
+    const resp = await this.fetchWithRetry(
+      `${OLLAMA_ENDPOINT}/api/chat`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+
+    const data = await resp.json() as {
+      message?: { content: string; thinking?: string };
+      prompt_eval_count?: number;
+      eval_count?: number;
+      model?: string;
+    };
+
+    // Qwen3.5 might put JSON in thinking field, handle both cases
+    let text = data.message?.content ?? "";
+    if (!text && data.message?.thinking) {
+      // Extract JSON from thinking if content is empty
+      const thinkingMatch = data.message.thinking.match(/\{[\s\S]*\}/);
+      if (thinkingMatch) {
+        text = thinkingMatch[0];
+      }
+    }
+
+    return {
+      text,
+      inputTokens: data.prompt_eval_count ?? 0,
+      outputTokens: data.eval_count ?? 0,
+      model: data.model ?? OLLAMA_PLANNING_MODEL,
     };
   }
 
