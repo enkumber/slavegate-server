@@ -64,11 +64,16 @@ export class ExecutorAgent {
     }
 
     if (step.action === "type") {
+      // Get text from params.text ONLY — never fallback to target (which is element name)
+      const textToType = (step.params?.text as string) || "";
+      if (!textToType) {
+        console.warn(`[executor] Type action missing params.text for step ${step.id}, skipping`);
+      }
       return {
         output: {
-          action: { type: "type", text: (step.params?.text as string) || step.target || "" },
-          confidence: 1.0,
-          reasoning: "Type action — text input",
+          action: { type: "type", text: textToType },
+          confidence: textToType ? 1.0 : 0,
+          reasoning: textToType ? "Type action — text input" : "Type action missing text",
           source: "llm_inferred",
         },
         tokens: { input: 0, output: 0 },
