@@ -24,8 +24,8 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
 // Local Ollama models (faster, no rate limits)
 const OLLAMA_ENDPOINT = process.env.OLLAMA_ENDPOINT || "http://192.168.50.185:11434";
-const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "llava:34b";
-const OLLAMA_PLANNING_MODEL = process.env.OLLAMA_PLANNING_MODEL || "qwen3:14b";
+const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "qwen3.5:9b";
+const OLLAMA_PLANNING_MODEL = process.env.OLLAMA_PLANNING_MODEL || "qwen3.5:9b";
 const USE_LOCAL_VISION = process.env.USE_LOCAL_VISION !== "false"; // default: true
 const USE_LOCAL_PLANNING = process.env.USE_LOCAL_PLANNING !== "false"; // default: true
 
@@ -333,13 +333,17 @@ export class LlmClient {
     );
 
     const data = await resp.json() as {
-      message?: { content: string };
+      message?: { content: string; thinking?: string };
       prompt_eval_count?: number;
       eval_count?: number;
       model?: string;
     };
 
-    const text = data.message?.content ?? "";
+    // Qwen3.5 might put response in thinking field when content is empty
+    let text = data.message?.content ?? "";
+    if (!text && data.message?.thinking) {
+      text = data.message.thinking;
+    }
 
     return {
       text,

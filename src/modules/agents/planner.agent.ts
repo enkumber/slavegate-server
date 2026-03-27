@@ -45,7 +45,7 @@ export class PlannerAgent {
     if (input.currentScreenshot) {
       console.log(`[planner] Step 1: Describing screenshot with local vision...`);
       const describeResponse = await llm.complete({
-        model: "llava:34b", // Force Ollama model
+        model: "qwen3.5:9b", // Multimodal model for vision
         systemPrompt: "",
         userContent: [
           { type: "image", base64: input.currentScreenshot },
