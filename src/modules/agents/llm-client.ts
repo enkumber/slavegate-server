@@ -22,7 +22,7 @@ const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "";
 const ANTHROPIC_ENDPOINT = process.env.ANTHROPIC_ENDPOINT || "https://api.anthropic.com/v1";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
-const REQUEST_TIMEOUT_MS = 45_000; // 45s — Sonnet ~5-15s, Opus ~15-30s; 45s covers slow cases
+const REQUEST_TIMEOUT_MS = 120_000; // 2min — large screenshots (400KB+) can take longer via gateway
 const MAX_RETRIES = 2;
 
 export class LlmClient {
