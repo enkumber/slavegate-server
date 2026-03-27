@@ -29,6 +29,30 @@ import {
   buildOcrSearchText,
 } from "./cascadeCore";
 
+// ─── Coordinate normalization helper ─────────────────────────────────────────
+
+/**
+ * B1 FIX: Ensure coordinates are normalized (0-1).
+ * a11y and OCR responses from Android sometimes return pixel values (e.g., x=540, y=1800).
+ * The orchestrator's performAction() always multiplies by screen dims, so cascade MUST
+ * return normalized values or the result is x=583200 (540 * 1080).
+ *
+ * Detection heuristic: any coord > 2 is definitely a pixel value.
+ */
+function normalizeCoord(x: number, y: number, resolution: string): { x: number; y: number } {
+  // If coords are already normalized (both <= 1.0), return as-is
+  if (x <= 1.0 && y <= 1.0) return { x, y };
+
+  // Pixel values — divide by screen dims
+  const parts = resolution.split("x");
+  const screenW = parts.length === 2 ? parseInt(parts[0], 10) : 1080;
+  const screenH = parts.length === 2 ? parseInt(parts[1], 10) : 2160;
+  const nx = x / screenW;
+  const ny = y / screenH;
+  console.log(`[cascade] B1: Normalizing pixel coords (${x}, ${y}) → (${nx.toFixed(3)}, ${ny.toFixed(3)}) for ${resolution}`);
+  return { x: nx, y: ny };
+}
+
 // ─── Device info helper ───────────────────────────────────────────────────────
 
 const PLATFORM_TO_PKG: Record<string, string> = {
@@ -266,10 +290,13 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
     const a11yResult = await executeA11yFindTapJob(req, element, timeoutMs);
 
     if (a11yResult.status === "completed" && a11yResult.output?.found) {
-      const newCoords: NormalizedCoords = {
-        x: a11yResult.output.x as number,
-        y: a11yResult.output.y as number,
-      };
+      // B1 fix: normalize coords — a11y may return pixel values, orchestrator expects 0-1
+      const rawCoords = normalizeCoord(
+        a11yResult.output.x as number,
+        a11yResult.output.y as number,
+        devInfo15?.resolution ?? "1080x2160"
+      );
+      const newCoords: NormalizedCoords = rawCoords;
 
       console.log(`[cascade] L2 a11y success for ${req.elementName} → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
 
@@ -304,10 +331,13 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
       const ocrResult = await executeOcrFindTapJob(req, searchText, timeoutMs);
 
       if (ocrResult.status === "completed" && ocrResult.output?.found) {
-        const newCoords: NormalizedCoords = {
-          x: ocrResult.output.x as number,
-          y: ocrResult.output.y as number,
-        };
+        // B1 fix: normalize coords — OCR may return pixel values, orchestrator expects 0-1
+        const rawOcrCoords = normalizeCoord(
+          ocrResult.output.x as number,
+          ocrResult.output.y as number,
+          devInfo15?.resolution ?? "1080x2160"
+        );
+        const newCoords: NormalizedCoords = rawOcrCoords;
 
         console.log(`[cascade] L2.5 OCR success: "${searchText}" → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
         await updateSkillCoords(req.platform, req.elementName, newCoords);
@@ -766,10 +796,12 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
     const a11yResult = await executeUnifiedA11yTextSearch(req.deviceId, parsed.value, element, timeoutMs);
 
     if (a11yResult.status === "completed" && a11yResult.output?.found) {
-      const newCoords: NormalizedCoords = {
-        x: a11yResult.output.x as number,
-        y: a11yResult.output.y as number,
-      };
+      // B1 fix: normalize coords — a11y may return pixel values, orchestrator expects 0-1
+      const newCoords: NormalizedCoords = normalizeCoord(
+        a11yResult.output.x as number,
+        a11yResult.output.y as number,
+        uniDevInfo?.resolution ?? "1080x2160"
+      );
 
       console.log(`[cascade] L2 a11y success: "${parsed.value}" → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
 
@@ -809,10 +841,12 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
     const ocrResult = await executeUnifiedOcrFindTapJob(req.deviceId, searchText, timeoutMs);
 
     if (ocrResult.status === "completed" && ocrResult.output?.found) {
-      const newCoords: NormalizedCoords = {
-        x: ocrResult.output.x as number,
-        y: ocrResult.output.y as number,
-      };
+      // B1 fix: normalize coords — OCR may return pixel values, orchestrator expects 0-1
+      const newCoords: NormalizedCoords = normalizeCoord(
+        ocrResult.output.x as number,
+        ocrResult.output.y as number,
+        uniDevInfo?.resolution ?? "1080x2160"
+      );
 
       console.log(`[cascade] L2.5 OCR success: "${searchText}" → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
 
