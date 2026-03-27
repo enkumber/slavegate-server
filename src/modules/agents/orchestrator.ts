@@ -238,8 +238,11 @@ export class AgentOrchestrator {
     let planCacheId: number | undefined;
     const tPlan = Date.now();
 
-    // Try cache first
-    const cached = await getCachedPlan(task, platform);
+    // B4 fix: plan cache disabled until screen-state validation is implemented.
+    // A cached plan assumes screen state from when it was created. If device is on
+    // Reels instead of Feed, the plan taps wrong elements from step 1.
+    // TODO: re-enable after getCachedPlan() validates currentScreenshot vs plan entry screen.
+    const cached = null; // await getCachedPlan(task, platform);
     if (cached) {
       plan = cached.plan;
       planCacheId = cached.id;
