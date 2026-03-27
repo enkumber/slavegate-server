@@ -1,0 +1,553 @@
+# Smart Unfollow Skill — Instagram
+# Iterates own Following list, evaluates each user against configurable criteria,
+# unfollows qualifying accounts with human-like pacing and full anti-detection.
+#
+# Reference files:
+#   - instagram.skill   → button_map + screens + gestures
+#   - HYDRA-CORE.md     → navigation rules, verify-tap, checkpoints
+#
+# Rules enforced:
+#   REGULA 0  — Reset to home before navigation
+#   REGULA 1  — verify after every cascade_tap
+#   REGULA 4  — abort_graceful on action_blocked / login
+#   REGULA 6  — ui_tree_dump preferred; VLM only for niche evaluation
+#   REGULA 7  — checkpoint every 5 evaluations + before every stop
+
+platform: instagram
+skill_type: automation
+package: com.instagram.android
+version: 1.0.0
+updated_at: 2026-03-24
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# JOB DEFINITIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+jobs:
+
+  # ─── Smart Unfollow ──────────────────────────────────────────────────────────
+  smart_unfollow:
+    description: "Navigate to own Following list, evaluate each account against criteria, unfollow qualifying users with anti-detection pacing"
+
+    # ─── Input Parameters ───────────────────────────────────────────────────────
+    input:
+      count:
+        type: number
+        required: true
+        default: 50
+        description: "How many unfollows to perform before stopping"
+
+      criteria:
+        type: object
+        properties:
+          unfollow_if:
+            type: array
+            items: string
+            default:
+              - not_following_back
+              - inactive_90_days
+              - following_3000_plus
+              - irrelevant_niche
+            description: "Any matching condition marks user as unfollow candidate"
+          never_unfollow_if:
+            type: array
+            items: string
+            default:
+              - follows_back
+              - bio_contains_keywords
+            description: "Any matching condition protects user from unfollow"
+          protected_keywords:
+            type: array
+            items: string
+            default: []
+            description: "Bio keywords that trigger bio_contains_keywords protection"
+          niche_description:
+            type: string
+            default: ""
+            description: "Niche description for irrelevant_niche VLM evaluation; empty = skip VLM"
+
+      pace:
+        type: object
+        properties:
+          delay_between_seconds:
+            type: array
+            items: number
+            default: [15, 45]
+            description: "[min, max] random delay between processed users (seconds)"
+          pause_every:
+            type: number
+            default: 10
+            description: "Insert longer pause after every N evaluations"
+          pause_duration_seconds:
+            type: array
+            items: number
+            default: [60, 180]
+            description: "[min, max] random duration for periodic pause (seconds)"
+
+    # ─── Checkpoint Fields (HYDRA-CORE REGULA 7) ──────────────────────────────
+    checkpoint_fields:
+      - unfollowed_count          # number: total unfollowed so far
+      - unfollowed_usernames      # array<{username, reason}>: completed unfollows
+      - skipped_usernames         # array<{username, reason}>: skipped users
+      - evaluated_count           # number: total profiles evaluated
+      - current_screen            # string: last known screen name
+      - scroll_position           # number: swipe count from top of following list
+      - last_processed_username   # string: last username touched (dedup on resume)
+      - consecutive_unfollows     # number: reset after forced pause
+      - consecutive_failures      # number: abort at max_consecutive_failures
+      - vlm_calls_this_hour       # number: VLM monitoring (HYDRA-CORE REGULA 9)
+      - consecutive_empty_scrolls # number: incremented when scroll yields no new users
+      - processed_usernames       # Set<string>: all touched usernames — dedup on resume
+
+    # ─── Phase 1: Navigate to Following List ──────────────────────────────────
+    steps:
+
+      # 1. Open Instagram (device must already be awake + unlocked — REGULA 0)
+      - action: open_app
+        package: com.instagram.android
+        wait_for_idle: true
+
+      # 2. Reset to Home (HYDRA-CORE REGULA 0 — Instagram reopens on last screen)
+      - action: cascade_tap
+        element: nav.home
+        platform: instagram
+        verify: home_feed
+        wait_ms: 2000
+
+      # 3. Navigate to own profile
+      - action: cascade_tap
+        element: nav.profile
+        platform: instagram
+        verify: own_profile
+        wait_ms: 2000
+
+      # 4. Tap Following count to open following list
+      - action: cascade_tap
+        element: profile.following_count
+        platform: instagram
+        verify: following_list
+        wait_ms: 2000
+
+      # 5. Initial checkpoint — in following list, ready to iterate
+      - action: checkpoint_save
+        phase: following_list_open
+        state:
+          current_screen: following_list
+          scroll_position: 0
+          unfollowed_count: 0
+          evaluated_count: 0
+          consecutive_unfollows: 0
+          consecutive_failures: 0
+          vlm_calls_this_hour: 0
+
+      # 6. Enter main iteration loop
+      - action: run_loop
+        loop_ref: unfollow_loop
+
+    # ─── Phase 2: Main Iteration Loop ─────────────────────────────────────────
+    loops:
+      unfollow_loop:
+        description: "Iterate following list rows until target count or list exhausted"
+
+        exit_conditions:
+          - condition: "unfollowed_count >= input.count"
+            set_stopped_reason: null        # null = completed normally
+          - condition: "consecutive_empty_scrolls >= 3"
+            set_stopped_reason: list_exhausted
+          - condition: "stopped_reason is set"
+            passthrough: true               # already set by error handler
+
+        body:
+          # A: Extract all visible rows from current following list screen
+          - action: ui_tree_dump
+            extract: following_list_rows
+            # Each row yields:
+            #   username:    text of the username TextView in the row
+            #   follows_you: true if "Follows you" sub-text is present in the row
+            #   row_id:      unique identifier for dedup
+            description: "Parse following list rows from UI tree — no screenshot, no VLM"
+
+          # B: Process each unprocessed user in this batch
+          - action: for_each
+            source: following_list_rows
+            skip_if_in: processed_usernames   # Set<string> — resume-safe dedup
+            handler: evaluate_user
+
+          # C: Scroll down for next batch
+          - action: gesture
+            gesture_ref: scroll_followers
+            platform: instagram
+            wait_ms: 1000
+          - action: increment
+            counter: current_scroll_position
+
+          # D: Track consecutive empty scrolls (no new users)
+          - action: track_empty_scroll
+            current_batch: following_list_rows
+            processed_set: processed_usernames
+            counter: consecutive_empty_scrolls
+            # Increments counter if no new users; resets to 0 if new users found
+
+    # ─── Per-User Evaluation Handler ──────────────────────────────────────────
+    handlers:
+      evaluate_user:
+        description: "Evaluate a single user row from the following list"
+
+        steps:
+
+          # B1: Fast-path mutual check from UI tree data (no navigation needed)
+          - action: check_mutual
+            username: "{row.username}"
+            follows_you: "{row.follows_you}"
+            # If follows_you=true AND "follows_back" in criteria.never_unfollow_if
+            # → append to skipped_usernames (reason: mutual), skip remaining steps
+            protected_by: follows_back
+            never_unfollow_if: "{input.criteria.never_unfollow_if}"
+            on_protected:
+              action: skip_user
+              reason: mutual
+
+          # B2: Navigate to user profile if deeper evaluation is needed
+          #     (skip navigation when fast-path already decided skip)
+          - action: conditional_navigate_to_profile
+            username: "{row.username}"
+            navigate_if_any:
+              - "'not_following_back' in input.criteria.unfollow_if"
+              - "'inactive_90_days' in input.criteria.unfollow_if"
+              - "'following_3000_plus' in input.criteria.unfollow_if"
+              - "'irrelevant_niche' in input.criteria.unfollow_if"
+            tap:
+              action: cascade_tap
+              text: "{row.username}"        # dynamic text-match tap → ui_tree
+              verify: other_profile
+              wait_ms: 2000
+            # Spend human-like time on the profile before acting
+            browse_seconds: "{anti_detection.timing.profile_browse_time}"
+
+          # B3: Extract evaluation data from UI tree on other_profile screen
+          - action: extract_profile_data_for_eval
+            fields:
+              following_count:
+                source: ui_tree
+                hint: "TextView containing pattern /^[0-9,KM]+ Following$/"
+              bio_text:
+                source: ui_tree
+                resource_id: "com.instagram.android:id/profile_header_bio_text"
+                nullable: true
+              last_post_age_days:
+                source: ui_tree
+                hint: "contentDescription of first grid item ('X days ago', 'X weeks ago', 'X months ago', 'X years ago')"
+                parse: relative_time_to_days
+                nullable: true              # null if 0 posts
+              posts_count:
+                source: ui_tree
+                hint: "TextView containing pattern /^[0-9,KM]+ Posts?$/"
+                default: 0
+
+          # B4: Optional VLM — niche relevance (only if irrelevant_niche active + description set)
+          - action: conditional_vlm_eval
+            condition: "'irrelevant_niche' in input.criteria.unfollow_if AND input.criteria.niche_description != ''"
+            on_true:
+              action: analyze_screen
+              task: "Este acest profil Instagram relevant pentru nișa: '{input.criteria.niche_description}'? Răspunde STRICT JSON: {\"relevant\": bool, \"reason\": string}"
+              result_field: niche_relevant
+              # VLM call — increments vlm_calls_this_hour
+            on_false:
+              set_field: niche_relevant
+              value: null
+
+          # B5: Apply criteria → decision (unfollow / skip)
+          - action: evaluate_criteria
+            username: "{row.username}"
+            profile_data:
+              following_count: "{extracted.following_count}"
+              bio_text: "{extracted.bio_text}"
+              last_post_age_days: "{extracted.last_post_age_days}"
+              posts_count: "{extracted.posts_count}"
+              niche_relevant: "{niche_relevant}"
+              follows_you: "{row.follows_you}"
+            criteria: "{input.criteria}"
+            rules:
+              # unfollow_if conditions
+              not_following_back:  "follows_you == false"
+              inactive_90_days:    "last_post_age_days > 90 OR posts_count == 0"
+              following_3000_plus: "following_count > 3000"
+              irrelevant_niche:    "niche_relevant == false"
+              # never_unfollow_if conditions (take precedence)
+              follows_back:            "follows_you == true"
+              bio_contains_keywords:   "any protected_keyword in bio_text (case-insensitive)"
+            # Decision logic:
+            #   IF any unfollow_if rule matches AND no never_unfollow_if rule matches → UNFOLLOW
+            #   ELSE → SKIP
+
+          # B6: Execute unfollow sequence or log skip
+          - action: branch_on_decision
+            on_unfollow:
+              action: run_sequence
+              sequence_ref: unfollow_sequence
+            on_skip:
+              - action: append_to_list
+                list: skipped_usernames
+                value:
+                  username: "{row.username}"
+                  reason: "{decision.reason}"
+
+          # B7: Navigate back to following list
+          - action: cascade_tap
+            element: nav.back
+            platform: instagram
+            verify: following_list
+            wait_ms: 1500
+
+          # B8: Human-like random delay between users
+          - action: random_delay
+            range_seconds: "{input.pace.delay_between_seconds}"
+
+          # B9: Mark as processed (dedup) and increment counters
+          - action: mark_processed
+            username: "{row.username}"
+          - action: increment
+            counter: evaluated_count
+
+          # B10: Checkpoint every 5 evaluations (HYDRA-CORE REGULA 7)
+          - action: checkpoint_save_if
+            every: 5
+            counter: evaluated_count
+            phase: evaluating_following
+            state:
+              current_screen: following_list
+              scroll_position: "{current_scroll_position}"
+              evaluated_count: "{evaluated_count}"
+              unfollowed_count: "{unfollowed_count}"
+              last_processed_username: "{row.username}"
+              consecutive_unfollows: "{consecutive_unfollows}"
+              vlm_calls_this_hour: "{vlm_calls_this_hour}"
+              processed_usernames: "{processed_usernames}"
+
+          # B11: Periodic anti-detection pause
+          - action: conditional_pause
+            trigger_every: "{input.pace.pause_every}"
+            counter: evaluated_count
+            duration_range_seconds: "{input.pace.pause_duration_seconds}"
+
+    # ─── Phase 3: Unfollow Sequence ────────────────────────────────────────────
+    sequences:
+      unfollow_sequence:
+        description: "Unfollow the user currently displayed on other_profile screen"
+
+        pre_check:
+          # Enforce max_consecutive_unfollows to avoid Instagram rate detection
+          - action: check_consecutive_limit
+            counter: consecutive_unfollows
+            max: "{anti_detection.rate_limits.max_consecutive_unfollows}"
+            on_limit_reached:
+              - action: forced_pause
+                duration_seconds: 30
+                description: "Rest pause after {max} consecutive unfollows"
+              - action: reset_counter
+                counter: consecutive_unfollows
+
+        steps:
+          # Tap "Following" button → opens bottom sheet with Unfollow option
+          - action: cascade_tap
+            element: profile.following
+            platform: instagram
+            wait_ms: 1000
+
+          # Tap "Unfollow" in the confirmation dialog
+          # dialog.confirm selector: { text: "Unfollow", className: "android.widget.Button" }
+          - action: cascade_tap
+            element: dialog.confirm
+            platform: instagram
+            wait_ms: 1500
+
+          # Verify success: button reverted to "Follow" (blue) = unfollow confirmed
+          - action: verify_element_present
+            element: profile.follow
+            platform: instagram
+            timeout_ms: 3000
+            on_success:
+              - action: increment
+                counter: unfollowed_count
+              - action: increment
+                counter: consecutive_unfollows
+              - action: reset_counter
+                counter: consecutive_failures
+              - action: append_to_list
+                list: unfollowed_usernames
+                value:
+                  username: "{row.username}"
+                  reason: "{decision.reason}"
+            on_fail:
+              - action: increment
+                counter: consecutive_failures
+              - action: log_failure
+                username: "{row.username}"
+                reason: unfollow_verify_failed
+                description: "Button did not change to Follow — action may have been silently blocked"
+
+    # ─── Output ────────────────────────────────────────────────────────────────
+    output:
+      unfollowed:
+        type: array
+        items:
+          username:
+            type: string
+          reason:
+            type: string
+      skipped:
+        type: array
+        items:
+          username:
+            type: string
+          reason:
+            type: string
+      total_unfollowed:
+        type: number
+      total_evaluated:
+        type: number
+      stopped_reason:
+        type: string
+        nullable: true
+        description: "null=completed | 'action_blocked' | 'login_required' | 'max_failures' | 'list_exhausted'"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CUSTOM ACTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+custom_actions:
+
+  extract_profile_data_for_eval:
+    description: "Parse following_count, bio, last_post_age_days, posts_count from other_profile UI tree"
+    implementation: ProfileEvalExtractor
+    requires_screenshot: false
+    requires_ui_tree: true
+    notes:
+      - "following_count: find TextView matching /^[0-9,KM]+ Following$/, parse number prefix (handle K/M suffixes)"
+      - "bio_text: resourceId com.instagram.android:id/profile_header_bio_text, nullable"
+      - "posts_count: find TextView matching /^[0-9,KM]+ Posts?$/, parse number prefix"
+      - "last_post_age_days: iterate grid item contentDescriptions; first item typically has relative timestamp"
+      - "  Patterns: 'X days ago'→X | 'X weeks ago'→X*7 | 'X months ago'→X*30 | 'X years ago'→X*365"
+      - "  No grid items (0 posts) → last_post_age_days = null, posts_count = 0"
+
+  check_mutual:
+    description: "Fast-path check: if user follows back and follows_back is in never_unfollow_if → skip immediately"
+    implementation: MutualFollowChecker
+    requires_screenshot: false
+    requires_ui_tree: false
+
+  conditional_navigate_to_profile:
+    description: "Tap on username text in following list only if at least one navigate_if condition is true"
+    implementation: ConditionalNavigator
+    requires_screenshot: false
+    requires_ui_tree: true
+    notes:
+      - "Uses cascade_tap with text match (dynamic) — does NOT use learned_coords"
+      - "Applies browse_seconds delay after navigation for human-like behavior"
+
+  evaluate_criteria:
+    description: "Apply unfollow_if / never_unfollow_if rules; return {decision: 'unfollow'|'skip', reason: string}"
+    implementation: CriteriaEvaluator
+    requires_screenshot: false
+    requires_ui_tree: false
+    notes:
+      - "never_unfollow_if rules take precedence over unfollow_if rules"
+      - "bio_contains_keywords: case-insensitive substring match against each protected_keyword"
+      - "irrelevant_niche: uses niche_relevant field set by conditional_vlm_eval (null = skip criterion)"
+      - "Decision: UNFOLLOW only if ≥1 unfollow_if matches AND 0 never_unfollow_if match"
+
+  conditional_vlm_eval:
+    description: "Call analyze-screen for niche relevance only when condition is met; otherwise set result field to null"
+    implementation: ConditionalVLMEval
+    requires_screenshot: true
+    requires_ui_tree: false
+    notes:
+      - "Uses /api/hydra/analyze-screen — screenshot NOT returned to context (HYDRA-CORE REGULA 2 / REGULA 6)"
+      - "Increments vlm_calls_this_hour counter after each call"
+      - "Response must be valid JSON {relevant: bool, reason: string}; parse failure → treat as null (skip criterion)"
+
+  check_consecutive_limit:
+    description: "Compare counter against max; if limit reached, trigger forced_pause and reset"
+    implementation: ConsecutiveLimitGuard
+    requires_screenshot: false
+    requires_ui_tree: false
+
+  verify_element_present:
+    description: "Poll UI tree until element appears or timeout_ms elapses"
+    implementation: ElementPresenceVerifier
+    requires_screenshot: false
+    requires_ui_tree: true
+
+  track_empty_scroll:
+    description: "After scroll, check if any new (unprocessed) usernames appeared; increment empty counter or reset it"
+    implementation: EmptyScrollTracker
+    requires_screenshot: false
+    requires_ui_tree: false
+
+  conditional_pause:
+    description: "Insert random pause of duration_range_seconds when counter % trigger_every == 0"
+    implementation: PacingPause
+    requires_screenshot: false
+    requires_ui_tree: false
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ANTI-DETECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+anti_detection:
+  rate_limits:
+    unfollows_per_hour: 15
+    max_consecutive_unfollows: 5
+  timing:
+    min_between_unfollows_seconds: 20
+    profile_browse_time: [3, 8]         # seconds of "reading" profile before acting
+  human_behavior:
+    scroll_speed_variation: true
+    occasional_pause: true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ERROR HANDLING (HYDRA-CORE REGULA 4 + REGULA 5)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+error_handling:
+
+  on_action_blocked:
+    # Screen: action_blocked — Instagram rate-limit enforced (HYDRA-CORE REGULA 4)
+    action: abort_graceful
+    save_checkpoint: true
+    cooldown_hours: 2
+    set_stopped_reason: action_blocked
+    report: "⚠️ Action Blocked — unfollow rate limit hit. Checkpoint saved. Reschedule in 2h."
+
+  on_login_required:
+    # Screen: login — session expired (HYDRA-CORE REGULA 4)
+    action: abort
+    save_checkpoint: true
+    set_stopped_reason: login_required
+    report: "🔐 Login Required — session expired. Manual re-login needed."
+
+  on_element_not_found:
+    # cascade_tap or verify_element_present could not find element
+    max_retries: 3
+    fallback: vision         # cascade falls through to VLM on 3rd retry
+    on_fail:
+      action: skip_user
+      log_reason: element_not_found
+      increment_counter: consecutive_failures
+
+  on_consecutive_failures:
+    # 5 consecutive failures across any action → abort to prevent bot-like loops
+    threshold: 5
+    action: abort_graceful
+    set_stopped_reason: max_failures
+    save_checkpoint: true
+    report: "⛔ Max consecutive failures (5) reached — aborting gracefully. Checkpoint saved."
+
+  on_unfollow_verify_fail:
+    # "Follow" button not detected after unfollow sequence
+    max_retries: 1
+    on_fail:
+      action: skip_user
+      log_reason: unfollow_verify_failed
+      count_as_unfollowed: false
+      note: "Do not count as successful unfollow — state uncertain"

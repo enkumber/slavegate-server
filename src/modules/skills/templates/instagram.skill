@@ -1,0 +1,484 @@
+# Instagram Skill — v2.1.0
+# Actualizat: 2026-03-16
+# Folosește împreună cu HYDRA-CORE.md
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# METADATA
+# ═══════════════════════════════════════════════════════════════════════════════
+
+platform: instagram
+package: com.instagram.android
+app_version: v320.0.0
+updated_at: 2026-03-16T07:20:00Z
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CORE INTEGRATION
+# Leagă acest skill de regulile din HYDRA-CORE.md
+# ═══════════════════════════════════════════════════════════════════════════════
+
+core_integration:
+  # Pentru verify-tap
+  package: com.instagram.android
+  recovery_anchor: nav.home
+  
+  # Pentru checkpoint_save — ce fields să salveze
+  checkpoint_fields:
+    - follows_done
+    - likes_done
+    - comments_done
+    - profiles_visited
+    - current_screen
+    - scroll_position
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCREEN DETECTION
+# Folosit pentru a identifica ecranul curent din ui_tree
+# ═══════════════════════════════════════════════════════════════════════════════
+
+screens:
+  # ─── ECRANE CRITICE (comportament special în CORE) ──────────────────────────
+  
+  action_blocked:
+    indicators:
+      - text_contains: "Action Blocked"
+      - text_contains: "Try Again Later"
+      - text_contains: "We restrict certain activity"
+      - text_contains: "Acțiune blocată"
+    description: "Rate limit Instagram - STOP și amână jobs conform CORE REGULA 4"
+    critical: true
+    
+  login:
+    indicators:
+      - resourceId: "com.instagram.android:id/login_username"
+      - text: "Log in"
+      - text: "Log In"
+      - text: "Conectează-te"
+    description: "Sesiune expirată - STOP și notifică Dan conform CORE REGULA 4"
+    critical: true
+
+  # ─── ECRANE NORMALE ─────────────────────────────────────────────────────────
+  
+  home_feed:
+    indicators:
+      - resourceId: "com.instagram.android:id/feed_tab"
+      - resourceId: "com.instagram.android:id/action_bar_title"
+    exclude:
+      - resourceId: "com.instagram.android:id/action_bar_back_button"
+    description: "Feed principal cu postări"
+    
+  search_explore:
+    indicators:
+      - resourceId: "com.instagram.android:id/search_tab"
+      - resourceId: "com.instagram.android:id/action_bar_search_edit_text"
+    description: "Pagina Search/Explore"
+    
+  own_profile:
+    indicators:
+      - resourceId: "com.instagram.android:id/profile_tab"
+      - text: "Edit profile"
+      - text: "Editează profilul"
+    description: "Profilul propriu"
+    
+  other_profile:
+    indicators:
+      - text: "Follow"
+      - text: "Following"
+      - text: "Requested"
+      - text: "Message"
+    exclude:
+      - text: "Edit profile"
+    description: "Profilul altui utilizator"
+    
+  followers_list:
+    indicators:
+      - text: "Followers"
+      - resourceId: "com.instagram.android:id/follow_list_container"
+    description: "Lista de followers a unui profil"
+    
+  following_list:
+    indicators:
+      - text: "Following"
+      - resourceId: "com.instagram.android:id/follow_list_container"
+    description: "Lista de following a unui profil"
+    
+  post_detail:
+    indicators:
+      - resourceId: "com.instagram.android:id/row_feed_button_like"
+      - resourceId: "com.instagram.android:id/row_feed_button_comment"
+    description: "Postare deschisă în full screen"
+    
+  comments_full:
+    indicators:
+      - resourceId: "com.instagram.android:id/comments_list"
+      - resourceId: "com.instagram.android:id/layout_comment_thread_edittext"
+    description: "Secțiunea de comentarii full screen"
+    
+  reels:
+    indicators:
+      - resourceId: "com.instagram.android:id/clips_tab"
+      - resourceId: "com.instagram.android:id/clips_viewer"
+    description: "Reels viewer"
+    
+  stories:
+    indicators:
+      - resourceId: "com.instagram.android:id/story_viewer"
+      - contentDescription_contains: "story"
+    description: "Story viewer"
+    
+  direct_messages:
+    indicators:
+      - resourceId: "com.instagram.android:id/direct_thread"
+      - contentDescription: "Direct"
+    description: "Mesaje directe"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUTTON MAP — Elemente pentru cascade-tap
+# ═══════════════════════════════════════════════════════════════════════════════
+
+button_map:
+
+  # ─── DIALOGS (pentru CORE REGULA 2 — Overlay Handling) ──────────────────────
+  
+  dialog:
+    confirm:
+      selector: { text: "Unfollow", className: "android.widget.Button" }
+      alt_selector: { text: "OK" }
+      hint: "confirmation button in dialogs"
+      
+    cancel:
+      selector: { text: "Cancel" }
+      alt_selector: { text: "Anulează" }
+      hint: "cancel button in dialogs"
+      
+    dismiss:
+      selector: { text: "Not Now" }
+      alt_selectors:
+        - { text: "Not now" }
+        - { text: "Nu acum" }
+        - { text: "Skip" }
+      hint: "dismiss popup/suggestion"
+      
+    close:
+      selector: { contentDescription: "Close" }
+      alt_selector: { resourceId: "com.instagram.android:id/dialog_close_button" }
+      hint: "close button on modals"
+      
+    allow:
+      selector: { text: "Allow" }
+      alt_selector: { text: "Permite" }
+      hint: "allow permission"
+      
+    deny:
+      selector: { text: "Deny" }
+      alt_selectors:
+        - { text: "Don't Allow" }
+        - { text: "Nu permite" }
+      hint: "deny permission"
+      
+    ok_blocked:
+      selector: { text: "OK" }
+      hint: "dismiss action blocked message"
+
+  # ─── NAVIGAȚIE PRINCIPALĂ (cu coords învățate) ───────────────────────────────
+  # Bottom nav bar — poziții stabile, coords confirmate pe OP5T2 (1080x2160)
+  
+  nav:
+    home:
+      selector: { resourceId: "com.instagram.android:id/feed_tab" }
+      alt_selectors:
+        - { contentDescription: "Home" }
+        - { contentDescription: "Acasă" }
+      hint: "house icon, bottom left"
+      
+    search:
+      selector: { resourceId: "com.instagram.android:id/search_tab" }
+      alt_selectors:
+        - { contentDescription: "Search and explore" }
+        - { contentDescription: "Search" }
+        - { contentDescription: "Căutare" }
+      hint: "magnifying glass, bottom row"
+      
+    create:
+      selector: { contentDescription: "New post" }
+      alt_selector: { contentDescription: "Postare nouă" }
+      hint: "plus icon, bottom center"
+      
+    reels:
+      selector: { resourceId: "com.instagram.android:id/clips_tab" }
+      alt_selectors:
+        - { contentDescription: "Reels" }
+      hint: "video icon, bottom row"
+      
+    profile:
+      selector: { resourceId: "com.instagram.android:id/profile_tab" }
+      alt_selectors:
+        - { contentDescription: "Profile" }
+        - { contentDescription: "Profil" }
+      hint: "avatar, bottom right"
+      
+    back:
+      selector: { contentDescription: "Back" }
+      alt_selectors:
+        - { contentDescription: "Înapoi" }
+        - { className: "android.widget.ImageButton", index: 0 }
+      hint: "back arrow, top left"
+
+  # ─── TOP BAR ────────────────────────────────────────────────────────────────
+  
+  top:
+    camera:
+      selector: { contentDescription: "Camera" }
+      hint: "camera icon, top left"
+      
+    messages:
+      selector: { contentDescription: "Direct" }
+      hint: "messenger icon, top right"
+      
+    activity:
+      selector: { contentDescription: "Activity" }
+      hint: "heart icon, top right"
+
+  # ─── SEARCH ─────────────────────────────────────────────────────────────────
+  
+  search:
+    input:
+      selector: { resourceId: "com.instagram.android:id/action_bar_search_edit_text" }
+      alt_selector: { className: "android.widget.EditText" }
+      hint: "search text field"
+      
+    result_user:
+      selector: { resourceId: "com.instagram.android:id/row_search_user_username" }
+      hint: "username in search results"
+    
+    result_hashtag:
+      selector: { resourceId: "com.instagram.android:id/row_hashtag_textview_tag_name" }
+      alt_selectors:
+        - { resourceId: "com.instagram.android:id/row_search_keyword_result_name" }
+        - { className: "android.widget.TextView", text_starts_with: "#" }
+      hint: "hashtag in search dropdown results"
+      match_type: partial  # Match "#hashtag" when searching for "hashtag"
+    
+    result_place:
+      selector: { resourceId: "com.instagram.android:id/row_place_title" }
+      hint: "place/location in search results"
+      
+    tab_accounts:
+      selector: { text: "Accounts" }
+      alt_selector: { text: "Conturi" }
+      hint: "Accounts filter tab"
+    
+    tab_tags:
+      selector: { text: "Tags" }
+      alt_selector: { text: "Etichete" }
+      hint: "Tags/Hashtags filter tab"
+    
+    tab_places:
+      selector: { text: "Places" }
+      alt_selector: { text: "Locuri" }
+      hint: "Places filter tab"
+      
+    clear:
+      selector: { contentDescription: "Clear" }
+      hint: "X button to clear search"
+
+  # ─── POST ACTIONS ───────────────────────────────────────────────────────────
+  
+  post:
+    like:
+      selector: { resourceId: "com.instagram.android:id/row_feed_button_like" }
+      alt_selectors:
+        - { contentDescription: "Like" }
+        - { contentDescription: "Apreciază" }
+      hint: "heart icon below post"
+      
+    unlike:
+      selector: { contentDescription: "Unlike" }
+      alt_selector: { contentDescription: "Nu mai aprecia" }
+      hint: "filled red heart"
+      
+    comment:
+      selector: { resourceId: "com.instagram.android:id/row_feed_button_comment" }
+      alt_selectors:
+        - { contentDescription: "Comment" }
+        - { contentDescription: "Comentariu" }
+      hint: "speech bubble next to heart"
+      
+    share:
+      selector: { contentDescription: "Share" }
+      hint: "paper plane icon"
+      
+    save:
+      selector: { contentDescription: "Save" }
+      hint: "bookmark icon, right side"
+      
+    more:
+      selector: { contentDescription: "More options" }
+      hint: "three dots, top right of post"
+      
+    username:
+      selector: { resourceId: "com.instagram.android:id/row_feed_photo_profile_name" }
+      hint: "username above post, tap to go to profile"
+      
+    view_all_comments:
+      selector: { text_contains: "View all" }
+      alt_selector: { text_contains: "comments" }
+      hint: "view all X comments link"
+
+  # ─── PROFILE SCREEN ─────────────────────────────────────────────────────────
+  
+  profile:
+    follow:
+      selector: { text: "Follow", className: "android.widget.Button" }
+      alt_selector: { text: "Urmărește" }
+      hint: "blue Follow button"
+      
+    following:
+      selector: { text: "Following", className: "android.widget.Button" }
+      alt_selector: { text: "Urmărești" }
+      hint: "Following button (already following)"
+      
+    requested:
+      selector: { text: "Requested", className: "android.widget.Button" }
+      alt_selector: { text: "Solicitat" }
+      hint: "Requested button (pending follow)"
+      
+    message:
+      selector: { text: "Message", className: "android.widget.Button" }
+      alt_selector: { text: "Mesaj" }
+      hint: "Message button below username"
+      
+    edit:
+      selector: { text: "Edit profile" }
+      alt_selector: { text: "Editează profilul" }
+      hint: "Edit profile button (own profile)"
+      
+    followers_count:
+      selector: { resourceId: "com.instagram.android:id/row_profile_header_followers_container" }
+      hint: "followers count, tappable"
+      
+    following_count:
+      # Instagram v320+ migrated profile header to Jetpack Compose — resourceId no longer in a11y tree.
+      # L1 (learned_coords) is the primary path. Fallback: OCR on the number text itself.
+      selector: { text_contains: "following" }
+      alt_selectors:
+        - { text_contains: "urmărești" }
+        - { contentDescription_contains: "following" }
+      hint: "following count, tappable — third stat block, rightmost on profile header"
+      
+    unfollow:
+      selector: { text: "Unfollow" }
+      alt_selector: { text: "Nu mai urmări" }
+      hint: "unfollow option in dropdown"
+
+  # ─── FOLLOWERS/FOLLOWING LIST ───────────────────────────────────────────────
+  
+  followers:
+    search:
+      selector: { hint: "Search", className: "android.widget.EditText" }
+      hint: "search in followers list"
+      
+    follow_button:
+      selector: { text: "Follow", className: "android.widget.Button" }
+      hint: "Follow button in list row"
+
+  # ─── COMMENT INPUT ──────────────────────────────────────────────────────────
+  
+  comment:
+    input:
+      selector: { resourceId: "com.instagram.android:id/layout_comment_thread_edittext" }
+      alt_selector: { hint: "Add a comment" }
+      hint: "comment text input field"
+      
+    post_button:
+      selector: { contentDescription: "Post" }
+      alt_selectors:
+        - { text: "Post" }
+        - { text: "Postează" }
+        - { resourceId: "com.instagram.android:id/layout_comment_thread_post_button_icon" }
+      hint: "Post button to submit comment"
+
+  # ─── STORIES ────────────────────────────────────────────────────────────────
+  
+  stories:
+    own:
+      selector: { contentDescription: "Your story" }
+      hint: "your story ring, top left"
+      
+    next:
+      selector: { contentDescription: "Next" }
+      hint: "tap right side to advance"
+      
+    close:
+      selector: { contentDescription: "Close" }
+      hint: "X button, top left"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GESTURES — Coordonate NORMALIZATE (0.0-1.0)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+gestures:
+  double_tap_like:
+    type: double_tap
+    target: center_of_visible_post
+    hint: "double tap on post image to like"
+    
+  scroll_feed:
+    type: swipe
+    params:
+      startX: 0.50
+      startY: 0.74
+      endX: 0.50
+      endY: 0.28
+      duration: { min: 350, max: 500 }
+    hint: "scroll down in feed"
+    
+  scroll_followers:
+    type: swipe
+    params:
+      startX: 0.50
+      startY: 0.69
+      endX: 0.50
+      endY: 0.37
+      duration: { min: 300, max: 450 }
+    hint: "scroll down in followers list"
+    
+  scroll_up:
+    type: swipe
+    params:
+      startX: 0.50
+      startY: 0.30
+      endX: 0.50
+      endY: 0.70
+      duration: { min: 300, max: 450 }
+    hint: "scroll up (refresh gesture)"
+    
+  dismiss_keyboard:
+    type: tap
+    params: { x: 0.50, y: 0.20 }
+    hint: "tap above keyboard to dismiss"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# LEARNED COORDS (auto-populated by cascade system)
+# Toate coordonatele sunt NORMALIZATE (0.0-1.0)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+learned_coords:
+  # UPDATED 2026-03-16: Instagram changed nav bar layout
+  # Bottom nav: home(0.1) → search(0.3) → create(0.5) → reels(0.7) → profile(0.9)
+  nav.home: { x: 0.10, y: 0.912, confidence: 1.0, learned_at: "2026-03-26T21:00:00Z", device: "OP5T" }
+  nav.reels: { x: 0.30, y: 0.912, confidence: 1.0, learned_at: "2026-03-26T21:00:00Z", device: "OP5T" }
+  nav.search: { x: 0.50, y: 0.912, confidence: 1.0, learned_at: "2026-03-26T21:00:00Z", device: "OP5T" }
+  nav.create: { x: 0.70, y: 0.912, confidence: 1.0, learned_at: "2026-03-26T21:00:00Z", device: "OP5T" }
+  nav.profile: { x: 0.90, y: 0.912, confidence: 1.0, learned_at: "2026-03-26T21:00:00Z", device: "OP5T" }
+  nav.back: { x: 0.05, y: 0.05, confidence: 0.8, learned_at: "2026-03-16T07:20:00Z", device: "OP5T2" }
+  top.messages: { x: 0.92, y: 0.05, confidence: 0.9, learned_at: "2026-03-16T07:20:00Z", device: "OP5T2" }
+  profile.follow: { x: 0.30, y: 0.35, confidence: 0.85, learned_at: "2026-03-16T07:20:00Z", device: "OP5T2" }
+  profile.followers_count: { x: 0.50, y: 0.345, confidence: 0.90, learned_at: "2026-03-24T22:14:00Z", device: "OP5T2" }
+  # Following count — third stat on profile header (Compose layout, no resourceId exposed)
+  # Layout: Stories highlights row at ~y=0.22-0.26; stats row (Posts|Followers|Following) BELOW at ~y=0.33-0.36
+  # x=0.83 = rightmost of 3 equal-width blocks on a 1080px screen (~896px center)
+  # y=0.345 = center of stats row (~745px on 2160px screen), below Stories highlights
+  profile.following_count: { x: 0.824, y: 0.164, confidence: 0.90, learned_at: "2026-03-24T22:14:00Z", device: "OP5T2" }
+  # Feed posts — center of first visible post on home feed
+  feed.post_1: { x: 0.50, y: 0.40, confidence: 0.85, learned_at: "2026-03-27T06:00:00Z", device: "OP5T2" }
