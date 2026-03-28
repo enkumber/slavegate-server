@@ -206,24 +206,10 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
   // so we send it unconditionally for all nav.* elements as a fail-safe.
   if (req.elementName.startsWith("nav.") && req.elementName !== "nav.home") {
     // For nav elements other than home:
-    // 1. Press BACK key 5 times to fully exit Reels/comments/overlays
-    // 2. Then tap nav.home (0.10, 0.912) to ensure clean Home Feed state
-    console.log(`[cascade] US-016: nav element detected (${req.elementName}) — sending 3x BACK + nav.home`);
+    // Just tap nav.home first to ensure we're on Home Feed.
+    // BACK key is risky — can exit app. Tapping nav.home works from most screens.
+    console.log(`[cascade] US-016: nav element detected (${req.elementName}) — tapping nav.home first`);
     try {
-      // Press BACK 3 times to escape overlays (5x was too aggressive - exits app)
-      for (let i = 0; i < 3; i++) {
-        const backJobId = uuidv4();
-        wsServer.sendJob(req.deviceId, {
-          jobId: backJobId,
-          type: "press_key" as import("../../../../shared/protocol/messages").JobType,
-          params: { key: "back" } as Record<string, unknown>,
-          timeoutMs: 2_000,
-        });
-        await awaitCascadeResult(backJobId, 2_500).catch(() => {});
-        await new Promise<void>((resolve) => setTimeout(resolve, 300));
-      }
-
-      // Then tap nav.home
       const homeJobId = uuidv4();
       wsServer.sendJob(req.deviceId, {
         jobId: homeJobId,
@@ -233,9 +219,9 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
       });
       await awaitCascadeResult(homeJobId, 3_500).catch(() => {});
       await new Promise<void>((resolve) => setTimeout(resolve, 800));
-      console.log(`[cascade] US-016: 3x BACK + nav.home complete, proceeding with ${req.elementName}`);
+      console.log(`[cascade] US-016: nav.home tap complete, proceeding with ${req.elementName}`);
     } catch (err) {
-      console.warn(`[cascade] US-016: pre-tap failed (non-fatal): ${(err as Error).message}`);
+      console.warn(`[cascade] US-016: nav.home pre-tap failed (non-fatal): ${(err as Error).message}`);
     }
   }
 
