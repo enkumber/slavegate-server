@@ -215,6 +215,22 @@
       "files": ["src/modules/skills/templates/instagram.skill"],
       "passes": false,
       "notes": "Instagram nav bar: Home(0.10), Search(0.30), Create(0.50), Reels(0.70), Profile(0.90)"
+    },
+    {
+      "id": "US-014",
+      "title": "Preamble: dismiss keyboard before nav tap",
+      "description": "Când Instagram e pe Reels cu comment box deschis, nav bar nu e vizibil. Preamble trebuie să: 1) detecteze keyboard, 2) dismiss cu BACK, 3) apoi tap nav.home",
+      "acceptanceCriteria": [
+        "Preamble P2.5: detectează keyboard vizibil",
+        "Dacă keyboard vizibil, send BACK key înainte de P3",
+        "P3 tap nav.home funcționează corect",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "dependsOn": [],
+      "files": ["src/modules/agents/orchestrator.ts"],
+      "passes": false,
+      "notes": "Keyboard deschis pe Reels ascunde nav bar-ul"
     }
   ]
 }

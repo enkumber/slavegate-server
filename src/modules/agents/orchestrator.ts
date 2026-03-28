@@ -717,6 +717,55 @@ export class AgentOrchestrator {
       console.log(`[orchestrator] Preamble P2: re-verify — on Home: ${isOnHome2}`);
     }
 
+    // Phase 2.5: keyboard dismiss guard
+    // If Instagram was on Reels with comment box open, the software keyboard hides the nav bar.
+    // A tap on nav.home coordinates would land in the comment text field instead.
+    // We take a fresh screenshot and ask the VLM if a keyboard is currently visible.
+    // If yes, send a single BACK key to dismiss it before proceeding to P3.
+    console.log(`[orchestrator] Preamble P2.5: checking for visible keyboard before nav tap`);
+    try {
+      const kbScreenshot = await this.captureScreenshot(deviceId);
+      if (kbScreenshot) {
+        const llm = getLlmClient();
+        const kbResponse = await llm.complete({
+          model: agentConfig.planner.model,
+          systemPrompt: "",
+          userContent: [
+            { type: "image", base64: kbScreenshot },
+            {
+              type: "text",
+              text: `Look at this mobile screenshot. Is a software keyboard (on-screen keyboard / virtual keyboard) currently visible on screen? Also check if there is an open comment input box or comment section overlay.
+
+Reply with EXACTLY one word: YES or NO`,
+            },
+          ],
+          temperature: 0.0,
+          maxTokens: 5,
+        });
+        const kbLabel = kbResponse.text.trim().toUpperCase();
+        if (kbLabel.includes("YES")) {
+          console.log(`[orchestrator] Preamble P2.5: keyboard detected, dismissing...`);
+          const kbBackId = uuidv4();
+          const kbBackP = awaitAction(kbBackId, 3_000);
+          wsServer.sendJob(deviceId, {
+            jobId: kbBackId,
+            type: "press_key" as import("../../../../shared/protocol/messages").JobType,
+            params: { key: "back" } as Record<string, unknown>,
+            timeoutMs: 3_000,
+          });
+          await kbBackP;
+          await sleep(600);
+          console.log(`[orchestrator] Preamble P2.5: keyboard dismissed ✓`);
+        } else {
+          console.log(`[orchestrator] Preamble P2.5: no keyboard detected (${kbLabel}), proceeding`);
+        }
+      } else {
+        console.warn(`[orchestrator] Preamble P2.5: no screenshot — skipping keyboard check`);
+      }
+    } catch (err) {
+      console.warn(`[orchestrator] Preamble P2.5: keyboard check error — ${(err as Error).message} — skipping`);
+    }
+
     // Phase 3: coordinate-based tap on nav.home as safety net
     // A11y may fail if Home node is absent from tree on certain sub-pages.
     // Hard tap at (0.1, 0.912) = bottom-left nav.home position.
