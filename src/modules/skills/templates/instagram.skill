@@ -262,6 +262,15 @@ button_map:
         - { className: "android.widget.TextView", text_starts_with: "#" }
       hint: "hashtag in search dropdown results"
       match_type: partial  # Match "#hashtag" when searching for "hashtag"
+
+    hashtag_result:
+      selector: { className: "android.widget.TextView", text_starts_with: "#" }
+      alt_selectors:
+        - { resourceId: "com.instagram.android:id/row_hashtag_textview_tag_name" }
+        - { resourceId: "com.instagram.android:id/row_search_keyword_result_name" }
+      hint: "tap rows starting with # (hashtag results), NOT account rows — accounts do not start with #"
+      match_type: prefix
+      priority: hashtag_over_account  # Always prefer hashtag rows over account rows in search results
     
     result_place:
       selector: { resourceId: "com.instagram.android:id/row_place_title" }
@@ -467,6 +476,17 @@ gestures:
     hint: "tap above keyboard to dismiss"
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCROLL REGIONS
+# Safe zones for scrolling actions (normalized 0.0-1.0)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+scroll_regions:
+  search_results:
+    startY: 0.25
+    endY: 0.75
+    description: "Safe scroll zone for search results, avoids search bar and nav bar"
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LEARNED COORDS (auto-populated by cascade system)
 # Toate coordonatele sunt NORMALIZATE (0.0-1.0)
