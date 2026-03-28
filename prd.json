@@ -133,6 +133,56 @@
       "files": ["src/modules/skills/templates/instagram.skill"],
       "passes": false,
       "notes": "Current coords (0.7, 0.912) are too far right and too low - activates multitasking gesture"
+    },
+    {
+      "id": "US-009",
+      "title": "Rebuild and deploy after US-008 coord fix",
+      "description": "US-008 committed but not deployed. Server still uses old coords. Need rebuild + pm2 restart.",
+      "acceptanceCriteria": [
+        "Run npm run build",
+        "Run pm2 restart phone-network-server",
+        "Verify logs show nav.search coords as x=0.5, y=0.91",
+        "No typecheck errors"
+      ],
+      "priority": 1,
+      "dependsOn": ["US-008"],
+      "files": [],
+      "passes": false,
+      "notes": "Deployment step missed"
+    },
+    {
+      "id": "US-010",
+      "title": "Clean failed tasks and create fresh test",
+      "description": "Delete/pause all failed tasks, create one fresh #test task, start runner, verify completion",
+      "acceptanceCriteria": [
+        "All failed/running tasks marked as paused via API",
+        "Create new task: hashtag:#test, 1 like, 2 min",
+        "Start task runner",
+        "Monitor until task completes or fails",
+        "Report final status"
+      ],
+      "priority": 1,
+      "dependsOn": ["US-008", "US-009"],
+      "files": [],
+      "passes": false,
+      "notes": "E2E validation after coord fixes"
+    },
+    {
+      "id": "US-011",
+      "title": "Clear device lock and restart task",
+      "description": "Device 2cd08058 is marked busy but no task running. Clear the lock and restart.",
+      "acceptanceCriteria": [
+        "Stop task runner",
+        "Clear device lock via API or pm2 restart",
+        "Reset task c5cd6628 to queued",
+        "Start task runner",
+        "Task should start executing"
+      ],
+      "priority": 1,
+      "dependsOn": ["US-010"],
+      "files": [],
+      "passes": false,
+      "notes": "Device stuck in busy state"
     }
   ]
 }
