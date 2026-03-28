@@ -183,6 +183,22 @@
       "files": [],
       "passes": false,
       "notes": "Device stuck in busy state"
+    },
+    {
+      "id": "US-012",
+      "title": "Fix keyboard dismiss — BACK navigates away instead of dismiss",
+      "description": "BACK key navigates away from search screen instead of dismissing keyboard. Need alternative dismiss method.",
+      "acceptanceCriteria": [
+        "Use tap outside keyboard area instead of BACK to dismiss",
+        "Or use IME action (hide keyboard ADB command)",
+        "Search context preserved after dismiss",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "dependsOn": [],
+      "files": ["src/modules/agents/prompts/planner.prompt.ts", "src/modules/skills/templates/instagram.skill"],
+      "passes": false,
+      "notes": "BACK on search screen exits search entirely"
     }
   ]
 }

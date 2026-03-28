@@ -292,8 +292,9 @@ button_map:
       hint: "Places filter tab"
       
     dismiss_keyboard:
-      action: back
-      hint: "press BACK to dismiss keyboard after typing in search"
+      type: tap
+      params: { x: 0.50, y: 0.30 }
+      hint: "tap search results area to dismiss keyboard without navigating away"
       
     clear:
       selector: { contentDescription: "Clear" }

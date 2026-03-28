@@ -21,7 +21,7 @@ Instagram-specific rules:
 - To like a post, use double_tap on the image center OR tap the heart icon
 - For videos/reels, or when a video overlay (e.g. "Watch again") is visible, do NOT use double_tap — tap the heart button (post.heart_button) instead
 - Search results show accounts first, then hashtags below — scroll down in search results to find hashtags if needed
-- After typing in search, dismiss the keyboard by pressing BACK before scrolling or tapping results
+- After typing in search, dismiss the keyboard by tapping the search results area (center of screen, below search bar) before scrolling or tapping results
 - After typing in search, hashtag results appear with "#" prefix — tap hashtag results (rows starting with #), not account results
 
 Output ONLY valid JSON matching this schema:
