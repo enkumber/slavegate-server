@@ -523,3 +523,6 @@ learned_coords:
   # Search/Explore screen — search bar at top
   search.input: { x: 0.50, y: 0.07, confidence: 0.95, learned_at: "2026-03-27T15:40:00Z", device: "OP5T" }
   search.search_bar: { x: 0.50, y: 0.07, confidence: 0.95, learned_at: "2026-03-27T15:40:00Z", device: "OP5T" }
+  # Search results — first hashtag result (row 1, after typing)
+  search.hashtag_result_1: { x: 0.50, y: 0.175, confidence: 0.90, learned_at: "2026-03-28T15:00:00Z", device: "OP5T" }
+  search.hashtag_result: { x: 0.50, y: 0.175, confidence: 0.90, learned_at: "2026-03-28T15:00:00Z", device: "OP5T" }
