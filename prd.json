@@ -117,6 +117,22 @@
       "files": ["src/modules/agents/prompts/planner.prompt.ts", "src/modules/skills/templates/instagram.skill"],
       "passes": false,
       "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Fix nav.search coordinates triggering app switcher",
+      "description": "nav.search at (0.7, 0.912) triggers Android app switcher instead of tapping Search tab. Need correct coordinates.",
+      "acceptanceCriteria": [
+        "Update nav.search in learned_coords to x=0.5, y=0.91 (center, slightly higher)",
+        "Coordinates must NOT trigger Android gesture navigation",
+        "Test confirms tap opens Search/Explore screen",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "dependsOn": [],
+      "files": ["src/modules/skills/templates/instagram.skill"],
+      "passes": false,
+      "notes": "Current coords (0.7, 0.912) are too far right and too low - activates multitasking gesture"
     }
   ]
 }

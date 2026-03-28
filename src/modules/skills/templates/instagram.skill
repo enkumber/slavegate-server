@@ -505,7 +505,7 @@ learned_coords:
   # Correct Instagram nav bar (verified): home(0.1) → search(0.3) → create(0.5) → reels(0.7) → profile(0.9)
   # Old wrong values: nav.reels=0.30, nav.search=0.50 (inversate!)
   nav.home: { x: 0.10, y: 0.912, confidence: 1.0, learned_at: "2026-03-27T17:00:00Z", device: "OP5T" }
-  nav.search: { x: 0.70, y: 0.912, confidence: 1.0, learned_at: "2026-03-27T17:00:00Z", device: "OP5T" }
+  nav.search: { x: 0.50, y: 0.91, confidence: 1.0, learned_at: "2026-03-27T17:00:00Z", device: "OP5T" }
   nav.create: { x: 0.50, y: 0.912, confidence: 1.0, learned_at: "2026-03-27T17:00:00Z", device: "OP5T" }
   nav.reels: { x: 0.30, y: 0.912, confidence: 1.0, learned_at: "2026-03-27T17:00:00Z", device: "OP5T" }
   nav.profile: { x: 0.90, y: 0.912, confidence: 1.0, learned_at: "2026-03-27T17:00:00Z", device: "OP5T" }
