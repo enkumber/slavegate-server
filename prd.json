@@ -231,6 +231,22 @@
       "files": ["src/modules/agents/orchestrator.ts"],
       "passes": false,
       "notes": "Keyboard deschis pe Reels ascunde nav bar-ul"
+    },
+    {
+      "id": "US-015",
+      "title": "Cascade tap: pre-check screen state before nav tap",
+      "description": "Între preamble și Step 1 trec ~30s (screenshot + planner). Ecranul se poate schimba. Cascade tap trebuie să verifice ecran + dismiss keyboard înainte de nav tap.",
+      "acceptanceCriteria": [
+        "Înainte de cascade L1 tap pe nav.*, verifică screenshot",
+        "Dacă keyboard vizibil, dismiss cu BACK",
+        "Dacă ecran != home_feed, încearcă recovery (tap nav.home)",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "dependsOn": ["US-014"],
+      "files": ["src/modules/skills/cascade-tap.ts"],
+      "passes": false,
+      "notes": "Timing gap între preamble și execution"
     }
   ]
 }
