@@ -14,15 +14,27 @@ import IORedis from "ioredis";
 
 let redis: IORedis | null = null;
 
+// Suppress repeated Redis errors — log once per minute max
+let lastRedisError = 0;
+const REDIS_ERROR_THROTTLE_MS = 60_000;
+
 export function getRedis(): IORedis {
   if (!redis) {
     redis = new IORedis(process.env.REDIS_URL ?? "redis://localhost:6379", {
       maxRetriesPerRequest: null,
       enableReadyCheck: false,
+      retryStrategy: (times) => {
+        // Exponential backoff: 1s, 2s, 4s, 8s, ... max 30s
+        return Math.min(times * 1000, 30_000);
+      },
     });
 
     redis.on("error", (err) => {
-      console.error("[redis] Connection error:", err.message);
+      const now = Date.now();
+      if (now - lastRedisError > REDIS_ERROR_THROTTLE_MS) {
+        console.error("[redis] Connection error (throttled, 1/min):", err.message);
+        lastRedisError = now;
+      }
     });
 
     redis.on("connect", () => {

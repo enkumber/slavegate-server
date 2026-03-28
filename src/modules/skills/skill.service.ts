@@ -91,6 +91,8 @@ export function getElement(skill: SkillFile, elementName: string): SkillElement 
     const element = current as SkillElement;
     
     // MERGE learned_coords if available
+    const hasLearnedCoords = !!(skill.learned_coords && skill.learned_coords[elementName]);
+    console.log(`[skills] getElement ${elementName}: found=${!!current}, hasSelector=${!!current.selector}, hasLearnedCoords=${hasLearnedCoords}`);
     if (skill.learned_coords && skill.learned_coords[elementName]) {
       const learned = skill.learned_coords[elementName];
       (element as any).coords = { x: learned.x, y: learned.y };
