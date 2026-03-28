@@ -208,10 +208,10 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
     // For nav elements other than home:
     // 1. Press BACK key 5 times to fully exit Reels/comments/overlays
     // 2. Then tap nav.home (0.10, 0.912) to ensure clean Home Feed state
-    console.log(`[cascade] US-016: nav element detected (${req.elementName}) — sending 5x BACK + nav.home`);
+    console.log(`[cascade] US-016: nav element detected (${req.elementName}) — sending 3x BACK + nav.home`);
     try {
-      // Press BACK 5 times to escape any overlay stack
-      for (let i = 0; i < 5; i++) {
+      // Press BACK 3 times to escape overlays (5x was too aggressive - exits app)
+      for (let i = 0; i < 3; i++) {
         const backJobId = uuidv4();
         wsServer.sendJob(req.deviceId, {
           jobId: backJobId,
@@ -233,7 +233,7 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
       });
       await awaitCascadeResult(homeJobId, 3_500).catch(() => {});
       await new Promise<void>((resolve) => setTimeout(resolve, 800));
-      console.log(`[cascade] US-016: 5x BACK + nav.home complete, proceeding with ${req.elementName}`);
+      console.log(`[cascade] US-016: 3x BACK + nav.home complete, proceeding with ${req.elementName}`);
     } catch (err) {
       console.warn(`[cascade] US-016: pre-tap failed (non-fatal): ${(err as Error).message}`);
     }
