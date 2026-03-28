@@ -199,6 +199,22 @@
       "files": ["src/modules/agents/prompts/planner.prompt.ts", "src/modules/skills/templates/instagram.skill"],
       "passes": false,
       "notes": "BACK on search screen exits search entirely"
+    },
+    {
+      "id": "US-013",
+      "title": "Fix nav.search coordinates — x=0.30 not x=0.50",
+      "description": "nav.search at x=0.50 taps Create button, not Search. Instagram nav: Home(0.10), Search(0.30), Create(0.50), Reels(0.70), Profile(0.90)",
+      "acceptanceCriteria": [
+        "Update nav.search to x=0.30, y=0.91",
+        "Verify nav.reels is NOT at x=0.30 (should be x=0.70)",
+        "Build and test",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "dependsOn": [],
+      "files": ["src/modules/skills/templates/instagram.skill"],
+      "passes": false,
+      "notes": "Instagram nav bar: Home(0.10), Search(0.30), Create(0.50), Reels(0.70), Profile(0.90)"
     }
   ]
 }
