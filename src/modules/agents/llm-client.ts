@@ -129,8 +129,9 @@ export class LlmClient {
     }
     messages.push({ role: "user", content: userContent });
 
-    // Model name: gateway expects "anthropic/model-name" format
-    const model = req.model.includes("/") ? req.model : `anthropic/${req.model}`;
+    // Model name: OpenClaw gateway expects "openclaw" (routes to configured model)
+    // NOT "anthropic/model-name" — gateway handles model selection internally
+    const model = "openclaw";
 
     const body = {
       model,
