@@ -1,0 +1,105 @@
+{
+  "project": "phone-network-server",
+  "branchName": "ralph/instagram-navigation-fixes",
+  "description": "Fix Instagram navigation issues: scroll triggering input, hashtag targeting, template automation",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Fix scroll triggering text input",
+      "description": "As the automation system, I need scroll actions to NOT trigger text input in the search field",
+      "acceptanceCriteria": [
+        "Scroll actions use coordinates away from text input areas",
+        "Scroll starts from center of results list, not near search bar",
+        "After scroll, search query text is unchanged",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "dependsOn": [],
+      "files": ["src/modules/agents/orchestrator.ts", "src/modules/agents/executor.agent.ts"],
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Dismiss keyboard before scrolling",
+      "description": "As the automation system, I need to dismiss the keyboard before scrolling search results",
+      "acceptanceCriteria": [
+        "After typing hashtag, press BACK to dismiss keyboard",
+        "Verify keyboard is dismissed before proceeding to scroll/tap results",
+        "Add search.dismiss_keyboard action in skill flow",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "dependsOn": [],
+      "files": ["src/modules/agents/orchestrator.ts", "src/modules/skills/templates/instagram.skill"],
+      "passes": true,
+      "notes": "Added BACK dismiss step in planner prompt + search.dismiss_keyboard in instagram.skill"
+    },
+    {
+      "id": "US-003",
+      "title": "Improve hashtag result targeting",
+      "description": "As the automation system, I need to tap hashtag results (starting with #) not account results",
+      "acceptanceCriteria": [
+        "Planner prompt instructs to look for # prefix in results",
+        "Skill file has search.hashtag_result element with selector",
+        "Tap targets rows with # visible, not profile pictures",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "dependsOn": ["US-002"],
+      "files": ["src/modules/agents/prompts/planner.prompt.ts", "src/modules/skills/templates/instagram.skill"],
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Automate template copying in build",
+      "description": "As a developer, I need skill templates to be copied to dist/ automatically during build",
+      "acceptanceCriteria": [
+        "npm run build copies src/modules/skills/templates/*.skill to dist/modules/skills/templates/",
+        "Build script handles missing directories gracefully",
+        "Existing templates are overwritten",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "dependsOn": [],
+      "files": ["package.json"],
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Add scroll coordinates to skill file",
+      "description": "As the automation system, I need predefined scroll regions in the skill file",
+      "acceptanceCriteria": [
+        "Add search.results_scroll_region with safe start/end coordinates",
+        "Start Y below search bar (y > 0.15)",
+        "End Y above nav bar (y < 0.85)",
+        "Scroll uses these coordinates instead of defaults",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "dependsOn": ["US-001"],
+      "files": ["src/modules/skills/templates/instagram.skill"],
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "End-to-end test flow",
+      "description": "Verify complete hashtag engagement flow works",
+      "acceptanceCriteria": [
+        "Create test task: hashtag:#bucharest, 1 like",
+        "Task completes: search → type → dismiss keyboard → tap hashtag → scroll → like",
+        "No search field changed errors",
+        "No wrong screen errors",
+        "Task status shows completed"
+      ],
+      "priority": 3,
+      "dependsOn": ["US-001", "US-002", "US-003", "US-004", "US-005"],
+      "files": [],
+      "passes": false,
+      "notes": "Manual test - requires running device"
+    }
+  ]
+}

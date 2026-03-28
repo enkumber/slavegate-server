@@ -282,6 +282,10 @@ button_map:
       alt_selector: { text: "Locuri" }
       hint: "Places filter tab"
       
+    dismiss_keyboard:
+      action: back
+      hint: "press BACK to dismiss keyboard after typing in search"
+      
     clear:
       selector: { contentDescription: "Clear" }
       hint: "X button to clear search"
