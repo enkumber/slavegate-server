@@ -679,24 +679,30 @@ export class AgentOrchestrator {
     console.log(`[orchestrator] Preamble P2: VLM screen check — on Home: ${isOnHome}`);
 
     if (!isOnHome) {
-      // Not on Home feed — press BACK x3 to dismiss overlays/Reels, then tap nav.home
-      console.log(`[orchestrator] Preamble P2: not on Home — pressing BACK x3`);
+      // Not on Home feed — tap the back arrow (top-left, 0.06, 0.05) to exit Reels/overlays
+      // This is more reliable than BACK key which can trigger different behaviors on Reels
+      console.log(`[orchestrator] Preamble P2: not on Home — tapping back arrow (0.06, 0.05)`);
+      const dims2 = await getScreenDims(deviceId);
+      
+      // Tap back arrow up to 3 times to fully exit Reels layers
       for (let i = 0; i < 3; i++) {
-        const backId = uuidv4();
-        const backP = awaitAction(backId, 3_000);
+        const backTapId = uuidv4();
+        const backTapP = awaitAction(backTapId, 3_000);
         wsServer.sendJob(deviceId, {
-          jobId: backId,
-          type: "press_key" as import("../../../../shared/protocol/messages").JobType,
-          params: { key: "back" } as Record<string, unknown>,
+          jobId: backTapId,
+          type: "tap" as import("../../../../shared/protocol/messages").JobType,
+          params: {
+            x: Math.round(0.06 * dims2.w),
+            y: Math.round(0.05 * dims2.h),
+          } as Record<string, unknown>,
           timeoutMs: 3_000,
         });
-        await backP;
-        await sleep(400);
+        await backTapP;
+        await sleep(600);
       }
 
-      // Explicit tap on nav.home coordinate (0.1, 0.912)
+      // Then tap nav.home to ensure we're on Home feed
       console.log(`[orchestrator] Preamble P2: tapping nav.home (0.1, 0.912)`);
-      const dims2 = await getScreenDims(deviceId);
       const navId2 = uuidv4();
       const navP2 = awaitAction(navId2, 5_000);
       wsServer.sendJob(deviceId, {

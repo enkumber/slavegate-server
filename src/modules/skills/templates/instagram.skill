@@ -222,6 +222,7 @@ button_map:
         - { contentDescription: "Înapoi" }
         - { className: "android.widget.ImageButton", index: 0 }
       hint: "back arrow, top left"
+      coords: { x: 0.06, y: 0.05 }
 
   # ─── TOP BAR ────────────────────────────────────────────────────────────────
   
