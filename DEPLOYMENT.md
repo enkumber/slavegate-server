@@ -6,7 +6,27 @@
 
 Redis is required for BullMQ (workflow queue, job dispatcher).
 
-**Install on Umbrel/Docker host:**
+**Current setup: Redis installed natively via Homebrew**
+
+Redis runs as a managed PM2 process (see `ecosystem.config.cjs`). The startup script is at `scripts/start-redis.sh`.
+
+```bash
+# Start everything (Redis + server) with PM2:
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup  # enables PM2 auto-start on reboot
+```
+
+Redis starts automatically before the app server because PM2 launches apps in order.
+
+**If Redis is not installed:**
+```bash
+brew install redis
+# Verify:
+/home/linuxbrew/.linuxbrew/bin/redis-server --version
+```
+
+**Alternative: Docker-based Redis** (for containerized deployments):
 ```bash
 docker run -d \
   --name redis \
@@ -16,9 +36,11 @@ docker run -d \
   redis:alpine redis-server --appendonly yes
 ```
 
-**Verify:**
+If using Docker Redis, remove the `redis` entry from `ecosystem.config.cjs` (PM2 shouldn't manage it).
+
+**Verify Redis is running:**
 ```bash
-docker exec redis redis-cli ping
+redis-cli ping
 # Should respond: PONG
 ```
 

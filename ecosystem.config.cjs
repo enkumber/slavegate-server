@@ -1,7 +1,17 @@
 require('dotenv').config();
 
 module.exports = {
-  apps: [{
+  apps: [
+  {
+    name: "redis",
+    script: "scripts/start-redis.sh",
+    cwd: __dirname,
+    interpreter: "bash",
+    autorestart: true,
+    watch: false,
+    env: {}
+  },
+  {
     name: "phone-network-server",
     script: "dist/phone-network-server/src/index.js",
     cwd: __dirname,
