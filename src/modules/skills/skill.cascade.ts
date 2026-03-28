@@ -205,23 +205,35 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
   // may show a keyboard or auto-scroll to Reels. BACK on home_feed is a no-op,
   // so we send it unconditionally for all nav.* elements as a fail-safe.
   if (req.elementName.startsWith("nav.") && req.elementName !== "nav.home") {
-    // For nav elements other than home, first tap nav.home to ensure we're in a clean state
-    // This is more reliable than BACK which can navigate away entirely
-    console.log(`[cascade] US-015: nav element detected (${req.elementName}) — tapping nav.home first to ensure clean state`);
+    // For nav elements other than home:
+    // 1. First tap back arrow (0.06, 0.05) to exit Reels/overlays
+    // 2. Then tap nav.home (0.10, 0.912) to ensure clean Home Feed state
+    console.log(`[cascade] US-016: nav element detected (${req.elementName}) — tapping back arrow + nav.home`);
     try {
+      // Tap back arrow (top-left) to exit Reels
+      const backJobId = uuidv4();
+      wsServer.sendJob(req.deviceId, {
+        jobId: backJobId,
+        type: "tap" as import("../../../../shared/protocol/messages").JobType,
+        params: { x: 0.06, y: 0.05 } as Record<string, unknown>,
+        timeoutMs: 3_000,
+      });
+      await awaitCascadeResult(backJobId, 3_500).catch(() => {});
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
+
+      // Then tap nav.home
       const homeJobId = uuidv4();
-      const homeCoords = { x: 0.10, y: 0.912 }; // nav.home fixed coords
       wsServer.sendJob(req.deviceId, {
         jobId: homeJobId,
         type: "tap" as import("../../../../shared/protocol/messages").JobType,
-        params: homeCoords as Record<string, unknown>,
+        params: { x: 0.10, y: 0.912 } as Record<string, unknown>,
         timeoutMs: 3_000,
       });
       await awaitCascadeResult(homeJobId, 3_500).catch(() => {});
       await new Promise<void>((resolve) => setTimeout(resolve, 800));
-      console.log(`[cascade] US-015: nav.home tap complete, now proceeding with ${req.elementName}`);
+      console.log(`[cascade] US-016: back + nav.home taps complete, proceeding with ${req.elementName}`);
     } catch (err) {
-      console.warn(`[cascade] US-015: nav.home pre-tap failed (non-fatal): ${(err as Error).message}`);
+      console.warn(`[cascade] US-016: pre-tap failed (non-fatal): ${(err as Error).message}`);
     }
   }
 
