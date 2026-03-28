@@ -28,7 +28,9 @@ import {
   MIN_CONFIDENCE_FOR_COORDS,
 } from './types';
 
-const SKILLS_DIR = path.join(__dirname, 'templates');
+// Fix: __dirname in dist is dist/phone-network-server/src/modules/skills/ due to rootDir=".."
+// Navigate up to find the correct templates location
+const SKILLS_DIR = path.resolve(__dirname, '..', '..', '..', 'modules', 'skills', 'templates');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SKILL FILE MANAGEMENT
