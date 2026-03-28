@@ -919,9 +919,13 @@ Respond with ONLY the label, nothing else.`,
         const dims = await getScreenDims(deviceId);
         jobType = "swipe";
         const dir = action.direction || "down";
+        // US-001: scroll coordinates kept away from text input regions.
+        // "down" endY 0.25 (was 0.3) — stops before search bar area.
+        // "up" startY 0.25 (was 0.3) — starts below search bar area.
+        // Both directions stay within y: 0.25–0.75, clear of search bar (y≈0.07) and nav bar (y≈0.912).
         const scrollMap: Record<string, Record<string, number>> = {
-          down:  { startX: 0.5, startY: 0.7, endX: 0.5, endY: 0.3 },
-          up:    { startX: 0.5, startY: 0.3, endX: 0.5, endY: 0.7 },
+          down:  { startX: 0.5, startY: 0.7, endX: 0.5, endY: 0.25 },
+          up:    { startX: 0.5, startY: 0.25, endX: 0.5, endY: 0.7 },
           left:  { startX: 0.7, startY: 0.5, endX: 0.3, endY: 0.5 },
           right: { startX: 0.3, startY: 0.5, endX: 0.7, endY: 0.5 },
         };
