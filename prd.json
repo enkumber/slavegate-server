@@ -100,6 +100,23 @@
       "files": [],
       "passes": false,
       "notes": "Manual test - requires running device"
+    },
+    {
+      "id": "US-007",
+      "title": "Fix like action for video/reels",
+      "description": "As the automation system, I need to like posts correctly even when they are videos/reels with overlays",
+      "acceptanceCriteria": [
+        "For videos/reels, tap the heart button instead of double-tap on image",
+        "Planner prompt instructs to use heart button for videos or when overlay is visible",
+        "Add post.heart_button element in skill file with coordinates",
+        "Handle 'Watch again' overlay state",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "dependsOn": [],
+      "files": ["src/modules/agents/prompts/planner.prompt.ts", "src/modules/skills/templates/instagram.skill"],
+      "passes": false,
+      "notes": ""
     }
   ]
 }

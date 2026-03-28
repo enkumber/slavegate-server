@@ -329,6 +329,14 @@ button_map:
       selector: { contentDescription: "Save" }
       hint: "bookmark icon, right side"
       
+    heart_button:
+      selector: { resourceId: "com.instagram.android:id/row_feed_button_like" }
+      alt_selectors:
+        - { contentDescription: "Like" }
+        - { contentDescription: "Apreciază" }
+      coords: { x: 0.92, y: 0.45 }
+      hint: "heart button on right side of video/reel — use instead of double-tap when video overlay (e.g. Watch again) is visible"
+
     more:
       selector: { contentDescription: "More options" }
       hint: "three dots, top right of post"
