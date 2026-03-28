@@ -47,6 +47,24 @@ async function bootstrap(): Promise<void> {
   await getDb().query("SELECT 1");
   console.log("[server] Database connected.");
 
+  // ─── Verify Redis connection — required for BullMQ (dispatcher + workflows) ──
+  {
+    const { getRedis } = await import("./redis/client");
+    const redisClient = getRedis();
+    try {
+      await redisClient.ping();
+      console.log("[server] Redis connected.");
+    } catch (err) {
+      console.error(
+        "[server] FATAL: Redis connection failed.\n" +
+        `         Error: ${(err as Error).message}\n` +
+        "         Redis is required for BullMQ (job dispatcher + workflow engine).\n" +
+        "         Set REDIS_URL env var or start Redis on localhost:6379."
+      );
+      process.exit(1);
+    }
+  }
+
   // ─── IMEI auth v2: no token revocation set to restore ───────────────────
   // (authService.restoreRevocationSet removed — tokens eliminated in 005_imei_auth)
 
