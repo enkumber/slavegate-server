@@ -232,11 +232,13 @@ class AutomationController(private val service: AccessibilityService?) {
         val cy   = dm.heightPixels / 2
         val half = distancePx / 2
 
+        // "scroll down" = content moves up = finger swipes UP (start low, end high)
+        // "scroll up"   = content moves down = finger swipes DOWN (start high, end low)
         val (startX, startY, endX, endY) = when (direction.lowercase()) {
-            "up"    -> listOf(cx, cy + half, cx, cy - half)
-            "down"  -> listOf(cx, cy - half, cx, cy + half)
-            "left"  -> listOf(cx + half, cy, cx - half, cy)
-            "right" -> listOf(cx - half, cy, cx + half, cy)
+            "up"    -> listOf(cx, cy - half, cx, cy + half)  // swipe down to scroll up
+            "down"  -> listOf(cx, cy + half, cx, cy - half)  // swipe up to scroll down
+            "left"  -> listOf(cx - half, cy, cx + half, cy)  // swipe right to scroll left
+            "right" -> listOf(cx + half, cy, cx - half, cy)  // swipe left to scroll right
             else    -> throw IllegalArgumentException("Unknown scroll direction: $direction")
         }
 
