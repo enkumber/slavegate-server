@@ -50,6 +50,7 @@ const ALLOWED_JOB_TYPES = new Set<JobType>([
   "skill_tap",       // tap at normalized coords from skill
   "a11y_find_tap",   // find element via A11y and tap
   "ocr_find_tap",    // find text via ML Kit OCR and tap (cascade Level 3)
+  "ocr_full",        // full-screen ML Kit OCR — Screen Detection Cascade L2
   // Extended job types (not in shared protocol type but supported by device agent)
   "intent_send" as unknown as JobType,  // send explicit intent (am start with specific activity)
 ]);
