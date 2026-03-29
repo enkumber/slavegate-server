@@ -40,6 +40,19 @@ export type ScreenId =
   // Fallback
   | 'UNKNOWN';
 
+/**
+ * All valid ScreenId values as a runtime array.
+ * Used to build dynamic regex patterns (e.g. in VLM detector fallback).
+ */
+export const ALL_SCREEN_IDS: ScreenId[] = [
+  'HOME_FEED', 'SEARCH_EXPLORE', 'SEARCH_RESULTS', 'REELS_TAB', 'REELS_FULLSCREEN',
+  'CREATE_POST', 'PROFILE_OWN', 'PROFILE_OTHER', 'NOTIFICATIONS', 'DM_INBOX',
+  'DM_CONVERSATION', 'HASHTAG_FEED', 'POST_DETAIL', 'COMMENTS_OPEN', 'STORY_VIEWER',
+  'STORY_CAMERA', 'FOLLOWERS_LIST', 'FOLLOWING_LIST', 'SETTINGS', 'KEYBOARD_OPEN',
+  'ACTION_SHEET', 'CONFIRMATION_DIALOG', 'SUGGESTIONS_POPUP', 'LOGIN_REQUIRED',
+  'ACTION_BLOCKED', 'UNKNOWN',
+];
+
 export type DetectionMethod = 'ui_tree' | 'ocr' | 'vlm';
 
 export interface DetectedScreen {

@@ -166,7 +166,7 @@ export class ScreenDetectionService {
     if (req.preferredMethod !== 'vlm') {
       try {
         const l2Start  = Date.now();
-        const ocrResult = await this.fetchOcr(req.deviceId, Math.min(5_000, timeoutMs - (Date.now() - start)));
+        const ocrResult = await this.fetchOcr(req.deviceId, Math.max(100, Math.min(5_000, timeoutMs - (Date.now() - start))));
         const partial   = this.ocrDetector.detect(ocrResult, rules);
         const l2Result  = this.finalize(partial, 'ocr', start);
 
@@ -185,7 +185,7 @@ export class ScreenDetectionService {
     // ── L3: VLM ────────────────────────────────────────────────────────────────
     try {
       const l3Start      = Date.now();
-      const screenshot   = await this.fetchScreenshot(req.deviceId, Math.min(5_000, timeoutMs - (Date.now() - start)));
+      const screenshot   = await this.fetchScreenshot(req.deviceId, Math.max(100, Math.min(5_000, timeoutMs - (Date.now() - start))));
       const partial      = await this.vlmDetector.detect(screenshot, req.platform, req.deviceId);
       const l3Result     = this.finalize(partial, 'vlm', start);
 
@@ -238,6 +238,7 @@ export class ScreenDetectionService {
     targetScreen:  ScreenId,
     maxAttempts:   number = 3,
   ): Promise<boolean> {
+    this.clearCache(deviceId); // ensure fresh detection on first attempt
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const check = await this.isOnScreen(deviceId, platform, targetScreen);
       if (check.match) {

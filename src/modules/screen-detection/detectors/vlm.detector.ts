@@ -9,6 +9,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import type { DetectedScreen, ScreenId } from '../types';
+import { ALL_SCREEN_IDS } from '../types';
 import type { VisionService } from '../../vision/vision.service';
 
 // ═══════════════════════════════════════════════════════════════════
@@ -93,8 +94,9 @@ export class VlmDetector {
         overlays:   (json.overlays ?? []) as ScreenId[],
       };
     } catch {
-      // Fallback: extract screen name from free-form text
-      const screenMatch = response.match(/\b(HOME_FEED|SEARCH_EXPLORE|SEARCH_RESULTS|REELS_TAB|REELS_FULLSCREEN|CREATE_POST|PROFILE_OWN|PROFILE_OTHER|NOTIFICATIONS|DM_INBOX|DM_CONVERSATION|HASHTAG_FEED|POST_DETAIL|COMMENTS_OPEN|STORY_VIEWER|STORY_CAMERA|FOLLOWERS_LIST|FOLLOWING_LIST|SETTINGS|ACTION_BLOCKED|LOGIN_REQUIRED|UNKNOWN)\b/i);
+      // Fallback: extract screen name from free-form text (built dynamically from ALL_SCREEN_IDS)
+      const screenIdsPattern = ALL_SCREEN_IDS.join('|');
+      const screenMatch = response.match(new RegExp(`\\b(${screenIdsPattern})\\b`, 'i'));
 
       return {
         screenId:   (screenMatch?.[1]?.toUpperCase() as ScreenId) ?? 'UNKNOWN',

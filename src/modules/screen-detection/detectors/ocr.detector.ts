@@ -79,7 +79,7 @@ export class OcrDetector {
 
   private matchOcrRule(
     fullText: string,
-    _blocks: OcrBlock[],
+    _blocks: OcrBlock[], // reserved for spatial matching (e.g. relative position checks)
     rule: ScreenRule,
   ): { matches: boolean; confidence: number; matchedTexts: string[] } {
     const { ocrMarkers } = rule;
