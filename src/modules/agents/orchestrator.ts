@@ -14,6 +14,7 @@ import { agentConfig } from "../../config/agents.config";
 import { wsServer } from "../../ws/ws.server";
 import { getDb } from "../../db/client";
 import * as skillService from "../skills/skill.service";
+import { screenDetectionService } from "../screen-detection";
 import type {
   ExecutorOutput,
   TaskResult,
@@ -798,16 +799,42 @@ Reply with EXACTLY one word: YES or NO`,
   }
 
   /**
-   * Uses VLM to identify whether the current screen is the Instagram Home/Feed screen.
-   * Takes a screenshot, asks VLM to classify the current screen type.
-   * Returns true if on Home feed, false otherwise (Reels, Profile, DMs, Search, etc.)
+   * Detects the current screen using the Screen Detection Cascade (L1 → L2 → L3).
+   * Returns true if on Home feed, false otherwise.
+   *
+   * Previously: VLM-only (pure screenshot + LLM classify). Now: cascade approach
+   * that tries UI tree (L1) and OCR (L2) first, falling back to VLM (L3) only when needed.
+   * Expected VLM call reduction: 80%+.
    */
   private async ensureHomeFeedVLM(deviceId: string, platform: string): Promise<boolean> {
+    // Feature flag — fall back to original VLM-only if cascade disabled
+    if (process.env.SCREEN_DETECTION_CASCADE_ENABLED === "false") {
+      return this.ensureHomeFeedVlmLegacy(deviceId, platform);
+    }
+
+    try {
+      const result = await screenDetectionService.detectScreen({ deviceId, platform });
+      console.log(
+        `[orchestrator] ensureHomeFeedVLM: detected "${result.screenId}" ` +
+        `via ${result.method} (confidence=${result.confidence.toFixed(2)}, latency=${result.latencyMs}ms)`
+      );
+      return result.screenId === "HOME_FEED";
+    } catch (err) {
+      console.warn(`[orchestrator] ensureHomeFeedVLM: cascade error — ${(err as Error).message} — assuming Home`);
+      return true; // fail-open
+    }
+  }
+
+  /**
+   * Legacy VLM-only screen detection — kept as fallback when cascade is disabled.
+   * Controlled by SCREEN_DETECTION_CASCADE_ENABLED=false env flag.
+   */
+  private async ensureHomeFeedVlmLegacy(deviceId: string, platform: string): Promise<boolean> {
     try {
       const screenshot = await this.captureScreenshot(deviceId);
       if (!screenshot) {
-        console.warn(`[orchestrator] ensureHomeFeedVLM: no screenshot — assuming Home`);
-        return true; // fail-open: assume home, let task proceed
+        console.warn(`[orchestrator] ensureHomeFeedVlmLegacy: no screenshot — assuming Home`);
+        return true;
       }
 
       const llm = getLlmClient();
@@ -850,11 +877,11 @@ Respond with ONLY the label, nothing else.`,
       });
 
       const label = response.text.trim().toUpperCase();
-      console.log(`[orchestrator] ensureHomeFeedVLM: VLM classified screen as "${label}"`);
+      console.log(`[orchestrator] ensureHomeFeedVlmLegacy: VLM classified screen as "${label}"`);
       return label === "HOME_FEED";
     } catch (err) {
-      console.warn(`[orchestrator] ensureHomeFeedVLM: VLM error — ${(err as Error).message} — assuming Home`);
-      return true; // fail-open
+      console.warn(`[orchestrator] ensureHomeFeedVlmLegacy: VLM error — ${(err as Error).message} — assuming Home`);
+      return true;
     }
   }
 
