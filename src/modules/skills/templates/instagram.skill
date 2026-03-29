@@ -528,3 +528,356 @@ learned_coords:
   # Search results — first hashtag result (row 1, after typing)
   search.hashtag_result_1: { x: 0.50, y: 0.175, confidence: 0.90, learned_at: "2026-03-28T15:00:00Z", device: "OP5T" }
   search.hashtag_result: { x: 0.50, y: 0.175, confidence: 0.90, learned_at: "2026-03-28T15:00:00Z", device: "OP5T" }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DETECTION RULES
+# Cascade-based screen identification (L1: UI Tree, L2: OCR, L3: VLM)
+# Used by: src/modules/screen-detection/screen-detection.service.ts
+# Story: US-SCREEN-CASCADE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+detection_rules:
+
+  # ─── CRITICAL SCREENS (priority 250 — checked first, immediate return) ────────
+
+  ACTION_BLOCKED:
+    priority: 250
+    critical: true
+    ui_tree:
+      anyOf:
+        - text_contains: "Action Blocked"
+        - text_contains: "Try Again Later"
+        - text_contains: "We restrict certain activity"
+        - text_contains: "Acțiune blocată"
+        - text_contains: "We Restrict"
+    ocr:
+      anyOf:
+        - "Action Blocked"
+        - "Try Again Later"
+        - "restrict certain"
+        - "Actiune blocata"
+    nav_bar:
+      visible: false
+
+  LOGIN_REQUIRED:
+    priority: 250
+    critical: true
+    ui_tree:
+      anyOf:
+        - resourceId: "com.instagram.android:id/login_username"
+        - text: "Log in"
+        - text: "Log In"
+        - text: "Conectează-te"
+        - text: "Create new account"
+    ocr:
+      anyOf:
+        - "Log in"
+        - "Create new account"
+        - "Forgot password"
+    nav_bar:
+      visible: false
+
+  # ─── OVERLAY STATES (priority 200 — affects other screens) ───────────────────
+
+  KEYBOARD_OPEN:
+    priority: 200
+    overlay: true
+    ui_tree:
+      anyOf:
+        - className: "android.inputmethodservice.InputMethodService"
+        - resourceId_contains: "keyboard"
+        - resourceId_contains: "ime"
+    nav_bar:
+      visible: false
+
+  CONFIRMATION_DIALOG:
+    priority: 200
+    overlay: true
+    ui_tree:
+      required:
+        - className: "android.app.Dialog"
+      anyOf:
+        - text: "Unfollow"
+        - text: "Delete"
+        - text: "Remove"
+        - text: "Cancel"
+        - text: "Block"
+    nav_bar:
+      visible: false
+
+  ACTION_SHEET:
+    priority: 195
+    overlay: true
+    ui_tree:
+      anyOf:
+        - resourceId: "com.instagram.android:id/action_sheet_container"
+        - resourceId_contains: "bottom_sheet"
+        - resourceId_contains: "action_sheet"
+    nav_bar:
+      visible: false
+
+  # ─── PRIMARY SCREENS ─────────────────────────────────────────────────────────
+
+  HOME_FEED:
+    priority: 100
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/feed_tab"
+      anyOf:
+        - resourceId: "com.instagram.android:id/action_bar_title"
+        - resourceId: "com.instagram.android:id/row_feed_photo"
+        - resourceId: "com.instagram.android:id/media_group"
+        - resourceId: "com.instagram.android:id/feed_list"
+      exclude:
+        - resourceId: "com.instagram.android:id/clips_viewer"
+        - resourceId: "com.instagram.android:id/action_bar_back_button"
+    ocr:
+      anyOf:
+        - "Instagram"
+        - "Suggested for you"
+        - "Sugestii pentru tine"
+      exclude:
+        - "Watch again"
+    nav_bar:
+      visible: true
+      selected_tab: home
+
+  REELS_FULLSCREEN:
+    priority: 95
+    ui_tree:
+      anyOf:
+        - resourceId: "com.instagram.android:id/clips_viewer"
+        - resourceId: "com.instagram.android:id/reel_viewer"
+        - contentDescription_contains: "reel"
+        - resourceId: "com.instagram.android:id/video_player"
+      exclude:
+        - resourceId: "com.instagram.android:id/feed_tab"
+    ocr:
+      anyOf:
+        - "Watch again"
+        - "Audio"
+    nav_bar:
+      visible: false
+
+  REELS_TAB:
+    priority: 90
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/clips_tab"
+      anyOf:
+        - contentDescription: "Reels"
+        - resourceId: "com.instagram.android:id/clips_viewer"
+    nav_bar:
+      visible: true
+      selected_tab: reels
+
+  SEARCH_EXPLORE:
+    priority: 85
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/search_tab"
+      anyOf:
+        - resourceId: "com.instagram.android:id/action_bar_search_edit_text"
+        - resourceId: "com.instagram.android:id/search_pill"
+        - resourceId: "com.instagram.android:id/explore_grid"
+    nav_bar:
+      visible: true
+      selected_tab: search
+
+  SEARCH_RESULTS:
+    priority: 84
+    ui_tree:
+      required:
+        - className: "android.widget.EditText"
+      anyOf:
+        - resourceId: "com.instagram.android:id/row_search_user_username"
+        - resourceId: "com.instagram.android:id/row_hashtag_textview_tag_name"
+        - text_starts_with: "#"
+    nav_bar:
+      visible: true
+      selected_tab: search
+
+  HASHTAG_FEED:
+    priority: 80
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/action_bar_back_button"
+      anyOf:
+        - text_starts_with: "#"
+        - resourceId_contains: "hashtag"
+        - resourceId: "com.instagram.android:id/hashtag_feed"
+    ocr:
+      required_pattern: "^#[a-z0-9]+"
+    nav_bar:
+      visible: true
+      selected_tab: null
+
+  PROFILE_OWN:
+    priority: 75
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/profile_tab"
+      anyOf:
+        - text: "Edit profile"
+        - text: "Editează profilul"
+        - resourceId: "com.instagram.android:id/edit_profile_button"
+    ocr:
+      anyOf:
+        - "Edit profile"
+        - "Editează profilul"
+    nav_bar:
+      visible: true
+      selected_tab: profile
+
+  PROFILE_OTHER:
+    priority: 74
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/action_bar_back_button"
+      anyOf:
+        - text: "Follow"
+        - text: "Following"
+        - text: "Requested"
+        - text: "Message"
+      exclude:
+        - text: "Edit profile"
+        - text: "Editează profilul"
+    nav_bar:
+      visible: true
+      selected_tab: null
+
+  DM_INBOX:
+    priority: 70
+    ui_tree:
+      anyOf:
+        - resourceId: "com.instagram.android:id/direct_tab"
+        - contentDescription: "Direct"
+        - text: "Messages"
+        - resourceId: "com.instagram.android:id/direct_inbox"
+    ocr:
+      anyOf:
+        - "Messages"
+        - "Requests"
+    nav_bar:
+      visible: true
+
+  DM_CONVERSATION:
+    priority: 69
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/direct_thread"
+      anyOf:
+        - resourceId: "com.instagram.android:id/message_input"
+        - hint: "Message"
+    nav_bar:
+      visible: false
+
+  COMMENTS_OPEN:
+    priority: 65
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/comments_list"
+      anyOf:
+        - resourceId: "com.instagram.android:id/layout_comment_thread_edittext"
+        - hint: "Add a comment"
+        - hint: "Adaugă un comentariu"
+    nav_bar:
+      visible: false
+
+  STORY_VIEWER:
+    priority: 60
+    ui_tree:
+      anyOf:
+        - resourceId: "com.instagram.android:id/story_viewer"
+        - contentDescription_contains: "story"
+        - resourceId: "com.instagram.android:id/story_progress"
+        - resourceId: "com.instagram.android:id/reel_progress_ring"
+    nav_bar:
+      visible: false
+
+  NOTIFICATIONS:
+    priority: 55
+    ui_tree:
+      anyOf:
+        - resourceId: "com.instagram.android:id/activity_list"
+        - contentDescription: "Activity"
+        - text: "Activity"
+        - text: "Activitate"
+    ocr:
+      anyOf:
+        - "Activity"
+        - "Notifications"
+        - "This Week"
+        - "Today"
+        - "Activitate"
+    nav_bar:
+      visible: true
+
+  POST_DETAIL:
+    priority: 50
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/row_feed_button_like"
+        - resourceId: "com.instagram.android:id/row_feed_button_comment"
+      exclude:
+        - resourceId: "com.instagram.android:id/feed_tab"
+    nav_bar:
+      visible: true
+
+  FOLLOWERS_LIST:
+    priority: 45
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/follow_list_container"
+      anyOf:
+        - text: "Followers"
+        - text: "Urmăritori"
+    ocr:
+      anyOf:
+        - "Followers"
+        - "Urmăritori"
+    nav_bar:
+      visible: false
+
+  FOLLOWING_LIST:
+    priority: 44
+    ui_tree:
+      required:
+        - resourceId: "com.instagram.android:id/follow_list_container"
+      anyOf:
+        - text: "Following"
+        - text: "Urmărești"
+    ocr:
+      anyOf:
+        - "Following"
+        - "Urmărești"
+    nav_bar:
+      visible: false
+
+  SETTINGS:
+    priority: 40
+    ui_tree:
+      anyOf:
+        - text: "Settings and privacy"
+        - text: "Setări și confidențialitate"
+        - resourceId: "com.instagram.android:id/settings_menu"
+      required:
+        - resourceId: "com.instagram.android:id/action_bar_back_button"
+    ocr:
+      anyOf:
+        - "Settings and privacy"
+        - "Account"
+    nav_bar:
+      visible: false
+
+  CREATE_POST:
+    priority: 35
+    ui_tree:
+      anyOf:
+        - resourceId: "com.instagram.android:id/creation_gallery"
+        - resourceId: "com.instagram.android:id/creation_tab"
+        - resourceId: "com.instagram.android:id/new_post_button"
+        - contentDescription: "New post"
+    nav_bar:
+      visible: false
