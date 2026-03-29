@@ -609,6 +609,22 @@ export class WsServer {
     });
     resolveActionResult(payload.jobId, { status: payload.status });
 
+    // Resolve awaiting screen detection cascade (ui_tree_dump, ocr_full, screenshot_for_vlm)
+    const { resolveUiTreeResult, resolveOcrResult, resolveScreenDetectionScreenshot } =
+      await import("../modules/screen-detection");
+    resolveUiTreeResult(payload.jobId, {
+      status: payload.status,
+      output: payload.output as Record<string, unknown> | undefined,
+    });
+    resolveOcrResult(payload.jobId, {
+      status: payload.status,
+      output: payload.output as Record<string, unknown> | undefined,
+    });
+    resolveScreenDetectionScreenshot(payload.jobId, {
+      status: payload.status,
+      output: payload.output as Record<string, unknown> | undefined,
+    });
+
     // Server-side audit log
     const db = getDb();
     await db.query(

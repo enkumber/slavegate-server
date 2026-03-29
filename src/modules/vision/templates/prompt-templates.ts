@@ -14,7 +14,7 @@
 
 // ─── Template key ─────────────────────────────────────────────────────────────
 
-export type RequestType = "element_find" | "verify_action" | "screen_understand";
+export type RequestType = "element_find" | "verify_action" | "screen_understand" | "screen_classification";
 
 export interface PromptContext {
   requestType: RequestType;
@@ -158,6 +158,56 @@ Return JSON:
 }`,
 };
 
+// ─── Screen Classification Templates (for Screen Detection Cascade L3) ─────────
+
+const SCREEN_CLASSIFICATION_TEMPLATES: Record<string, string> = {
+  default: `You are a mobile UI classifier for social media automation.
+
+Analyze this screenshot and identify the current screen.
+
+Reply with EXACTLY this JSON format (no other text, no markdown):
+{
+  "screen": "<SCREEN_ID>",
+  "confidence": <0.0-1.0>,
+  "navBar": { "visible": <true/false>, "selectedTab": "<tab_name_or_null>" },
+  "overlays": ["<OVERLAY_ID>", ...]
+}
+
+Valid SCREEN_IDs:
+HOME_FEED, SEARCH_EXPLORE, SEARCH_RESULTS, REELS_TAB, REELS_FULLSCREEN,
+CREATE_POST, PROFILE_OWN, PROFILE_OTHER, NOTIFICATIONS, DM_INBOX, DM_CONVERSATION,
+HASHTAG_FEED, POST_DETAIL, COMMENTS_OPEN, STORY_VIEWER, STORY_CAMERA,
+FOLLOWERS_LIST, FOLLOWING_LIST, SETTINGS, UNKNOWN
+
+Valid OVERLAY_IDs (include only if actually visible):
+KEYBOARD_OPEN, ACTION_SHEET, CONFIRMATION_DIALOG, SUGGESTIONS_POPUP,
+LOGIN_REQUIRED, ACTION_BLOCKED
+
+Valid selectedTab values: home, search, create, reels, profile, null
+
+Rules:
+- HOME_FEED: vertical feed with posts, home tab highlighted in bottom nav
+- REELS_FULLSCREEN: fullscreen video, nav bar hidden
+- REELS_TAB: reels tab highlighted in bottom nav, multiple reels visible
+- PROFILE_OWN: profile with "Edit profile" or "Edit Profile" button
+- PROFILE_OTHER: profile with "Follow" / "Following" / "Message" buttons
+- ACTION_BLOCKED: "Action Blocked" or "Try Again Later" dialog visible
+- LOGIN_REQUIRED: login form or "Log in" button visible
+- KEYBOARD_OPEN: software keyboard visible at bottom of screen`,
+};
+
+// Map detect_screen_<platform> → default template
+function resolveScreenClassification(actionType: string): string {
+  // Extract platform if present: detect_screen_instagram → instagram
+  const platformMatch = actionType.match(/^detect_screen_(.+)$/);
+  const platform = platformMatch?.[1];
+
+  const template = SCREEN_CLASSIFICATION_TEMPLATES[platform ?? '']
+    ?? SCREEN_CLASSIFICATION_TEMPLATES.default;
+
+  return template;
+}
+
 // ─── Template resolver ────────────────────────────────────────────────────────
 
 export function resolvePrompt(ctx: PromptContext): string {
@@ -173,6 +223,9 @@ export function resolvePrompt(ctx: PromptContext): string {
     case "screen_understand":
       return SCREEN_UNDERSTAND_TEMPLATES[ctx.actionType]
           ?? SCREEN_UNDERSTAND_TEMPLATES.default;
+
+    case "screen_classification":
+      return resolveScreenClassification(ctx.actionType);
 
     default:
       return ELEMENT_FIND_TEMPLATES.default;
