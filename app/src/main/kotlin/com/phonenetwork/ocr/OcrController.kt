@@ -6,6 +6,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.suspendCancellableCoroutine
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -162,6 +163,122 @@ class OcrController {
                 if (cont.isActive) cont.resumeWithException(e)
             }
     }
+
+    /**
+     * Full-screen OCR — returns all detected text blocks with coordinates.
+     *
+     * Used by Screen Detection Cascade L2: server's `ocr.detector.ts` receives
+     * this payload and matches text markers against screen detection rules.
+     *
+     * Result format matches [OcrFullResult] in `shared/protocol/messages.ts`:
+     * ```json
+     * {
+     *   "blocks": [
+     *     {
+     *       "text": "Action Blocked",
+     *       "bounds": { "left": 120, "top": 300, "right": 600, "bottom": 360 },
+     *       "confidence": 0.97,
+     *       "lines": [
+     *         { "text": "Action Blocked", "bounds": {...}, "confidence": 0.97 }
+     *       ]
+     *     }
+     *   ],
+     *   "fullText": "Action Blocked\nThis action was blocked...",
+     *   "totalBlocks": 3
+     * }
+     * ```
+     *
+     * @param bitmap        Screenshot bitmap (any resolution — coordinates auto-scaled to screen).
+     * @param screenWidth   Physical screen width in pixels (for coordinate normalization).
+     * @param screenHeight  Physical screen height in pixels (for coordinate normalization).
+     */
+    suspend fun runFullOcr(
+        bitmap: Bitmap,
+        screenWidth: Int,
+        screenHeight: Int
+    ): JSONObject = suspendCancellableCoroutine { cont ->
+
+        val image = InputImage.fromBitmap(bitmap, 0)
+
+        recognizer.process(image)
+            .addOnSuccessListener { visionText ->
+                // Scale factors: bitmap space → screen space
+                val scaleX = screenWidth.toFloat() / bitmap.width.coerceAtLeast(1)
+                val scaleY = screenHeight.toFloat() / bitmap.height.coerceAtLeast(1)
+
+                val blocksArray = JSONArray()
+                val fullTextBuilder = StringBuilder()
+
+                for (block in visionText.textBlocks) {
+                    val blockObj = JSONObject()
+
+                    // Block-level text (all lines joined with newline)
+                    val blockText = block.text
+                    blockObj.put("text", blockText)
+
+                    // Block bounding box in screen space
+                    val blockBb = block.boundingBox
+                    if (blockBb != null) {
+                        blockObj.put("bounds", scaledBoundsJson(blockBb, scaleX, scaleY))
+                    }
+
+                    // Average confidence across all lines in this block
+                    val lineConfidences = block.lines.mapNotNull { line ->
+                        line.elements.firstOrNull()?.confidence
+                    }
+                    val avgConfidence = if (lineConfidences.isNotEmpty()) {
+                        lineConfidences.average().toFloat()
+                    } else 0f
+                    blockObj.put("confidence", avgConfidence.toDouble())
+
+                    // Individual lines within this block
+                    val linesArray = JSONArray()
+                    for (line in block.lines) {
+                        val lineObj = JSONObject()
+                        lineObj.put("text", line.text)
+
+                        val lineBb = line.boundingBox
+                        if (lineBb != null) {
+                            lineObj.put("bounds", scaledBoundsJson(lineBb, scaleX, scaleY))
+                        }
+
+                        val lineConfidence = line.elements.firstOrNull()?.confidence ?: 0f
+                        lineObj.put("confidence", lineConfidence.toDouble())
+
+                        linesArray.put(lineObj)
+                    }
+                    blockObj.put("lines", linesArray)
+
+                    blocksArray.put(blockObj)
+
+                    // Accumulate full text
+                    if (fullTextBuilder.isNotEmpty()) fullTextBuilder.append("\n")
+                    fullTextBuilder.append(blockText)
+                }
+
+                val result = JSONObject().apply {
+                    put("blocks",      blocksArray)
+                    put("fullText",    fullTextBuilder.toString())
+                    put("totalBlocks", visionText.textBlocks.size)
+                }
+
+                if (cont.isActive) cont.resume(result)
+            }
+            .addOnFailureListener { e ->
+                if (cont.isActive) cont.resumeWithException(e)
+            }
+    }
+
+    /**
+     * Scale a bounding [Rect] from bitmap space to screen space and serialize to JSON.
+     */
+    private fun scaledBoundsJson(bb: Rect, scaleX: Float, scaleY: Float): JSONObject =
+        JSONObject().apply {
+            put("left",   (bb.left   * scaleX).toInt())
+            put("top",    (bb.top    * scaleY).toInt())
+            put("right",  (bb.right  * scaleX).toInt())
+            put("bottom", (bb.bottom * scaleY).toInt())
+        }
 
     /**
      * Serialize [OcrFindResult] to [JSONObject] for transmission to server.

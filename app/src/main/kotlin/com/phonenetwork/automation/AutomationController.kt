@@ -336,32 +336,43 @@ class AutomationController(private val service: AccessibilityService?) {
         service ?: throw IllegalStateException("AccessibilityService not connected")
 
     /** Recursively convert AccessibilityNodeInfo to JSONObject */
+    /**
+     * Recursively convert AccessibilityNodeInfo to JSONObject.
+     *
+     * All field names use full camelCase for easy parsing by Screen Detection
+     * Cascade rule engine (UiTreeDetector). Key fields used by L1 detection:
+     *   - `text`               — matched against UiMarker.text rules
+     *   - `contentDescription` — matched against UiMarker.contentDescription rules
+     *   - `className`          — matched against UiMarker.className rules
+     *   - `resourceId`         — matched against UiMarker.resourceId rules
+     */
     private fun nodeToJson(node: AccessibilityNodeInfo?, filter: String?): JSONObject {
         val obj = JSONObject()
         if (node == null) return obj
         try {
             val pkg = node.packageName?.toString() ?: ""
-            // If filter active, skip nodes from other packages (but keep structural parents)
-            obj.put("pkg",       pkg)
-            obj.put("cls",       node.className?.toString() ?: "")
-            obj.put("resId",     node.viewIdResourceName ?: "")
-            obj.put("text",      node.text?.toString() ?: "")
-            obj.put("desc",      node.contentDescription?.toString() ?: "")
-            obj.put("checkable", node.isCheckable)
-            obj.put("checked",   node.isChecked)
-            obj.put("clickable", node.isClickable)
-            obj.put("editable",  node.isEditable)
-            obj.put("enabled",   node.isEnabled)
-            obj.put("focused",   node.isFocused)
-            obj.put("scrollable",node.isScrollable)
-            obj.put("selected",  node.isSelected)
-            obj.put("visible",   node.isVisibleToUser)
+            obj.put("packageName",        pkg)
+            obj.put("className",          node.className?.toString() ?: "")
+            obj.put("resourceId",         node.viewIdResourceName ?: "")
+            obj.put("text",               node.text?.toString() ?: "")
+            obj.put("contentDescription", node.contentDescription?.toString() ?: "")
+            obj.put("checkable",          node.isCheckable)
+            obj.put("checked",            node.isChecked)
+            obj.put("clickable",          node.isClickable)
+            obj.put("editable",           node.isEditable)
+            obj.put("enabled",            node.isEnabled)
+            obj.put("focused",            node.isFocused)
+            obj.put("scrollable",         node.isScrollable)
+            obj.put("selected",           node.isSelected)
+            obj.put("visible",            node.isVisibleToUser)
 
             val bounds = android.graphics.Rect()
             node.getBoundsInScreen(bounds)
             obj.put("bounds", JSONObject().apply {
-                put("l", bounds.left); put("t", bounds.top)
-                put("r", bounds.right); put("b", bounds.bottom)
+                put("left",   bounds.left)
+                put("top",    bounds.top)
+                put("right",  bounds.right)
+                put("bottom", bounds.bottom)
             })
 
             val children = JSONArray()

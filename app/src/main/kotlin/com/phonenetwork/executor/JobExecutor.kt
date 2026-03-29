@@ -157,6 +157,7 @@ class JobExecutor(
                     "screen_record"  -> Triple("completed", executeScreenRecord(params), null)
                     "ui_tree_dump"   -> Triple("completed", executeUiTreeDump(params), null)
                     "ocr_find_tap"   -> Triple("completed", executeOcrFindTap(params), null)
+                    "ocr_full"       -> Triple("completed", executeOcrFull(), null)
                     "press_key"      -> { executePressKey(params);      Triple("completed", null, null) }
                     "screen_wake"    -> Triple("completed", executeScreenWake(), null)
                     "screen_off"     -> Triple("completed", executeScreenOff(), null)
@@ -313,6 +314,52 @@ class JobExecutor(
         return@withContext ocr.toJson(result).apply {
             put("tapped", tapped)
         }
+    }
+
+    // ─── OCR Full Screen ──────────────────────────────────────────────────────
+
+    /**
+     * Full-screen OCR — ML Kit Text Recognition, returns all text blocks with bounds.
+     *
+     * Used by Screen Detection Cascade L2 (ocr.detector.ts on server-side) to identify
+     * which screen is currently visible via text markers (e.g. "Action Blocked",
+     * "Turn on notifications", etc.).
+     *
+     * Result JSON:
+     * ```json
+     * {
+     *   "blocks": [
+     *     {
+     *       "text": "Action Blocked",
+     *       "bounds": { "left": 120, "top": 300, "right": 600, "bottom": 360 },
+     *       "confidence": 0.97,
+     *       "lines": [
+     *         { "text": "Action Blocked", "bounds": {...}, "confidence": 0.97 }
+     *       ]
+     *     }
+     *   ],
+     *   "fullText": "Action Blocked\nThis action was blocked...",
+     *   "totalBlocks": 3
+     * }
+     * ```
+     */
+    private suspend fun executeOcrFull(): JSONObject {
+        // 1. Take screenshot
+        val bitmap = capture.takeScreenshotBitmap()
+            ?: return JSONObject().apply {
+                put("blocks", org.json.JSONArray())
+                put("fullText", "")
+                put("totalBlocks", 0)
+                put("error", "screenshot_failed")
+            }
+
+        // 2. Screen dimensions for coordinate scaling
+        val metrics      = context.resources.displayMetrics
+        val screenWidth  = metrics.widthPixels
+        val screenHeight = metrics.heightPixels
+
+        // 3. Run full OCR
+        return ocr.runFullOcr(bitmap, screenWidth, screenHeight)
     }
 
     private suspend fun executePressKey(params: JSONObject) = withContext(Dispatchers.Main) {
