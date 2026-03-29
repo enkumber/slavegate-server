@@ -95,10 +95,7 @@ const rulesCache = new Map<string, RulesCacheEntry>();
 const RULES_CACHE_TTL = 60_000;
 
 // Skills directory — mirrors skill.service.ts logic
-const SKILLS_DIR = path.resolve(
-  __dirname.replace(/phone-network-server[/\\]src[/\\]/, ''),
-  'templates',
-);
+const SKILLS_DIR = path.resolve(__dirname, '../skills/templates');
 
 // ═══════════════════════════════════════════════════════════════════
 // CONFIDENCE THRESHOLDS
@@ -252,6 +249,7 @@ export class ScreenDetectionService {
       // Simple navigation: press BACK and HOME to try to reach the screen
       if (attempt < maxAttempts) {
         await this.pressBack(deviceId);
+        this.clearCache(deviceId);
         await sleep(500);
       }
     }
