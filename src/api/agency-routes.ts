@@ -56,14 +56,32 @@ router.get("/clients", async (req: Request, res: Response) => {
   const db = getDb();
   const { page, pageSize, offset } = parsePagination(req.query);
   const activeOnly = req.query.active === "true";
+  const type = req.query.type as string | undefined;
 
-  const where = activeOnly ? "WHERE active = TRUE" : "";
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (activeOnly) {
+    conditions.push(`active = TRUE`);
+  }
+  if (type) {
+    conditions.push(`type = $${idx++}`);
+    values.push(type);
+  }
+
+  const where = conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "";
+  
+  values.push(pageSize, offset);
   const [rows, count] = await Promise.all([
     db.query(
-      `SELECT * FROM clients ${where} ORDER BY name ASC LIMIT $1 OFFSET $2`,
-      [pageSize, offset]
+      `SELECT * FROM clients ${where} ORDER BY name ASC LIMIT $${idx++} OFFSET $${idx}`,
+      values
     ),
-    db.query(`SELECT COUNT(*) FROM clients ${where}`),
+    db.query(
+      `SELECT COUNT(*) FROM clients ${where}`,
+      values.slice(0, -2)
+    ),
   ]);
 
   res.json({
@@ -88,15 +106,23 @@ router.get("/clients/:id", async (req: Request, res: Response) => {
 
 router.post("/clients", async (req: Request, res: Response) => {
   const db = getDb();
-  const { name, strategy = {} } = req.body as { name: string; strategy?: Record<string, unknown> };
+  const { name, strategy = {}, type = 'client' } = req.body as { 
+    name: string; 
+    strategy?: Record<string, unknown>;
+    type?: 'client' | 'farming';
+  };
 
   if (!name?.trim()) {
     return res.status(400).json({ ok: false, error: "name required" });
   }
 
+  if (!['client', 'farming'].includes(type)) {
+    return res.status(400).json({ ok: false, error: "type must be 'client' or 'farming'" });
+  }
+
   const result = await db.query(
-    `INSERT INTO clients (name, strategy) VALUES ($1, $2) RETURNING *`,
-    [name.trim(), JSON.stringify(strategy)]
+    `INSERT INTO clients (name, strategy, type) VALUES ($1, $2, $3) RETURNING *`,
+    [name.trim(), JSON.stringify(strategy), type]
   );
 
   res.status(201).json({ ok: true, data: result.rows[0] });

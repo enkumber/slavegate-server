@@ -289,12 +289,12 @@ router.post("/jobs", async (req, res) => {
     return res.status(409).json({ ok: false, error: "Device is not connected" });
   }
   try {
-    const { jobId } = await dispatcherService.dispatch(body);
+    const { jobId, timeoutMs } = await dispatcherService.dispatch(body);
     const sent = wsServer.sendJob(body.deviceId, {
       jobId,
       type: body.type,
       params: body.params,
-      timeoutMs: body.timeoutMs,
+      timeoutMs, // Use calculated timeout from dispatcher
       requiresRoot: body.confirmRoot,
     });
     if (!sent) return res.status(409).json({ ok: false, error: "Failed to send job to device" });

@@ -80,7 +80,7 @@ export class DispatcherService {
     return this.queues.get(deviceId)!;
   }
 
-  async dispatch(req: DispatchJobRequest): Promise<{ jobId: string }> {
+  async dispatch(req: DispatchJobRequest): Promise<{ jobId: string; timeoutMs: number }> {
     // 0. Kill switch — block all dispatches when active (B4 fix)
     if (await isKillSwitchActive()) {
       throw new Error("Kill switch active — job dispatch blocked");
@@ -106,12 +106,14 @@ export class DispatcherService {
       const params = req.params as Record<string, unknown>;
       const text = params?.text;
       if (typeof text === "string" && text.length > 0) {
-        // ~65ms per character (avg delay 40-90ms) + 5s base + buffer
+        // Calculate realistic timeout:
+        // Observed: ~660ms per character in practice (includes all delays, typos, pauses)
+        // Using 700ms per char as safe estimate + 15s buffer
         const textLength = text.length;
-        const estimatedMs = textLength * 65 + 5000;
-        calculatedTimeout = Math.max(calculatedTimeout, estimatedMs);
+        const estimatedMs = textLength * 700 + 15000;
+        calculatedTimeout = estimatedMs;
         skipMaxClamp = true; // type_text gets exact calculated timeout
-        console.log(`[dispatcher] type_text: ${textLength} chars → timeout ${calculatedTimeout}ms`);
+        console.log(`[dispatcher] type_text: ${textLength} chars → timeout ${calculatedTimeout}ms (${Math.round(estimatedMs/1000)}s)`);
       }
     }
     
@@ -168,7 +170,7 @@ export class DispatcherService {
       }
     }, timeoutMs + 5_000); // +5s grace period for network latency
 
-    return { jobId };
+    return { jobId, timeoutMs };
   }
 
   /**
