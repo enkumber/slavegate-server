@@ -57,6 +57,13 @@
         "platform": "instagram",
         "wait_ms": 2000,
         "retries": 4
+      },
+      "expectedScreen": "HOME_FEED",
+      "screenConfidenceThreshold": 0.72,
+      "screenMismatchPolicy": {
+        "maxRetries": 2,
+        "delayMs": 1000,
+        "action": "retry_step"
       }
     },
     {
@@ -77,6 +84,13 @@
         "platform": "instagram",
         "wait_ms": 2000,
         "retries": 3
+      },
+      "expectedScreen": "PROFILE_OWN",
+      "screenConfidenceThreshold": 0.72,
+      "screenMismatchPolicy": {
+        "maxRetries": 2,
+        "delayMs": 1000,
+        "action": "retry_step"
       }
     },
     {
@@ -96,7 +110,14 @@
         "text": "following"
       },
       "retries": 3,
-      "timeoutMs": 10000
+      "timeoutMs": 10000,
+      "expectedScreen": "FOLLOWING_LIST",
+      "screenConfidenceThreshold": 0.72,
+      "screenMismatchPolicy": {
+        "maxRetries": 2,
+        "delayMs": 1000,
+        "action": "retry_step"
+      }
     },
     {
       "type": "wait",

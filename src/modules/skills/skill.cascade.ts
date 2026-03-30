@@ -284,10 +284,15 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
   }
 
   // ─── Level 1.5: DB Persistent Cache ──────────────────────────────────────
+  // Skip DB cache entirely for contextual elements — their coords are dynamic
+  if (isContextualElement(element)) {
+    fallbackChain.push("L1.5_skip_contextual");
+    console.log(`[cascade] L1.5 skipped for contextual element: ${req.elementName}`);
+  }
   fallbackChain.push("L1.5_db_cache");
   const devInfo15 = await getDeviceInfoAsync(req.deviceId, req.platform).catch(() => null);
   const screenType15 = req.currentScreen || "unknown";
-  if (devInfo15) {
+  if (devInfo15 && !isContextualElement(element)) {
     try {
       const cached = await coordCacheService.getCoord(devInfo15, screenType15, req.elementName, MIN_CONFIDENCE_FOR_COORDS);
 
@@ -337,13 +342,17 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
 
       console.log(`[cascade] L2 a11y success for ${req.elementName} → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
 
-      await updateSkillCoords(req.platform, req.elementName, newCoords);
-      if (devInfo15) {
-        coordCacheService.learnCoord({
-          deviceInfo: devInfo15, screenType: screenType15,
-          elementName: req.elementName, x: newCoords.x, y: newCoords.y,
-          learnMethod: "ui_tree", confidence: 0.95,
-        }).catch(() => {});
+      if (!isContextualElement(element)) {
+        await updateSkillCoords(req.platform, req.elementName, newCoords);
+        if (devInfo15) {
+          coordCacheService.learnCoord({
+            deviceInfo: devInfo15, screenType: screenType15,
+            elementName: req.elementName, x: newCoords.x, y: newCoords.y,
+            learnMethod: "ui_tree", confidence: 0.95,
+          }).catch(() => {});
+        }
+      } else {
+        console.log(`[cascade] Skipping coord cache for contextual element: ${req.elementName}`);
       }
 
       const result: CascadeTapResult = {
@@ -377,13 +386,17 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
         const newCoords: NormalizedCoords = rawOcrCoords;
 
         console.log(`[cascade] L2.5 OCR success: "${searchText}" → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
-        await updateSkillCoords(req.platform, req.elementName, newCoords);
-        if (devInfo15) {
-          coordCacheService.learnCoord({
-            deviceInfo: devInfo15, screenType: screenType15,
-            elementName: req.elementName, x: newCoords.x, y: newCoords.y,
-            learnMethod: "ocr", confidence: 0.90,
-          }).catch(() => {});
+        if (!isContextualElement(element)) {
+          await updateSkillCoords(req.platform, req.elementName, newCoords);
+          if (devInfo15) {
+            coordCacheService.learnCoord({
+              deviceInfo: devInfo15, screenType: screenType15,
+              elementName: req.elementName, x: newCoords.x, y: newCoords.y,
+              learnMethod: "ocr", confidence: 0.90,
+            }).catch(() => {});
+          }
+        } else {
+          console.log(`[cascade] Skipping coord cache for contextual element: ${req.elementName}`);
         }
 
         const result: CascadeTapResult = {
@@ -615,6 +628,20 @@ async function executeOcrFindTapJob(
 // buildOcrSearchTextFromElement is now imported from cascadeCore as buildOcrSearchText
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// CONTEXTUAL ELEMENT GUARD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Returns true if an element is marked as contextual (position varies per screen context).
+ * Contextual elements (e.g., post.like, post.comment) appear in feeds/lists and have
+ * dynamic Y positions — caching their coords causes taps in the wrong location.
+ */
+function isContextualElement(element: import("./types").SkillElement | null | undefined): boolean {
+  if (!element) return false;
+  return (element as unknown as Record<string, unknown>).contextual === true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // AUTO-LEARN
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -629,6 +656,12 @@ async function updateSkillCoords(
 
     const element = skillService.getElement(skill, elementName);
     if (!element || element.type === "variable") return;
+
+    // Never persist coords for contextual elements (positions vary per feed item)
+    if (isContextualElement(element)) {
+      console.log(`[cascade] updateSkillCoords: skipped for contextual element ${platform}:${elementName}`);
+      return;
+    }
 
     // B7 fix: support nested button_map structure (e.g., "nav.home" → button_map.nav.home)
     // Old code only looked in fixed_elements/contextual_elements flat keys — always missed.
@@ -826,11 +859,16 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
   }
 
   // ─── L1.5: DB Persistent Cache ──────────────────────────────────────────────
+  // Skip DB cache entirely for contextual elements — their coords are dynamic (feed positions)
+  if (isContextualElement(element)) {
+    fallbackChain.push("L1.5_skip_contextual");
+    console.log(`[cascade] L1.5 skipped for contextual element: ${parsed.value}`);
+  }
   fallbackChain.push("L1.5_db_cache");
   const uniPlatform  = req.platform || "unknown";
   const uniScreenType = (req as { currentScreen?: string }).currentScreen || "unknown";
   const uniDevInfo   = await getDeviceInfoAsync(req.deviceId, uniPlatform).catch(() => null);
-  if (uniDevInfo) {
+  if (uniDevInfo && !isContextualElement(element)) {
     try {
       const cached = await coordCacheService.getCoord(uniDevInfo, uniScreenType, parsed.value, MIN_CONFIDENCE_FOR_COORDS);
 
@@ -883,7 +921,7 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
 
       console.log(`[cascade] L2 a11y success: "${parsed.value}" → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
 
-      if (shouldLearn && parsed.type === "ref" && req.platform) {
+      if (shouldLearn && parsed.type === "ref" && req.platform && !isContextualElement(element)) {
         await updateSkillCoords(req.platform, parsed.value, newCoords);
         if (uniDevInfo) {
           coordCacheService.learnCoord({
@@ -892,6 +930,8 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
             learnMethod: "ui_tree", confidence: 0.95,
           }).catch(() => {});
         }
+      } else if (isContextualElement(element)) {
+        console.log(`[cascade] Skipping coord cache for contextual element: ${parsed.value}`);
       }
 
       const result: CascadeTapResult = {
@@ -928,7 +968,7 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
 
       console.log(`[cascade] L2.5 OCR success: "${searchText}" → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
 
-      if (shouldLearn && parsed.type === "ref" && req.platform) {
+      if (shouldLearn && parsed.type === "ref" && req.platform && !isContextualElement(element)) {
         await updateSkillCoords(req.platform, parsed.value, newCoords);
         if (uniDevInfo) {
           coordCacheService.learnCoord({
@@ -937,6 +977,8 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
             learnMethod: "ocr", confidence: 0.90,
           }).catch(() => {});
         }
+      } else if (isContextualElement(element)) {
+        console.log(`[cascade] Skipping coord cache for contextual element: ${parsed.value}`);
       }
 
       const result: CascadeTapResult = {
@@ -961,7 +1003,7 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
     if (vlmCoords) {
       console.log(`[cascade] L3 VLM success: "${parsed.value}" → (${vlmCoords.x.toFixed(3)}, ${vlmCoords.y.toFixed(3)})`);
 
-      if (shouldLearn && parsed.type === "ref" && req.platform) {
+      if (shouldLearn && parsed.type === "ref" && req.platform && !isContextualElement(element)) {
         await updateSkillCoords(req.platform, parsed.value, vlmCoords);
         if (uniDevInfo) {
           coordCacheService.learnCoord({
@@ -970,6 +1012,8 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
             learnMethod: "vlm", confidence: 0.85,
           }).catch(() => {});
         }
+      } else if (isContextualElement(element)) {
+        console.log(`[cascade] Skipping coord cache for contextual element: ${parsed.value}`);
       }
 
       const tapSuccess = await executeUnifiedTapAtCoords(req.deviceId, vlmCoords, timeoutMs);

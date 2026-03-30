@@ -50,7 +50,14 @@
       "params": {},
       "verification": "local_only",
       "retries": 2,
-      "timeoutMs": 15000
+      "timeoutMs": 15000,
+      "expectedScreen": "HOME_FEED",
+      "screenConfidenceThreshold": 0.70,
+      "screenMismatchPolicy": {
+        "maxRetries": 2,
+        "delayMs": 1000,
+        "action": "retry_step"
+      }
     },
     {
       "type": "wait",
@@ -94,9 +101,16 @@
               "type": "action",
               "id": "tap_like",
               "action": "tap",
-              "target": "like_button",
+              "target": "post.like",
               "verification": "local_with_screenshot",
-              "retries": 1
+              "retries": 1,
+              "expectedScreen": ["HOME_FEED", "POST_DETAIL"],
+              "screenConfidenceThreshold": 0.70,
+              "screenMismatchPolicy": {
+                "maxRetries": 1,
+                "delayMs": 500,
+                "action": "continue_with_warning"
+              }
             },
             {
               "type": "wait",
@@ -119,9 +133,16 @@
               "type": "action",
               "id": "tap_profile",
               "action": "tap",
-              "target": "post_author_avatar",
+              "target": "post.author_avatar",
               "verification": "local_only",
-              "retries": 1
+              "retries": 1,
+              "expectedScreen": "PROFILE_OTHER",
+              "screenConfidenceThreshold": 0.72,
+              "screenMismatchPolicy": {
+                "maxRetries": 2,
+                "delayMs": 800,
+                "action": "retry_step"
+              }
             },
             {
               "type": "wait",
@@ -137,8 +158,15 @@
               "type": "action",
               "id": "back_to_feed",
               "action": "tap",
-              "target": "back_button",
-              "verification": "local_only"
+              "target": "nav.back",
+              "verification": "local_only",
+              "expectedScreen": "HOME_FEED",
+              "screenConfidenceThreshold": 0.70,
+              "screenMismatchPolicy": {
+                "maxRetries": 1,
+                "delayMs": 500,
+                "action": "continue_with_warning"
+              }
             }
           ]
         }

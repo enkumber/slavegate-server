@@ -77,6 +77,7 @@ export interface DetectedScreen {
 export interface DetectionRequest {
   deviceId: string;
   platform: string;
+  packageName?: string;         // Used to resolve platform="*" wildcard
   timeoutMs?: number;           // Default: 10000
   skipCache?: boolean;          // Force fresh detection
   preferredMethod?: DetectionMethod; // Force specific level

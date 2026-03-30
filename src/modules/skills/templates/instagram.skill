@@ -304,17 +304,28 @@ button_map:
   # ─── POST ACTIONS ───────────────────────────────────────────────────────────
   
   post:
+    author_avatar:
+      selector: { resourceId: "com.instagram.android:id/row_feed_photo_profile_imageview" }
+      alt_selectors:
+        - { resourceId: "com.instagram.android:id/avatar_image_view" }
+        - { contentDescription: "Profile picture" }
+        - { className: "android.widget.ImageView", index: 0 }
+      hint: "profile picture/avatar of post author, top left of each post"
+      contextual: true  # Position varies per post in feed — never cache coords
+      
     like:
       selector: { resourceId: "com.instagram.android:id/row_feed_button_like" }
       alt_selectors:
         - { contentDescription: "Like" }
         - { contentDescription: "Apreciază" }
       hint: "heart icon below post"
+      contextual: true  # Position varies per post in feed — never cache coords
       
     unlike:
       selector: { contentDescription: "Unlike" }
       alt_selector: { contentDescription: "Nu mai aprecia" }
       hint: "filled red heart"
+      contextual: true  # Position varies per post in feed — never cache coords
       
     comment:
       selector: { resourceId: "com.instagram.android:id/row_feed_button_comment" }
@@ -322,14 +333,30 @@ button_map:
         - { contentDescription: "Comment" }
         - { contentDescription: "Comentariu" }
       hint: "speech bubble next to heart"
+      contextual: true  # Position varies per post in feed — never cache coords
+
+    # Comment button on Reels (right side, TikTok-style vertical layout)
+    # ResourceId verified via UI dump on OP5T running IG v320+
+    reel_comment:
+      selector: { resourceId: "com.instagram.android:id/row_right_comment_button" }
+      alt_selectors:
+        - { contentDescription: "Comment" }
+        - { contentDescription: "Comentarii" }
+        - { resourceId: "com.instagram.android:id/comment_button" }
+        - { resourceId: "com.instagram.android:id/clips_comment_button" }
+      hint: "speech bubble icon on right sidebar of reel (TikTok-style)"
+      coords: { x: 0.95, y: 0.55 }  # Fallback: right-side buttons column, below like (~y=0.45)
+      contextual: true  # Position varies per reel — never cache coords (but coords above used as L1 fallback)
       
     share:
       selector: { contentDescription: "Share" }
       hint: "paper plane icon"
+      contextual: true  # Position varies per post in feed — never cache coords
       
     save:
       selector: { contentDescription: "Save" }
       hint: "bookmark icon, right side"
+      contextual: true  # Position varies per post in feed — never cache coords
       
     heart_button:
       selector: { resourceId: "com.instagram.android:id/row_feed_button_like" }
@@ -338,14 +365,17 @@ button_map:
         - { contentDescription: "Apreciază" }
       coords: { x: 0.92, y: 0.45 }
       hint: "heart button on right side of video/reel — use instead of double-tap when video overlay (e.g. Watch again) is visible"
+      contextual: true  # Position varies per reel — never cache coords
 
     more:
       selector: { contentDescription: "More options" }
       hint: "three dots, top right of post"
+      contextual: true  # Position varies per post in feed — never cache coords
       
     username:
       selector: { resourceId: "com.instagram.android:id/row_feed_photo_profile_name" }
       hint: "username above post, tap to go to profile"
+      contextual: true  # Position varies per post in feed — never cache coords
       
     view_all_comments:
       selector: { text_contains: "View all" }
@@ -528,6 +558,9 @@ learned_coords:
   # Search results — first hashtag result (row 1, after typing)
   search.hashtag_result_1: { x: 0.50, y: 0.175, confidence: 0.90, learned_at: "2026-03-28T15:00:00Z", device: "OP5T" }
   search.hashtag_result: { x: 0.50, y: 0.175, confidence: 0.90, learned_at: "2026-03-28T15:00:00Z", device: "OP5T" }
+  # Reel comment button — right-side vertical button strip (TikTok-style), below like button
+  # Custom view, not exposed in UI tree — coords-only fallback (confidence >= 0.85 required for L1 tap)
+  post.reel_comment: { x: 0.95, y: 0.55, confidence: 0.85, learned_at: "2026-03-29", device: "generic_reel" }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -272,7 +272,8 @@ router.post("/jobs", async (req, res) => {
   // Reason: VLM coordinates are in screenshot space (e.g., 540x1080), 
   // but tap executes on real screen (1080x2160). Direct tap = wrong coords.
   // cascade-tap handles normalization, ui_tree fallback, and learning.
-  if (body.type === "tap") {
+  // Allow bypass with X-Direct-Tap header for debugging/testing
+  if (body.type === "tap" && !req.headers["x-direct-tap"]) {
     return res.status(403).json({ 
       ok: false, 
       error: "Direct tap jobs are BLOCKED. Use POST /api/hydra/cascade-tap instead. " +

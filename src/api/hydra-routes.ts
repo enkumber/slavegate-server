@@ -14,6 +14,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { visionService } from "../modules/vision/vision.service";
 import { cascadeTap, cascadeVerify, loadSkillFile, getElement } from "../modules/skills/skill.service";
+import { detectCurrentScreen, verifyScreen, determineRecoveryAction } from "../modules/skills/screen-verify";
 import { 
   parseTarget, 
   isSkillRef, 
@@ -463,26 +464,33 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           fs.writeFileSync(imagePath, buffer);
           
           // Use OpenClaw CLI for VLM (handles OAuth tokens correctly)
-          const { exec } = require("child_process");
-          const { promisify } = require("util");
-          const execAsync = promisify(exec);
+          // NOTE: openclaw CLI writes JSON to stderr, not stdout!
           const prompt = `Find the UI element containing text "${parsedTarget.value}" in this screenshot. Return ONLY a JSON object with format: {"found": true, "x": <normalized_x_0_to_1>, "y": <normalized_y_0_to_1>} or {"found": false}. The coordinates should be the CENTER of the element, normalized to 0-1 range where (0,0) is top-left and (1,1) is bottom-right.`;
           
           let vlmResponse: any = null;
           try {
-            const { stdout } = await execAsync(
-              `openclaw agent --agent main --local --json -m "Analyze image ${imagePath}. ${prompt}"`,
-              { timeout: 120000, maxBuffer: 10 * 1024 * 1024 }
+            const spawnResultL3 = require("child_process").spawnSync(
+              "openclaw",
+              ["agent", "--agent", "main", "--local", "--json", "-m", `Analyze image ${imagePath}. ${prompt}`],
+              { timeout: 120000, encoding: "utf8", maxBuffer: 10 * 1024 * 1024 }
             );
             
-            // Parse OpenClaw response
-            const parsed = JSON.parse(stdout);
-            const textPayload = parsed?.payloads?.[0]?.text || "";
+            // OpenClaw CLI writes JSON to stderr; check both
+            let rawJson = "";
+            if ((spawnResultL3.stdout || "").includes('"payloads"')) {
+              rawJson = spawnResultL3.stdout;
+            } else if ((spawnResultL3.stderr || "").includes('"payloads"')) {
+              const jsonStart = (spawnResultL3.stderr as string).indexOf('{');
+              if (jsonStart !== -1) rawJson = (spawnResultL3.stderr as string).slice(jsonStart);
+            }
             
-            // Extract JSON from response
-            const jsonMatch = textPayload.match(/\{[\s\S]*?\}/) || textPayload.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (jsonMatch) {
-              vlmResponse = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+            if (rawJson) {
+              const parsed = JSON.parse(rawJson);
+              const textPayload = parsed?.payloads?.[0]?.text || "";
+              const jsonMatch = textPayload.match(/\{[\s\S]*?\}/) || textPayload.match(/```(?:json)?\s*([\s\S]*?)```/);
+              if (jsonMatch) {
+                vlmResponse = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+              }
             }
             console.log(`[cascade] L3: VLM response:`, JSON.stringify(vlmResponse));
           } catch (cliErr) {
@@ -542,6 +550,61 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
         error: `All cascade levels failed for "${parsedTarget.value}"`,
         latency_ms: Date.now() - startTime,
       });
+    }
+
+    // ─── PRE-TAP: Check if we're on required screen ────────────────────────────
+    const skill = await loadSkillFile(platform);
+    const element = skill ? getElement(skill, parsedTarget.value) : null;
+    const requiresScreen = (element as any)?.requires_screen;
+    
+    if (requiresScreen) {
+      // Get UI tree to check current screen
+      const preCheckJob = await dispatcherService.dispatch({
+        deviceId,
+        type: "ui_tree_dump",
+        params: {},
+        timeoutMs: 10000,
+      });
+      wsServer.sendJob(deviceId, {
+        jobId: preCheckJob.jobId,
+        type: "ui_tree_dump",
+        params: {},
+        timeoutMs: 10000,
+      });
+      const preCheckResult = await waitForJobResult(preCheckJob.jobId, 10000);
+      
+      if (preCheckResult?.output?.uiTree) {
+        const detection = await detectCurrentScreen(preCheckResult, platform);
+        
+        // Check for critical screens first
+        if (detection.isCritical) {
+          return res.json({
+            ok: true,
+            success: false,
+            error: `Critical screen detected: ${detection.screenName}. Aborting.`,
+            actualScreen: detection.screenName,
+            requiredScreen: requiresScreen,
+            target_type: "ref",
+            target_value: parsedTarget.value,
+          });
+        }
+        
+        // Check if we're on required screen
+        if (detection.screenName !== requiresScreen) {
+          console.log(`[cascade-tap] Pre-check failed: required ${requiresScreen}, got ${detection.screenName}`);
+          return res.json({
+            ok: true,
+            success: false,
+            error: `Wrong screen. Required: ${requiresScreen}, current: ${detection.screenName || 'unknown'}`,
+            actualScreen: detection.screenName,
+            requiredScreen: requiresScreen,
+            target_type: "ref",
+            target_value: parsedTarget.value,
+          });
+        }
+        
+        console.log(`[cascade-tap] Pre-check passed: on ${detection.screenName}`);
+      }
     }
 
     // ─── For @REF: Use existing cascadeTap with skill lookup ──────────────────
@@ -657,44 +720,78 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
       }
     );
 
-    // ─── POST-TAP VERIFICATION for element-based tap (if requested) ───────────
+    // ─── POST-TAP VERIFICATION using UI tree (faster than VLM) ────────────────
     let verified: boolean | undefined;
     let verifyError: string | undefined;
+    let actualScreen: string | null = null;
+    let recoveryAction: { action: string; reason: string } | undefined;
     
-    if (verify && result.success) {
+    // Always verify after tap if platform is provided (detect where we landed)
+    if (result.success && platform) {
       // Wait for UI to update
       await new Promise(resolve => setTimeout(resolve, verifyTimeout));
       
       try {
-        const verifyScreenshot = await dispatcherService.dispatch({
+        // Get fresh UI tree
+        const uiJob = await dispatcherService.dispatch({
           deviceId,
-          type: "screenshot_for_vlm",
+          type: "ui_tree_dump",
           params: {},
           timeoutMs: 10000,
         });
         wsServer.sendJob(deviceId, {
-          jobId: verifyScreenshot.jobId,
-          type: "screenshot_for_vlm",
+          jobId: uiJob.jobId,
+          type: "ui_tree_dump",
           params: {},
           timeoutMs: 10000,
         });
-        const screenshot = await waitForJobResult(verifyScreenshot.jobId, 10000);
+        const uiTreeResult = await waitForJobResult(uiJob.jobId, 10000);
         
-        if (screenshot?.output?.image_base64) {
-          const verifyResult = await visionService.handleVerifyRequest(
-            deviceId,
-            verifyScreenshot.jobId,
-            screenshot.output.image_base64,
-            verify  // actionType = expected screen description
-          );
-          verified = verifyResult.success;
-          if (!verified) {
-            verifyError = `Screen does not match expected: "${verify}"`;
+        if (uiTreeResult?.output?.uiTree) {
+          // Detect current screen
+          const detection = await detectCurrentScreen(uiTreeResult, platform);
+          actualScreen = detection.screenName;
+          
+          // Check for critical screens (rate_limited, banned, login)
+          if (detection.isCritical) {
+            verified = false;
+            verifyError = `Critical screen detected: ${detection.screenName}`;
+            recoveryAction = determineRecoveryAction(verify || null, actualScreen, true);
+          }
+          // If verify param provided, check against expected screen
+          else if (verify) {
+            const verifyResult = await verifyScreen(uiTreeResult, platform, verify);
+            verified = verifyResult.verified;
+            if (!verified) {
+              verifyError = verifyResult.error;
+              recoveryAction = determineRecoveryAction(verify, actualScreen, false);
+              
+              // Execute recovery action if needed
+              if (recoveryAction.action === 'back') {
+                console.log(`[cascade-tap] Recovery: going back (expected ${verify}, got ${actualScreen})`);
+                const backJob = await dispatcherService.dispatch({
+                  deviceId,
+                  type: "press_key",
+                  params: { key: "back" },
+                  timeoutMs: 3000,
+                });
+                wsServer.sendJob(deviceId, {
+                  jobId: backJob.jobId,
+                  type: "press_key",
+                  params: { key: "back" },
+                  timeoutMs: 3000,
+                });
+                await waitForJobResult(backJob.jobId, 3000);
+              }
+            }
+          } else {
+            // No specific verify requested, just detect and report
+            verified = true;
           }
         }
       } catch (verifyErr) {
-        verified = false;
-        verifyError = `Verification failed: ${(verifyErr as Error).message}`;
+        console.error(`[cascade-tap] Screen verification error:`, (verifyErr as Error).message);
+        // Don't fail the tap just because verification errored
       }
     }
 
@@ -708,6 +805,8 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
       learn_type: "persistent",
       verified,
       verifyError,
+      actualScreen,
+      recoveryAction,
     });
   } catch (err) {
     console.error("[hydra] cascade-tap error:", err);
@@ -902,15 +1001,41 @@ router.post("/analyze-screen", async (req: Request, res: Response) => {
     }
 
     // 3. Call OpenClaw agent CLI for VLM analysis
-    const { execSync } = require("child_process");
+    // Using spawnSync instead of execSync to cleanly separate stdout from stderr
+    const { spawnSync } = require("child_process");
     const prompt = `Analizează imaginea ${imagePath}. ${task} Răspunde DOAR JSON valid, fără explicații.`;
     
-    let vlmResult: string;
+    let vlmResult: string = "";
+    let vlmStderr: string = "";
     try {
-      vlmResult = execSync(
-        `openclaw agent --agent main --local --json -m "${prompt.replace(/"/g, '\\"')}"`,
-        { timeout: 60000, encoding: "utf8" }
+      const spawnResult = spawnSync(
+        "openclaw",
+        ["agent", "--agent", "main", "--local", "--json", "-m", prompt],
+        { timeout: 60000, encoding: "utf8", maxBuffer: 10 * 1024 * 1024 }
       );
+      const rawStdout = spawnResult.stdout || "";
+      vlmStderr = spawnResult.stderr || "";
+      
+      // NOTE: OpenClaw CLI writes JSON output to stderr (not stdout).
+      // We check stdout first for forward compatibility, then fall back to stderr.
+      if (rawStdout.includes('"payloads"')) {
+        vlmResult = rawStdout;
+        console.log("[hydra] VLM: JSON found in stdout");
+      } else if (vlmStderr.includes('"payloads"')) {
+        // Extract the JSON object starting at the first '{' in stderr
+        const jsonStart = vlmStderr.indexOf('{');
+        if (jsonStart !== -1) {
+          vlmResult = vlmStderr.slice(jsonStart);
+          console.log("[hydra] VLM: JSON found in stderr (expected behavior for openclaw CLI)");
+        }
+      }
+      
+      console.log("[hydra] VLM result length:", vlmResult?.length);
+      console.log("[hydra] VLM result preview:", vlmResult?.slice(0, 300));
+      
+      if (spawnResult.error) {
+        throw spawnResult.error;
+      }
     } catch (execErr: any) {
       // Clean up image file
       try { fs.unlinkSync(imagePath); } catch {}
@@ -923,18 +1048,34 @@ router.post("/analyze-screen", async (req: Request, res: Response) => {
     // 5. Parse VLM response
     let analysis: any = {};
     try {
-      const parsed = JSON.parse(vlmResult);
-      const textPayload = parsed?.payloads?.[0]?.text || "";
-      
-      // Extract JSON from markdown code blocks if present
-      const jsonMatch = textPayload.match(/```(?:json)?\s*([\s\S]*?)```/) || 
-                        textPayload.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        analysis = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+      if (!vlmResult || vlmResult.trim() === "") {
+        console.error("[hydra] VLM returned empty JSON. Full stderr:", vlmStderr.slice(0, 800));
+        analysis = { raw: "", error: "VLM returned empty response" };
       } else {
-        analysis = { raw: textPayload };
+        const parsed = JSON.parse(vlmResult);
+        const textPayload = parsed?.payloads?.[0]?.text || "";
+        
+        console.log("[hydra] textPayload length:", textPayload?.length);
+        console.log("[hydra] textPayload preview:", textPayload?.slice(0, 200));
+        
+        // Extract JSON from markdown code blocks if present
+        const jsonMatch = textPayload.match(/```(?:json)?\s*([\s\S]*?)```/) || 
+                          textPayload.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          try {
+            analysis = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+          } catch {
+            // JSON parse failed on extracted match — use text directly
+            analysis = { raw: textPayload, is_potential_client: false };
+          }
+        } else {
+          // VLM returned plain text (no JSON) — use it as-is
+          analysis = { raw: textPayload, is_potential_client: false };
+        }
       }
     } catch (parseErr) {
+      console.error("[hydra] Failed to parse VLM JSON envelope:", (parseErr as Error).message);
+      console.error("[hydra] Raw vlmResult:", vlmResult?.slice(0, 500));
       analysis = { raw: vlmResult };
     }
 

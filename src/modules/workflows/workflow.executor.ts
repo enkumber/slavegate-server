@@ -43,6 +43,7 @@ import {
   executeSkillAction,
   type SkillActionContext,
 } from "../skills/skill.actions";
+import { verifyScreenAfterStep } from "./screen-verifier";
 
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
@@ -494,6 +495,20 @@ async function executeActionStep(
     finalParams["durationMs"] = hbeStep.action.scrollParams.durationMs;
   }
 
+  // Resolve textFromVariable for type_text action
+  if (step.action === "type_text" && finalParams["textFromVariable"] && !finalParams["text"]) {
+    const varName = finalParams["textFromVariable"] as string;
+    const textValue = checkpoint.variables[varName] as string | undefined;
+    if (textValue) {
+      finalParams["text"] = textValue;
+      console.log(`[workflow] ${workflowId} step ${stepIndex}: resolved text from variable "${varName}" (${textValue.length} chars)`);
+    } else {
+      console.warn(`[workflow] ${workflowId} step ${stepIndex}: textFromVariable "${varName}" is empty/undefined`);
+      finalParams["text"] = "";
+    }
+    delete finalParams["textFromVariable"]; // Remove meta-param before sending to device
+  }
+
   // Resolve packageName for open_app/close_app actions
   if ((step.action === "open_app" || step.action === "close_app") && !finalParams["packageName"]) {
     // template.platform can be "*" (wildcard) — treat as unset and fall through to checkpoint or default
@@ -555,6 +570,49 @@ async function executeActionStep(
     if (hbeStep.action.postActionDelayMs > 0) {
       await sleep(hbeStep.action.postActionDelayMs);
     }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SCREEN VERIFICATION (after cascade tap)
+    // Story: US-WORKFLOW-SCREEN-VERIFY
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (step.expectedScreen && process.env.SCREEN_DETECTION_CASCADE_ENABLED === 'true') {
+      const verifyResult = await verifyScreenAfterStep({
+        deviceId,
+        platform,
+        workflowId,
+        stepIndex,
+        expectedScreen: step.expectedScreen,
+        confidenceThreshold: step.screenConfidenceThreshold,
+        policy: step.screenMismatchPolicy,
+        currentRetry: step._screenRetryCount ?? 0,
+      });
+
+      if (verifyResult.shouldAbort) {
+        const expected = Array.isArray(step.expectedScreen) 
+          ? step.expectedScreen.join(',') 
+          : step.expectedScreen;
+        throw new Error(
+          `Screen mismatch at step ${stepIndex}: expected [${expected}], ` +
+          `got ${verifyResult.detected.screenId} (conf=${verifyResult.detected.confidence.toFixed(2)})`
+        );
+      }
+
+      if (verifyResult.shouldRetry) {
+        console.log(`[workflow] ${workflowId} step ${stepIndex}: screen mismatch after cascade, retrying...`);
+        await sleep(step.screenMismatchPolicy?.delayMs ?? 500);
+        await executeActionStep(
+          workflowId, deviceId, template,
+          { ...step, _screenRetryCount: (step._screenRetryCount ?? 0) + 1 },
+          checkpoint, stepIndex
+        );
+        return;
+      }
+
+      if (!verifyResult.match) {
+        console.warn(`[workflow] ${workflowId} step ${stepIndex}: screen mismatch (continue_with_warning mode)`);
+      }
+    }
+    
     return; // Cascade handled the tap — skip regular dispatch
   }
 
@@ -621,6 +679,48 @@ async function executeActionStep(
   // Post-action HBE delay (human settle time after action)
   if (hbeStep.action.postActionDelayMs > 0) {
     await sleep(hbeStep.action.postActionDelayMs);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SCREEN VERIFICATION (after regular dispatch)
+  // Story: US-WORKFLOW-SCREEN-VERIFY
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (step.expectedScreen && process.env.SCREEN_DETECTION_CASCADE_ENABLED === 'true') {
+    const verifyResult = await verifyScreenAfterStep({
+      deviceId,
+      platform,
+      workflowId,
+      stepIndex,
+      expectedScreen: step.expectedScreen,
+      confidenceThreshold: step.screenConfidenceThreshold,
+      policy: step.screenMismatchPolicy,
+      currentRetry: step._screenRetryCount ?? 0,
+    });
+
+    if (verifyResult.shouldAbort) {
+      const expected = Array.isArray(step.expectedScreen) 
+        ? step.expectedScreen.join(',') 
+        : step.expectedScreen;
+      throw new Error(
+        `Screen mismatch at step ${stepIndex}: expected [${expected}], ` +
+        `got ${verifyResult.detected.screenId} (conf=${verifyResult.detected.confidence.toFixed(2)})`
+      );
+    }
+
+    if (verifyResult.shouldRetry) {
+      console.log(`[workflow] ${workflowId} step ${stepIndex}: screen mismatch, retrying...`);
+      await sleep(step.screenMismatchPolicy?.delayMs ?? 500);
+      await executeActionStep(
+        workflowId, deviceId, template,
+        { ...step, _screenRetryCount: (step._screenRetryCount ?? 0) + 1 },
+        checkpoint, stepIndex
+      );
+      return;
+    }
+
+    if (!verifyResult.match) {
+      console.warn(`[workflow] ${workflowId} step ${stepIndex}: screen mismatch (continue_with_warning mode)`);
+    }
   }
 }
 

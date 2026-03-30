@@ -328,6 +328,45 @@ CREATE TABLE IF NOT EXISTS navigation_logs (
 
 CREATE INDEX IF NOT EXISTS idx_navlog_device ON navigation_logs(device_id, created_at DESC);
 
+-- screen_detection_logs: cascade detection event log (L1/L2/L3)
+-- Story: US-SCREEN-CASCADE
+CREATE TABLE IF NOT EXISTS screen_detection_logs (
+  id                  SERIAL PRIMARY KEY,
+  device_id           TEXT NOT NULL,
+  platform            TEXT NOT NULL,
+  detected_screen     TEXT NOT NULL,
+  confidence          NUMERIC(4,3) NOT NULL,
+  method              TEXT NOT NULL,
+  fallback_chain      TEXT[] NOT NULL DEFAULT '{}',
+  latency_ms          INTEGER NOT NULL,
+  ui_tree_nodes       INTEGER,
+  ocr_text_length     INTEGER,
+  vlm_tokens          INTEGER,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_screen_detection_device   ON screen_detection_logs(device_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_screen_detection_platform ON screen_detection_logs(platform, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_screen_detection_method   ON screen_detection_logs(method, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_screen_detection_created  ON screen_detection_logs(created_at DESC);
+
+-- workflow_screen_verifications: post-step screen verification results
+-- Story: US-WORKFLOW-SCREEN-VERIFY
+CREATE TABLE IF NOT EXISTS workflow_screen_verifications (
+  id                    SERIAL PRIMARY KEY,
+  workflow_id           UUID NOT NULL,
+  step_index            INTEGER NOT NULL,
+  detected_screen       TEXT NOT NULL,
+  detected_confidence   NUMERIC(4,3) NOT NULL,
+  detection_method      TEXT NOT NULL,
+  expected_screens      TEXT[] NOT NULL,
+  match                 BOOLEAN NOT NULL,
+  latency_ms            INTEGER NOT NULL,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_wf_screen_verify_workflow ON workflow_screen_verifications(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_wf_screen_verify_match    ON workflow_screen_verifications(match) WHERE match = false;
+CREATE INDEX IF NOT EXISTS idx_wf_screen_verify_created  ON workflow_screen_verifications(created_at);
+
 -- system_config: key-value store for server-side persistent state
 CREATE TABLE IF NOT EXISTS system_config (
   key        TEXT PRIMARY KEY,

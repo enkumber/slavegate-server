@@ -47,13 +47,37 @@ export function resolveUiTreeResult(
 ): boolean {
   const pending = pendingUiTree.get(jobId);
   if (!pending) return false;
+  console.log(`[screen-detection] resolveUiTreeResult: jobId=${jobId.slice(0,8)} status=${result.status} outputKeys=${JSON.stringify(Object.keys(result.output ?? {}))}`);
   clearTimeout(pending.timer);
   pendingUiTree.delete(jobId);
 
   if (result.status === 'completed' && result.output) {
-    // Output may be under "nodes", "tree", or direct array
-    const nodes = (result.output.nodes ?? result.output.tree ?? result.output.data ?? []) as UiNode[];
-    pending.resolve(Array.isArray(nodes) ? nodes : []);
+    // Android returns: { "uiTree": "<json_string>" }  ← uiTree is a JSON string, not object
+    // Also support legacy: "nodes", "tree", "data" keys
+    let nodes: UiNode[] = [];
+
+    const rawUiTree = result.output.uiTree;
+    if (typeof rawUiTree === 'string') {
+      // Android serializes the tree as a JSON string — parse it
+      try {
+        const parsed = JSON.parse(rawUiTree) as UiNode | UiNode[];
+        // Root may be a single root node object (not array) — wrap it
+        nodes = Array.isArray(parsed) ? parsed : [parsed];
+        console.log(`[screen-detection] resolveUiTreeResult: parsed uiTree string → ${nodes.length} root nodes`);
+      } catch (e) {
+        console.warn(`[screen-detection] resolveUiTreeResult: failed to parse uiTree JSON string: ${(e as Error).message}`);
+        nodes = [];
+      }
+    } else if (rawUiTree && typeof rawUiTree === 'object') {
+      // Already an object — wrap in array if not array
+      nodes = Array.isArray(rawUiTree) ? rawUiTree as UiNode[] : [rawUiTree as UiNode];
+    } else {
+      // Legacy fallbacks: "nodes", "tree", "data"
+      const fallback = result.output.nodes ?? result.output.tree ?? result.output.data ?? [];
+      nodes = Array.isArray(fallback) ? fallback as UiNode[] : [];
+    }
+
+    pending.resolve(nodes.length > 0 ? nodes : null);
   } else {
     pending.resolve(null);
   }
@@ -125,6 +149,9 @@ export class ScreenDetectionService {
     const start     = Date.now();
     const timeoutMs = req.timeoutMs ?? 10_000;
 
+    // Resolve platform wildcard "*" to a concrete platform
+    const platform = this.resolvePlatform(req.platform, req.packageName);
+
     // Cache check (1s TTL, skip if skipCache=true)
     if (!req.skipCache) {
       const cached = this.detectionCache.get(req.deviceId);
@@ -133,25 +160,28 @@ export class ScreenDetectionService {
       }
     }
 
-    const rules = await this.getRules(req.platform);
+    const rules = await this.getRules(platform);
 
     // ── L1: UI Tree ────────────────────────────────────────────────────────────
     if (req.preferredMethod !== 'ocr' && req.preferredMethod !== 'vlm') {
       try {
         const l1Start  = Date.now();
-        const uiTree   = await this.fetchUiTree(req.deviceId, Math.min(3_000, timeoutMs));
+        const uiTree   = await this.fetchUiTree(req.deviceId, Math.min(8_000, timeoutMs));
+        // Log node count for observability
+        const allFlatNodes = this.uiTreeDetector.flattenTree(uiTree);
+        console.log(`[screen-detection] L1 ui_tree: ${allFlatNodes.length} nodes for device ${req.deviceId.slice(0, 8)}`);
         const partial  = this.uiTreeDetector.detect(uiTree, rules);
         const l1Result = this.finalize(partial, 'ui_tree', start);
 
         // Critical screen → return immediately regardless of confidence
         if (l1Result.screenId !== 'UNKNOWN' && this.isCritical(l1Result.screenId, rules)) {
-          this.log(req.deviceId, req.platform, l1Result, ['L1_critical_early_return']);
+          this.log(req.deviceId, platform, l1Result, ['L1_critical_early_return']);
           this.cache(req.deviceId, l1Result);
           return l1Result;
         }
 
         if (l1Result.confidence >= CONFIDENCE_THRESHOLD) {
-          this.log(req.deviceId, req.platform, l1Result, ['L1_success']);
+          this.log(req.deviceId, platform, l1Result, ['L1_success']);
           this.cache(req.deviceId, l1Result);
           return l1Result;
         }
@@ -166,12 +196,13 @@ export class ScreenDetectionService {
     if (req.preferredMethod !== 'vlm') {
       try {
         const l2Start  = Date.now();
-        const ocrResult = await this.fetchOcr(req.deviceId, Math.max(100, Math.min(5_000, timeoutMs - (Date.now() - start))));
+        // OCR takes 2-3s on device — minimum 3000ms, capped at remaining budget
+        const ocrResult = await this.fetchOcr(req.deviceId, Math.max(3_000, Math.min(5_000, timeoutMs - (Date.now() - start))));
         const partial   = this.ocrDetector.detect(ocrResult, rules);
         const l2Result  = this.finalize(partial, 'ocr', start);
 
         if (l2Result.confidence >= CONFIDENCE_THRESHOLD) {
-          this.log(req.deviceId, req.platform, l2Result, ['L1_failed', 'L2_success']);
+          this.log(req.deviceId, platform, l2Result, ['L1_failed', 'L2_success']);
           this.cache(req.deviceId, l2Result);
           return l2Result;
         }
@@ -185,12 +216,13 @@ export class ScreenDetectionService {
     // ── L3: VLM ────────────────────────────────────────────────────────────────
     try {
       const l3Start      = Date.now();
-      const screenshot   = await this.fetchScreenshot(req.deviceId, Math.max(100, Math.min(5_000, timeoutMs - (Date.now() - start))));
-      const partial      = await this.vlmDetector.detect(screenshot, req.platform, req.deviceId);
+      // Screenshot takes ~1s + VLM call — minimum 4s
+      const screenshot   = await this.fetchScreenshot(req.deviceId, Math.max(4_000, Math.min(10_000, timeoutMs - (Date.now() - start))));
+      const partial      = await this.vlmDetector.detect(screenshot, platform, req.deviceId);
       const l3Result     = this.finalize(partial, 'vlm', start);
 
       console.log(`[screen-detection] L3 VLM: ${l3Result.screenId} (${l3Result.confidence.toFixed(2)}) in ${Date.now() - l3Start}ms`);
-      this.log(req.deviceId, req.platform, l3Result, ['L1_failed', 'L2_failed', 'L3_vlm']);
+      this.log(req.deviceId, platform, l3Result, ['L1_failed', 'L2_failed', 'L3_vlm']);
       this.cache(req.deviceId, l3Result);
       return l3Result;
     } catch (err) {
@@ -208,7 +240,7 @@ export class ScreenDetectionService {
       latencyMs:  Date.now() - start,
       error:      'All detection levels failed',
     };
-    this.log(req.deviceId, req.platform, fallback, ['L1_failed', 'L2_failed', 'L3_failed']);
+    this.log(req.deviceId, platform, fallback, ['L1_failed', 'L2_failed', 'L3_failed']);
     return fallback;
   }
 
@@ -255,6 +287,38 @@ export class ScreenDetectionService {
       }
     }
     return false;
+  }
+
+  /**
+   * Resolve platform wildcard "*" to a concrete platform name.
+   * Uses packageName→platform reverse map if available.
+   * Falls back to "instagram" as the default platform.
+   */
+  private resolvePlatform(platform: string, packageName?: string): string {
+    if (platform !== '*') return platform;
+
+    // Reverse map: packageName → platform
+    if (packageName) {
+      const packageToPlatform: Record<string, string> = {
+        'com.instagram.android': 'instagram',
+        'com.zhiliaoapp.musically': 'tiktok',
+        'com.ss.android.ugc.trill': 'tiktok',
+        'com.reddit.frontpage': 'reddit',
+        'com.twitter.android': 'twitter',
+        'com.facebook.katana': 'facebook',
+        'com.youtube.android': 'youtube',
+        'com.google.android.youtube': 'youtube',
+      };
+      const resolved = packageToPlatform[packageName.toLowerCase()];
+      if (resolved) {
+        console.log(`[screen-detection] Resolved platform "*" → "${resolved}" from packageName="${packageName}"`);
+        return resolved;
+      }
+    }
+
+    // Default fallback
+    console.log(`[screen-detection] Platform "*" — defaulting to "instagram"`);
+    return 'instagram';
   }
 
   /**

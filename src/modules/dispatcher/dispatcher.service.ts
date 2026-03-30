@@ -98,11 +98,24 @@ export class DispatcherService {
       );
     }
 
-    // 3. Clamp timeout
-    const timeoutMs = Math.min(
-      req.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      MAX_TIMEOUT_MS
-    );
+    // 3. Calculate timeout (dynamic for type_text based on text length)
+    let calculatedTimeout = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    let skipMaxClamp = false;
+    
+    if (req.type === "type_text") {
+      const params = req.params as Record<string, unknown>;
+      const text = params?.text;
+      if (typeof text === "string" && text.length > 0) {
+        // ~65ms per character (avg delay 40-90ms) + 5s base + buffer
+        const textLength = text.length;
+        const estimatedMs = textLength * 65 + 5000;
+        calculatedTimeout = Math.max(calculatedTimeout, estimatedMs);
+        skipMaxClamp = true; // type_text gets exact calculated timeout
+        console.log(`[dispatcher] type_text: ${textLength} chars → timeout ${calculatedTimeout}ms`);
+      }
+    }
+    
+    const timeoutMs = skipMaxClamp ? calculatedTimeout : Math.min(calculatedTimeout, MAX_TIMEOUT_MS);
 
     // 4. Persist job to DB
     const db = getDb();

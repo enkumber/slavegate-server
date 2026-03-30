@@ -473,9 +473,32 @@ function findElementInUiTree(uiTree: any, selector: any): NormalizedCoords | nul
     return false;
   };
   
+  // Helper to check if element is visible on screen
+  const isVisibleOnScreen = (node: any, screenW: number, screenH: number): boolean => {
+    const bounds = node.bounds || {};
+    const left = bounds.left ?? bounds.l ?? 0;
+    const right = bounds.right ?? bounds.r ?? 0;
+    const top = bounds.top ?? bounds.t ?? 0;
+    const bottom = bounds.bottom ?? bounds.b ?? 0;
+    
+    // Must have positive bounds within screen
+    if (left < 0 || right < 0 || top < 0) return false;
+    if (left > screenW || right > screenW) return false;
+    if (top > screenH || bottom > screenH) return false;
+    
+    // Check visible flag if present
+    if (node.visible === false) return false;
+    
+    return true;
+  };
+  
+  const screenW = uiTree.screenWidth || 1080;
+  const screenH = uiTree.screenHeight || 2160;
+  
   const findNode = (nodeList: any[], sel: any): any => {
     for (const node of nodeList) {
-      if (matchesSelector(node, sel)) {
+      // Only match if element is visible on screen
+      if (matchesSelector(node, sel) && isVisibleOnScreen(node, screenW, screenH)) {
         return node;
       }
       const children = node.children || [];

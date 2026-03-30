@@ -40,6 +40,10 @@ export const SKILL_ACTION_NAMES = new Set<string>([
   'evaluate_criteria',
   'checkpoint_save',
   'track_empty_scroll',
+  // Outreach actions (Instagram engagement)
+  'vlm_analyze_post_for_outreach',
+  'vlm_generate_comment',
+  'detect_current_screen',
   // Utility state-management actions (used by smart_unfollow handlers)
   'random_delay',
   'increment',
@@ -129,6 +133,10 @@ export async function executeSkillAction(
     case 'branch_on_decision':              return handleBranchOnDecision(params, ctx);
     case 'conditional_pause':               return handleConditionalPause(params, ctx);
     case 'forced_pause':                    return handleForcedPause(params, ctx);
+    // Outreach actions
+    case 'vlm_analyze_post_for_outreach':   return handleVlmAnalyzePostForOutreach(params, ctx);
+    case 'vlm_generate_comment':            return handleVlmGenerateComment(params, ctx);
+    case 'detect_current_screen':           return handleDetectCurrentScreen(params, ctx);
 
     default:
       throw new Error(`[skill-actions] Unknown skill action: "${actionName}"`);
@@ -1205,6 +1213,21 @@ async function handleSetVariable(params: Record<string, unknown>, ctx: SkillActi
  *   on_skip:     WorkflowStep[]
  */
 async function handleBranchOnDecision(params: Record<string, unknown>, ctx: SkillActionContext): Promise<void> {
+  const cond = params.condition as string | undefined;
+
+  // New condition-based branch (condition / if_true_steps / if_false_steps)
+  if (cond !== undefined) {
+    info(ctx, `branch_on_decision: condition="${cond}", variables=${JSON.stringify(ctx.checkpoint.variables)}`);
+    const evalResult = evalConditionExpr(cond, ctx.checkpoint.variables);
+    info(ctx, `branch_on_decision: evalResult=${evalResult}`);
+    const steps = evalResult
+      ? (params.if_true_steps  as WorkflowStep[]) || []
+      : (params.if_false_steps as WorkflowStep[]) || [];
+    if (steps.length > 0) await ctx.executeSteps(steps);
+    return;
+  }
+
+  // Legacy: _unfollow_decision / on_<action> pattern
   const decision = ctx.checkpoint.variables['_unfollow_decision'] as UnfollowDecision | null;
   const action   = decision?.action ?? 'skip';
   const steps    = (params[`on_${action}`] as WorkflowStep[]) || [];
@@ -1358,4 +1381,403 @@ function info(ctx: SkillActionContext, msg: string): void {
 
 function warn(ctx: SkillActionContext, msg: string): void {
   console.warn(`[skill-action] ${ctx.workflowId} @${ctx.stepIndex}: ${msg}`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OUTREACH ACTIONS — Instagram engagement automation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * DETECT_CURRENT_SCREEN — fast UI tree–based detection of Instagram screen type.
+ *
+ * Distinguishes between:
+ *   REELS_FULLSCREEN — Reels tab, TikTok-style fullscreen player
+ *                      Signals: clips_viewer / reel_viewer / clips_swipe_refresh_layout
+ *                               resourceId present AND no bottom nav bar visible
+ *   HOME_FEED        — Home feed (posts, inline Reels, Stories)
+ *                      Signals: swipeable_tab_view_pager or tab_bar visible
+ *   UNKNOWN          — anything else (profile, search, etc.)
+ *
+ * Sets checkpoint.variables[target_variable] (default: "_current_screen")
+ * to one of: "REELS_FULLSCREEN" | "HOME_FEED" | "UNKNOWN"
+ *
+ * Params:
+ *   target_variable: string — checkpoint key (default: "_current_screen")
+ */
+async function handleDetectCurrentScreen(
+  params: Record<string, unknown>,
+  ctx:    SkillActionContext,
+): Promise<void> {
+  const targetVar = (params.target_variable as string) || '_current_screen';
+
+  info(ctx, 'detect_current_screen: dispatching ui_tree_dump');
+
+  let screen = 'UNKNOWN';
+
+  try {
+    const result = await ctx.dispatchAndWait('ui_tree_dump', {}, 15_000);
+
+    if (result.status !== 'ok' && result.status !== 'success') {
+      warn(ctx, `detect_current_screen: ui_tree_dump failed (${result.status}) — defaulting to HOME_FEED`);
+      ctx.checkpoint.variables[targetVar] = 'HOME_FEED';
+      return;
+    }
+
+    const rawTree = (result.output as Record<string, unknown> | undefined)?.['uiTree'];
+    if (!rawTree) {
+      warn(ctx, 'detect_current_screen: no uiTree in result — defaulting to HOME_FEED');
+      ctx.checkpoint.variables[targetVar] = 'HOME_FEED';
+      return;
+    }
+
+    const tree: UiNode = typeof rawTree === 'string' ? JSON.parse(rawTree) : (rawTree as UiNode);
+
+    // ── Signal collectors ──────────────────────────────────────────────────
+    let hasReelViewer   = false;
+    let hasNavBar       = false;
+    let hasHomeFeedPager = false;
+
+    traverseUiTree(tree, (n) => {
+      const rid = (n.resourceId || n.resId || '').toLowerCase();
+
+      // REELS_FULLSCREEN markers
+      if (
+        rid.includes('clips_viewer') ||
+        rid.includes('reel_viewer') ||
+        rid.includes('clips_swipe_refresh') ||
+        rid.includes('clips_bottom_sheet') ||
+        rid.includes('reels_tray')
+      ) {
+        hasReelViewer = true;
+      }
+
+      // HOME_FEED markers — bottom navigation bar
+      if (
+        rid.includes('tab_bar') ||
+        rid.includes('bottom_navigation') ||
+        rid.includes('navigation_bar') ||
+        rid.includes('feed_tab') ||
+        rid.includes('home_tab')
+      ) {
+        hasNavBar = true;
+      }
+
+      // HOME_FEED markers — feed pager
+      if (
+        rid.includes('swipeable_tab_view_pager') ||
+        rid.includes('feed_list') ||
+        rid.includes('feed_recycler')
+      ) {
+        hasHomeFeedPager = true;
+      }
+    });
+
+    // ── Decision logic ─────────────────────────────────────────────────────
+    // REELS_FULLSCREEN: reel viewer present AND no bottom nav bar (fullscreen hides it)
+    if (hasReelViewer && !hasNavBar) {
+      screen = 'REELS_FULLSCREEN';
+    } else if (hasNavBar || hasHomeFeedPager) {
+      screen = 'HOME_FEED';
+    } else if (hasReelViewer) {
+      // Edge case: reel viewer present but nav bar also visible (transition state) — treat as HOME_FEED
+      screen = 'HOME_FEED';
+    } else {
+      screen = 'UNKNOWN';
+    }
+
+    info(ctx,
+      `detect_current_screen: result="${screen}" ` +
+      `(reelViewer=${hasReelViewer}, navBar=${hasNavBar}, feedPager=${hasHomeFeedPager})`
+    );
+
+  } catch (err) {
+    warn(ctx, `detect_current_screen: error: ${(err as Error).message} — defaulting to HOME_FEED`);
+    screen = 'HOME_FEED';
+  }
+
+  ctx.checkpoint.variables[targetVar] = screen;
+}
+
+/**
+ * VLM_ANALYZE_POST_FOR_OUTREACH
+ * 
+ * Takes a screenshot and uses VLM to determine if the visible post is from
+ * a potential client for glamour/boudoir photography.
+ * 
+ * Params:
+ *   target_variable: string — checkpoint key to store result (default: "post_analysis")
+ *   account_name:    string — own account name to skip (default: "@incitographer")
+ *   min_age:         number — minimum age for potential client (default: 20)
+ *   max_age:         number — maximum age for potential client (default: 35)
+ * 
+ * Sets in checkpoint.variables:
+ *   [target_variable]: { is_potential_client: boolean, reason: string, post_description: string, post_author: string }
+ *   _found_potential_client: boolean
+ */
+async function handleVlmAnalyzePostForOutreach(
+  params: Record<string, unknown>,
+  ctx:    SkillActionContext,
+): Promise<void> {
+  const targetVar   = (params.target_variable as string) || 'post_analysis';
+  const accountName = (params.account_name as string)    || '@incitographer';
+  const minAge      = (params.min_age as number)         || 20;
+  const maxAge      = (params.max_age as number)         || 35;
+
+  const port  = parseInt(process.env['PORT'] ?? '3000', 10);
+  const token = process.env['API_KEY'] || '';
+
+  const task = `Analizează această postare Instagram vizibilă pe ecran.
+
+Răspunde STRICT un singur obiect JSON, fără alt text:
+
+{
+  "is_potential_client": true/false,
+  "reason": "explicație scurtă",
+  "post_description": "descriere detaliată (80-100 cuvinte): culori dominante, stil/aesthetic, locație, outfit, vibe, elemente vizuale distinctive care ar putea inspira un comentariu autentic",
+  "post_author": "@username sau 'unknown'"
+}
+
+Criterii pentru is_potential_client = true:
+1. Postarea este făcută de o FEMEIE
+2. Vârsta estimată: ${minAge}-${maxAge} ani
+3. Se vede chipul sau silueta ei în poză
+4. Nu este o pagină de brand/magazin/companie
+5. Nu este ${accountName} (contul propriu)
+6. Conținutul sugerează că ar putea fi interesată de fotografie glamour/boudoir (lifestyle, fashion, beauty, selfie)
+
+Dacă postarea este un Reel/video, analizează thumbnail-ul vizibil.
+Dacă nu poți determina cu certitudine, pune is_potential_client: false.`;
+
+  // ── Ensure screen is ON before taking screenshot ──────────────────────────
+  // Check screen state first — only wake if actually off (avoids ~1s latency when already on).
+  try {
+    const stateResult = await ctx.dispatchAndWait('get_screen_state', {}, 3000);
+    const stateResultAny = stateResult as unknown as Record<string, unknown> | null | undefined;
+    const screenState = stateResultAny
+      ? (stateResultAny['output'] as Record<string, unknown> | undefined)?.['state']
+      : undefined;
+
+    if (screenState === 'off') {
+      info(ctx, 'vlm_analyze: screen off, waking...');
+      await ctx.dispatchAndWait('screen_wake', {}, 5000);
+      await new Promise(r => setTimeout(r, 500));
+    } else {
+      info(ctx, `vlm_analyze: screen already on (state=${screenState ?? 'unknown'}), skipping wake`);
+    }
+  } catch (wakeErr) {
+    warn(ctx, `vlm_analyze_post_for_outreach: screen state check/wake failed (non-fatal): ${(wakeErr as Error).message}`);
+  }
+
+  info(ctx, 'vlm_analyze_post_for_outreach: calling analyze-screen');
+
+  try {
+    const body = JSON.stringify({ deviceId: ctx.deviceId, task });
+
+    // Retry once if screenshot appears black (size < 10KB is a strong signal)
+    let response = await httpPost(`http://localhost:${port}/api/hydra/analyze-screen`, body, token);
+
+    // If we got a response but the screenshot might be black, retry after another wake
+    if (response.ok) {
+      const screenshotSize = (response.data as Record<string, unknown>)?.['screenshotSize'] as number | undefined;
+      const analysisRaw    = (response.data as Record<string, unknown>)?.['analysis'];
+      const analysisStr    = typeof analysisRaw === 'string' ? analysisRaw : JSON.stringify(analysisRaw ?? '');
+      const looksBlack     = screenshotSize !== undefined && screenshotSize < 10_000;
+      const noContent      = analysisStr.toLowerCase().includes('black') || analysisStr.toLowerCase().includes('dark screen') || analysisStr.toLowerCase().includes('negru');
+
+      if (looksBlack || noContent) {
+        warn(ctx, `vlm_analyze_post_for_outreach: screenshot appears black (size=${screenshotSize}), retrying after screen wake`);
+        try {
+          await ctx.dispatchAndWait('screen_wake', {}, 5000);
+          await ctx.sleep(800);
+        } catch { /* non-fatal */ }
+        response = await httpPost(`http://localhost:${port}/api/hydra/analyze-screen`, body, token);
+      }
+    }
+
+    // ── Remove duplicate response variable shadowing below ─────────────────
+    // (original code continues with `response` which is now potentially the retried one)
+
+    if (!response.ok) {
+      warn(ctx, `vlm_analyze_post_for_outreach: analyze-screen error: ${JSON.stringify(response.data).slice(0, 200)}`);
+      ctx.checkpoint.variables[targetVar] = { is_potential_client: false, reason: 'VLM error', post_description: '', post_author: '' };
+      ctx.checkpoint.variables['_found_potential_client'] = false;
+      return;
+    }
+
+    // Parse VLM response
+    let analysis = response.data?.analysis as Record<string, unknown> | null;
+    
+    // Handle raw string response
+    if (analysis && typeof analysis === 'object' && 'raw' in analysis) {
+      try {
+        const jsonMatch = (analysis.raw as string).match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          analysis = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+        }
+      } catch { /* ignore parse error */ }
+    }
+
+    const result = {
+      is_potential_client: Boolean(analysis?.['is_potential_client']),
+      reason: String(analysis?.['reason'] || ''),
+      post_description: String(analysis?.['post_description'] || ''),
+      post_author: String(analysis?.['post_author'] || 'unknown'),
+    };
+
+    // Skip own account
+    if (result.post_author.toLowerCase().includes(accountName.toLowerCase().replace('@', ''))) {
+      result.is_potential_client = false;
+      result.reason = 'Own account - skip';
+    }
+
+    // Detect if it's a Reel based on VLM response (used by workflow to pick correct selector)
+    const isReel = result.post_description.toLowerCase().includes('reel') ||
+                   result.reason.toLowerCase().includes('reel');
+    ctx.checkpoint.variables['_is_reel'] = isReel;
+
+    ctx.checkpoint.variables[targetVar] = result;
+    ctx.checkpoint.variables['_found_potential_client'] = result.is_potential_client;
+    ctx.checkpoint.variables['_post_description'] = result.post_description;
+    ctx.checkpoint.variables['_post_author'] = result.post_author;
+
+    info(ctx, `vlm_analyze_post_for_outreach: result=${result.is_potential_client}, author=${result.post_author}, is_reel=${isReel}`);
+
+  } catch (err) {
+    warn(ctx, `vlm_analyze_post_for_outreach: request failed: ${(err as Error).message}`);
+    ctx.checkpoint.variables[targetVar] = { is_potential_client: false, reason: 'Request failed', post_description: '', post_author: '' };
+    ctx.checkpoint.variables['_found_potential_client'] = false;
+  }
+
+  // Track VLM usage
+  const prev = (ctx.checkpoint.variables['vlm_calls_this_run'] as number) ?? 0;
+  ctx.checkpoint.variables['vlm_calls_this_run'] = prev + 1;
+}
+
+/**
+ * VLM_GENERATE_COMMENT
+ * 
+ * Uses VLM to generate a contextual, admiring comment based on the post description.
+ * 
+ * Params:
+ *   post_description_var: string — checkpoint variable with post description (default: "_post_description")
+ *   target_variable:      string — checkpoint key to store comment (default: "_generated_comment")
+ *   account_context:      string — context about the commenting account (default: "fotograf glamour")
+ *   max_chars:            number — maximum comment length (default: 150)
+ *   tone:                 string — comment tone (default: "admirativ, prietenos, natural")
+ * 
+ * Sets:
+ *   [target_variable]: string — the generated comment
+ */
+async function handleVlmGenerateComment(
+  params: Record<string, unknown>,
+  ctx:    SkillActionContext,
+): Promise<void> {
+  const descVar       = (params.post_description_var as string) || '_post_description';
+  const targetVar     = (params.target_variable as string)      || '_generated_comment';
+  const accountCtx    = (params.account_context as string)      || 'fotograf glamour';
+  const maxChars      = (params.max_chars as number)            || 150;
+  const tone          = (params.tone as string)                 || 'admirativ, prietenos, natural';
+
+  const postDesc = ctx.checkpoint.variables[descVar] as string;
+  if (!postDesc) {
+    warn(ctx, 'vlm_generate_comment: no post description available');
+    ctx.checkpoint.variables[targetVar] = '';
+    return;
+  }
+
+  const task = `Generează un comentariu scurt pentru această postare Instagram.
+
+Descrierea postării: "${postDesc}"
+
+Context: Comentariul este de la un cont de ${accountCtx} (@incitographer).
+
+REGULI STRICTE:
+1. Maxim ${maxChars} caractere
+2. Maxim 2 propoziții
+3. Ton: ${tone}
+4. NU menționa servicii foto sau colaborări
+5. NU folosi emoji exagerate (maxim 1-2 emoji subtile)
+6. NU folosi întrebări
+7. Sună natural, ca un compliment sincer
+8. Poate fi în română sau engleză, potrivit cu contextul postării
+
+Exemple bune:
+- "Ce culori superbe! 💫"
+- "Adorable vibes ✨"
+- "Locație perfectă pentru această poză!"
+- "This aesthetic is everything 🔥"
+
+Răspunde DOAR cu textul comentariului, fără ghilimele, fără explicații.`;
+
+  info(ctx, 'vlm_generate_comment: generating comment via OpenClaw CLI (no screenshot needed)');
+
+  try {
+    // Use OpenClaw CLI directly for text generation — no screenshot needed
+    const { spawnSync } = require('child_process');
+    const spawnResult = spawnSync(
+      'openclaw',
+      ['agent', '--agent', 'main', '--local', '--json', '-m', task],
+      {
+        encoding:  'utf8',
+        timeout:   30000,
+        maxBuffer: 5 * 1024 * 1024,
+        cwd:       '/data/.openclaw/workspace',
+      },
+    );
+
+    if (spawnResult.error) {
+      throw spawnResult.error;
+    }
+
+    // OpenClaw CLI writes JSON to stderr; check stdout first for forward-compat
+    const rawStdout = spawnResult.stdout || '';
+    const rawStderr = spawnResult.stderr || '';
+    let vlmResult   = '';
+
+    if (rawStdout.includes('"payloads"')) {
+      vlmResult = rawStdout;
+      info(ctx, 'vlm_generate_comment: JSON found in stdout');
+    } else if (rawStderr.includes('"payloads"')) {
+      const jsonStart = rawStderr.indexOf('{');
+      if (jsonStart !== -1) {
+        vlmResult = rawStderr.slice(jsonStart);
+        info(ctx, 'vlm_generate_comment: JSON found in stderr (expected openclaw CLI behavior)');
+      }
+    }
+
+    if (!vlmResult || vlmResult.trim() === '') {
+      warn(ctx, `vlm_generate_comment: OpenClaw returned empty response. stderr: ${rawStderr.slice(0, 300)}`);
+      ctx.checkpoint.variables[targetVar] = '';
+      return;
+    }
+
+    const parsed  = JSON.parse(vlmResult);
+    let   comment = (parsed?.payloads?.[0]?.text as string || '').trim();
+
+    // Clean up: remove quotes if wrapped
+    if ((comment.startsWith('"') && comment.endsWith('"')) ||
+        (comment.startsWith("'") && comment.endsWith("'"))) {
+      comment = comment.slice(1, -1);
+    }
+
+    // Truncate if too long
+    if (comment.length > maxChars) {
+      comment = comment.slice(0, maxChars - 3) + '...';
+    }
+
+    ctx.checkpoint.variables[targetVar] = comment;
+    if (comment) {
+      info(ctx, `vlm_generate_comment: generated "${comment.slice(0, 50)}..."`);
+    } else {
+      warn(ctx, 'vlm_generate_comment: parsed response but comment is empty');
+    }
+
+  } catch (err) {
+    warn(ctx, `vlm_generate_comment: request failed: ${(err as Error).message}`);
+    ctx.checkpoint.variables[targetVar] = '';
+  }
+
+  // Track VLM usage
+  const prev = (ctx.checkpoint.variables['vlm_calls_this_run'] as number) ?? 0;
+  ctx.checkpoint.variables['vlm_calls_this_run'] = prev + 1;
 }

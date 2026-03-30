@@ -14,7 +14,14 @@
       "params": {},
       "verification": "local_only",
       "retries": 2,
-      "timeoutMs": 15000
+      "timeoutMs": 15000,
+      "expectedScreen": "HOME_FEED",
+      "screenConfidenceThreshold": 0.70,
+      "screenMismatchPolicy": {
+        "maxRetries": 2,
+        "delayMs": 1000,
+        "action": "retry_step"
+      }
     },
     {
       "type": "wait",
@@ -28,7 +35,14 @@
       "action": "tap",
       "target": "video_tab",
       "verification": "local_with_screenshot",
-      "retries": 2
+      "retries": 2,
+      "expectedScreen": ["REELS_TAB", "REELS_FULLSCREEN"],
+      "screenConfidenceThreshold": 0.72,
+      "screenMismatchPolicy": {
+        "maxRetries": 2,
+        "delayMs": 1000,
+        "action": "retry_step"
+      }
     },
     {
       "type": "wait",
@@ -64,7 +78,14 @@
               "action": "tap",
               "target": "like_button",
               "verification": "local_with_screenshot",
-              "retries": 1
+              "retries": 1,
+              "expectedScreen": ["REELS_FULLSCREEN", "REELS_TAB"],
+              "screenConfidenceThreshold": 0.70,
+              "screenMismatchPolicy": {
+                "maxRetries": 1,
+                "delayMs": 500,
+                "action": "continue_with_warning"
+              }
             }
           ]
         },

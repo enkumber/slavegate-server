@@ -48,6 +48,47 @@ export interface ActionStep {
   retries?:  number;
   /** Timeout for this step in ms (overrides workflow default) */
   timeoutMs?: number;
+
+  // ─── Screen Verification (US-WORKFLOW-SCREEN-VERIFY) ────────────────────────
+  
+  /**
+   * Expected screen after action completes.
+   * If set, workflow executor verifies via Screen Detection Cascade.
+   * Supports single screen or array (for ambiguous transitions).
+   */
+  expectedScreen?: import('../screen-detection/types').ScreenId | import('../screen-detection/types').ScreenId[];
+  
+  /**
+   * Minimum confidence threshold for screen match (default: 0.75).
+   * Lower = more lenient, higher = stricter verification.
+   */
+  screenConfidenceThreshold?: number;
+  
+  /**
+   * Retry config for screen mismatch.
+   * Default: { maxRetries: 2, delayMs: 500, action: 'retry_step' }
+   */
+  screenMismatchPolicy?: ScreenMismatchPolicy;
+  
+  /**
+   * Internal: current retry count for screen verification.
+   * Set by executor during retry loop — do not set in templates.
+   * @internal
+   */
+  _screenRetryCount?: number;
+}
+
+/**
+ * Policy for handling screen mismatch after step execution.
+ * Story: US-WORKFLOW-SCREEN-VERIFY
+ */
+export interface ScreenMismatchPolicy {
+  /** How many times to retry the step on mismatch */
+  maxRetries: number;
+  /** Delay before retry in ms */
+  delayMs: number;
+  /** What to do on mismatch */
+  action: 'retry_step' | 'abort' | 'continue_with_warning';
 }
 
 // ─── Wait steps ───────────────────────────────────────────────────────────────

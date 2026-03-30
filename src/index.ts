@@ -27,6 +27,7 @@ import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.serv
 import browseAndEngageTemplate from "./modules/workflows/templates/browse_and_engage.json";
 import watchContentTemplate from "./modules/workflows/templates/watch_content.json";
 import smartUnfollowTemplate from "./modules/workflows/templates/smart_unfollow.json";
+import outreachCommentTemplate from "./modules/workflows/templates/outreach_comment.json";
 import type { WorkflowTemplate } from "./modules/workflows/types";
 
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
@@ -72,6 +73,7 @@ async function bootstrap(): Promise<void> {
   await workflowService.saveTemplate(browseAndEngageTemplate as WorkflowTemplate);
   await workflowService.saveTemplate(watchContentTemplate as WorkflowTemplate);
   await workflowService.saveTemplate(smartUnfollowTemplate as WorkflowTemplate);
+  await workflowService.saveTemplate(outreachCommentTemplate as WorkflowTemplate);
   console.log("[server] Workflow templates seeded.");
 
   // ─── Start workflow execution worker ─────────────────────────────────────
