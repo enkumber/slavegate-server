@@ -71,7 +71,7 @@ class AutomationController(private val service: AccessibilityService?) {
      * Falls back to ACTION_SET_TEXT if root is unavailable (logs warning).
      *
      * Timing:
-     *   - Inter-character delay: 40-90ms (fast typing speed)
+     *   - Inter-character delay: none (shell exec latency ~500ms is enough)
      *   - Inter-word pause:      100-250ms
      *   - Typo simulation:       5-10% chance per char (wrong key → pause → backspace → correct key)
      *   - Thinking pause:        ~4% chance, 300-800ms
@@ -113,12 +113,7 @@ class AutomationController(private val service: AccessibilityService?) {
 
                 // ── Type the correct character ────────────────────────────────
                 shellInputText(char.toString())
-                delay(Random.nextLong(40, 90))                  // inter-char delay
-
-                // ── Occasional thinking pause (~4%) ───────────────────────────
-                if (Random.nextFloat() < 0.04f) {
-                    delay(Random.nextLong(300, 800))
-                }
+                // No inter-char delay - shell exec latency is enough
             }
         }
 
