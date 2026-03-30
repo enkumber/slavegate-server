@@ -140,7 +140,7 @@ class JobExecutor(
         // Target ROI for L2
         val targetRoi = buildRoi(params)
 
-        val jobTimeoutMs = payload.optLong("timeoutMs", 30_000L).coerceIn(5_000L, 120_000L)
+        val jobTimeoutMs = payload.optLong("timeoutMs", 30_000L).coerceIn(5_000L, 600_000L) // 10 min max for type_text
         val (status, output, error) = try {
             withTimeoutOrNull(jobTimeoutMs) {
                 when (type) {
