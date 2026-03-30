@@ -11,8 +11,8 @@ android {
         applicationId = "com.phonenetwork"
         minSdk = 29          // Android 10 (OP5T fleet minimum)
         targetSdk = 30       // Android 11 — Scoped Storage + package visibility
-        versionCode = 42
-        versionName = "2.6.7"
+        versionCode = 43
+        versionName = "2.6.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
