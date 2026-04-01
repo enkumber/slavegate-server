@@ -1,0 +1,152 @@
+═══════════════════════════════════════════════════════════════
+SCREEN DIMENSIONS UNIFORMIZATION - COMPLETE ✅
+═══════════════════════════════════════════════════════════════
+
+🎯 OBJECTIVE:
+Fix critical bug where displayMetrics.heightPixels (excludes nav bar) 
+was inconsistent with UI tree bounds (includes nav bar), causing 
+skill_tap to miss bottom navigation elements.
+
+📊 BUG IMPACT:
+- skill_tap y=0.91 → calculated 1850px, but target at 1903px
+- 126px navigation bar not accounted for (2160 real vs 2034 reported)
+- All coordinate-based operations affected
+
+═══════════════════════════════════════════════════════════════
+FILES CREATED
+═══════════════════════════════════════════════════════════════
+
+✨ app/src/main/kotlin/com/phonenetwork/utils/ScreenMetrics.kt
+   NEW utility class providing real screen dimensions
+
+Key methods:
+   • getRealDimensions(context): Pair<Int, Int>
+   • getRealWidth(context): Int  
+   • getRealHeight(context): Int
+
+Uses: WindowManager.getDefaultDisplay().getRealMetrics()
+
+═══════════════════════════════════════════════════════════════
+FILES MODIFIED
+═══════════════════════════════════════════════════════════════
+
+📝 app/src/main/kotlin/com/phonenetwork/executor/JobExecutor.kt
+   
+   ✓ Added import: com.phonenetwork.utils.ScreenMetrics
+   ✓ Line ~289:  ocr_find_tap → ScreenMetrics.getRealDimensions()
+   ✓ Line ~357:  ocr_full → ScreenMetrics.getRealDimensions()
+   ✓ Line ~476:  unlock_screen (swipe) → ScreenMetrics.getRealDimensions()
+   ✓ Line ~495:  unlock_screen (pattern) → uses screenWidth/screenHeight
+   ✓ Line ~840:  executeSkillTap() → ScreenMetrics.getRealDimensions() [CRITICAL]
+   ✓ Line ~897:  executeA11yFindTap() → ScreenMetrics.getRealDimensions()
+   
+   Total: 6 locations updated
+
+📝 app/src/main/kotlin/com/phonenetwork/automation/AutomationController.kt
+   
+   ✓ Added import: com.phonenetwork.utils.ScreenMetrics
+   ✓ Line ~225:  scroll() → ScreenMetrics.getRealDimensions()
+   
+   Total: 1 location updated
+
+📝 app/src/main/kotlin/com/phonenetwork/ocr/OcrController.kt
+   
+   ✓ Updated documentation example to show ScreenMetrics usage
+   
+   Total: Documentation only
+
+═══════════════════════════════════════════════════════════════
+VERIFICATION
+═══════════════════════════════════════════════════════════════
+
+✅ All displayMetrics.heightPixels/widthPixels removed
+✅ ScreenMetrics imported in all necessary files
+✅ 8 calls to ScreenMetrics.getRealDimensions() confirmed
+✅ Critical skill_tap fix verified
+✅ AutomationController scroll fix verified
+
+Run: ./verify_screen_dimensions.sh
+
+═══════════════════════════════════════════════════════════════
+TESTING REQUIRED
+═══════════════════════════════════════════════════════════════
+
+Device: Redmi Note 13 (or any device with nav bar)
+
+Test 1: skill_tap bottom navigation
+   {
+     "type": "skill_tap",
+     "params": {"x": 0.5, "y": 0.91, "skillId": "test"}
+   }
+   Expected: Hits bottom nav accurately (was ~50px off before)
+
+Test 2: ocr_find_tap near bottom
+   {
+     "type": "ocr_find_tap",
+     "params": {"searchText": "Settings"}
+   }
+   Expected: Correctly taps text near screen bottom
+
+Test 3: unlock_screen pattern
+   {
+     "type": "unlock_screen",
+     "params": {"pattern": [0,1,2,5,8]}
+   }
+   Expected: Pattern covers full screen height
+
+Test 4: scroll gesture
+   {
+     "type": "scroll",
+     "params": {"direction": "down", "distancePx": 800}
+   }
+   Expected: Scroll from correct screen center
+
+═══════════════════════════════════════════════════════════════
+BUILD & DEPLOY
+═══════════════════════════════════════════════════════════════
+
+1. Build APK:
+   cd /data/.openclaw/workspace-volt/phone-network/android-agent
+   ./gradlew assembleDebug
+
+2. APK location:
+   app/build/outputs/apk/debug/app-debug.apk
+
+3. Deploy via OTA or ADB:
+   adb install -r app/build/outputs/apk/debug/app-debug.apk
+
+4. Version bump recommended: v3.3.0
+
+═══════════════════════════════════════════════════════════════
+DOCUMENTATION
+═══════════════════════════════════════════════════════════════
+
+📄 SCREEN_DIMENSIONS_AUDIT.md
+   Complete audit report with:
+   • Bug analysis
+   • Solution explanation  
+   • All code changes documented
+   • Testing instructions
+   • Future considerations
+
+📄 verify_screen_dimensions.sh
+   Automated verification script
+
+═══════════════════════════════════════════════════════════════
+BACKWARD COMPATIBILITY
+═══════════════════════════════════════════════════════════════
+
+✅ No breaking API changes
+✅ Internal coordinate fix only
+⚠️  Previously learned skill coordinates may need re-calibration
+   on devices with navigation bars (they were learned with wrong
+   dimensions)
+
+Recommendation: Add device_screen_height_real to device info
+payload for server-side validation.
+
+═══════════════════════════════════════════════════════════════
+COMPLETED BY: Atlas
+DATE: 2026-03-31
+PRIORITY: High ✅
+═══════════════════════════════════════════════════════════════

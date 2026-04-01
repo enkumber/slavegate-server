@@ -41,12 +41,13 @@ data class OcrFindResult(
  *
  * Usage:
  * ```kotlin
+ * val (screenWidth, screenHeight) = ScreenMetrics.getRealDimensions(context)
  * val result = ocr.findText(
  *     bitmap = capture.takeScreenshotBitmap(),
  *     searchText = "Follow",
  *     partialMatch = false,
- *     screenWidth = metrics.widthPixels,
- *     screenHeight = metrics.heightPixels
+ *     screenWidth = screenWidth,
+ *     screenHeight = screenHeight
  * )
  * if (result.found) {
  *     automation.tap(result.pixelX, result.pixelY)

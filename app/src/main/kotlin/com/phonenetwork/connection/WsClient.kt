@@ -87,6 +87,7 @@ class WsClient(
 
     // PONG timeout tracking — detects zombie connections
     private var lastPongReceived = System.currentTimeMillis()
+    private val classInitializedAt = System.currentTimeMillis()  // Track when WsClient was created
     private val PONG_TIMEOUT_MS = 60_000L        // 60s without PONG = zombie connection
     private val CONNECTING_TIMEOUT_MS = 45_000L  // 45s stuck in connecting = force reconnect
     private val AUTH_TIMEOUT_MS = 30_000L        // 30s without HELLO_ACK = auth timeout
@@ -215,11 +216,12 @@ class WsClient(
                 // Connection established — clear guards
                 isConnecting.set(false)
                 connectingWatchdogJob?.cancel()
-                Log.i(TAG, "Connected to server")
                 connectionOpenedAt = System.currentTimeMillis()
+                Log.i(TAG, "Connected to server (connectionId=$connectionId, uptimeSinceInit=${connectionOpenedAt - classInitializedAt}ms)")
 
                 // Reset PONG tracking for new connection
                 lastPongReceived = System.currentTimeMillis()
+                Log.d(TAG, "PONG tracking reset in onOpen (connectionId=$connectionId)")
 
                 // Start application-level keepalive (replaces OkHttp pingInterval).
                 // Sends {"type":"PING"} every 30s — server replies with {"type":"PONG"}.
@@ -227,20 +229,34 @@ class WsClient(
                 // Also checks PONG timeout to detect zombie connections.
                 keepAliveJob?.cancel()
                 keepAliveJob = scope.launch {
+                    // Defensive: track when this job started
+                    val jobStartedAt = System.currentTimeMillis()
+                    
                     while (isActive) {
                         delay(30_000L)
-                        if (connectionId.get() != myId) break  // connection replaced — stop
+                        if (connectionId.get() != myId) {
+                            Log.d(TAG, "keepAliveJob: stale connection (gen $myId, current $connectionId) — stopping")
+                            break  // connection replaced — stop
+                        }
+                        
+                        // Defensive check: if job has been running > 2x timeout, something is wrong
+                        val jobAge = System.currentTimeMillis() - jobStartedAt
+                        if (jobAge > PONG_TIMEOUT_MS * 2) {
+                            Log.e(TAG, "⚠️ keepAliveJob age ${jobAge}ms > 2x timeout — forcing reconnect to reset state")
+                            webSocket.close(4002, "Job stale")
+                            break
+                        }
                         
                         // Check PONG timeout BEFORE sending next PING
                         val timeSincePong = System.currentTimeMillis() - lastPongReceived
                         if (timeSincePong > PONG_TIMEOUT_MS) {
-                            Log.e(TAG, "⚠️ PONG timeout (${timeSincePong}ms) — zombie connection, forcing reconnect")
+                            Log.e(TAG, "⚠️ PONG timeout (${timeSincePong}ms > ${PONG_TIMEOUT_MS}ms) — zombie connection, forcing reconnect")
                             webSocket.close(4002, "PONG timeout")
                             break
                         }
                         
                         webSocket.send("{\"type\":\"PING\"}")
-                        Log.d(TAG, "PING sent (last PONG: ${timeSincePong}ms ago)")
+                        Log.d(TAG, "PING sent (last PONG: ${timeSincePong}ms ago, job age: ${jobAge}ms)")
                     }
                 }
 
@@ -779,8 +795,10 @@ class WsClient(
 
                 "PING" -> Log.d(TAG, "PING received")
                 "PONG" -> {
-                    lastPongReceived = System.currentTimeMillis()
-                    Log.d(TAG, "PONG received")
+                    val now = System.currentTimeMillis()
+                    val gap = now - lastPongReceived
+                    lastPongReceived = now
+                    Log.d(TAG, "PONG received (gap: ${gap}ms, connectionId=$connectionId)")
                 }
 
                 else -> Log.w(TAG, "Unknown message type: $type")

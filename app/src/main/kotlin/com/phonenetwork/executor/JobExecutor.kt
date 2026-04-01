@@ -12,6 +12,7 @@ import com.phonenetwork.ota.OtaInstaller
 import com.phonenetwork.verification.VerificationCascade
 import com.phonenetwork.verification.VerificationStrategy
 import com.phonenetwork.verification.L2PixelDiffVerifier
+import com.phonenetwork.utils.ScreenMetrics
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -285,10 +286,8 @@ class JobExecutor(
                 put("error", "screenshot_failed")
             }
 
-        // 2. Screen dimensions for coordinate normalization
-        val metrics      = context.resources.displayMetrics
-        val screenWidth  = metrics.widthPixels
-        val screenHeight = metrics.heightPixels
+        // 2. Screen dimensions for coordinate normalization (use REAL dimensions)
+        val (screenWidth, screenHeight) = ScreenMetrics.getRealDimensions(context)
 
         // 3. OCR
         val result = ocr.findText(
@@ -353,10 +352,8 @@ class JobExecutor(
                 put("error", "screenshot_failed")
             }
 
-        // 2. Screen dimensions for coordinate scaling
-        val metrics      = context.resources.displayMetrics
-        val screenWidth  = metrics.widthPixels
-        val screenHeight = metrics.heightPixels
+        // 2. Screen dimensions for coordinate scaling (use REAL dimensions)
+        val (screenWidth, screenHeight) = ScreenMetrics.getRealDimensions(context)
 
         // 3. Run full OCR
         return ocr.runFullOcr(bitmap, screenWidth, screenHeight)
@@ -472,11 +469,11 @@ class JobExecutor(
             return@withContext JSONObject().put("unlocked", true).put("note", "was_already_unlocked")
         }
 
-        // Swipe up to show PIN entry
-        val metrics = context.resources.displayMetrics
-        val centerX = metrics.widthPixels / 2
-        val startY = metrics.heightPixels * 3 / 4
-        val endY = metrics.heightPixels / 4
+        // Swipe up to show PIN entry (use REAL dimensions)
+        val (screenWidth, screenHeight) = ScreenMetrics.getRealDimensions(context)
+        val centerX = screenWidth / 2
+        val startY = screenHeight * 3 / 4
+        val endY = screenHeight / 4
         automation.swipe(centerX, startY, centerX, endY, 300L)
         delay(500L)
 
@@ -496,9 +493,9 @@ class JobExecutor(
             // 0 1 2
             // 3 4 5
             // 6 7 8
-            val patternGridSize = metrics.widthPixels / 3
-            val patternStartX = metrics.widthPixels / 6
-            val patternStartY = metrics.heightPixels / 2  // approximate pattern area
+            val patternGridSize = screenWidth / 3
+            val patternStartX = screenWidth / 6
+            val patternStartY = screenHeight / 2  // approximate pattern area
 
             fun pointToCoords(point: Int): Pair<Int, Int> {
                 val col = point % 3
@@ -835,10 +832,8 @@ class JobExecutor(
         val skillId = params.optString("skillId", "")
         val buttonId = params.optString("buttonId", "")
 
-        // Get screen dimensions
-        val displayMetrics = context.resources.displayMetrics
-        val screenWidth = displayMetrics.widthPixels
-        val screenHeight = displayMetrics.heightPixels
+        // Get screen dimensions (use REAL dimensions including nav bar)
+        val (screenWidth, screenHeight) = ScreenMetrics.getRealDimensions(context)
 
         // Convert normalized to pixel coords
         val pixelX = (normalizedX * screenWidth).toInt()
@@ -892,10 +887,8 @@ class JobExecutor(
         val rootNode = svc.rootInActiveWindow
             ?: throw IllegalStateException("No active window root")
 
-        // Get screen dimensions for normalization
-        val displayMetrics = context.resources.displayMetrics
-        val screenWidth = displayMetrics.widthPixels
-        val screenHeight = displayMetrics.heightPixels
+        // Get screen dimensions for normalization (use REAL dimensions including nav bar)
+        val (screenWidth, screenHeight) = ScreenMetrics.getRealDimensions(context)
 
         var foundNode: android.view.accessibility.AccessibilityNodeInfo? = null
         try {

@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
+import com.phonenetwork.utils.ScreenMetrics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -221,10 +222,10 @@ class AutomationController(private val service: AccessibilityService?) {
         Log.d(TAG, "scroll($direction, ${distancePx}px)")
         val svc = requireService()
 
-        // Screen center as scroll origin
-        val dm   = svc.resources.displayMetrics
-        val cx   = dm.widthPixels / 2
-        val cy   = dm.heightPixels / 2
+        // Screen center as scroll origin (use REAL dimensions including nav bar)
+        val (screenWidth, screenHeight) = ScreenMetrics.getRealDimensions(svc)
+        val cx   = screenWidth / 2
+        val cy   = screenHeight / 2
         val half = distancePx / 2
 
         // "scroll down" = content moves up = finger swipes UP (start low, end high)
