@@ -61,6 +61,7 @@ interface DeviceConnection {
   heartbeatInterval: "active" | "idle";
   msgCount: number;
   windowStart: number;
+  supersededAt?: number;  // Timestamp when this connection was replaced by a newer one
 }
 
 interface HelloPayload {
@@ -709,15 +710,17 @@ export class WsServer {
   private async checkHeartbeats(): Promise<void> {
     const now = Date.now();
     for (const [deviceId, conn] of this.connections) {
-      // FIX: eliminate connections that are no longer OPEN
-      if (conn.ws.readyState !== WebSocket.OPEN) {
-        console.warn(`[ws] Stale connection removed for ${conn.deviceId?.slice(0,8)} (readyState=${conn.ws.readyState})`);
+      const isSuperseded = !!(conn.supersededAt && (now - conn.supersededAt) > 5_000);
+      if (conn.ws.readyState !== WebSocket.OPEN || isSuperseded) {
+        console.warn(`[ws] ${isSuperseded ? 'Superseded' : 'Stale'} connection removed for ${conn.deviceId?.slice(0,8)} (readyState=${conn.ws.readyState})`);
         this.connections.delete(deviceId);
         this.visionRateLimit.delete(deviceId);
         devicesConnected?.set(this.connections.size);
-        deviceOfflineEvents?.labels(deviceId, conn.location ?? "unknown")?.inc();
-        await alerting.deviceOffline(deviceId, conn.location ?? "unknown");
-        await devicesService.markOffline(deviceId);
+        if (conn.deviceId) {
+          deviceOfflineEvents?.labels(conn.deviceId, conn.location ?? "unknown")?.inc();
+          await alerting.deviceOffline(conn.deviceId, conn.location ?? "unknown");
+          await devicesService.markOffline(conn.deviceId);
+        }
         continue;
       }
       // Heartbeat monitor normal
@@ -766,11 +769,11 @@ export class WsServer {
         ws.close(4003, "Already connected");
         return existing;
       }
-      console.warn(`[ws-debug] DUPLICATE: deviceId=${deviceId.slice(0,8)} — existing conn is ${age}ms old. Gracefully closing old connection.`);
-      // Use close() instead of terminate() — terminate() sends TCP RST which can
-      // disrupt the new connection on the same client (shared connection pool in OkHttp)
+      // Mark old connection as superseded so heartbeat monitor can clean it up
+      existing.supersededAt = Date.now();
       existing.ws.close(1000, "Replaced by newer connection");
-      this.connections.delete(deviceId);
+      // DON'T delete from map — heartbeat monitor will clean it up after 5s grace period
+      console.warn(`[ws-debug] DUPLICATE: deviceId=${deviceId.slice(0,8)} — existing conn is ${age}ms old. Marking superseded.`);
     }
 
     const conn: DeviceConnection = {
