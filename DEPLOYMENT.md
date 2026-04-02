@@ -116,3 +116,46 @@ The `--appendonly yes` flag enables AOF persistence.
 - **Task Runner** (`task-runner.service.ts`) polls PostgreSQL directly — does NOT require Redis.
 
 - If Redis is unavailable, workflows and job dispatch will fail, but the server will continue running.
+
+---
+
+## WS-Relay (WebSocket Relay pentru telefoane)
+
+Telefoanele se conectează la server prin WireGuard. Trebuie un relay care să expună portul 18791 de pe containerul OpenClaw pe host-ul Umbrel.
+
+### Setup ws-relay
+
+```bash
+# 1. Află IP-ul containerului OpenClaw
+docker inspect openclaw_gateway_1 --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+# SAU din interiorul containerului: hostname -I
+
+# 2. Pornește ws-relay cu IP-ul obținut (înlocuiește X.X.X.X)
+docker rm -f ws-relay
+docker run -d --name ws-relay --restart=always --network=host alpine/socat TCP-LISTEN:18791,fork,reuseaddr TCP:X.X.X.X:18791
+```
+
+**Exemplu concret:**
+```bash
+docker rm -f ws-relay
+docker run -d --name ws-relay --restart=always --network=host alpine/socat TCP-LISTEN:18791,fork,reuseaddr TCP:10.21.0.6:18791
+```
+
+### Verificare
+
+```bash
+# Trebuie să returneze 401 (nu 000)
+curl -s -o /dev/null -w "%{http_code}" http://192.168.50.57:18791/api/devices
+
+# Status relay
+docker ps | grep ws-relay
+docker logs ws-relay
+```
+
+### ⚠️ IMPORTANT
+
+**IP-ul containerului se schimbă la fiecare reboot Umbrel!** După reboot:
+1. Verifică noul IP al containerului OpenClaw
+2. Recrează ws-relay cu IP-ul nou
+
+**Documentație completă:** `scripts/WS-RELAY.md`

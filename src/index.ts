@@ -24,7 +24,6 @@ import { canaryService } from "./modules/canary/canary.service";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
-import browseAndEngageTemplate from "./modules/workflows/templates/browse_and_engage.json";
 import watchContentTemplate from "./modules/workflows/templates/watch_content.json";
 import smartUnfollowTemplate from "./modules/workflows/templates/smart_unfollow.json";
 import outreachCommentTemplate from "./modules/workflows/templates/outreach_comment.json";
@@ -70,7 +69,6 @@ async function bootstrap(): Promise<void> {
   // (authService.restoreRevocationSet removed — tokens eliminated in 005_imei_auth)
 
   // ─── Seed workflow templates (upsert — safe to run on every start) ───────
-  await workflowService.saveTemplate(browseAndEngageTemplate as WorkflowTemplate);
   await workflowService.saveTemplate(watchContentTemplate as WorkflowTemplate);
   await workflowService.saveTemplate(smartUnfollowTemplate as WorkflowTemplate);
   await workflowService.saveTemplate(outreachCommentTemplate as WorkflowTemplate);

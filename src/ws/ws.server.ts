@@ -282,6 +282,8 @@ export class WsServer {
         break;
 
       case "PING":
+        // DEBUG: Log PING for diagnosis (remove in production)
+        console.log(`[ws] PING from device=${state.conn?.deviceId?.slice(0,8) ?? 'unauth'} at=${Date.now()}`);
         ws.send(JSON.stringify({ type: "PONG" }));
         return;
 
@@ -707,6 +709,18 @@ export class WsServer {
   private async checkHeartbeats(): Promise<void> {
     const now = Date.now();
     for (const [deviceId, conn] of this.connections) {
+      // FIX: eliminate connections that are no longer OPEN
+      if (conn.ws.readyState !== WebSocket.OPEN) {
+        console.warn(`[ws] Stale connection removed for ${conn.deviceId?.slice(0,8)} (readyState=${conn.ws.readyState})`);
+        this.connections.delete(deviceId);
+        this.visionRateLimit.delete(deviceId);
+        devicesConnected?.set(this.connections.size);
+        deviceOfflineEvents?.labels(deviceId, conn.location ?? "unknown")?.inc();
+        await alerting.deviceOffline(deviceId, conn.location ?? "unknown");
+        await devicesService.markOffline(deviceId);
+        continue;
+      }
+      // Heartbeat monitor normal
       const maxSilence =
         conn.heartbeatInterval === "active"
           ? HEARTBEAT_ACTIVE_MS * OFFLINE_MULTIPLIER

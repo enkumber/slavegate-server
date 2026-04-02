@@ -575,6 +575,7 @@ export class AgentOrchestrator {
     twitter:   "com.twitter.android",
     pinterest: "com.pinterest",
     threads:   "com.instagram.barcelona",
+    reddit:    "com.reddit.frontpage",
   };
 
   /**
@@ -617,6 +618,230 @@ export class AgentOrchestrator {
   };
 
   /**
+   * Helper: wait for a dispatched job to complete (polling).
+   * Similar to waitForJobResult in hydra-routes.ts
+   */
+  private async waitForJobResult(
+    jobId: string,
+    timeoutMs: number
+  ): Promise<{ status: string; output?: unknown; error?: string } | null> {
+    const { dispatcherService } = await import("../dispatcher/dispatcher.service");
+    const startTime = Date.now();
+    const pollInterval = 100;
+
+    while (Date.now() - startTime < timeoutMs) {
+      try {
+        const job = await dispatcherService.getJob(jobId);
+        if (job && job.status !== "pending" && job.status !== "running") {
+          return {
+            status: job.status,
+            output: job.output,
+            error: job.error,
+          };
+        }
+      } catch {
+        // Continue polling
+      }
+      await sleep(pollInterval);
+    }
+
+    console.warn(`[orchestrator] waitForJobResult: timeout for job ${jobId.slice(0, 8)}`);
+    return null;
+  }
+
+  /**
+   * Reddit-specific preamble using UI tree detection (no VLM needed).
+   * 
+   * Logic:
+   * 1. Check if already on home_feed (resourceId contains home_screen_surface or feed_lazy_column)
+   * 2. If yes → DONE
+   * 3. If no, check if bottom_nav visible → a11y_find_tap "Home"
+   * 4. If no bottom_nav → Back key, then repeat
+   * 
+   * Max 5 iterations to prevent infinite loops.
+   */
+  private async ensureRedditHomeScreen(deviceId: string): Promise<boolean> {
+    const MAX_ITERATIONS = 5;
+    const { dispatcherService } = await import("../dispatcher/dispatcher.service");
+    
+    for (let i = 0; i < MAX_ITERATIONS; i++) {
+      console.log(`[orchestrator] Reddit preamble: iteration ${i + 1}/${MAX_ITERATIONS}`);
+      
+      // Dispatch UI tree dump job
+      const treeDispatch = await dispatcherService.dispatch({
+        deviceId,
+        type: "ui_tree_dump",
+        params: {},
+        timeoutMs: 10_000,
+      });
+      
+      // Send job to device via WebSocket
+      const sent = wsServer.sendJob(deviceId, {
+        jobId: treeDispatch.jobId,
+        type: "ui_tree_dump" as import("../../../../shared/protocol/messages").JobType,
+        params: {} as Record<string, unknown>,
+        timeoutMs: 10_000,
+      });
+      
+      if (!sent) {
+        console.warn(`[orchestrator] Reddit preamble: sendJob failed, sending back`);
+        await this.sendBackKey(deviceId);
+        await sleep(500);
+        continue;
+      }
+      
+      // Wait for job result
+      const treeJob = await this.waitForJobResult(treeDispatch.jobId, treeDispatch.timeoutMs);
+      
+      if (!treeJob || treeJob.status !== "completed" || !treeJob.output) {
+        console.warn(`[orchestrator] Reddit preamble: UI tree failed (status=${treeJob?.status}), sending back`);
+        await this.sendBackKey(deviceId);
+        await sleep(500);
+        continue;
+      }
+      
+      // Parse UI tree
+      let tree: Record<string, unknown>;
+      try {
+        const output = treeJob.output as Record<string, string>;
+        tree = JSON.parse(output.uiTree);
+      } catch {
+        console.warn(`[orchestrator] Reddit preamble: UI tree parse failed`);
+        await this.sendBackKey(deviceId);
+        await sleep(500);
+        continue;
+      }
+      
+      // Check indicators in tree
+      const indicators = this.findRedditIndicators(tree);
+      console.log(`[orchestrator] Reddit preamble: onHome=${indicators.onHome}, hasBottomNav=${indicators.hasBottomNav}, hasHomeButton=${indicators.hasHomeButton}`);
+      
+      // Step 1: Already on home?
+      if (indicators.onHome) {
+        console.log(`[orchestrator] Reddit preamble: already on home_feed ✓`);
+        return true;
+      }
+      
+      // Step 2: Has bottom_nav? Tap Home
+      if (indicators.hasBottomNav && indicators.hasHomeButton) {
+        console.log(`[orchestrator] Reddit preamble: bottom_nav visible, tapping Home`);
+        
+        // Dispatch a11y_find_tap job
+        const tapDispatch = await dispatcherService.dispatch({
+          deviceId,
+          type: "a11y_find_tap",
+          params: { text: "Home" },
+          timeoutMs: 5_000,
+        });
+        
+        wsServer.sendJob(deviceId, {
+          jobId: tapDispatch.jobId,
+          type: "a11y_find_tap" as import("../../../../shared/protocol/messages").JobType,
+          params: { text: "Home" } as Record<string, unknown>,
+          timeoutMs: 5_000,
+        });
+        
+        await this.waitForJobResult(tapDispatch.jobId, tapDispatch.timeoutMs);
+        await sleep(800);
+        
+        // Verify we're now on home
+        const verifyDispatch = await dispatcherService.dispatch({
+          deviceId,
+          type: "ui_tree_dump",
+          params: {},
+          timeoutMs: 5_000,
+        });
+        
+        wsServer.sendJob(deviceId, {
+          jobId: verifyDispatch.jobId,
+          type: "ui_tree_dump" as import("../../../../shared/protocol/messages").JobType,
+          params: {} as Record<string, unknown>,
+          timeoutMs: 5_000,
+        });
+        
+        const verifyJob = await this.waitForJobResult(verifyDispatch.jobId, verifyDispatch.timeoutMs);
+        
+        if (verifyJob?.status === "completed" && verifyJob?.output) {
+          try {
+            const verifyOutput = verifyJob.output as Record<string, string>;
+            const verifyTree = JSON.parse(verifyOutput.uiTree);
+            const verifyIndicators = this.findRedditIndicators(verifyTree);
+            if (verifyIndicators.onHome) {
+              console.log(`[orchestrator] Reddit preamble: now on home_feed ✓`);
+              return true;
+            }
+          } catch { /* continue loop */ }
+        }
+        continue;
+      }
+      
+      // Step 3: No bottom_nav, send Back
+      console.log(`[orchestrator] Reddit preamble: no bottom_nav, sending back`);
+      await this.sendBackKey(deviceId);
+      await sleep(500);
+    }
+    
+    console.warn(`[orchestrator] Reddit preamble: max iterations reached, assuming failure`);
+    return false;
+  }
+  
+  /**
+   * Helper: Find Reddit screen indicators in UI tree
+   */
+  private findRedditIndicators(node: Record<string, unknown>): { onHome: boolean; hasBottomNav: boolean; hasHomeButton: boolean } {
+    const result = { onHome: false, hasBottomNav: false, hasHomeButton: false };
+    
+    const traverse = (n: Record<string, unknown>) => {
+      const resourceId = (n.resourceId as string) || "";
+      const text = (n.text as string) || "";
+      const bounds = n.bounds as { top?: number } | undefined;
+      
+      // Home screen indicators
+      if (resourceId.includes("home_screen_surface") || 
+          resourceId.includes("feed_lazy_column") || 
+          resourceId === "home_revamp_m1_app_bar") {
+        result.onHome = true;
+      }
+      
+      // Bottom nav
+      if (resourceId === "bottom_nav" || resourceId.includes("bottom_nav")) {
+        result.hasBottomNav = true;
+      }
+      
+      // Home button (text "Home" in bottom area, y > 1800 for 2160 height screens)
+      if (text === "Home" && bounds?.top && bounds.top > 1800) {
+        result.hasHomeButton = true;
+      }
+      
+      // Recurse children
+      const children = n.children as Record<string, unknown>[] | undefined;
+      if (children) {
+        for (const child of children) {
+          traverse(child);
+        }
+      }
+    };
+    
+    traverse(node);
+    return result;
+  }
+  
+  /**
+   * Helper: Send BACK key to device
+   */
+  private async sendBackKey(deviceId: string): Promise<void> {
+    const backId = uuidv4();
+    const backP = awaitAction(backId, 3_000);
+    wsServer.sendJob(deviceId, {
+      jobId: backId,
+      type: "press_key" as import("../../../../shared/protocol/messages").JobType,
+      params: { key: "back" } as Record<string, unknown>,
+      timeoutMs: 3_000,
+    });
+    await backP;
+  }
+
+  /**
    * Ensure the target app is on its home/feed screen before plan execution.
    *
    * Strategy (3 phases):
@@ -654,6 +879,26 @@ export class AgentOrchestrator {
     await unlockP;
     console.log(`[orchestrator] Preamble P0: wake+unlock done`);
     await sleep(500);
+
+    // Reddit-specific preamble: uses UI tree detection (no VLM, fast)
+    if (platform === "reddit") {
+      console.log(`[orchestrator] Preamble: Reddit platform — using UI tree preamble`);
+      
+      // Open Reddit app first
+      const openId = uuidv4();
+      const openP = awaitAction(openId, 10_000);
+      wsServer.sendJob(deviceId, {
+        jobId: openId,
+        type: "open_app" as import("../../../../shared/protocol/messages").JobType,
+        params: { packageName: pkg } as Record<string, unknown>,
+        timeoutMs: 10_000,
+      });
+      await openP;
+      await sleep(2000); // Wait for app to load
+      
+      // Run Reddit-specific preamble
+      return this.ensureRedditHomeScreen(deviceId);
+    }
 
     // Phase 1: force-stop + fresh launch via open_app_fresh
     // This guarantees main activity (feed), not last-viewed (Reels/Stories)

@@ -1269,6 +1269,391 @@ router.delete("/checkpoint/clear", async (req: Request, res: Response) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// RUSTDESK ENABLE — Start screen sharing service and extract ID + password
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const RUSTDESK_PACKAGE = "com.carriez.flutter_hbb";
+
+/**
+ * Helper: Find element by contentDescription OR text in UI tree
+ * Returns bounds center coordinates if found
+ */
+function findElementInUiTree(
+  node: UIElement,
+  options: { contentDescription?: string; text?: string; textContains?: string }
+): { x: number; y: number } | null {
+  if (!node) return null;
+  
+  function search(n: UIElement): UIElement | null {
+    if (!n) return null;
+    
+    const nodeDesc = n.desc || "";
+    const nodeText = n.text || "";
+    
+    // Match by contentDescription (exact)
+    if (options.contentDescription && nodeDesc === options.contentDescription) {
+      return n;
+    }
+    
+    // Match by text (exact)
+    if (options.text && nodeText === options.text) {
+      return n;
+    }
+    
+    // Match by text contains
+    if (options.textContains && nodeText.includes(options.textContains)) {
+      return n;
+    }
+    
+    // Recurse into children
+    if (n.children && Array.isArray(n.children)) {
+      for (const child of n.children) {
+        const found = search(child);
+        if (found) return found;
+      }
+    }
+    
+    return null;
+  }
+  
+  const found = search(node);
+  if (found?.bounds) {
+    const centerX = (found.bounds.l + found.bounds.r) / 2;
+    const centerY = (found.bounds.t + found.bounds.b) / 2;
+    return { x: centerX, y: centerY };
+  }
+  return null;
+}
+
+/**
+ * Helper: Check if RustDesk service is already running
+ * Returns { running: boolean, id?: string, password?: string }
+ * 
+ * UI tree text format when running:
+ *   'Your device\nID\n1 134 065 636\nOne-time password\nrq5apy\n...'
+ *   contentDescription/text contains "Stop service"
+ */
+function checkRustDeskStatus(uiTree: UIElement): { 
+  running: boolean; 
+  id?: string; 
+  password?: string;
+} {
+  let hasStopService = false;
+  let id: string | undefined;
+  let password: string | undefined;
+  
+  function traverse(n: UIElement) {
+    if (!n) return;
+    
+    const text = n.text || "";
+    const desc = n.contentDescription || n.desc || "";
+    
+    // Check for Stop service button (means service is running)
+    // contentDescription or text contains "Stop service"
+    if (desc.includes("Stop service") || text.includes("Stop service")) {
+      hasStopService = true;
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Parse ID and password from multiline text block
+    // Format: 'Your device\nID\n1 134 065 636\nOne-time password\nrq5apy\n...'
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    // Try to extract ID from multiline text containing "\nID\n"
+    // ID format: X XXX XXX XXX (1 digit, space, 3 digits, space, 3 digits, space, 3 digits)
+    if (text.includes("\\nID\\n") || text.includes("\nID\n")) {
+      // Parse ID: look for pattern after "ID\n" - format: "X XXX XXX XXX"
+      const idMatch = text.match(/ID\\n(\d\s\d{3}\s\d{3}\s\d{3})/) || 
+                      text.match(/ID\n(\d\s\d{3}\s\d{3}\s\d{3})/);
+      if (idMatch) {
+        // Remove all spaces: "1 134 065 636" -> "1134065636"
+        id = idMatch[1].replace(/\s/g, "");
+      }
+      
+      // Parse password: look for pattern after "One-time password\n" - 6 alphanumeric chars
+      const pwMatch = text.match(/One-time password\\n([a-z0-9]{6})/i) ||
+                      text.match(/One-time password\n([a-z0-9]{6})/i);
+      if (pwMatch) {
+        password = pwMatch[1];
+      }
+    }
+    
+    // Fallback: Also check for direct matches (in case UI tree has separate nodes)
+    // ID: pattern X XXX XXX XXX directly in a node's text
+    if (!id) {
+      const directIdMatch = text.match(/^(\d)\s(\d{3})\s(\d{3})\s(\d{3})$/);
+      if (directIdMatch) {
+        id = directIdMatch[1] + directIdMatch[2] + directIdMatch[3] + directIdMatch[4];
+      }
+    }
+    
+    // Password: 6-char alphanumeric that's not pure numeric and not a known UI label
+    if (!password && text.match(/^[a-z0-9]{6}$/i) && !text.match(/^\d+$/)) {
+      password = text;
+    }
+    
+    // Recurse into children
+    if (n.children && Array.isArray(n.children)) {
+      for (const child of n.children) {
+        traverse(child);
+      }
+    }
+  }
+  
+  traverse(uiTree);
+  
+  // Running = has Stop service button (Ready is optional, Stop service is definitive)
+  return {
+    running: hasStopService,
+    id,
+    password,
+  };
+}
+
+router.post("/rustdesk/enable", async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  
+  try {
+    const { deviceId } = req.body;
+    
+    if (!deviceId) {
+      return res.status(400).json({ ok: false, error: "Missing deviceId" });
+    }
+    
+    if (!wsServer.isDeviceConnected(deviceId)) {
+      return res.status(503).json({ ok: false, error: "Device not connected" });
+    }
+    
+    console.log(`[rustdesk] Starting enable flow for device ${deviceId.slice(0, 8)}...`);
+    
+    // Helper to dispatch job and wait
+    async function dispatchAndWait(
+      type: string,
+      params: Record<string, unknown>,
+      timeoutMs: number
+    ): Promise<any> {
+      const job = await dispatcherService.dispatch({
+        deviceId,
+        type: type as any,
+        params,
+        timeoutMs,
+      });
+      wsServer.sendJob(deviceId, {
+        jobId: job.jobId,
+        type: type as any,
+        params,
+        timeoutMs,
+      });
+      return await waitForJobResult(job.jobId, timeoutMs);
+    }
+    
+    // Helper to get UI tree
+    async function getUiTree(): Promise<UIElement | null> {
+      const result = await dispatchAndWait("ui_tree_dump", {}, 10000);
+      if (result?.output?.uiTree) {
+        return typeof result.output.uiTree === "string"
+          ? JSON.parse(result.output.uiTree)
+          : result.output.uiTree;
+      }
+      return null;
+    }
+    
+    // Helper to tap by finding element
+    async function tapElement(
+      options: { contentDescription?: string; text?: string },
+      screenWidth = 1080,
+      screenHeight = 2160
+    ): Promise<boolean> {
+      const uiTree = await getUiTree();
+      if (!uiTree) return false;
+      
+      const coords = findElementInUiTree(uiTree, options);
+      if (!coords) return false;
+      
+      const result = await dispatchAndWait("tap", { x: coords.x, y: coords.y }, 5000);
+      return result?.status === "completed";
+    }
+    
+    // Helper to tap with a11y_find_tap (more reliable for accessibility-labeled elements)
+    async function a11yFindTap(
+      searchText: string,
+      useContentDescription = true,
+      partialMatch = false
+    ): Promise<boolean> {
+      const params: Record<string, unknown> = useContentDescription
+        ? { contentDescription: searchText, partialMatch }
+        : { text: searchText, partialMatch };
+      
+      const result = await dispatchAndWait("a11y_find_tap", params, 8000);
+      return result?.status === "completed" && result?.output?.found !== false;
+    }
+    
+    // ─── PREAMBLE: Wake + Unlock if on lockscreen ──────────────────────────────
+    console.log(`[rustdesk] Preamble: Checking screen state...`);
+    const preambleTree = await getUiTree();
+    const isLockscreen = preambleTree?.packageName === "com.android.systemui";
+    
+    if (isLockscreen) {
+      console.log(`[rustdesk] Preamble: Device on lockscreen — waking + unlocking`);
+      
+      // screen_wake
+      await dispatchAndWait("screen_wake", {}, 5000);
+      
+      // unlock
+      await dispatchAndWait("unlock", {}, 5000);
+      
+      // wait for unlock animation
+      await new Promise(r => setTimeout(r, 500));
+      console.log(`[rustdesk] Preamble: Wake + unlock complete`);
+    } else {
+      console.log(`[rustdesk] Preamble: Screen already active (pkg=${preambleTree?.packageName || "unknown"})`);
+    }
+    
+    // ─── STEP 1: Open RustDesk app (skip if already in foreground) ─────────────
+    console.log(`[rustdesk] Step 1: Checking if RustDesk already open...`);
+    
+    // Check if RustDesk is already the foreground app
+    const preOpenTree = await getUiTree();
+    const rustdeskAlreadyOpen = preOpenTree?.packageName === RUSTDESK_PACKAGE;
+    
+    if (rustdeskAlreadyOpen) {
+      console.log(`[rustdesk] Step 1: RustDesk already in foreground, skipping open_app`);
+    } else {
+      console.log(`[rustdesk] Step 1: Opening app ${RUSTDESK_PACKAGE}`);
+      const openResult = await dispatchAndWait("open_app", { packageName: RUSTDESK_PACKAGE }, 8000);
+      if (openResult?.status !== "completed") {
+        return res.status(500).json({ ok: false, error: "Failed to open RustDesk app" });
+      }
+      
+      // Wait for app to load
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    
+    // ─── STEP 2: Navigate to "Share screen" tab ────────────────────────────────
+    // Note: contentDescription is "Share screen\nTab 3 of 4", so we use partialMatch
+    console.log(`[rustdesk] Step 2: Navigating to Share screen tab`);
+    const shareScreenTapped = await a11yFindTap("Share screen", true, true);
+    if (!shareScreenTapped) {
+      console.warn(`[rustdesk] Could not find Share screen tab via a11y, trying fixed coords (Tab 3: 675, 1960)`);
+      // Fallback: tap fixed coordinates for Tab 3 on 1080x2160 screen
+      await dispatchAndWait("tap", { x: 675, y: 1960 }, 5000);
+    }
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // ─── STEP 3: Check current status ──────────────────────────────────────────
+    console.log(`[rustdesk] Step 3: Checking current status`);
+    let uiTree = await getUiTree();
+    if (!uiTree) {
+      return res.status(500).json({ ok: false, error: "Failed to get UI tree" });
+    }
+    
+    let status = checkRustDeskStatus(uiTree);
+    
+    // If already running, return immediately
+    if (status.running) {
+      console.log(`[rustdesk] Service already running`);
+      return res.json({
+        ok: true,
+        data: {
+          status: "running",
+        },
+        latency_ms: Date.now() - startTime,
+      });
+    }
+    
+    // ─── STEP 4: Start service ─────────────────────────────────────────────────
+    console.log(`[rustdesk] Step 4: Starting service`);
+    const startTapped = await a11yFindTap("Start service");
+    if (!startTapped) {
+      // Try text-based tap as fallback
+      await tapElement({ text: "Start service" });
+    }
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // ─── STEP 5: Handle "I Agree" warning dialog ───────────────────────────────
+    console.log(`[rustdesk] Step 5: Handling warning dialog (I Agree)`);
+    const agreeTapped = await a11yFindTap("I Agree");
+    if (agreeTapped) {
+      console.log(`[rustdesk] Tapped I Agree`);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    
+    // ─── STEP 6: Handle screen capture permission dialog (OK) ──────────────────
+    console.log(`[rustdesk] Step 6: Handling screen capture dialog (OK)`);
+    const okTapped = await a11yFindTap("OK");
+    if (okTapped) {
+      console.log(`[rustdesk] Tapped OK`);
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    
+    // ─── STEP 7: Handle system dialog (START NOW) ──────────────────────────────
+    // This dialog comes from com.android.systemui, uses text= not contentDescription
+    console.log(`[rustdesk] Step 7: Handling system dialog (START NOW)`);
+    const startNowTapped = await a11yFindTap("START NOW", false); // text-based
+    if (!startNowTapped) {
+      // Also try "Start now" (different capitalization)
+      await a11yFindTap("Start now", false);
+    }
+    await new Promise(r => setTimeout(r, 3000));
+    
+    // ─── STEP 8: Verify service started and extract ID/password ────────────────
+    console.log(`[rustdesk] Step 8: Verifying service status and extracting credentials`);
+    
+    // Retry a few times as UI may take time to update
+    for (let attempt = 0; attempt < 3; attempt++) {
+      uiTree = await getUiTree();
+      if (uiTree) {
+        status = checkRustDeskStatus(uiTree);
+        if (status.running) {
+          break;
+        }
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    
+    if (!status.running) {
+      // Try to click "Start service" one more time if we didn't catch the dialogs
+      console.log(`[rustdesk] Service not running, retrying Start service tap`);
+      await a11yFindTap("Start service");
+      await new Promise(r => setTimeout(r, 3000));
+      
+      // Final check
+      uiTree = await getUiTree();
+      if (uiTree) {
+        status = checkRustDeskStatus(uiTree);
+      }
+    }
+    
+    // Success = "Stop service" found in UI (means RustDesk is active)
+    if (status.running) {
+      console.log(`[rustdesk] Success! Service is running (Stop service found in UI)`);
+      return res.json({
+        ok: true,
+        data: {
+          status: "running",
+        },
+        latency_ms: Date.now() - startTime,
+      });
+    }
+    
+    // Service not running
+    return res.status(500).json({
+      ok: false,
+      error: "Service did not start - 'Stop service' button not found in UI",
+      latency_ms: Date.now() - startTime,
+    });
+    
+  } catch (err) {
+    console.error("[rustdesk] Enable error:", err);
+    return res.status(500).json({ 
+      ok: false, 
+      error: (err as Error).message,
+      latency_ms: Date.now() - startTime,
+    });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 

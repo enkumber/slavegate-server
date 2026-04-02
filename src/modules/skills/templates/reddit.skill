@@ -591,6 +591,87 @@ gestures:
     hint: "Pull to refresh"
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PREAMBLES — Secvențe standard pentru stare cunoscută
+# ═══════════════════════════════════════════════════════════════════════════════
+
+preambles:
+  home:
+    description: "Aduce Reddit în home feed din orice ecran"
+    
+    # LOGICĂ SMART:
+    # 1. Verifică dacă suntem DEJA pe home_feed → DONE
+    # 2. Verifică dacă bottom_nav e vizibil → tap Home → DONE
+    # 3. Dacă nu → Back și repeat
+    
+    # DETECTARE:
+    # - home_feed: resourceId conține "home_screen_surface" sau "feed_lazy_column"
+    # - bottom_nav: resourceId = "bottom_nav" sau text = "Home" în zona de jos
+    
+    steps:
+      - action: ensure_app
+        package: com.reddit.frontpage
+        wait_ms: 2000
+        
+      - action: loop
+        max_iterations: 5
+        steps:
+          # Step 1: UI dump pentru a vedea unde suntem
+          - action: ui_tree_dump
+          
+          # Step 2: Verifică dacă suntem deja pe home
+          - action: check_screen
+            indicators:
+              - resourceId_contains: "home_screen_surface"
+              - resourceId_contains: "feed_lazy_column"
+              - resourceId: "home_revamp_m1_app_bar"
+            on_match: break  # Suntem pe home, ieșim
+            
+          # Step 3: Verifică dacă bottom_nav e vizibil
+          - action: check_element
+            indicators:
+              - resourceId: "bottom_nav"
+              - text: "Home"
+            on_match: tap_home  # Avem nav bar, putem da tap pe Home
+            on_no_match: go_back  # Nu avem nav bar, dăm back
+            
+          # Step 3a: Tap pe Home (dacă on_match: tap_home)
+          - action: a11y_find_tap
+            text: "Home"
+            wait_ms: 500
+            label: tap_home
+            goto: verify
+            
+          # Step 3b: Back (dacă on_no_match: go_back)
+          - action: key
+            keycode: BACK
+            label: go_back
+            wait_ms: 500
+            
+      # Final: Verificare că am ajuns
+      - action: verify_screen
+        label: verify
+        expected: home_feed
+        indicators:
+          - resourceId_contains: "home_screen_surface"
+          - resourceId_contains: "feed_lazy_column"
+        on_fail: abort
+        
+    on_success: ready
+    on_fail: abort
+    
+    notes: |
+      LOGICA SMART:
+      1. Dacă deja pe home → DONE (nu facem nimic)
+      2. Dacă bottom_nav vizibil → tap Home → DONE (mai rapid decât back)
+      3. Dacă nu → Back repetat până apare nav sau home
+      
+      AVANTAJE:
+      - Nu dăm back inutil dacă suntem pe home
+      - Tap Home e mai precis decât back repetat
+      - Max 5 iterații previne loop infinit
+      - Funcționează din orice ecran
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # TIMING & SAFETY
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -601,8 +682,4 @@ timing:
   between_posts_delay_ms: 2000
   rate_limit_backoff_minutes: 10
 
-safety:
-  max_upvotes_per_hour: 30
-  max_comments_per_hour: 10
-  require_scroll_variation: true
-  human_like_delays: true
+

@@ -17,6 +17,7 @@ import { getDb } from "../../db/client";
 import { resolvePrompt, type RequestType } from "./templates/prompt-templates";
 import { AnthropicVisionProvider } from "./providers/anthropic.provider";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.provider";
+import { MiniMaxVisionProvider }    from "./providers/minimax.provider";
 import type { VisionProvider, VisionResult, VerifyResult } from "./vision-provider.interface";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ export interface VerifyResponse {
 // ─── Vision config row ────────────────────────────────────────────────────────
 
 interface VisionConfig {
-  provider:     "anthropic" | "openai_compatible";
+  provider:     "anthropic" | "openai_compatible" | "minimax";
   model:        string;
   endpoint:     string | null;
   apiKeyRef:    string;   // Vault reference or direct env var name
@@ -182,6 +183,16 @@ export class VisionService {
           maxTokens:   config.maxTokens,
           temperature: config.temperature,
           timeoutMs:   config.timeoutMs,
+        });
+        break;
+      case "minimax":
+        provider = new MiniMaxVisionProvider({
+          apiKey:     apiKey,
+          model:      config.model,
+          endpoint:   config.endpoint ?? "https://api.minimax.io/anthropic/v1",
+          maxTokens:  config.maxTokens,
+          temperature: config.temperature,
+          timeoutMs:  config.timeoutMs,
         });
         break;
       default:

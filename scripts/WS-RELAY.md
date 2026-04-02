@@ -35,13 +35,32 @@ sudo docker rm -f ws-relay && sudo bash scripts/ws-relay.sh
 
 ## Fallback: IP dinamic (Option A)
 
-Dacă network sharing nu e posibil:
+Dacă network sharing nu e posibil sau DNS-ul Docker nu funcționează:
 
+### Comandă manuală (recomandată pentru debugging)
+
+```bash
+# 1. Află IP-ul containerului OpenClaw
+docker inspect openclaw_gateway_1 --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+# SAU din interiorul containerului: hostname -I
+
+# 2. Pornește ws-relay cu IP-ul obținut (înlocuiește X.X.X.X)
+docker rm -f ws-relay
+docker run -d --name ws-relay --restart=always --network=host alpine/socat TCP-LISTEN:18791,fork,reuseaddr TCP:X.X.X.X:18791
+```
+
+**Exemplu concret:**
+```bash
+docker rm -f ws-relay
+docker run -d --name ws-relay --restart=always --network=host alpine/socat TCP-LISTEN:18791,fork,reuseaddr TCP:10.21.0.6:18791
+```
+
+### Sau folosește scriptul:
 ```bash
 sudo bash scripts/ws-relay.sh --ip
 ```
 
-**Atenție:** dacă containerul `openclaw_gateway_1` repornește cu IP nou, trebuie re-rulat scriptul.
+**⚠️ IMPORTANT:** IP-ul containerului se schimbă la fiecare reboot! Trebuie verificat și actualizat de fiecare dată.
 
 ---
 
