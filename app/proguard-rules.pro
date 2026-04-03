@@ -23,3 +23,7 @@
 -keepclassmembers class * {
     @org.json.JSONObject *;
 }
+
+# Rust Nostr SDK native libs
+-keep class rust.nostr.** { *; }
+-keepclassmembers class rust.nostr.** { *; }

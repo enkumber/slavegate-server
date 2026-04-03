@@ -106,6 +106,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-service:2.6.2")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
 
+    // ─── Nostr SDK (Rust bindings) ────────────────────────────────────────────
+    implementation("org.rust-nostr:nostr-sdk:0.44.2")
+
     // ─── Testing ──────────────────────────────────────────────────────────────
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
