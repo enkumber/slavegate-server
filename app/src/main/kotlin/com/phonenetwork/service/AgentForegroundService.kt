@@ -6,29 +6,29 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.net.VpnService
 import android.os.IBinder
 import android.provider.Settings
 import android.util.Log
 import com.phonenetwork.accessibility.AgentAccessibilityService
 import com.phonenetwork.anti_detection.DnsBackgroundService
 import com.phonenetwork.automation.AutomationController
-import com.phonenetwork.auth.TokenStore
 import com.phonenetwork.capture.CaptureController
-import com.phonenetwork.connection.NetworkLockManager
 import com.phonenetwork.connection.WifiWatchdog
-import com.phonenetwork.connection.WsClient
 import com.phonenetwork.executor.JobExecutor
 import com.phonenetwork.health.HealthMonitor
+import com.phonenetwork.nostr.DefaultNostrMessageHandler
+import com.phonenetwork.nostr.EnrollmentStore
+import com.phonenetwork.nostr.NostrClient
+import com.phonenetwork.nostr.NostrEventKinds
+import com.phonenetwork.nostr.NostrMessageHandler
 import com.phonenetwork.ota.OtaInstaller
-import com.phonenetwork.wireguard.WireGuardManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONObject
+import rust.nostr.sdk.Event
 
 /**
  * AgentForegroundService — sticky foreground service, owns all agent components.
@@ -37,9 +37,9 @@ import kotlinx.coroutines.launch
  * components are singletons within service lifetime.
  *
  * Lifecycle:
- *   onCreate()        → create NotificationChannel, NetworkLockManager
- *   onStartCommand()  → startForeground, acquire locks, init components, connect WS
- *   onDestroy()       → disconnect WS, stop DNS, release locks, cancel scope
+ *   onCreate()        → create NotificationChannel
+ *   onStartCommand()  → startForeground, init components, connect Nostr
+ *   onDestroy()       → disconnect Nostr, stop DNS, cancel scope
  *
  * Connectivity state is reflected in the notification text.
  *
@@ -56,7 +56,6 @@ class AgentForegroundService : Service() {
         const val CHANNEL_NAME    = "Phone Network Agent"
         private const val TAG     = "PhoneNet/FgService"
 
-        /** Singleton ref — used by WsClient to update notification text */
         @Volatile var instance: AgentForegroundService? = null
 
         fun start(context: Context) {
@@ -82,14 +81,12 @@ class AgentForegroundService : Service() {
     // ─── Component lifetime tied to service ───────────────────────────────────
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private lateinit var networkLocks:  NetworkLockManager
-    private lateinit var tokenStore:    TokenStore
     private lateinit var captureCtrl:   CaptureController
     private lateinit var healthMonitor: HealthMonitor
     private lateinit var otaInstaller:  OtaInstaller
     private lateinit var automation:    AutomationController
     private lateinit var jobExecutor:   JobExecutor
-    private lateinit var wsClient:      WsClient
+    private lateinit var nostrClient:   NostrClient
     private lateinit var wifiWatchdog:  WifiWatchdog
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -98,7 +95,6 @@ class AgentForegroundService : Service() {
         super.onCreate()
         instance = this
         Log.i(TAG, "Service created")
-        networkLocks = NetworkLockManager(applicationContext)
         createNotificationChannel()
     }
 
@@ -108,19 +104,22 @@ class AgentForegroundService : Service() {
         // Must call startForeground() within 5s — do it immediately
         startForeground(NOTIFICATION_ID, buildNotification("Connecting…"))
 
-        // Acquire WiFi + CPU locks
-        networkLocks.acquire()
-
-        // Build dependency graph — manual DI, no framework needed
+        // Build dependency graph — manual DI
         initComponents()
 
-        // Start DNS background traffic diversification (A4)
+        // Start DNS background traffic diversification
         DnsBackgroundService.start(serviceScope)
 
         // Start WiFi watchdog — monitors and recovers stuck WiFi connections
         wifiWatchdog = WifiWatchdog(applicationContext, serviceScope) { report ->
-            if (::wsClient.isInitialized) {
-                wsClient.sendHealthReport(report)
+            if (::nostrClient.isInitialized) {
+                serviceScope.launch {
+                    try {
+                        nostrClient.sendHeartbeat(report)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to send WiFi health report: ${e.message}")
+                    }
+                }
             }
         }
         wifiWatchdog.start()
@@ -131,12 +130,18 @@ class AgentForegroundService : Service() {
         // Wire A11y if it already connected before this service started (race condition fix)
         pendingA11y?.let { onAccessibilityServiceConnected(it) }
 
-        // Start WireGuard tunnel (GoBackend) before WebSocket connection
+        // Check enrollment — fail gracefully if not enrolled
+        val enrollment = EnrollmentStore.getEnrollment(applicationContext)
+        if (enrollment == null) {
+            Log.e(TAG, "Device not enrolled — scan QR code first")
+            updateNotification("Not enrolled — scan QR code")
+            // Still start service (will retry on reconnect / re-enrollment)
+        }
+
+        // Connect to Nostr relays
         serviceScope.launch {
-            startWireGuard()
-            // Connect WebSocket after WireGuard is up (or failed — still connect to relay)
-            wsClient.connect()
-            Log.i(TAG, "WsClient started → ${getServerUrl()}")
+            nostrClient.connect()
+            Log.i(TAG, "NostrClient started")
         }
 
         return START_STICKY  // Android restarts service after OOM kill
@@ -146,12 +151,15 @@ class AgentForegroundService : Service() {
         Log.i(TAG, "Service stopping")
         instance = null
 
-        if (::wsClient.isInitialized)      wsClient.disconnect()
+        if (::nostrClient.isInitialized) {
+            serviceScope.launch {
+                try { nostrClient.disconnect() } catch (e: Exception) {
+                    Log.w(TAG, "Disconnect error: ${e.message}")
+                }
+            }
+        }
         if (::wifiWatchdog.isInitialized)  wifiWatchdog.stop()
-        // Stop WireGuard tunnel (GoBackend)
-        WireGuardManager.stopTunnel()
         DnsBackgroundService.stop()
-        if (::networkLocks.isInitialized)  networkLocks.release()
         serviceScope.cancel()
 
         super.onDestroy()
@@ -162,7 +170,6 @@ class AgentForegroundService : Service() {
     // ─── Dependency construction ──────────────────────────────────────────────
 
     private fun enableAccessibilityServiceViaRoot() {
-        // Use build variant-aware component name (debug vs release package suffix)
         val component = "$packageName/${AgentAccessibilityService::class.java.name}"
         try {
             val current = Settings.Secure.getString(
@@ -173,7 +180,6 @@ class AgentForegroundService : Service() {
                 return
             }
             val newList = if (current.isEmpty()) component else "$current:$component"
-            // Double-quote the value to handle colons safely in shell
             val proc = Runtime.getRuntime().exec(arrayOf(
                 "su", "-c",
                 "settings put secure enabled_accessibility_services \"$newList\" " +
@@ -192,9 +198,8 @@ class AgentForegroundService : Service() {
 
     private fun initComponents() {
         val ctx = applicationContext
+        val enrollment = EnrollmentStore.getEnrollment(ctx)
 
-        // TokenStore kept for deviceId persistence compatibility (other components may use it)
-        tokenStore    = TokenStore(ctx)
         captureCtrl   = CaptureController()
         healthMonitor = HealthMonitor(ctx)
         otaInstaller  = OtaInstaller(ctx)
@@ -210,25 +215,85 @@ class AgentForegroundService : Service() {
             otaInstaller = otaInstaller,
         )
 
-        wsClient = WsClient(
-            relayHost     = null,  // set relay.host in config to override WireGuardManager URL
-            relayPort     = null,  // set relay.port in config to override WireGuardManager URL
-            executor      = jobExecutor,
-            healthMonitor = healthMonitor,
-            scope         = serviceScope,
-            onRevoked     = {
-                Log.w(TAG, "Device revoked — stopping service")
-                updateNotification("Blocked — contact admin")
+        // Build NostrClient with enrollment data (or fallback empty values if not enrolled yet)
+        val relayUrls   = enrollment?.relayUrls ?: emptyList()
+        val serverPubkey = enrollment?.serverPubkey ?: ""
+        val deviceId    = enrollment?.deviceId ?: ""
+
+        nostrClient = NostrClient(
+            context      = ctx,
+            relayUrls    = relayUrls,
+            serverPubkey = serverPubkey,
+            deviceId     = deviceId,
+            scope        = serviceScope
+        )
+
+        // Wire message handler: routes incoming Nostr events to service components
+        nostrClient.messageHandler = object : DefaultNostrMessageHandler() {
+
+            override suspend fun onJobDispatch(payload: JSONObject, rawEvent: Event) {
+                Log.i(TAG, "JOB_DISPATCH received: ${payload.optString("jobId", "?").take(8)}")
+                jobExecutor.execute(payload) { result ->
+                    serviceScope.launch {
+                        try {
+                            nostrClient.sendJobResult(
+                                jobId   = result.getString("jobId"),
+                                result  = result,
+                                success = result.optString("status") == "completed"
+                            )
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to send JOB_RESULT: ${e.message}")
+                        }
+                    }
+                }
+            }
+
+            override suspend fun onKillSwitch(payload: JSONObject, rawEvent: Event) {
+                val reason = payload.optString("reason", "unspecified")
+                Log.w(TAG, "KILL_SWITCH received: $reason — stopping service")
+                updateNotification("Kill switch activated")
+                jobExecutor.cancelCurrentJob(reason)
                 stopSelf()
-            },
-            onConnected   = { deviceId ->
-                Log.i(TAG, "Authenticated. deviceId=$deviceId")
-                // Notify WiFi watchdog — sends accumulated event history from offline period
+            }
+
+            override suspend fun onOta(payload: JSONObject, rawEvent: Event) {
+                val version = payload.optString("version", "?")
+                val apkUrl  = payload.optString("apkUrl", "")
+                Log.i(TAG, "OTA received: version=$version")
+                try {
+                    otaInstaller.downloadVerifyInstall(
+                        apkUrl        = apkUrl,
+                        sha256        = payload.getString("apkSha256"),
+                        signature     = payload.getString("apkSignature"),
+                        versionCode   = payload.getInt("versionCode"),
+                        forceDowngrade = payload.optBoolean("forceDowngrade", false)
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "OTA install failed: ${e.message}")
+                }
+            }
+
+            override suspend fun onDeviceAck(payload: JSONObject, rawEvent: Event) {
+                Log.i(TAG, "DEVICE_ACK — device approved by server")
+                updateNotification("Connected ✓")
+                // Notify WiFi watchdog about reconnection
                 if (::wifiWatchdog.isInitialized) {
                     wifiWatchdog.onReconnected()
                 }
             }
-        )
+
+            override suspend fun onDeviceReject(payload: JSONObject, rawEvent: Event) {
+                val reason = payload.optString("reason", "unspecified")
+                Log.w(TAG, "DEVICE_REJECT: $reason — stopping service")
+                updateNotification("Blocked — contact admin")
+                stopSelf()
+            }
+        }
+
+        // Start periodic heartbeat (30s interval)
+        nostrClient.startHeartbeat {
+            healthMonitor.getHealth().toJson()
+        }
     }
 
     // ─── AccessibilityService integration ────────────────────────────────────
@@ -275,68 +340,4 @@ class AgentForegroundService : Service() {
             .setOngoing(true)
             .setShowWhen(false)
             .build()
-
-    // ─── WireGuard ──────────────────────────────────────────────────────────────
-
-    private suspend fun startWireGuard() {
-        updateNotification("Starting WireGuard tunnel…")
-
-        // Initialize GoBackend if not yet done
-        WireGuardManager.initBackend(this)
-
-        // Check if we have saved config from QR scan
-        if (!WireGuardManager.hasConfig(this)) {
-            Log.e(TAG, "No WireGuard config — need QR scan first")
-            updateNotification("No WG config — scan QR in app")
-            return
-        }
-
-        // Check if already active
-        if (WireGuardManager.isActive()) {
-            Log.i(TAG, "WireGuard tunnel already active")
-            updateNotification("WG connected")
-            return
-        }
-
-        // Check VPN permission — auto-grant via root if needed
-        val vpnIntent = VpnService.prepare(this)
-        if (vpnIntent != null) {
-            Log.w(TAG, "VPN permission not granted — attempting auto-grant via root")
-            try {
-                val proc = Runtime.getRuntime().exec(arrayOf(
-                    "su", "-c",
-                    "appops set $packageName ACTIVATE_VPN allow"
-                ))
-                val exitCode = proc.waitFor()
-                proc.inputStream.close()
-                proc.errorStream.close()
-                proc.destroy()
-                if (exitCode == 0) {
-                    Log.i(TAG, "VPN permission auto-granted via root ✓")
-                } else {
-                    Log.e(TAG, "VPN auto-grant failed (exit=$exitCode)")
-                    updateNotification("VPN permission denied")
-                    return
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "VPN auto-grant failed: ${e.message}")
-                updateNotification("VPN permission denied")
-                return
-            }
-        }
-
-        // Start tunnel using GoBackend
-        val success = WireGuardManager.startTunnel(this)
-        if (success) {
-            Log.i(TAG, "WireGuard tunnel started successfully")
-            updateNotification("WG connected")
-        } else {
-            Log.e(TAG, "WireGuard tunnel failed to start")
-            updateNotification("WG failed — check config")
-        }
-    }
-
-    // ─── Config ───────────────────────────────────────────────────────────────
-
-    private fun getServerUrl(): String = WireGuardManager.getServerUrl()
 }
