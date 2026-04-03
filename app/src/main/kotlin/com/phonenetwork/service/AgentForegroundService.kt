@@ -263,7 +263,7 @@ class AgentForegroundService : Service() {
                 try {
                     otaInstaller.downloadVerifyInstall(
                         apkUrl        = apkUrl,
-                        sha256        = payload.getString("apkSha256"),
+                        expectedSha256 = payload.getString("apkSha256"),
                         signature     = payload.getString("apkSignature"),
                         versionCode   = payload.getInt("versionCode"),
                         forceDowngrade = payload.optBoolean("forceDowngrade", false)
