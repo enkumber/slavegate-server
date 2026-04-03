@@ -25,7 +25,7 @@ import {
 import type { OcrFindTapParams } from "../../../shared/protocol/messages";
 import { skillDbService } from "../modules/skills/skill-db.service";
 import { checkpointService } from "../modules/checkpoints/checkpoint.service";
-import { wsServer } from "../ws/ws.server";
+import { getNostrAdapter } from "../nostr/adapter";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 
 const router = Router();
@@ -118,7 +118,7 @@ async function performVerification(
       params: {},
       timeoutMs: 10000,
     });
-    wsServer.sendJob(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: verifyScreenshot.jobId,
       type: "screenshot_for_vlm",
       params: {},
@@ -164,7 +164,7 @@ async function executeTapAtCoords(
       params: { x: pixelX, y: pixelY },
       timeoutMs: 8000,
     });
-    wsServer.sendJob(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: tapJob.jobId,
       type: "tap",
       params: { x: pixelX, y: pixelY },
@@ -210,7 +210,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
     }
 
     // Check device connected
-    if (!wsServer.isDeviceConnected(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -277,7 +277,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             params: { x: pixelX, y: pixelY },
             timeoutMs: 5000,
           });
-          wsServer.sendJob(deviceId, {
+          await getNostrAdapter()?.sendJob(deviceId, {
             jobId: tapJob.jobId,
             type: "tap",
             params: { x: pixelX, y: pixelY },
@@ -327,7 +327,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        wsServer.sendJob(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: uiJob.jobId,
           type: "ui_tree_dump",
           params: {},
@@ -395,7 +395,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: { searchText: parsedTarget.value, partialMatch: true } as unknown as OcrFindTapParams,
           timeoutMs: 10000,
         });
-        wsServer.sendJob(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: ocrJob.jobId,
           type: "ocr_find_tap",
           params: { searchText: parsedTarget.value, partialMatch: true } as unknown as OcrFindTapParams,
@@ -449,7 +449,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        wsServer.sendJob(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: screenshotJob.jobId,
           type: "screenshot_for_vlm",
           params: {},
@@ -565,7 +565,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
         params: {},
         timeoutMs: 10000,
       });
-      wsServer.sendJob(deviceId, {
+      await getNostrAdapter()?.sendJob(deviceId, {
         jobId: preCheckJob.jobId,
         type: "ui_tree_dump",
         params: {},
@@ -618,8 +618,8 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        // IMPORTANT: Send job to device via WebSocket (dispatch only creates DB record)
-        wsServer.sendJob(devId, {
+        // IMPORTANT: Send job to device via Nostr (dispatch only creates DB record)
+        await getNostrAdapter()?.sendJob(devId, {
           jobId: job.jobId,
           type: "ui_tree_dump",
           params: {},
@@ -636,7 +636,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: { searchText, partialMatch: false } as unknown as OcrFindTapParams,
           timeoutMs: 8000,
         });
-        wsServer.sendJob(devId, {
+        await getNostrAdapter()?.sendJob(devId, {
           jobId: ocrJob.jobId,
           type: "ocr_find_tap",
           params: { searchText, partialMatch: false } as unknown as OcrFindTapParams,
@@ -659,7 +659,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 10000,
         });
-        wsServer.sendJob(devId, {
+        await getNostrAdapter()?.sendJob(devId, {
           jobId: screenshotResult.jobId,
           type: "screenshot_for_vlm",
           params: {},
@@ -702,7 +702,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             params: { x: pixelX, y: pixelY },
             timeoutMs: 8000,
           });
-          wsServer.sendJob(devId, {
+          await getNostrAdapter()?.sendJob(devId, {
             jobId: job.jobId,
             type: "tap",
             params: { x: pixelX, y: pixelY },
@@ -739,7 +739,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 10000,
         });
-        wsServer.sendJob(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: uiJob.jobId,
           type: "ui_tree_dump",
           params: {},
@@ -775,7 +775,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
                   params: { key: "back" },
                   timeoutMs: 3000,
                 });
-                wsServer.sendJob(deviceId, {
+                await getNostrAdapter()?.sendJob(deviceId, {
                   jobId: backJob.jobId,
                   type: "press_key",
                   params: { key: "back" },
@@ -826,7 +826,7 @@ router.post("/verify-tap", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId, platform, or expectedScreen" });
     }
 
-    if (!wsServer.isDeviceConnected(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -840,7 +840,7 @@ router.post("/verify-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        wsServer.sendJob(devId, {
+        await getNostrAdapter()?.sendJob(devId, {
           jobId: job.jobId,
           type: "ui_tree_dump",
           params: {},
@@ -856,7 +856,7 @@ router.post("/verify-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 10000,
         });
-        wsServer.sendJob(devId, {
+        await getNostrAdapter()?.sendJob(devId, {
           jobId: screenshotResult.jobId,
           type: "screenshot_for_vlm",
           params: {},
@@ -895,7 +895,7 @@ router.post("/screenshot-to-file", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId" });
     }
 
-    if (!wsServer.isDeviceConnected(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -909,7 +909,7 @@ router.post("/screenshot-to-file", async (req: Request, res: Response) => {
       params: {},
       timeoutMs: 30000,
     });
-    wsServer.sendJob(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: screenshotJob.jobId,
       type: "screenshot_for_vlm",
       params: {},
@@ -955,7 +955,7 @@ router.post("/analyze-screen", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId or task" });
     }
 
-    if (!wsServer.isDeviceConnected(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -966,7 +966,7 @@ router.post("/analyze-screen", async (req: Request, res: Response) => {
       params: {},
       timeoutMs: 30000,
     });
-    wsServer.sendJob(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: screenshotJob.jobId,
       type: "screenshot_for_vlm",
       params: {},
@@ -1111,7 +1111,7 @@ router.post("/vlm/analyze", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId or requestType" });
     }
 
-    if (!wsServer.isDeviceConnected(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -1156,7 +1156,7 @@ router.post("/vlm/evaluate-profile", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId" });
     }
 
-    if (!wsServer.isDeviceConnected(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -1201,7 +1201,7 @@ router.post("/vlm/detect-block", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId" });
     }
 
-    if (!wsServer.isDeviceConnected(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -1420,7 +1420,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId" });
     }
     
-    if (!wsServer.isDeviceConnected(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
     
@@ -1438,7 +1438,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
         params,
         timeoutMs,
       });
-      wsServer.sendJob(deviceId, {
+      await getNostrAdapter()?.sendJob(deviceId, {
         jobId: job.jobId,
         type: type as any,
         params,
