@@ -14,6 +14,7 @@ RUN npm ci
 
 # Copy source code
 COPY src ./src
+COPY shared ./shared
 
 # Build TypeScript → dist/
 RUN npm run build
