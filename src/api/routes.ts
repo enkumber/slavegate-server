@@ -13,7 +13,7 @@ import crypto from "crypto";
 import { devicesService } from "../modules/devices/devices.service";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { authService } from "../modules/auth/auth.service";
-import { wsServer } from "../ws/ws.server";
+import { getNostrAdapter } from "../nostr/adapter";
 import { workflowService } from "../modules/workflows/workflow.service";
 import { startWorkflow } from "../modules/workflows/workflow.executor";
 import { hbeService } from "../modules/hbe/hbe.service";
@@ -196,7 +196,9 @@ router.get("/devices/:id", async (req, res) => {
 });
 
 router.get("/devices/:id/connected", (req, res) => {
-  res.json({ ok: true, data: { connected: wsServer.isDeviceConnected(req.params.id) } });
+  const adapter = getNostrAdapter();
+  const connected = adapter?.isDeviceOnline(req.params.id) ?? false;
+  res.json({ ok: true, data: { connected } });
 });
 
 router.post("/devices/:id/approve", requireAuth, async (req, res) => {
@@ -214,7 +216,7 @@ router.post("/devices/:id/block", requireAuth, async (req, res) => {
   if (!device) return res.status(404).json({ ok: false, error: "Not found" });
   // Set status=revoked — next HELLO will receive HELLO_REJECT[BLOCKED]
   await authService.revokeDevice(req.params.id);
-  getWsServer()?.sendKillSwitch(req.params.id, reason);
+  getNostrAdapter()?.sendKillSwitch(req.params.id, reason);
   console.log(`[admin] Device ${req.params.id} blocked (revoked): ${reason}`);
   res.json({ ok: true, data: { blocked: true } });
 });
@@ -233,7 +235,7 @@ router.post("/devices/:id/revoke", async (req, res) => {
   await authService.revokeDevice(req.params.id);
 
   // Notify device immediately if connected (KILL_SWITCH)
-  wsServer.sendRevoked(req.params.id);
+  getNostrAdapter()?.sendRevoked(req.params.id);
 
   res.json({ ok: true, data: { revoked: true } });
 });
@@ -241,7 +243,7 @@ router.post("/devices/:id/revoke", async (req, res) => {
 router.delete("/devices/:id", async (req, res) => {
   // Revoke first (sets status='revoked'), then hard-delete
   await authService.revokeDevice(req.params.id);
-  wsServer.sendRevoked(req.params.id);
+  getNostrAdapter()?.sendRevoked(req.params.id);
 
   const deleted = await devicesService.deleteDevice(req.params.id);
   if (!deleted) return res.status(404).json({ ok: false, error: "Not found" });
@@ -285,19 +287,19 @@ router.post("/jobs", async (req, res) => {
     });
   }
   
-  if (!wsServer.isDeviceConnected(body.deviceId)) {
+  const adapter = getNostrAdapter();
+  if (!adapter?.isDeviceOnline(body.deviceId)) {
     return res.status(409).json({ ok: false, error: "Device is not connected" });
   }
   try {
     const { jobId, timeoutMs } = await dispatcherService.dispatch(body);
-    const sent = wsServer.sendJob(body.deviceId, {
+    await adapter.sendJob(body.deviceId, {
       jobId,
       type: body.type,
       params: body.params,
       timeoutMs, // Use calculated timeout from dispatcher
       requiresRoot: body.confirmRoot,
     });
-    if (!sent) return res.status(409).json({ ok: false, error: "Failed to send job to device" });
     // Audit log INSERT is done by dispatcherService.dispatch() — do NOT insert here.
     // Double INSERT was a bug: dispatcher writes the row; ws.server.handleJobResult() UPDATEs it.
 
@@ -601,12 +603,12 @@ router.post("/kill-switch", requireAuth, async (req, res) => {
 
   await persistKillSwitch(activate, String(initiatedBy), scope, reason, deviceId);
 
-  const wsServer = getWsServer?.();
+  const adapter = getNostrAdapter();
   if (activate) {
     const reason_ = reason || "Kill switch activated";
     if (scope === "device" && deviceId) {
       // Per-device kill switch: WS command only, no fleet DB cancel
-      wsServer?.sendKillSwitch(deviceId, reason_);
+      adapter?.sendKillSwitch(deviceId, reason_);
       console.warn(`[kill-switch] 🛑 DEVICE ${deviceId} by ${initiatedBy}`);
     } else {
       // Fleet-wide: cancel DB + WS all devices
@@ -615,7 +617,7 @@ router.post("/kill-switch", requireAuth, async (req, res) => {
         "UPDATE workflows SET status = 'failed', error = $1 WHERE status IN ('running', 'queued')",
         [reason_]
       );
-      wsServer?.sendKillSwitch("ALL", reason_);
+      adapter?.sendKillSwitchAll(reason_);
       await alerting.killSwitch(String(initiatedBy));
       console.error(`[kill-switch] 🛑 FLEET by ${initiatedBy}: ${reason_}`);
     }
@@ -625,7 +627,7 @@ router.post("/kill-switch", requireAuth, async (req, res) => {
   res.json({ ok: true, data: { killSwitchActive: activate, scope, deviceId } });
 });
 
-// Lazy getter for WsServer — avoids circular dep at module load time
+// Legacy WsServer ref — kept for backward compat, will be removed in final cleanup
 let _wsServerRef: import("../ws/ws.server").WsServer | null = null;
 function getWsServer() { return _wsServerRef; }
 export function setWsServerRef(srv: import("../ws/ws.server").WsServer) { _wsServerRef = srv; }
@@ -759,13 +761,13 @@ router.post("/ota/push", requireAuth, async (req, res) => {
     mandatory,
   };
 
-  // Get wsServer from module ref
-  const wsServer = getWsServer();
-  if (!wsServer) {
-    return res.status(500).json({ ok: false, error: "WebSocket server not available" });
+  // Use nostrAdapter for OTA broadcast
+  const adapter = getNostrAdapter();
+  if (!adapter) {
+    return res.status(500).json({ ok: false, error: "Transport not initialized" });
   }
 
-  const sentTo = wsServer.broadcastOta(payload, deviceIds);
+  const sentTo = await adapter.broadcastOta(payload, deviceIds);
 
   res.json({
     ok: true,
@@ -776,28 +778,7 @@ router.post("/ota/push", requireAuth, async (req, res) => {
   });
 });
 
-// ─── WireGuard Config Push (remote, via WebSocket) ────────────────────────────
-
-router.post("/devices/:id/wg-config", requireAuth, async (req, res) => {
-  const { id } = req.params;
-  const { config } = req.body as { config: string };
-
-  if (!config || !config.includes("[Interface]") || !config.includes("[Peer]")) {
-    return res.status(400).json({ ok: false, error: "Invalid WireGuard config" });
-  }
-
-  const wsServer = getWsServer();
-  if (!wsServer) {
-    return res.status(500).json({ ok: false, error: "WebSocket server not available" });
-  }
-
-  const sent = wsServer.sendWgConfig(id, config);
-  if (!sent) {
-    return res.status(404).json({ ok: false, error: "Device not connected" });
-  }
-
-  res.json({ ok: true, data: { deviceId: id, message: "WG config pushed" } });
-});
+// NOTE: WireGuard Config Push endpoint REMOVED — WireGuard replaced by Nostr transport
 
 // ─── WireGuard Provisioning ───────────────────────────────────────────────────
 
@@ -1191,7 +1172,8 @@ router.post("/orchestrator/execute", requireAuth, async (req, res) => {
     return res.status(400).json({ ok: false, error: "task and deviceId required" });
   }
 
-  if (!wsServer.isDeviceConnected(deviceId)) {
+  const adapter = getNostrAdapter();
+  if (!adapter?.isDeviceOnline(deviceId)) {
     return res.status(409).json({ ok: false, error: "Device is not connected" });
   }
 
@@ -1346,22 +1328,14 @@ router.patch("/tasks/:id", requireAuth, async (req, res) => {
 // ─── Debug: WebSocket connections ─────────────────────────────────────────────
 
 router.get("/debug/connections", requireAuth, (_req, res) => {
-  const wsServer = getWsServer();
-  if (!wsServer) {
-    return res.json({ ok: false, error: "WS server not available" });
+  const adapter = getNostrAdapter();
+  if (!adapter) {
+    return res.json({ ok: false, error: "Transport not available" });
   }
-  const connections = (wsServer as any).connections as Map<string, { 
-    imei: string; 
-    connectedAt: number; 
-    lastMessageAt: number; 
-    ws: { readyState: number } 
-  }>;
-  const list = Array.from(connections.entries()).map(([id, conn]) => ({
+  const onlineDevices = adapter.getOnlineDeviceIds();
+  const list = onlineDevices.map((id) => ({
     deviceId: id.slice(0, 8),
-    imei: conn.imei?.slice(0, 6) + "...",
-    connectedAt: new Date(conn.connectedAt).toISOString(),
-    lastMessageAt: new Date(conn.lastMessageAt).toISOString(),
-    wsState: conn.ws.readyState,  // 0=CONNECTING, 1=OPEN, 2=CLOSING, 3=CLOSED
+    online: true,
   }));
   res.json({ ok: true, data: { count: list.length, connections: list } });
 });
