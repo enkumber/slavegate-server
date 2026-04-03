@@ -20,16 +20,20 @@ import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
-import com.phonenetwork.wireguard.WireGuardManager
+import com.phonenetwork.nostr.EnrollmentStore
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * QrScannerActivity — scans WireGuard config QR codes.
- * 
+ * QrScannerActivity — scans Nostr enrollment QR codes (v2 format).
+ *
  * Uses CameraX + ML Kit Barcode Scanning.
- * On successful scan, saves config and starts WireGuard tunnel.
+ * On successful scan, saves enrollment via EnrollmentStore and returns success.
+ *
+ * Expected QR payload:
+ * { "v": 2, "s": "<serverPubkey>", "r": ["wss://relay..."], "d": "<deviceId>" }
+ * OR base64-encoded version of the same JSON.
  */
 class QrScannerActivity : AppCompatActivity() {
 
@@ -56,7 +60,7 @@ class QrScannerActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
         // Create UI programmatically (no XML)
         val container = FrameLayout(this).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -82,7 +86,7 @@ class QrScannerActivity : AppCompatActivity() {
             ).apply {
                 topMargin = 100
             }
-            text = "📱 Point camera at WireGuard QR code"
+            text = "📱 Point camera at enrollment QR code"
             textSize = 18f
             setTextColor(0xFFFFFFFF.toInt())
             textAlignment = TextView.TEXT_ALIGNMENT_CENTER
@@ -145,45 +149,41 @@ class QrScannerActivity : AppCompatActivity() {
         // Prevent multiple processing
         if (!isProcessing.compareAndSet(false, true)) return
 
-        Log.i(TAG, "QR scanned: ${content.take(50)}...")
+        Log.i(TAG, "QR scanned: ${content.take(80)}...")
 
         runOnUiThread {
-            statusText.text = "✅ QR detected! Setting up..."
+            statusText.text = "✅ QR detected! Processing..."
         }
 
-        // Validate it looks like WireGuard config
-        if (!content.contains("[Interface]") || !content.contains("[Peer]")) {
-            Log.w(TAG, "Invalid QR — not a WireGuard config")
+        // Try to parse as v2 Nostr enrollment payload
+        val saved = try {
+            EnrollmentStore.saveFromQrContent(this, content)
+        } catch (e: Exception) {
+            Log.e(TAG, "EnrollmentStore.saveFromQrContent failed: ${e.message}")
+            false
+        }
+
+        if (!saved) {
+            Log.w(TAG, "Invalid QR — not a valid v2 enrollment payload: ${content.take(80)}")
             runOnUiThread {
-                statusText.text = "❌ Invalid QR — not a WireGuard config"
-                Toast.makeText(this, "Scan a valid WireGuard QR code", Toast.LENGTH_SHORT).show()
+                statusText.text = "❌ Invalid QR — expected enrollment code\n{v:2, s:..., r:[...], d:...}"
+                Toast.makeText(this, "Scan a valid enrollment QR code (v2)", Toast.LENGTH_LONG).show()
             }
             isProcessing.set(false)
             return
         }
 
-        // Save config
-        try {
-            WireGuardManager.saveConfig(this, content)
-            Log.i(TAG, "WireGuard config saved")
+        val enrollment = EnrollmentStore.getEnrollment(this)
+        Log.i(TAG, "Enrollment saved: deviceId=${enrollment?.deviceId?.take(8)} relays=${enrollment?.relayUrls?.size}")
 
-            runOnUiThread {
-                statusText.text = "✅ Config saved! Starting VPN..."
-                Toast.makeText(this, "WireGuard config imported!", Toast.LENGTH_SHORT).show()
-            }
-
-            // Return success
-            setResult(RESULT_CONFIG_SAVED)
-            finish()
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save config: ${e.message}")
-            runOnUiThread {
-                statusText.text = "❌ Error: ${e.message}"
-                Toast.makeText(this, "Failed to save config", Toast.LENGTH_LONG).show()
-            }
-            isProcessing.set(false)
+        runOnUiThread {
+            statusText.text = "✅ Enrolled! Starting agent..."
+            Toast.makeText(this, "Enrollment successful!", Toast.LENGTH_SHORT).show()
         }
+
+        // Return success to MainActivity
+        setResult(RESULT_CONFIG_SAVED)
+        finish()
     }
 
     override fun onDestroy() {
@@ -205,7 +205,7 @@ class QrScannerActivity : AppCompatActivity() {
             val mediaImage = imageProxy.image
             if (mediaImage != null) {
                 val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                
+
                 scanner.process(image)
                     .addOnSuccessListener { barcodes ->
                         for (barcode in barcodes) {

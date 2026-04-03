@@ -3,7 +3,6 @@ package com.phonenetwork
 import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
-import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
@@ -15,20 +14,25 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import com.phonenetwork.nostr.EnrollmentStore
 import com.phonenetwork.qr.QrScannerActivity
 import com.phonenetwork.service.AgentForegroundService
-import com.phonenetwork.wireguard.WireGuardManager
 
 /**
- * MainActivity — setup screen with WireGuard QR scanning and VPN permission.
+ * MainActivity — setup screen for Nostr enrollment via QR code.
  *
  * Flow:
- * 1. Check if WireGuard config exists
+ * 1. Check if device is enrolled (EnrollmentStore has valid v2 data)
  * 2. If NO → show "Scan QR" button, open QrScannerActivity
- * 3. If YES → request VPN permission if needed → start service
+ * 3. If YES → start AgentForegroundService
  *
- * VPN permission: GoBackend requires Android VPN consent dialog (one-time).
- * On rooted devices, autoGrantVpnPermission() bypasses the dialog via appops.
+ * QR payload format (v2):
+ * {
+ *   "v": 2,
+ *   "s": "<serverPubkey_hex>",  // 64 chars
+ *   "r": ["wss://relay1", ...], // relay URLs
+ *   "d": "<deviceId_uuid>"      // pre-assigned device ID
+ * }
  *
  * Note: This activity is for device operator setup only.
  * All automation happens in AgentForegroundService (headless).
@@ -41,18 +45,10 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == QrScannerActivity.RESULT_CONFIG_SAVED) {
-            Log.i(tag, "QR config saved — requesting VPN permission and starting service")
-            requestVpnPermissionAndStart()
+            Log.i(tag, "QR enrollment saved — starting service")
+            AgentForegroundService.start(this)
             updateUI()
         }
-    }
-
-    private val vpnPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        Log.i(tag, "VPN permission result: ${result.resultCode}")
-        // Start service regardless — it will handle VPN state internally
-        AgentForegroundService.start(this)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,20 +58,11 @@ class MainActivity : AppCompatActivity() {
         // Request battery optimization exclusion on first launch
         requestBatteryOptimizationExclusion()
 
-        // Initialize WireGuard GoBackend
-        WireGuardManager.initBackend(this)
-
-        // Auto-grant VPN permission via root (Magisk) — no user interaction needed
-        autoGrantVpnPermission()
-
-        // Always start the service — WireGuard config is optional.
-        // Config will be pushed via WebSocket (WG_CONFIG) after authentication.
-        if (WireGuardManager.hasConfig(this)) {
-            Log.i(tag, "Has WG config — requesting VPN permission and starting service")
-            requestVpnPermissionAndStart()
-        } else {
-            Log.i(tag, "No WG config — starting service without VPN (will use relay)")
+        if (EnrollmentStore.hasEnrollment(this)) {
+            Log.i(tag, "Device enrolled — starting service")
             AgentForegroundService.start(this)
+        } else {
+            Log.i(tag, "Device not enrolled — show QR scan UI")
         }
 
         buildUI()
@@ -84,46 +71,6 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         updateUI()
-    }
-
-    /**
-     * Request VPN permission via system dialog, then start service.
-     * If already granted (or auto-granted via root), starts immediately.
-     */
-    private fun requestVpnPermissionAndStart() {
-        val vpnIntent = VpnService.prepare(this)
-        if (vpnIntent != null) {
-            Log.i(tag, "VPN permission needed — launching consent dialog")
-            vpnPermissionLauncher.launch(vpnIntent)
-        } else {
-            Log.i(tag, "VPN permission already granted ✓")
-            AgentForegroundService.start(this)
-        }
-    }
-
-    /**
-     * Auto-grant VPN permission via root (appops set ACTIVATE_VPN allow).
-     * Bypasses the Android VPN consent dialog on rooted (Magisk) devices.
-     * Safe to call multiple times — idempotent.
-     */
-    private fun autoGrantVpnPermission() {
-        try {
-            val proc = Runtime.getRuntime().exec(arrayOf(
-                "su", "-c",
-                "appops set $packageName ACTIVATE_VPN allow"
-            ))
-            val exitCode = proc.waitFor()
-            if (exitCode == 0) {
-                Log.i(tag, "VPN permission auto-granted via root ✓")
-            } else {
-                Log.w(tag, "appops set ACTIVATE_VPN failed (exit=$exitCode)")
-            }
-            proc.inputStream.close()
-            proc.errorStream.close()
-            proc.destroy()
-        } catch (e: Exception) {
-            Log.w(tag, "autoGrantVpnPermission failed: ${e.message}")
-        }
     }
 
     private fun buildUI() {
@@ -151,10 +98,10 @@ class MainActivity : AppCompatActivity() {
         }
         layout.addView(statusText)
 
-        // Scan QR button
+        // Scan QR button (enrollment)
         val scanButton = Button(this).apply {
             tag = "scan_btn"
-            text = "📷 Scan WireGuard QR"
+            text = "📷 Scan Enrollment QR"
             textSize = 16f
             setOnClickListener {
                 qrScannerLauncher.launch(Intent(this@MainActivity, QrScannerActivity::class.java))
@@ -162,13 +109,14 @@ class MainActivity : AppCompatActivity() {
         }
         layout.addView(scanButton)
 
-        // Re-scan button (if already configured)
+        // Re-enroll button (if already enrolled)
         val rescanButton = Button(this).apply {
             tag = "rescan_btn"
-            text = "🔄 Re-scan QR (new config)"
+            text = "🔄 Re-enroll (scan new QR)"
             textSize = 14f
             setOnClickListener {
-                WireGuardManager.clearConfig(this@MainActivity)
+                EnrollmentStore.clear(this@MainActivity)
+                AgentForegroundService.stop(this@MainActivity)
                 qrScannerLauncher.launch(Intent(this@MainActivity, QrScannerActivity::class.java))
             }
         }
@@ -179,17 +127,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateUI() {
-        val hasConfig = WireGuardManager.hasConfig(this)
+        val isEnrolled = EnrollmentStore.hasEnrollment(this)
         val statusText = window.decorView.findViewWithTag<TextView>("status")
         val scanButton = window.decorView.findViewWithTag<Button>("scan_btn")
         val rescanButton = window.decorView.findViewWithTag<Button>("rescan_btn")
 
-        if (hasConfig) {
-            statusText?.text = "✅ WireGuard configured\n🔌 Service running"
+        if (isEnrolled) {
+            val enrollment = EnrollmentStore.getEnrollment(this)
+            val deviceId = enrollment?.deviceId?.take(8) ?: "?"
+            val relayCount = enrollment?.relayUrls?.size ?: 0
+            statusText?.text = "✅ Enrolled (device: $deviceId…)\n🔌 Service running — $relayCount relay(s)"
             scanButton?.visibility = android.view.View.GONE
             rescanButton?.visibility = android.view.View.VISIBLE
         } else {
-            statusText?.text = "⚠️ No WireGuard config\nScan QR code to connect"
+            statusText?.text = "⚠️ Not enrolled\nScan enrollment QR code to connect"
             scanButton?.visibility = android.view.View.VISIBLE
             rescanButton?.visibility = android.view.View.GONE
         }
