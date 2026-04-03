@@ -1,33 +1,55 @@
-FROM node:20-alpine AS builder
+# ─── Stage 1: Builder ────────────────────────────────────────────────────────
+FROM node:22-alpine AS builder
 
-WORKDIR /app
+WORKDIR /build
 
-# Copy shared protocol types
-COPY shared/ ./shared/
+# Install build dependencies for native modules
+RUN apk add --no-cache python3 make g++
 
-# Install server dependencies
-COPY server/package.json server/tsconfig.json ./server/
-WORKDIR /app/server
+# Copy package files first for layer caching
+COPY package.json package-lock.json* tsconfig.json ./
+
+# Install all dependencies (including devDependencies for build)
 RUN npm ci
 
-# Build TypeScript
-COPY server/src ./src
+# Copy source code
+COPY src ./src
+
+# Build TypeScript → dist/
 RUN npm run build
 
-# ─── Production image ─────────────────────────────────────────────────────────
-FROM node:20-alpine AS runner
+# ─── Stage 2: Runtime ────────────────────────────────────────────────────────
+FROM node:22-alpine AS runtime
 
 WORKDIR /app
 
-COPY --from=builder /app/server/dist ./dist
-COPY --from=builder /app/server/node_modules ./node_modules
-COPY --from=builder /app/server/package.json ./package.json
+ENV NODE_ENV=production
 
-# Non-root user
+# Install runtime system dependencies
+RUN apk add --no-cache \
+    sqlite \
+    bash \
+    tini
+
+# Copy built artifacts from builder
+COPY --from=builder /build/dist ./dist
+COPY --from=builder /build/node_modules ./node_modules
+COPY --from=builder /build/package.json ./package.json
+
+# Copy migration SQL
+COPY src/db/schema.sql ./schema.sql
+COPY migrations/ ./migrations/
+
+# Copy startup scripts
+COPY scripts/ ./scripts/
+RUN chmod +x ./scripts/*.sh
+
+# Non-root user for security
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN mkdir -p /data && chown appuser:appgroup /data
 USER appuser
 
 EXPOSE 3000
-ENV NODE_ENV=production
 
-CMD ["node", "dist/index.js"]
+# tini handles signal forwarding and zombie reaping
+ENTRYPOINT ["/sbin/tini", "--", "/app/scripts/entrypoint.sh"]
