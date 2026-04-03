@@ -134,6 +134,17 @@
             </intent-filter>
         </receiver>
 
+        <!-- Nostr Integration Test Activity (Sprint 3a T6) -->
+        <activity
+            android:name=".nostr.NostrTestActivity"
+            android:exported="true"
+            android:label="Nostr Test">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
     </application>
 
 </manifest>
