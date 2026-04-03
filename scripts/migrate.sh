@@ -5,15 +5,18 @@ set -euo pipefail
 
 DATABASE_URL="${DATABASE_URL:?DATABASE_URL is required}"
 
+# Extract password from DATABASE_URL for psql (handles passwordless URLs too)
+export PGPASSWORD="$(echo "$DATABASE_URL" | sed -n 's|.*://[^:]*:\([^@]*\)@.*|\1|p')"
+
 echo "[migrate] Connecting to database..."
 
 # Helper: run SQL against the database
 run_sql() {
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "$1"
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --no-password -c "$1"
 }
 
 run_sql_file() {
-  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$1"
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --no-password -f "$1"
 }
 
 # ─── 1. Apply main schema (idempotent — CREATE TABLE IF NOT EXISTS) ──────────
