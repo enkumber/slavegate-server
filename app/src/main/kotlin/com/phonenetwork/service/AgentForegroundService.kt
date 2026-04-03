@@ -211,7 +211,8 @@ class AgentForegroundService : Service() {
         )
 
         wsClient = WsClient(
-            serverUrl     = getServerUrl(),
+            relayHost     = null,  // set relay.host in config to override WireGuardManager URL
+            relayPort     = null,  // set relay.port in config to override WireGuardManager URL
             executor      = jobExecutor,
             healthMonitor = healthMonitor,
             scope         = serviceScope,

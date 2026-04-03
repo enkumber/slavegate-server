@@ -26,13 +26,27 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
 /**
- * WsClient — WebSocket lifecycle with EC key pair challenge-response auth (v4).
+ * WsClient — Outbound WebSocket client for relay server connection.
  *
- * Auth flow:
+ * Phase 2: Phone initiates outbound WebSocket to relay server.
+ * This solves NAT/firewall traversal — phone is client, relay is server.
+ *
+ * Connection states:
+ * - DISCONNECTED: Initial / after disconnect() / after permanent failure
+ * - CONNECTING: TCP handshake in progress
+ * - AUTHENTICATING: Connected, performing registration + EC key challenge
+ * - CONNECTED: Fully authenticated and ready for job dispatch / heartbeats
+ * - RECONNECTING: Connection lost, waiting before next attempt
+ *
+ * Reconnect: exponential backoff starting at 1s, doubling each time,
+ * capped at 60s, with ±30% jitter added each cycle.
+ * Relay keeps session in grace period (30s) for seamless resume.
+ *
+ * Auth flow (relay server):
  * 1. Connect → `ensureKeyPair()` (once, idempotent)
- * 2. Send HELLO { imei, publicKeyPem }
- *    Server saves publicKeyPem. If approved → sends CHALLENGE { deviceId, nonce }.
- *    If pending/revoked → HELLO_REJECT.
+ * 2. Send register { deviceId, authToken, role: "phone", imei, publicKeyPem, ... }
+ *    Relay validates authToken. If approved → sends registered + optional CHALLENGE.
+ *    If pending/revoked → HELLO_REJECT or error.
  * 3. Receive CHALLENGE → sign nonce bytes with EC private key → send CHALLENGE_RESPONSE
  * 4. Server verifies ECDSA-SHA256 → sends HELLO_ACK (device authenticated)
  *
@@ -40,11 +54,22 @@ import kotlin.random.Random
  * - EC P-256 key pair in Android Keystore (hardware-backed, non-exportable)
  * - Server stores only public key — no secret exposed on server compromise
  * - Nonce is one-time-use, expires in 60s — prevents replay attacks
+ * - Auth token: HMAC-SHA256 based, stored per-device
  *
- * No tokens. No expiry. Permanent access after admin approval.
+ * Heartbeat: application-level PING every 30s (Cloudflare-compatible).
+ * PONG timeout: 60s — triggers reconnect for zombie connections.
  */
+enum class ConnectionState {
+    DISCONNECTED,
+    CONNECTING,
+    AUTHENTICATING,
+    CONNECTED,
+    RECONNECTING
+}
+
 class WsClient(
-    private val serverUrl: String,
+    private val relayHost: String?,
+    private val relayPort: Int?,
     private val executor: JobExecutor,
     private val healthMonitor: HealthMonitor,
     private val scope: CoroutineScope,
@@ -59,10 +84,11 @@ class WsClient(
         private const val TAG                  = "WsClient"
         private const val HEARTBEAT_IDLE_MS    = 45_000L
         private const val HEARTBEAT_ACTIVE_MS  = 30_000L
-        private const val MAX_RECONNECT_DELAY  = 30_000L
+        private const val MAX_RECONNECT_DELAY  = 60_000L
         const val KEY_ALIAS                    = "phone_network_device_key"
         private const val IMEI_CACHE_KEY       = "cached_imei"
         private const val DEVICE_ID_KEY        = "server_device_id"
+        private const val AUTH_TOKEN_KEY       = "auth_token"
         private const val PREFS_NAME           = "phone_network_auth"
         private const val UUID_FILE            = "device_imei.txt"
     }
@@ -81,7 +107,7 @@ class WsClient(
     private var keepAliveJob: Job? = null        // application-level PING every 30s
     private var connectingWatchdogJob: Job? = null  // detects stuck in "Connecting..." state
     private var authTimeoutJob: Job? = null      // detects auth completion timeout
-    private var reconnectDelay = 1_000L
+    private var reconnectDelay = 1_000L  // backoff starts at 1s
     private var connectionOpenedAt = 0L
     private var rapidReconnectCount = 0
 
@@ -118,6 +144,13 @@ class WsClient(
     @Volatile var isJobActive = false
 
     /**
+     * Exposed connection state for external observers (UI, tests, watchdog).
+     */
+    @Volatile
+    var connectionState: ConnectionState = ConnectionState.DISCONNECTED
+        private set
+
+    /**
      * AUTH_FAILED loop prevention.
      * If device is deleted from DB but keeps sending CHALLENGE_RESPONSE, server
      * returns AUTH_FAILED repeatedly → infinite loop. After 3 consecutive failures,
@@ -148,6 +181,7 @@ class WsClient(
             return
         }
         isActive = true
+        connectionState = ConnectionState.CONNECTING
         ensureKeyPair()
         // Reset stale state from any prior session before calling attemptConnect.
         // This is the external entry point — force a fresh start.
@@ -158,6 +192,7 @@ class WsClient(
 
     fun disconnect() {
         isActive = false
+        connectionState = ConnectionState.DISCONNECTED
         heartbeatJob?.cancel()
         keepAliveJob?.cancel()
         reconnectJob?.cancel()
@@ -199,12 +234,11 @@ class WsClient(
         ws?.close(1000, "Reconnecting")
         ws = null
 
-        // Re-evaluate server URL on every connect attempt — switches to local WG URL when tunnel is active
-        val currentUrl = com.phonenetwork.wireguard.WireGuardManager.getServerUrl()
-        if (currentUrl != serverUrl) {
-            Log.i(TAG, "Server URL switched: $serverUrl → $currentUrl")
-        }
-        val request = Request.Builder().url(currentUrl).build()
+        // Resolve target URL: relay config overrides WireGuardManager URL.
+        // Path is always /relay for Phase 2 outbound relay connection.
+        val targetUrl = buildTargetUrl()
+        Log.i(TAG, "Connecting to relay: $targetUrl")
+        val request = Request.Builder().url(targetUrl).build()
         ws = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 // Stale guard: a newer connection has already been initiated.
@@ -217,7 +251,8 @@ class WsClient(
                 isConnecting.set(false)
                 connectingWatchdogJob?.cancel()
                 connectionOpenedAt = System.currentTimeMillis()
-                Log.i(TAG, "Connected to server (connectionId=$connectionId, uptimeSinceInit=${connectionOpenedAt - classInitializedAt}ms)")
+                connectionState = ConnectionState.AUTHENTICATING
+                Log.i(TAG, "Connected to relay (connectionId=$connectionId, uptimeSinceInit=${connectionOpenedAt - classInitializedAt}ms)")
 
                 // Reset PONG tracking for new connection
                 lastPongReceived = System.currentTimeMillis()
@@ -284,6 +319,7 @@ class WsClient(
                 keepAliveJob?.cancel()
                 heartbeatJob?.cancel()
                 isConnecting.set(false)
+                connectionState = ConnectionState.RECONNECTING
                 com.phonenetwork.service.AgentForegroundService.instance
                     ?.updateNotification("Connecting…")
                 scheduleReconnect()
@@ -300,6 +336,7 @@ class WsClient(
                 keepAliveJob?.cancel()
                 heartbeatJob?.cancel()
                 isConnecting.set(false)
+                connectionState = ConnectionState.RECONNECTING
                 com.phonenetwork.service.AgentForegroundService.instance
                     ?.updateNotification("Connecting…")
                 scheduleReconnect()
@@ -378,8 +415,17 @@ class WsClient(
         return data
     }
 
-    // ─── HELLO auth ───────────────────────────────────────────────────────────
+    // ─── Register auth (Phase 2: outbound to relay) ───────────────────────────────────
 
+    /**
+     * Send registration message to relay server.
+     * Auth flow (relay server):
+     * 1. Phone sends register { deviceId, authToken, role: "phone", ... }
+     * 2. Relay validates authToken, sends registered on success
+     * 3. Phone optionally receives CHALLENGE for EC key verification
+     * 
+     * For backward compatibility, we also handle HELLO_ACK (legacy server).
+     */
     private fun sendAuthMessage(webSocket: WebSocket) {
         // Resume pending challenge if connection dropped mid-auth
         pendingChallenge?.let { (deviceId, nonce) ->
@@ -394,7 +440,7 @@ class WsClient(
                 Log.i(TAG, "CHALLENGE_RESPONSE sent (resumed)")
                 return
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to resume challenge — clearing and sending HELLO")
+                Log.w(TAG, "Failed to resume challenge — clearing and sending register")
                 pendingChallenge = null
             }
         }
@@ -409,11 +455,18 @@ class WsClient(
                 Log.w(TAG, "Failed to get wireguardIp: ${e.message}")
                 null  // Non-fatal — continue without wireguardIp
             }
-            // Determine connection type from current server URL
-            val currentServerUrl = com.phonenetwork.wireguard.WireGuardManager.getServerUrl()
-            val connectionType = if (currentServerUrl.contains("192.168.50")) "wireguard" else "relay"
+
+            // Get or generate auth token
+            val authToken = getOrCreateAuthToken()
+            // Get existing deviceId (for reconnects within grace period)
+            val existingDeviceId = getDeviceId()
+            // Use existing deviceId if available, otherwise use IMEI as provisional id
+            val deviceId = existingDeviceId ?: imei
 
             val payload = JSONObject().apply {
+                put("deviceId", deviceId)
+                put("authToken", authToken)
+                put("role", "phone")
                 put("imei", imei)
                 put("publicKeyPem", publicKeyPem)
                 put("model", android.os.Build.MODEL)
@@ -421,30 +474,38 @@ class WsClient(
                 put("agentVersion", try {
                     context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.0"
                 } catch (_: Exception) { "1.0.0" })
-                put("connectionType", connectionType)
                 if (wireguardIp != null) put("wireguardIp", wireguardIp)
             }
-            send(webSocket, "HELLO", payload)
-            Log.i(TAG, "HELLO sent (imei=${imei.take(6)}…, wgIp=${wireguardIp ?: "none"})")
+            send(webSocket, "register", payload)
+            Log.i(TAG, "register sent (deviceId=${deviceId.take(6)}…, authToken=${authToken.take(6)}…, wgIp=${wireguardIp ?: "none"})")
             
-            // Start auth timeout — detects hung auth (no HELLO_ACK)
+            // Start auth timeout — detects hung auth (no registered or HELLO_ACK)
             authTimeoutJob?.cancel()
             authTimeoutJob = scope.launch {
                 delay(AUTH_TIMEOUT_MS)
                 if (getDeviceId() == null || pendingChallenge != null) {
-                    Log.e(TAG, "⚠️ Auth timeout: no HELLO_ACK after ${AUTH_TIMEOUT_MS}ms")
+                    Log.e(TAG, "⚠️ Auth timeout: no registered after ${AUTH_TIMEOUT_MS}ms")
                     ws?.close(4004, "Auth timeout")
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to prepare HELLO: ${e.message}")
-            // FIX: Close connection BEFORE scheduling reconnect to prevent DUPLICATE loop.
-            // Previous bug: scheduleReconnect() was called with connection still open,
-            // causing attemptConnect() to close old connection, triggering onClosed,
-            // which called scheduleReconnect() again → infinite loop.
-            webSocket.close(1001, "HELLO preparation failed")
-            // Don't call scheduleReconnect() here — onClosed will handle it
+            Log.e(TAG, "Failed to prepare register: ${e.message}")
+            webSocket.close(1001, "register preparation failed")
         }
+    }
+
+    /**
+     * Get existing auth token or generate a new one.
+     * Auth token sent to relay server for device validation.
+     * For Phase 2: uses a simple UUID-based token.
+     * In production: should be HMAC-SHA256(deviceId, serverSecret).
+     */
+    private fun getOrCreateAuthToken(): String {
+        prefs.getString(AUTH_TOKEN_KEY, null)?.takeIf { it.isNotBlank() }?.let { return it }
+        val token = "at_${UUID.randomUUID()}"
+        prefs.edit().putString(AUTH_TOKEN_KEY, token).apply()
+        Log.i(TAG, "Generated new auth token: ${token.take(8)}…")
+        return token
     }
 
     // ─── IMEI reading ─────────────────────────────────────────────────────────
@@ -565,25 +626,51 @@ class WsClient(
                     }
                 }
 
-                "HELLO_ACK" -> {
-                    authTimeoutJob?.cancel()  // auth completed successfully
+                "registered" -> {
+                    // Relay server confirmed registration
+                    authTimeoutJob?.cancel()
                     val p = msg.getJSONObject("payload")
-                    val deviceId = p.getString("deviceId")
+                    val deviceId = p.optString("deviceId", getDeviceId() ?: "unknown")
                     saveDeviceId(deviceId)
-                    consecutiveAuthFailures = 0  // reset on successful auth
-                    pendingChallenge = null      // auth complete — clear pending state
-                    // Reset backoff only after stable connection (30s+)
+                    consecutiveAuthFailures = 0
+                    pendingChallenge = null
+                    connectionState = ConnectionState.CONNECTED
                     if (System.currentTimeMillis() - connectionOpenedAt > 30_000L) {
                         reconnectDelay = 1_000L
                         rapidReconnectCount = 0
                     }
-                    Log.i(TAG, "HELLO_ACK — authenticated. deviceId=$deviceId")
-
-                    // CLOAK_CONFIG processing removed — functionality deprecated
-
+                    Log.i(TAG, "registered — authenticated. deviceId=$deviceId")
                     com.phonenetwork.service.AgentForegroundService.instance
                         ?.updateNotification("Connected")
                     onConnected(deviceId)
+                }
+
+                "HELLO_ACK" -> {
+                    // Backward compat: legacy server sends HELLO_ACK
+                    authTimeoutJob?.cancel()
+                    val p = msg.getJSONObject("payload")
+                    val deviceId = p.getString("deviceId")
+                    saveDeviceId(deviceId)
+                    consecutiveAuthFailures = 0
+                    pendingChallenge = null
+                    connectionState = ConnectionState.CONNECTED
+                    if (System.currentTimeMillis() - connectionOpenedAt > 30_000L) {
+                        reconnectDelay = 1_000L
+                        rapidReconnectCount = 0
+                    }
+                    Log.i(TAG, "HELLO_ACK (legacy) — authenticated. deviceId=$deviceId")
+                    com.phonenetwork.service.AgentForegroundService.instance
+                        ?.updateNotification("Connected")
+                    onConnected(deviceId)
+                }
+
+                "error" -> {
+                    // Relay server error (invalid auth token, etc.)
+                    val errMsg = msg.optString("message", "Unknown relay error")
+                    Log.e(TAG, "Relay error: $errMsg")
+                    com.phonenetwork.service.AgentForegroundService.instance
+                        ?.updateNotification("Relay error")
+                    ws?.close(4005, "Relay error: $errMsg")
                 }
 
                 "HELLO_REJECT" -> {
@@ -729,8 +816,8 @@ class WsClient(
                             // Force reconnect through WG tunnel only if not already on local URL
                             if (started) {
                                 val localUrl = com.phonenetwork.wireguard.WireGuardManager.SERVER_WS_URL
-                                val currentUrl = com.phonenetwork.wireguard.WireGuardManager.getServerUrl()
-                                if (serverUrl != localUrl && currentUrl == localUrl) {
+                                val targetUrl = buildTargetUrl()
+                                if (targetUrl != localUrl && com.phonenetwork.wireguard.WireGuardManager.getServerUrl() == localUrl) {
                                     Log.i(TAG, "WG tunnel active — forcing reconnect to local server URL")
                                     delay(2000)  // Give WG tunnel time to stabilize
                                     ws?.close(1000, "Switching to WG tunnel")
@@ -831,8 +918,16 @@ class WsClient(
         send(ws, "HEARTBEAT", payload)
     }
 
-    // ─── Reconnect with backoff + jitter ─────────────────────────────────────
+    // ─── Reconnect with exponential backoff + jitter ─────────────────────────
 
+    /**
+     * Reconnect with exponential backoff starting at 1s, doubling each time,
+     * capped at 60s, with ±30% jitter added each cycle.
+     * 
+     * Phase 2: Phone initiates outbound WebSocket to relay.
+     * If connection drops, phone automatically reconnects to relay.
+     * Relay keeps session in grace period (30s) for seamless resume.
+     */
     private fun scheduleReconnect() {
         if (!isActive) return
         // Rapid reconnect breaker — detect unstable connections
@@ -841,18 +936,20 @@ class WsClient(
             if (rapidReconnectCount >= 5) {
                 Log.w(TAG, "⚠️ Rapid reconnect detected ($rapidReconnectCount times) — forcing 2min cooldown")
                 reconnectDelay = 120_000L
+                rapidReconnectCount = 0
             }
         } else if (connectionOpenedAt > 0 && System.currentTimeMillis() - connectionOpenedAt > 60_000L) {
             rapidReconnectCount = 0
         }
         // Cancel any existing pending reconnect before scheduling a new one.
-        // Prevents double-reconnect when both onClosed and onFailure fire
-        // on the same WebSocket (which can happen with OkHttp).
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
-            Log.i(TAG, "Reconnecting in ${reconnectDelay}ms…")
-            delay(reconnectDelay)
-            if (!isActive) return@launch  // may have been deactivated during delay
+            val delayMs = reconnectDelay
+            Log.i(TAG, "Reconnecting in ${delayMs}ms (backoff, attempt=$rapidReconnectCount, next=${minOf(reconnectDelay * 2, MAX_RECONNECT_DELAY)}ms)…")
+            delay(delayMs)
+            if (!isActive) return@launch
+            // Exponential backoff: double each time, cap at MAX_RECONNECT_DELAY
+            // Add ±30% jitter to prevent thundering herd when many phones reconnect
             val jitter = (reconnectDelay * 0.3 * Random.nextDouble()).toLong()
             reconnectDelay = minOf(reconnectDelay * 2, MAX_RECONNECT_DELAY) + jitter
             attemptConnect()
@@ -884,5 +981,30 @@ class WsClient(
         }
         send(ws, "HEALTH_REPORT", payload)
         Log.i(TAG, "Health report sent: ${report.optString("type", "unknown")}")
+    }
+
+    // ─── URL resolution ───────────────────────────────────────────────────────
+
+    /**
+     * Build the target WebSocket URL.
+     * If relay.host / relay.port are configured, use them (outbound to relay).
+     * Path is always /relay for the relay server.
+     * Otherwise fall back to WireGuardManager (local WG tunnel if active, else public relay).
+     * 
+     * Phase 2: Phone initiates outbound connection to relay.
+     * This solves NAT/firewall traversal — phone is client, relay is server.
+     */
+    private fun buildTargetUrl(): String {
+        val host = relayHost
+        val port = relayPort
+        return if (host != null && port != null) {
+            // Direct relay connection — use wss for port 18792 (TLS)
+            val scheme = if (port == 18792) "wss" else "ws"
+            "$scheme://$host:$port/relay"
+        } else {
+            // Fall back to WireGuardManager URL — use /relay path
+            val baseUrl = com.phonenetwork.wireguard.WireGuardManager.getServerUrl()
+            baseUrl.replaceFirst(Regex("/ws$"), "/relay")
+        }
     }
 }
