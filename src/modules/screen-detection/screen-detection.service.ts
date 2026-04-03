@@ -372,7 +372,7 @@ export class ScreenDetectionService {
       }
       uiTreeAdapter.sendJob(deviceId, {
         jobId,
-        type: 'ui_tree_dump' as import('../../../../shared/protocol/messages').JobType,
+        type: 'ui_tree_dump' as import('../../../shared/protocol/messages').JobType,
         params: { format: 'json' } as Record<string, unknown>,
         timeoutMs,
       }).catch(() => {
@@ -405,7 +405,7 @@ export class ScreenDetectionService {
       }
       ocrAdapter.sendJob(deviceId, {
         jobId,
-        type: 'ocr_full' as import('../../../../shared/protocol/messages').JobType,
+        type: 'ocr_full' as import('../../../shared/protocol/messages').JobType,
         params: {} as Record<string, unknown>,
         timeoutMs,
       }).catch(() => {
@@ -440,7 +440,7 @@ export class ScreenDetectionService {
       }
       screenshotAdapter.sendJob(deviceId, {
         jobId,
-        type: 'screenshot_for_vlm' as import('../../../../shared/protocol/messages').JobType,
+        type: 'screenshot_for_vlm' as import('../../../shared/protocol/messages').JobType,
         params: { quality: 85, maxWidth: 540 } as Record<string, unknown>,
         timeoutMs,
       }).catch(() => {
@@ -460,7 +460,7 @@ export class ScreenDetectionService {
     if (backAdapter) {
       await backAdapter.sendJob(deviceId, {
         jobId,
-        type: 'press_key' as import('../../../../shared/protocol/messages').JobType,
+        type: 'press_key' as import('../../../shared/protocol/messages').JobType,
         params: { key: 'back' } as Record<string, unknown>,
         timeoutMs: 3_000,
       });

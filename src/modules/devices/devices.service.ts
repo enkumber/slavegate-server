@@ -5,13 +5,13 @@
  */
 
 import { getDb } from "../../db/client";
-import type { DeviceHealth } from "../../../../shared/protocol/messages";
+import type { DeviceHealth } from "../../../shared/protocol/messages";
 import type {
   Device,
   DeviceStatus,
   UpdateDeviceRequest,
   PaginatedResponse,
-} from "../../../../shared/protocol/api-types";
+} from "../../../shared/protocol/api-types";
 
 export class DevicesService {
   // ─── Queries ──────────────────────────────────────────────────────────────

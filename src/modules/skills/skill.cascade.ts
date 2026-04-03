@@ -217,7 +217,7 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
       if (!backAdapter) throw new Error("Transport not initialized");
       await backAdapter.sendJob(req.deviceId, {
         jobId: backJobId,
-        type: "press_key" as import("../../../../shared/protocol/messages").JobType,
+        type: "press_key" as import("../../../shared/protocol/messages").JobType,
         params: { key: "back" } as Record<string, unknown>,
         timeoutMs: 2_000,
       });
@@ -230,7 +230,7 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
       if (!homeAdapter) throw new Error("Transport not initialized");
       await homeAdapter.sendJob(req.deviceId, {
         jobId: homeJobId,
-        type: "tap" as import("../../../../shared/protocol/messages").JobType,
+        type: "tap" as import("../../../shared/protocol/messages").JobType,
         params: { x: 0.10, y: 0.912 } as Record<string, unknown>,
         timeoutMs: 3_000,
       });
@@ -459,7 +459,7 @@ async function executeSkillTapJob(
   await dispatcherService.dispatch({
     deviceId: req.deviceId,
     type: "skill_tap",
-    params: params as unknown as import("../../../../shared/protocol/messages").JobParams,
+    params: params as unknown as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
     workflowId: req.workflowId,
     stepIndex: req.stepIndex,
@@ -469,7 +469,7 @@ async function executeSkillTapJob(
   await skillTapAdapter.sendJob(req.deviceId, {
     jobId,
     type: "skill_tap",
-    params: params as unknown as import("../../../../shared/protocol/messages").JobParams,
+    params: params as unknown as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
   });
 
@@ -569,7 +569,7 @@ async function executeA11yFindTapJob(
   await dispatcherService.dispatch({
     deviceId: req.deviceId,
     type: "a11y_find_tap",
-    params: params as unknown as import("../../../../shared/protocol/messages").JobParams,
+    params: params as unknown as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
     workflowId: req.workflowId,
     stepIndex: req.stepIndex,
@@ -579,7 +579,7 @@ async function executeA11yFindTapJob(
   await a11yAdapter.sendJob(req.deviceId, {
     jobId,
     type: "a11y_find_tap",
-    params: params as unknown as import("../../../../shared/protocol/messages").JobParams,
+    params: params as unknown as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
   });
 
@@ -607,7 +607,7 @@ async function executeOcrFindTapJob(
   await dispatcherService.dispatch({
     deviceId: req.deviceId,
     type: "ocr_find_tap",
-    params: params as unknown as import("../../../../shared/protocol/messages").JobParams,
+    params: params as unknown as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
     workflowId: req.workflowId,
     stepIndex: req.stepIndex,
@@ -617,7 +617,7 @@ async function executeOcrFindTapJob(
   await ocrAdapter.sendJob(req.deviceId, {
     jobId,
     type: "ocr_find_tap",
-    params: params as unknown as import("../../../../shared/protocol/messages").JobParams,
+    params: params as unknown as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
   });
 

@@ -13,8 +13,8 @@ import { isKillSwitchActive } from "../../api/routes";
 // NOTE: wsServer is intentionally NOT imported here — would create circular dependency.
 // Job dispatch to device WebSocket is handled by routes.ts (after calling dispatcher.dispatch()).
 // dispatcher only manages the DB + queue layer.
-import type { JobType, JobParams, JobDispatchPayload } from "../../../../shared/protocol/messages";
-import type { Job, DispatchJobRequest } from "../../../../shared/protocol/api-types";
+import type { JobType, JobParams, JobDispatchPayload } from "../../../shared/protocol/messages";
+import type { Job, DispatchJobRequest } from "../../../shared/protocol/api-types";
 import { v4 as uuidv4 } from "uuid";
 
 // ─── Whitelist ─────────────────────────────────────────────────────────────────

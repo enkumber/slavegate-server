@@ -367,7 +367,7 @@ export class AgentOrchestrator {
               const backPromise = awaitAction(backJobId, 3_000);
               await getNostrAdapter()?.sendJob(deviceId, {
                 jobId: backJobId,
-                type: "press_key" as import("../../../../shared/protocol/messages").JobType,
+                type: "press_key" as import("../../../shared/protocol/messages").JobType,
                 params: { key: "back" } as Record<string, unknown>,
                 timeoutMs: 3_000,
               });
@@ -502,7 +502,7 @@ export class AgentOrchestrator {
                 const backPromise = awaitAction(backJobId, 3_000);
                 await getNostrAdapter()?.sendJob(deviceId, {
                   jobId: backJobId,
-                  type: "press_key" as import("../../../../shared/protocol/messages").JobType,
+                  type: "press_key" as import("../../../shared/protocol/messages").JobType,
                   params: { key: "back" } as Record<string, unknown>,
                   timeoutMs: 3_000,
                 });
@@ -679,7 +679,7 @@ export class AgentOrchestrator {
       // Send job to device via Nostr
       await getNostrAdapter()?.sendJob(deviceId, {
         jobId: treeDispatch.jobId,
-        type: "ui_tree_dump" as import("../../../../shared/protocol/messages").JobType,
+        type: "ui_tree_dump" as import("../../../shared/protocol/messages").JobType,
         params: {} as Record<string, unknown>,
         timeoutMs: 10_000,
       });
@@ -738,7 +738,7 @@ export class AgentOrchestrator {
         
         await getNostrAdapter()?.sendJob(deviceId, {
           jobId: tapDispatch.jobId,
-          type: "a11y_find_tap" as import("../../../../shared/protocol/messages").JobType,
+          type: "a11y_find_tap" as import("../../../shared/protocol/messages").JobType,
           params: { text: "Home" } as Record<string, unknown>,
           timeoutMs: 5_000,
         });
@@ -756,7 +756,7 @@ export class AgentOrchestrator {
         
         await getNostrAdapter()?.sendJob(deviceId, {
           jobId: verifyDispatch.jobId,
-          type: "ui_tree_dump" as import("../../../../shared/protocol/messages").JobType,
+          type: "ui_tree_dump" as import("../../../shared/protocol/messages").JobType,
           params: {} as Record<string, unknown>,
           timeoutMs: 5_000,
         });
@@ -836,7 +836,7 @@ export class AgentOrchestrator {
     const backP = awaitAction(backId, 3_000);
     await getNostrAdapter()?.sendJob(deviceId, {
       jobId: backId,
-      type: "press_key" as import("../../../../shared/protocol/messages").JobType,
+      type: "press_key" as import("../../../shared/protocol/messages").JobType,
       params: { key: "back" } as Record<string, unknown>,
       timeoutMs: 3_000,
     });
@@ -864,7 +864,7 @@ export class AgentOrchestrator {
     const wakeP = awaitAction(wakeId, 5_000);
     await getNostrAdapter()?.sendJob(deviceId, {
       jobId: wakeId,
-      type: "screen_wake" as import("../../../../shared/protocol/messages").JobType,
+      type: "screen_wake" as import("../../../shared/protocol/messages").JobType,
       params: {} as Record<string, unknown>,
       timeoutMs: 5_000,
     });
@@ -874,7 +874,7 @@ export class AgentOrchestrator {
     const unlockP = awaitAction(unlockId, 5_000);
     await getNostrAdapter()?.sendJob(deviceId, {
       jobId: unlockId,
-      type: "unlock" as import("../../../../shared/protocol/messages").JobType,
+      type: "unlock" as import("../../../shared/protocol/messages").JobType,
       params: {} as Record<string, unknown>,
       timeoutMs: 5_000,
     });
@@ -891,7 +891,7 @@ export class AgentOrchestrator {
       const openP = awaitAction(openId, 10_000);
       await getNostrAdapter()?.sendJob(deviceId, {
         jobId: openId,
-        type: "open_app" as import("../../../../shared/protocol/messages").JobType,
+        type: "open_app" as import("../../../shared/protocol/messages").JobType,
         params: { packageName: pkg } as Record<string, unknown>,
         timeoutMs: 10_000,
       });
@@ -909,7 +909,7 @@ export class AgentOrchestrator {
     const freshP = awaitAction(freshId, 10_000);
     await getNostrAdapter()?.sendJob(deviceId, {
       jobId: freshId,
-      type: "open_app_fresh" as import("../../../../shared/protocol/messages").JobType,
+      type: "open_app_fresh" as import("../../../shared/protocol/messages").JobType,
       params: { packageName: pkg } as Record<string, unknown>,
       timeoutMs: 10_000,
     });
@@ -938,7 +938,7 @@ export class AgentOrchestrator {
         const backTapP = awaitAction(backTapId, 3_000);
         await getNostrAdapter()?.sendJob(deviceId, {
           jobId: backTapId,
-          type: "tap" as import("../../../../shared/protocol/messages").JobType,
+          type: "tap" as import("../../../shared/protocol/messages").JobType,
           params: {
             x: Math.round(0.06 * dims2.w),
             y: Math.round(0.05 * dims2.h),
@@ -955,7 +955,7 @@ export class AgentOrchestrator {
       const navP2 = awaitAction(navId2, 5_000);
       await getNostrAdapter()?.sendJob(deviceId, {
         jobId: navId2,
-        type: "tap" as import("../../../../shared/protocol/messages").JobType,
+        type: "tap" as import("../../../shared/protocol/messages").JobType,
         params: {
           x: Math.round(0.1 * dims2.w),
           y: Math.round(0.912 * dims2.h),
@@ -1003,7 +1003,7 @@ Reply with EXACTLY one word: YES or NO`,
           const kbBackP = awaitAction(kbBackId, 3_000);
           await getNostrAdapter()?.sendJob(deviceId, {
             jobId: kbBackId,
-            type: "press_key" as import("../../../../shared/protocol/messages").JobType,
+            type: "press_key" as import("../../../shared/protocol/messages").JobType,
             params: { key: "back" } as Record<string, unknown>,
             timeoutMs: 3_000,
           });
@@ -1030,7 +1030,7 @@ Reply with EXACTLY one word: YES or NO`,
     const navHomeP = awaitAction(navHomeId, 5_000);
     await getNostrAdapter()?.sendJob(deviceId, {
       jobId: navHomeId,
-      type: "tap" as import("../../../../shared/protocol/messages").JobType,
+      type: "tap" as import("../../../shared/protocol/messages").JobType,
       params: {
         x: Math.round(0.1 * dims.w),
         y: Math.round(0.912 * dims.h),
@@ -1194,7 +1194,7 @@ Respond with ONLY the label, nothing else.`,
     try {
       await adapter.sendJob(deviceId, {
         jobId,
-        type: "screenshot" as import("../../../../shared/protocol/messages").JobType,
+        type: "screenshot" as import("../../../shared/protocol/messages").JobType,
         params: { quality: 70, maxWidth: 1080 } as Record<string, unknown>,
         timeoutMs,
       });
@@ -1292,7 +1292,7 @@ Respond with ONLY the label, nothing else.`,
     try {
       await getNostrAdapter()?.sendJob(deviceId, {
         jobId,
-        type: jobType as import("../../../../shared/protocol/messages").JobType,
+        type: jobType as import("../../../shared/protocol/messages").JobType,
         params: params as Record<string, unknown>,
         timeoutMs: agentConfig.orchestrator.stepTimeoutMs,
       });

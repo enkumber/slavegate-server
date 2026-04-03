@@ -15,8 +15,8 @@
 
 import { getDb } from "../../db/client";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import type { AgentRelease, DeployOtaRequest } from "../../../../shared/protocol/api-types";
-import type { OtaUpdateJobParams } from "../../../../shared/protocol/messages";
+import type { AgentRelease, DeployOtaRequest } from "../../../shared/protocol/api-types";
+import type { OtaUpdateJobParams } from "../../../shared/protocol/messages";
 
 export class OtaService {
   async listReleases(page = 1, pageSize = 20) {

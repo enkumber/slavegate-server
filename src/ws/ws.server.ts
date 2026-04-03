@@ -34,7 +34,7 @@ import type {
   JobResultPayload,
   HealthReportPayload,
   JobDispatchPayload,
-} from "../../../shared/protocol/messages";
+} from "../../shared/protocol/messages";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -331,7 +331,7 @@ export class WsServer {
             break;
           }
           this.handleVisionRequest(
-            msg.payload as import("../../../shared/protocol/messages").VisionRequestPayload,
+            msg.payload as import("../../shared/protocol/messages").VisionRequestPayload,
             state.conn
           ).catch(err => {
             console.error(`[ws] VISION_REQUEST error for device ${state.conn?.deviceId}:`, err.message);
@@ -574,7 +574,7 @@ export class WsServer {
     if (conn.connectionType) {
       enrichedHealth.connectionType = conn.connectionType;
     }
-    await devicesService.updateHealth(conn.deviceId, enrichedHealth as unknown as import("../../../shared/protocol/messages").DeviceHealth);
+    await devicesService.updateHealth(conn.deviceId, enrichedHealth as unknown as import("../../shared/protocol/messages").DeviceHealth);
     recordDeviceHealth(conn.deviceId, {
       batteryLevel:      payload.health?.batteryLevel as number | undefined,
       memoryAvailableMb: payload.health?.memoryAvailableMb as number | undefined,
@@ -673,7 +673,7 @@ export class WsServer {
   // ─── Vision request handler ──────────────────────────────────────────────
 
   private async handleVisionRequest(
-    payload: import("../../../shared/protocol/messages").VisionRequestPayload,
+    payload: import("../../shared/protocol/messages").VisionRequestPayload,
     conn: DeviceConnection
   ): Promise<void> {
     const { visionService } = await import("../modules/vision/vision.service");

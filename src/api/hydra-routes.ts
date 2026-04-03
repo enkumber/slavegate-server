@@ -22,7 +22,7 @@ import {
   setSessionLearnedCoords,
   type ParsedTarget 
 } from "../modules/skills/target-parser";
-import type { OcrFindTapParams } from "../../../shared/protocol/messages";
+import type { OcrFindTapParams } from "../../shared/protocol/messages";
 import { skillDbService } from "../modules/skills/skill-db.service";
 import { checkpointService } from "../modules/checkpoints/checkpoint.service";
 import { getNostrAdapter } from "../nostr/adapter";

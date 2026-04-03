@@ -29,7 +29,7 @@ import { runNightlyPipeline } from "../modules/nautilus/pipeline";
 import type {
   DispatchJobRequest,
   UpdateDeviceRequest,
-} from "../../../shared/protocol/api-types";
+} from "../../shared/protocol/api-types";
 import type { WorkflowCheckpoint } from "../modules/workflows/types";
 
 const router = Router();

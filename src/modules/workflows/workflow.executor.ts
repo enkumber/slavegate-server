@@ -375,18 +375,18 @@ async function executeSkillActionStep(
 
     // Dispatch a device job (ui_tree_dump, a11y_find_tap, etc.) and await JOB_RESULT.
     async dispatchAndWait(type, params, timeoutMs = 30_000) {
-      const jobType = type as import("../../../../shared/protocol/messages").JobType;
+      const jobType = type as import("../../../shared/protocol/messages").JobType;
       const { jobId } = await dispatcherService.dispatch({
         deviceId,
         type:     jobType,
-        params:   params as import("../../../../shared/protocol/messages").JobParams,
+        params:   params as import("../../../shared/protocol/messages").JobParams,
         timeoutMs,
         workflowId,
         stepIndex,
       });
       const dispatchAdapter = getNostrAdapter();
       if (!dispatchAdapter) throw new Error("Transport not initialized");
-      await dispatchAdapter.sendJob(deviceId, { jobId, type: jobType, params: params as import("../../../../shared/protocol/messages").JobParams, timeoutMs });
+      await dispatchAdapter.sendJob(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs });
       return awaitJobResult(jobId, timeoutMs + 5_000);
     },
 
@@ -623,12 +623,12 @@ async function executeActionStep(
   // REGULAR DISPATCH: For non-cascade actions (or tap with explicit x/y coords)
   // ═══════════════════════════════════════════════════════════════════════════
   // action string → JobType (validated by dispatcher whitelist)
-  const jobType = step.action as import("../../../../shared/protocol/messages").JobType;
+  const jobType = step.action as import("../../../shared/protocol/messages").JobType;
 
   const { jobId } = await dispatcherService.dispatch({
     deviceId,
     type:        jobType,
-    params:      finalParams as import("../../../../shared/protocol/messages").JobParams,
+    params:      finalParams as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
     confirmRoot: isRootAction(step.action),
     workflowId,
@@ -650,7 +650,7 @@ async function executeActionStep(
   await wfAdapter.sendJob(deviceId, {
     jobId,
     type:     jobType,
-    params:   finalParams as import("../../../../shared/protocol/messages").JobParams,
+    params:   finalParams as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
     requiresRoot:         isRootAction(step.action),
     verificationStrategy: strategy,
