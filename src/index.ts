@@ -9,6 +9,7 @@ import path from "path";
 import express from "express";
 import cors from "cors";
 import { wsServer } from "./ws/ws.server";
+import { createNostrAdapter, getNostrAdapter } from "./nostr/adapter";
 import apiRouter from "./api/routes";
 import agencyRouter from "./api/agency-routes";
 import hydraRouter from "./api/hydra-routes";
@@ -150,14 +151,30 @@ async function bootstrap(): Promise<void> {
   // ─── HTTP server ──────────────────────────────────────────────────────────
   const httpServer = http.createServer(app);
 
-  // ─── WebSocket server (shares HTTP port) ─────────────────────────────────
-  wsServer.attach(httpServer);
-  setWsServerRef(wsServer);  // C1: allow routes.ts to send KILL_SWITCH WS commands
+  // ─── Transport layer (WebSocket or Nostr) ─────────────────────────────────
+  const useNostr = process.env.NOSTR_ENABLED === "true";
+
+  if (useNostr) {
+    // Nostr transport (v2)
+    console.log("[server] Starting Nostr transport...");
+    const nostrAdapter = await createNostrAdapter();
+    await nostrAdapter.connect();
+    console.log(`[server] Nostr connected. Server pubkey: ${nostrAdapter.getServerPubkey().slice(0, 16)}...`);
+  } else {
+    // Legacy WebSocket transport (v1)
+    wsServer.attach(httpServer);
+    setWsServerRef(wsServer);  // C1: allow routes.ts to send KILL_SWITCH WS commands
+    console.log("[server] WebSocket transport attached.");
+  }
 
   // ─── Start listening ──────────────────────────────────────────────────────
   httpServer.listen(PORT, () => {
     console.log(`[server] Listening on :${PORT}`);
-    console.log(`[server] WebSocket endpoint: ws://localhost:${PORT}/ws`);
+    if (useNostr) {
+      console.log(`[server] Nostr relay: ${process.env.NOSTR_RELAY_PRIMARY}`);
+    } else {
+      console.log(`[server] WebSocket endpoint: ws://localhost:${PORT}/ws`);
+    }
     console.log(`[server] REST API: http://localhost:${PORT}/api`);
   });
 
@@ -165,7 +182,12 @@ async function bootstrap(): Promise<void> {
   async function shutdown(signal: string): Promise<void> {
     console.log(`\n[server] ${signal} received — shutting down...`);
     httpServer.close();
-    await wsServer.close();
+    if (useNostr) {
+      const adapter = getNostrAdapter();
+      await adapter?.close();
+    } else {
+      await wsServer.close();
+    }
     await dispatcherService.close();
     // Workflow worker cleanup handled by BullMQ process exit hooks
     await closeRedis();
