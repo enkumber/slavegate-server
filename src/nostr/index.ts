@@ -24,3 +24,13 @@ export { DeviceRegistry, OFFLINE_THRESHOLD_MS } from "./device-registry";
 export { MessageRouter } from "./message-router";
 export type { MessageHandlers } from "./message-router";
 export { NostrPhoneClient } from "./client";
+
+// Sprint 2: Adapter layer
+export {
+  createNostrAdapter,
+  getNostrAdapter,
+  type NostrAdapter,
+  type JobPayload,
+  type OtaPayload,
+} from "./adapter";
+export { createHandlers } from "./handlers";
