@@ -926,7 +926,188 @@ router.get("/wireguard/health", requireAuth, async (_req, res) => {
   res.json({ ok: true, data: { wgEasyReachable: healthy } });
 });
 
-// ─── Health check (no auth) ───────────────────────────────────────────────────
+// ─── Nostr Device Enrollment (v2) ────────────────────────────────────────────────
+
+import { loadOrGenerateServerKeys, getServerPublicKey } from "../nostr";
+
+/**
+ * GET /api/nostr/server-info
+ * Returns server Nostr pubkey and relay URLs for device enrollment.
+ * Used by dashboard to generate QR codes.
+ */
+router.get("/nostr/server-info", requireAuth, async (_req, res) => {
+  try {
+    const { sk } = await loadOrGenerateServerKeys();
+    const serverPubkey = getServerPublicKey(sk);
+    const relayPrimary = process.env.NOSTR_RELAY_PRIMARY || "ws://localhost:7777";
+    const relaySecondary = process.env.NOSTR_RELAY_SECONDARY || null;
+    
+    res.json({
+      ok: true,
+      data: {
+        serverPubkey,
+        relayPrimary,
+        relaySecondary,
+        enrollmentVersion: 2,  // Nostr-based enrollment
+      },
+    });
+  } catch (err) {
+    console.error("[api] Nostr server-info error:", (err as Error).message);
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/**
+ * POST /api/nostr/enroll
+ * Create a pending device entry for Nostr enrollment.
+ * Returns enrollment data for QR code generation.
+ * 
+ * QR payload format (JSON):
+ * {
+ *   "v": 2,                        // enrollment version
+ *   "s": "<server_pubkey_hex>",    // server pubkey
+ *   "r": ["ws://relay1", ...],     // relay URLs
+ *   "d": "<device_id_uuid>"        // pre-assigned device ID
+ * }
+ */
+router.post("/nostr/enroll", requireAuth, async (req, res) => {
+  const { name } = req.body as { name?: string };
+  
+  try {
+    const db = getDb();
+    const { sk } = await loadOrGenerateServerKeys();
+    const serverPubkey = getServerPublicKey(sk);
+    const relayPrimary = process.env.NOSTR_RELAY_PRIMARY || "ws://localhost:7777";
+    const relaySecondary = process.env.NOSTR_RELAY_SECONDARY || null;
+    
+    // Create pending device in DB (no pubkey yet — will be set on first DEVICE_HELLO)
+    const result = await db.query(
+      `INSERT INTO devices (friendly_name, status, created_at)
+       VALUES ($1, 'pending', NOW())
+       RETURNING id`,
+      [name || "New Device"]
+    );
+    const deviceId = result.rows[0].id as string;
+    console.log(`[api] Nostr enrollment created: ${deviceId}`);
+    
+    // Build QR payload
+    const relays = relaySecondary ? [relayPrimary, relaySecondary] : [relayPrimary];
+    const qrPayload = {
+      v: 2,
+      s: serverPubkey,
+      r: relays,
+      d: deviceId,
+    };
+    
+    res.json({
+      ok: true,
+      data: {
+        deviceId,
+        qrPayload,
+        qrPayloadBase64: Buffer.from(JSON.stringify(qrPayload)).toString("base64"),
+      },
+    });
+  } catch (err) {
+    console.error("[api] Nostr enroll error:", (err as Error).message);
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/**
+ * POST /api/nostr/approve/:deviceId
+ * Approve a pending device after admin reviews DEVICE_HELLO.
+ * Sends DEVICE_ACK via Nostr.
+ */
+router.post("/nostr/approve/:deviceId", requireAuth, async (req, res) => {
+  const { deviceId } = req.params;
+  
+  try {
+    const db = getDb();
+    
+    // Check device exists and is pending
+    const result = await db.query(
+      "SELECT status, nostr_pubkey FROM devices WHERE id = $1",
+      [deviceId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Device not found" });
+    }
+    
+    const { status, nostr_pubkey } = result.rows[0] as { status: string; nostr_pubkey: string | null };
+    
+    if (status !== "pending") {
+      return res.status(400).json({ ok: false, error: `Device is ${status}, not pending` });
+    }
+    if (!nostr_pubkey) {
+      return res.status(400).json({ ok: false, error: "Device has not sent DEVICE_HELLO yet" });
+    }
+    
+    // Update status to approved
+    await db.query(
+      "UPDATE devices SET status = 'approved', approved_at = NOW() WHERE id = $1",
+      [deviceId]
+    );
+    
+    // Send DEVICE_ACK via Nostr
+    const adapter = getNostrAdapter();
+    if (adapter) {
+      await adapter.sendDeviceAck(deviceId, "approved");
+      console.log(`[api] Sent DEVICE_ACK to ${deviceId}`);
+    }
+    
+    res.json({ ok: true, data: { deviceId, status: "approved" } });
+  } catch (err) {
+    console.error("[api] Nostr approve error:", (err as Error).message);
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+/**
+ * POST /api/nostr/reject/:deviceId
+ * Reject a pending device.
+ * Sends DEVICE_REJECT via Nostr.
+ */
+router.post("/nostr/reject/:deviceId", requireAuth, async (req, res) => {
+  const { deviceId } = req.params;
+  const { reason } = req.body as { reason?: string };
+  
+  try {
+    const db = getDb();
+    
+    // Check device exists
+    const result = await db.query(
+      "SELECT nostr_pubkey FROM devices WHERE id = $1",
+      [deviceId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Device not found" });
+    }
+    
+    const { nostr_pubkey } = result.rows[0] as { nostr_pubkey: string | null };
+    
+    // Update status to rejected
+    await db.query(
+      "UPDATE devices SET status = 'rejected' WHERE id = $1",
+      [deviceId]
+    );
+    
+    // Send DEVICE_REJECT via Nostr if pubkey exists
+    if (nostr_pubkey) {
+      const adapter = getNostrAdapter();
+      if (adapter) {
+        await adapter.sendRevoked(deviceId);
+        console.log(`[api] Sent DEVICE_REJECT to ${deviceId}`);
+      }
+    }
+    
+    res.json({ ok: true, data: { deviceId, status: "rejected", reason: reason || "Admin rejected" } });
+  } catch (err) {
+    console.error("[api] Nostr reject error:", (err as Error).message);
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ─── Health check (no auth) ─────────────────────────────────────────────────────────
 
 router.get("/health", (_req, res) => {
   res.json({ ok: true, data: { status: "healthy", ts: new Date().toISOString() } });
