@@ -11,7 +11,7 @@ import { getCachedPlan, savePlanToCache, recordPlanOutcome } from "./plan-cache"
 import { learnFromSuccess, learnFromFailure } from "./self-evolution";
 import { getLlmClient } from "./llm-client";
 import { agentConfig } from "../../config/agents.config";
-import { wsServer } from "../../ws/ws.server";
+import { getNostrAdapter } from "../../nostr/adapter";
 import { getDb } from "../../db/client";
 import * as skillService from "../skills/skill.service";
 import { screenDetectionService } from "../screen-detection";
@@ -213,7 +213,8 @@ export class AgentOrchestrator {
     };
 
     // Check device is online
-    if (!wsServer.isDeviceConnected(deviceId)) {
+    const adapter = getNostrAdapter();
+    if (!adapter?.isDeviceOnline(deviceId)) {
       return {
         success: false, stepsCompleted: 0, totalSteps: 0,
         failReason: `Device ${deviceId} is offline`,
@@ -364,7 +365,7 @@ export class AgentOrchestrator {
               console.log(`[orchestrator] Pressing back + will retry`);
               const backJobId = uuidv4();
               const backPromise = awaitAction(backJobId, 3_000);
-              wsServer.sendJob(deviceId, {
+              await getNostrAdapter()?.sendJob(deviceId, {
                 jobId: backJobId,
                 type: "press_key" as import("../../../../shared/protocol/messages").JobType,
                 params: { key: "back" } as Record<string, unknown>,
@@ -499,7 +500,7 @@ export class AgentOrchestrator {
                 console.log(`[orchestrator] Pressing back before retry (escape potential overlay)`);
                 const backJobId = uuidv4();
                 const backPromise = awaitAction(backJobId, 3_000);
-                wsServer.sendJob(deviceId, {
+                await getNostrAdapter()?.sendJob(deviceId, {
                   jobId: backJobId,
                   type: "press_key" as import("../../../../shared/protocol/messages").JobType,
                   params: { key: "back" } as Record<string, unknown>,
@@ -675,13 +676,14 @@ export class AgentOrchestrator {
         timeoutMs: 10_000,
       });
       
-      // Send job to device via WebSocket
-      const sent = wsServer.sendJob(deviceId, {
+      // Send job to device via Nostr
+      await getNostrAdapter()?.sendJob(deviceId, {
         jobId: treeDispatch.jobId,
         type: "ui_tree_dump" as import("../../../../shared/protocol/messages").JobType,
         params: {} as Record<string, unknown>,
         timeoutMs: 10_000,
       });
+      const sent = true; // NostrAdapter throws on error, so if we reach here it's sent
       
       if (!sent) {
         console.warn(`[orchestrator] Reddit preamble: sendJob failed, sending back`);
@@ -734,7 +736,7 @@ export class AgentOrchestrator {
           timeoutMs: 5_000,
         });
         
-        wsServer.sendJob(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: tapDispatch.jobId,
           type: "a11y_find_tap" as import("../../../../shared/protocol/messages").JobType,
           params: { text: "Home" } as Record<string, unknown>,
@@ -752,7 +754,7 @@ export class AgentOrchestrator {
           timeoutMs: 5_000,
         });
         
-        wsServer.sendJob(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: verifyDispatch.jobId,
           type: "ui_tree_dump" as import("../../../../shared/protocol/messages").JobType,
           params: {} as Record<string, unknown>,
@@ -832,7 +834,7 @@ export class AgentOrchestrator {
   private async sendBackKey(deviceId: string): Promise<void> {
     const backId = uuidv4();
     const backP = awaitAction(backId, 3_000);
-    wsServer.sendJob(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: backId,
       type: "press_key" as import("../../../../shared/protocol/messages").JobType,
       params: { key: "back" } as Record<string, unknown>,
@@ -860,7 +862,7 @@ export class AgentOrchestrator {
     console.log(`[orchestrator] Preamble P0: screen_wake + unlock`);
     const wakeId = uuidv4();
     const wakeP = awaitAction(wakeId, 5_000);
-    wsServer.sendJob(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: wakeId,
       type: "screen_wake" as import("../../../../shared/protocol/messages").JobType,
       params: {} as Record<string, unknown>,
@@ -870,7 +872,7 @@ export class AgentOrchestrator {
 
     const unlockId = uuidv4();
     const unlockP = awaitAction(unlockId, 5_000);
-    wsServer.sendJob(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: unlockId,
       type: "unlock" as import("../../../../shared/protocol/messages").JobType,
       params: {} as Record<string, unknown>,
@@ -887,7 +889,7 @@ export class AgentOrchestrator {
       // Open Reddit app first
       const openId = uuidv4();
       const openP = awaitAction(openId, 10_000);
-      wsServer.sendJob(deviceId, {
+      await getNostrAdapter()?.sendJob(deviceId, {
         jobId: openId,
         type: "open_app" as import("../../../../shared/protocol/messages").JobType,
         params: { packageName: pkg } as Record<string, unknown>,
@@ -905,7 +907,7 @@ export class AgentOrchestrator {
     console.log(`[orchestrator] Preamble P1: open_app_fresh ${pkg}`);
     const freshId = uuidv4();
     const freshP = awaitAction(freshId, 10_000);
-    wsServer.sendJob(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: freshId,
       type: "open_app_fresh" as import("../../../../shared/protocol/messages").JobType,
       params: { packageName: pkg } as Record<string, unknown>,
@@ -934,7 +936,7 @@ export class AgentOrchestrator {
       for (let i = 0; i < 3; i++) {
         const backTapId = uuidv4();
         const backTapP = awaitAction(backTapId, 3_000);
-        wsServer.sendJob(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: backTapId,
           type: "tap" as import("../../../../shared/protocol/messages").JobType,
           params: {
@@ -951,7 +953,7 @@ export class AgentOrchestrator {
       console.log(`[orchestrator] Preamble P2: tapping nav.home (0.1, 0.912)`);
       const navId2 = uuidv4();
       const navP2 = awaitAction(navId2, 5_000);
-      wsServer.sendJob(deviceId, {
+      await getNostrAdapter()?.sendJob(deviceId, {
         jobId: navId2,
         type: "tap" as import("../../../../shared/protocol/messages").JobType,
         params: {
@@ -999,7 +1001,7 @@ Reply with EXACTLY one word: YES or NO`,
           console.log(`[orchestrator] Preamble P2.5: keyboard detected, dismissing...`);
           const kbBackId = uuidv4();
           const kbBackP = awaitAction(kbBackId, 3_000);
-          wsServer.sendJob(deviceId, {
+          await getNostrAdapter()?.sendJob(deviceId, {
             jobId: kbBackId,
             type: "press_key" as import("../../../../shared/protocol/messages").JobType,
             params: { key: "back" } as Record<string, unknown>,
@@ -1026,7 +1028,7 @@ Reply with EXACTLY one word: YES or NO`,
     const dims = await getScreenDims(deviceId);
     const navHomeId = uuidv4();
     const navHomeP = awaitAction(navHomeId, 5_000);
-    wsServer.sendJob(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: navHomeId,
       type: "tap" as import("../../../../shared/protocol/messages").JobType,
       params: {
@@ -1178,7 +1180,8 @@ Respond with ONLY the label, nothing else.`,
   // ─── Device helpers ─────────────────────────────────────────────────────────
 
   private async captureScreenshot(deviceId: string): Promise<string | null> {
-    if (!wsServer.isDeviceConnected(deviceId)) {
+    const adapter = getNostrAdapter();
+    if (!adapter?.isDeviceOnline(deviceId)) {
       console.warn(`[orchestrator] captureScreenshot: device ${deviceId.slice(0, 8)} not connected`);
       return null;
     }
@@ -1188,15 +1191,15 @@ Respond with ONLY the label, nothing else.`,
 
     const promise = awaitScreenshot(jobId, timeoutMs);
 
-    const sent = wsServer.sendJob(deviceId, {
-      jobId,
-      type: "screenshot" as import("../../../../shared/protocol/messages").JobType,
-      params: { quality: 70, maxWidth: 1080 } as Record<string, unknown>,
-      timeoutMs,
-    });
-
-    if (!sent) {
-      console.warn(`[orchestrator] captureScreenshot: sendJob failed for ${deviceId.slice(0, 8)}`);
+    try {
+      await adapter.sendJob(deviceId, {
+        jobId,
+        type: "screenshot" as import("../../../../shared/protocol/messages").JobType,
+        params: { quality: 70, maxWidth: 1080 } as Record<string, unknown>,
+        timeoutMs,
+      });
+    } catch (err) {
+      console.warn(`[orchestrator] captureScreenshot: sendJob failed for ${deviceId.slice(0, 8)}: ${(err as Error).message}`);
       // Clean up pending
       pendingScreenshots.delete(jobId);
       return null;
@@ -1286,14 +1289,17 @@ Respond with ONLY the label, nothing else.`,
 
     const promise = awaitAction(jobId, agentConfig.orchestrator.stepTimeoutMs);
 
-    const sent = wsServer.sendJob(deviceId, {
-      jobId,
-      type: jobType as import("../../../../shared/protocol/messages").JobType,
-      params: params as Record<string, unknown>,
-      timeoutMs: agentConfig.orchestrator.stepTimeoutMs,
-    });
-
-    if (!sent) return;
+    try {
+      await getNostrAdapter()?.sendJob(deviceId, {
+        jobId,
+        type: jobType as import("../../../../shared/protocol/messages").JobType,
+        params: params as Record<string, unknown>,
+        timeoutMs: agentConfig.orchestrator.stepTimeoutMs,
+      });
+    } catch (err) {
+      console.warn(`[orchestrator] performAction: sendJob failed: ${(err as Error).message}`);
+      return;
+    }
     await promise;
   }
 }
