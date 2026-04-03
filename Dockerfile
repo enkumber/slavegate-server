@@ -28,7 +28,7 @@ ENV NODE_ENV=production
 
 # Install runtime system dependencies
 RUN apk add --no-cache \
-    sqlite \
+    postgresql-client \
     bash \
     tini
 
