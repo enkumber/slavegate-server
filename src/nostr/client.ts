@@ -105,7 +105,7 @@ export class NostrPhoneClient {
 
     const sub = this.pool.subscribeMany(
       this.relayUrls,
-      filter,
+      [filter],
       {
         onevent: (event: NostrEvent) => {
           void this._handleEvent(event);

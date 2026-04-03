@@ -29,8 +29,13 @@ CREATE TABLE IF NOT EXISTS nostr_server_keys (
   id TEXT PRIMARY KEY DEFAULT 'default',
   secret_key_encrypted TEXT NOT NULL,
   public_key TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  rotated_at TIMESTAMPTZ,
+  previous_public_key TEXT
 );
+
+COMMENT ON COLUMN nostr_server_keys.rotated_at IS 'Timestamp of last key rotation';
+COMMENT ON COLUMN nostr_server_keys.previous_public_key IS 'Previous pubkey for graceful rotation';
 
 -- ─── Event log ────────────────────────────────────────────────────────────────
 -- Audit log for processed Nostr events.
