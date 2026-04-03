@@ -30,4 +30,4 @@ fi
 
 # Start the server
 echo "[entrypoint] Starting server on port ${PORT:-3000}..."
-exec node dist/phone-network-server/src/index.js
+exec node dist/src/index.js
