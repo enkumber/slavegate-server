@@ -14,7 +14,7 @@
 
 import { getDb } from "../../db/client";
 import { agentOrchestrator } from "../agents/orchestrator";
-import { wsServer } from "../../ws/ws.server";
+import { getNostrAdapter } from "../../nostr/adapter";
 import type { TaskResult } from "../agents/types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -188,7 +188,8 @@ async function runPollCycle(): Promise<void> {
     }
     
     // Skip if device is offline
-    if (!wsServer.isDeviceConnected(task.device_id)) {
+    const taskAdapter = getNostrAdapter();
+    if (!taskAdapter || !taskAdapter.isDeviceOnline(task.device_id)) {
       console.log(`[task-runner] Skipping task ${task.id.slice(0, 8)} — device ${task.device_id.slice(0, 8)} offline`);
       continue;
     }
@@ -464,7 +465,8 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
     return { success: false, error: "Device is busy with another task" };
   }
   
-  if (!wsServer.isDeviceConnected(task.device_id)) {
+  const nowAdapter = getNostrAdapter();
+  if (!nowAdapter || !nowAdapter.isDeviceOnline(task.device_id)) {
     return { success: false, error: "Device is offline" };
   }
   

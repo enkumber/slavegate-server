@@ -14,7 +14,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../../db/client";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { wsServer } from "../../ws/ws.server";
+import { getNostrAdapter } from "../../nostr/adapter";
 import * as skillService from "./skill.service";
 import { coordCacheService } from "./skill-db.service";
 import type { DeviceInfo } from "./skill-db.service";
@@ -72,8 +72,9 @@ function getDeviceInfo(deviceId: string, platform: string): DeviceInfo {
   if (cached && Date.now() - cached.ts < DEV_INFO_TTL) return cached.info;
 
   // Best-effort from wsServer metadata (if available)
-  const deviceMeta = (wsServer as unknown as Record<string, unknown>).getDeviceMeta instanceof Function
-    ? (wsServer as unknown as { getDeviceMeta: (id: string) => Record<string, unknown> | null }).getDeviceMeta(deviceId)
+  const adapter = getNostrAdapter();
+  const deviceMeta = adapter && (adapter as unknown as Record<string, unknown>).getDeviceMeta instanceof Function
+    ? (adapter as unknown as { getDeviceMeta: (id: string) => Record<string, unknown> | null }).getDeviceMeta(deviceId)
     : null;
 
   const info: DeviceInfo = {
@@ -212,7 +213,9 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
     try {
       // BACK to dismiss keyboard
       const backJobId = uuidv4();
-      wsServer.sendJob(req.deviceId, {
+      const backAdapter = getNostrAdapter();
+      if (!backAdapter) throw new Error("Transport not initialized");
+      await backAdapter.sendJob(req.deviceId, {
         jobId: backJobId,
         type: "press_key" as import("../../../../shared/protocol/messages").JobType,
         params: { key: "back" } as Record<string, unknown>,
@@ -223,7 +226,9 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
 
       // Tap nav.home
       const homeJobId = uuidv4();
-      wsServer.sendJob(req.deviceId, {
+      const homeAdapter = getNostrAdapter();
+      if (!homeAdapter) throw new Error("Transport not initialized");
+      await homeAdapter.sendJob(req.deviceId, {
         jobId: homeJobId,
         type: "tap" as import("../../../../shared/protocol/messages").JobType,
         params: { x: 0.10, y: 0.912 } as Record<string, unknown>,
@@ -435,7 +440,9 @@ async function executeSkillTapJob(
   coords: NormalizedCoords,
   timeoutMs: number
 ): Promise<JobResult> {
-  if (!wsServer.isDeviceConnected(req.deviceId)) {
+  const skillTapAdapter = getNostrAdapter();
+  if (!skillTapAdapter) throw new Error("Transport not initialized");
+  if (!skillTapAdapter.isDeviceOnline(req.deviceId)) {
     throw new Error(`Device ${req.deviceId} offline`);
   }
 
@@ -459,16 +466,12 @@ async function executeSkillTapJob(
   });
 
   // Send to device
-  const sent = wsServer.sendJob(req.deviceId, {
+  await skillTapAdapter.sendJob(req.deviceId, {
     jobId,
     type: "skill_tap",
     params: params as unknown as import("../../../../shared/protocol/messages").JobParams,
     timeoutMs,
   });
-
-  if (!sent) {
-    throw new Error(`Failed to send skill_tap job to ${req.deviceId}`);
-  }
 
   return awaitCascadeResult(jobId, timeoutMs + 5000);
 }
@@ -478,7 +481,9 @@ async function executeA11yFindTapJob(
   element: import("./types").SkillElement | null,
   timeoutMs: number
 ): Promise<JobResult> {
-  if (!wsServer.isDeviceConnected(req.deviceId)) {
+  const a11yAdapter = getNostrAdapter();
+  if (!a11yAdapter) throw new Error("Transport not initialized");
+  if (!a11yAdapter.isDeviceOnline(req.deviceId)) {
     throw new Error(`Device ${req.deviceId} offline`);
   }
 
@@ -571,16 +576,12 @@ async function executeA11yFindTapJob(
   });
 
   // Send to device
-  const sent = wsServer.sendJob(req.deviceId, {
+  await a11yAdapter.sendJob(req.deviceId, {
     jobId,
     type: "a11y_find_tap",
     params: params as unknown as import("../../../../shared/protocol/messages").JobParams,
     timeoutMs,
   });
-
-  if (!sent) {
-    throw new Error(`Failed to send a11y_find_tap job to ${req.deviceId}`);
-  }
 
   return awaitCascadeResult(jobId, timeoutMs + 5000);
 }
@@ -590,7 +591,9 @@ async function executeOcrFindTapJob(
   searchText: string,
   timeoutMs: number
 ): Promise<JobResult> {
-  if (!wsServer.isDeviceConnected(req.deviceId)) {
+  const ocrAdapter = getNostrAdapter();
+  if (!ocrAdapter) throw new Error("Transport not initialized");
+  if (!ocrAdapter.isDeviceOnline(req.deviceId)) {
     throw new Error(`Device ${req.deviceId} offline`);
   }
 
@@ -611,16 +614,12 @@ async function executeOcrFindTapJob(
   });
 
   // Send to device
-  const sent = wsServer.sendJob(req.deviceId, {
+  await ocrAdapter.sendJob(req.deviceId, {
     jobId,
     type: "ocr_find_tap",
     params: params as unknown as import("../../../../shared/protocol/messages").JobParams,
     timeoutMs,
   });
-
-  if (!sent) {
-    throw new Error(`Failed to send ocr_find_tap job to ${req.deviceId}`);
-  }
 
   return awaitCascadeResult(jobId, timeoutMs + 5000);
 }
@@ -1125,7 +1124,9 @@ async function executeUnifiedA11yTextSearch(
     params: params as any,
     timeoutMs,
   });
-  wsServer.sendJob(deviceId, { jobId, type: "a11y_find_tap", params: params as any, timeoutMs });
+  const uniA11yAdapter = getNostrAdapter();
+  if (!uniA11yAdapter) throw new Error("Transport not initialized");
+  await uniA11yAdapter.sendJob(deviceId, { jobId, type: "a11y_find_tap", params: params as any, timeoutMs });
 
   return awaitCascadeResult(jobId, timeoutMs + 5000);
 }
@@ -1144,7 +1145,9 @@ async function executeUnifiedOcrFindTapJob(
     params: params as any,
     timeoutMs,
   });
-  wsServer.sendJob(deviceId, { jobId, type: "ocr_find_tap", params, timeoutMs });
+  const uniOcrAdapter = getNostrAdapter();
+  if (!uniOcrAdapter) throw new Error("Transport not initialized");
+  await uniOcrAdapter.sendJob(deviceId, { jobId, type: "ocr_find_tap", params, timeoutMs });
 
   return awaitCascadeResult(jobId, timeoutMs + 5000);
 }
@@ -1162,7 +1165,9 @@ async function executeUnifiedVlmFindElement(
     params: {},
     timeoutMs: 10000,
   });
-  wsServer.sendJob(deviceId, { jobId: screenshotJobId, type: "screenshot_for_vlm", params: {}, timeoutMs: 10000 });
+  const vlmScreenAdapter = getNostrAdapter();
+  if (!vlmScreenAdapter) throw new Error("Transport not initialized");
+  await vlmScreenAdapter.sendJob(deviceId, { jobId: screenshotJobId, type: "screenshot_for_vlm", params: {}, timeoutMs: 10000 });
   
   const screenshot = await awaitCascadeResult(screenshotJobId, 10000);
   if (!screenshot.output?.image_base64) return null;
@@ -1211,7 +1216,9 @@ async function executeUnifiedTapAtCoords(
     params: { x: pixelX, y: pixelY },
     timeoutMs: 5000,
   });
-  wsServer.sendJob(deviceId, { jobId, type: "tap", params: { x: pixelX, y: pixelY }, timeoutMs: 5000 });
+  const tapAdapter = getNostrAdapter();
+  if (!tapAdapter) throw new Error("Transport not initialized");
+  await tapAdapter.sendJob(deviceId, { jobId, type: "tap", params: { x: pixelX, y: pixelY }, timeoutMs: 5000 });
 
   try {
     const result = await awaitCascadeResult(jobId, 5000);

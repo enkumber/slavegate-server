@@ -22,7 +22,7 @@ import { getRedisConnectionOptions } from "../../redis/client";
 import { workflowService } from "./workflow.service";
 import { hbeService } from "../hbe/hbe.service";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { wsServer } from "../../ws/ws.server";
+import { getNostrAdapter } from "../../nostr/adapter";
 import { getDb } from "../../db/client";
 import type {
   WorkflowStep,
@@ -384,8 +384,9 @@ async function executeSkillActionStep(
         workflowId,
         stepIndex,
       });
-      const sent = wsServer.sendJob(deviceId, { jobId, type: jobType, params: params as import("../../../../shared/protocol/messages").JobParams, timeoutMs });
-      if (!sent) throw new Error(`Failed to send job ${jobId} to device ${deviceId}`);
+      const dispatchAdapter = getNostrAdapter();
+      if (!dispatchAdapter) throw new Error("Transport not initialized");
+      await dispatchAdapter.sendJob(deviceId, { jobId, type: jobType, params: params as import("../../../../shared/protocol/messages").JobParams, timeoutMs });
       return awaitJobResult(jobId, timeoutMs + 5_000);
     },
 
@@ -453,7 +454,9 @@ async function executeActionStep(
   checkpoint: WorkflowCheckpoint,
   stepIndex:  number
 ): Promise<void> {
-  if (!wsServer.isDeviceConnected(deviceId)) {
+  const wfAdapter = getNostrAdapter();
+  if (!wfAdapter) throw new Error("Transport not initialized");
+  if (!wfAdapter.isDeviceOnline(deviceId)) {
     // Device offline — pause and let BullMQ retry on reconnect
     await workflowService.markPaused(workflowId);
     throw new Error(`Device ${deviceId} offline at step ${stepIndex}`);
@@ -643,8 +646,8 @@ async function executeActionStep(
     [deviceId, jobId, step.action, `workflow:${workflowId} step:${stepIndex} ${step.action}`, JSON.stringify(finalParams)]
   );
 
-  // Send to device via WebSocket
-  const sent = wsServer.sendJob(deviceId, {
+  // Send to device via Nostr adapter
+  await wfAdapter.sendJob(deviceId, {
     jobId,
     type:     jobType,
     params:   finalParams as import("../../../../shared/protocol/messages").JobParams,
@@ -654,10 +657,6 @@ async function executeActionStep(
     l1TimeoutMs:          hbeStep.l1TimeoutMs,
     l2SettleMs:           hbeStep.l2SettleMs,
   });
-
-  if (!sent) {
-    throw new Error(`Failed to send job ${jobId} to device ${deviceId}`);
-  }
 
   console.log(`[workflow] ${workflowId} step ${stepIndex} dispatched ${step.action} → jobId=${jobId}`);
 
