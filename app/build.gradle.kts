@@ -10,7 +10,7 @@ android {
     defaultConfig {
         applicationId = "com.phonenetwork"
         minSdk = 29          // Android 10 (OP5T fleet minimum)
-        targetSdk = 30       // Android 11 — Scoped Storage + package visibility
+        targetSdk = 34       // Android 14
         versionCode = 44
         versionName = "3.0.0"
 
@@ -19,8 +19,8 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

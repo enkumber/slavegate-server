@@ -20,6 +20,7 @@ import com.phonenetwork.nostr.DefaultNostrMessageHandler
 import com.phonenetwork.nostr.EnrollmentStore
 import com.phonenetwork.nostr.NostrClient
 import com.phonenetwork.nostr.NostrEventKinds
+import com.phonenetwork.nostr.NostrConfig
 import com.phonenetwork.nostr.NostrMessageHandler
 import com.phonenetwork.ota.OtaInstaller
 import kotlinx.coroutines.CoroutineScope
@@ -130,12 +131,11 @@ class AgentForegroundService : Service() {
         // Wire A11y if it already connected before this service started (race condition fix)
         pendingA11y?.let { onAccessibilityServiceConnected(it) }
 
-        // Check enrollment — fail gracefully if not enrolled
+        // Check enrollment — if not enrolled, use hardcoded defaults (auto-discovery)
         val enrollment = EnrollmentStore.getEnrollment(applicationContext)
         if (enrollment == null) {
-            Log.e(TAG, "Device not enrolled — scan QR code first")
-            updateNotification("Not enrolled — scan QR code")
-            // Still start service (will retry on reconnect / re-enrollment)
+            Log.i(TAG, "No enrollment — using default config (auto-discovery mode)")
+            updateNotification("Connecting (auto-discovery)...")
         }
 
         // Connect to Nostr relays
@@ -215,10 +215,12 @@ class AgentForegroundService : Service() {
             otaInstaller = otaInstaller,
         )
 
-        // Build NostrClient with enrollment data (or fallback empty values if not enrolled yet)
-        val relayUrls   = enrollment?.relayUrls ?: emptyList()
-        val serverPubkey = enrollment?.serverPubkey ?: ""
-        val deviceId    = enrollment?.deviceId ?: ""
+        // Build NostrClient — use enrollment data or hardcoded defaults (auto-discovery)
+        val relayUrls    = enrollment?.relayUrls?.takeIf { it.isNotEmpty() } ?: NostrConfig.DEFAULT_RELAYS
+        val serverPubkey = enrollment?.serverPubkey?.takeIf { it.isNotEmpty() } ?: NostrConfig.SERVER_PUBKEY
+        val deviceId     = enrollment?.deviceId ?: android.provider.Settings.Secure.getString(
+            ctx.contentResolver, android.provider.Settings.Secure.ANDROID_ID
+        )
 
         nostrClient = NostrClient(
             context      = ctx,

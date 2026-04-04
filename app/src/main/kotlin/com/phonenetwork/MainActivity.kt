@@ -9,7 +9,9 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -58,12 +60,9 @@ class MainActivity : AppCompatActivity() {
         // Request battery optimization exclusion on first launch
         requestBatteryOptimizationExclusion()
 
-        if (EnrollmentStore.hasEnrollment(this)) {
-            Log.i(tag, "Device enrolled — starting service")
-            AgentForegroundService.start(this)
-        } else {
-            Log.i(tag, "Device not enrolled — show QR scan UI")
-        }
+        // Always start service — uses enrollment data or hardcoded defaults (auto-discovery)
+        Log.i(tag, "Starting service (enrolled=${EnrollmentStore.hasEnrollment(this)})")
+        AgentForegroundService.start(this)
 
         buildUI()
     }
@@ -109,6 +108,15 @@ class MainActivity : AppCompatActivity() {
         }
         layout.addView(scanButton)
 
+        // Manual enrollment button
+        val manualButton = Button(this).apply {
+            tag = "manual_btn"
+            text = "📋 Manual Enrollment (paste code)"
+            textSize = 16f
+            setOnClickListener { showManualEnrollmentDialog() }
+        }
+        layout.addView(manualButton)
+
         // Re-enroll button (if already enrolled)
         val rescanButton = Button(this).apply {
             tag = "rescan_btn"
@@ -132,18 +140,60 @@ class MainActivity : AppCompatActivity() {
         val scanButton = window.decorView.findViewWithTag<Button>("scan_btn")
         val rescanButton = window.decorView.findViewWithTag<Button>("rescan_btn")
 
+        val manualButton = window.decorView.findViewWithTag<Button>("manual_btn")
+
         if (isEnrolled) {
             val enrollment = EnrollmentStore.getEnrollment(this)
             val deviceId = enrollment?.deviceId?.take(8) ?: "?"
             val relayCount = enrollment?.relayUrls?.size ?: 0
             statusText?.text = "✅ Enrolled (device: $deviceId…)\n🔌 Service running — $relayCount relay(s)"
             scanButton?.visibility = android.view.View.GONE
+            manualButton?.visibility = android.view.View.GONE
             rescanButton?.visibility = android.view.View.VISIBLE
         } else {
-            statusText?.text = "⚠️ Not enrolled\nScan enrollment QR code to connect"
+            statusText?.text = "⚠️ Not enrolled\nScan QR or paste enrollment code"
             scanButton?.visibility = android.view.View.VISIBLE
+            manualButton?.visibility = android.view.View.VISIBLE
             rescanButton?.visibility = android.view.View.GONE
         }
+    }
+
+    /**
+     * Show dialog for manual enrollment code entry.
+     * Accepts JSON or base64 enrollment payload.
+     */
+    private fun showManualEnrollmentDialog() {
+        val input = EditText(this).apply {
+            hint = "Paste enrollment JSON or base64 code"
+            setPadding(32, 24, 32, 24)
+            minLines = 3
+            setTextColor(0xFF000000.toInt())
+            setHintTextColor(0xFF888888.toInt())
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("📋 Manual Enrollment")
+            .setMessage("Paste the enrollment code from the server:")
+            .setView(input)
+            .setPositiveButton("Enroll") { _, _ ->
+                val code = input.text.toString().trim()
+                if (code.isEmpty()) {
+                    Toast.makeText(this, "No code entered", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val success = EnrollmentStore.saveFromQrContent(this, code)
+                if (success) {
+                    Log.i(tag, "Manual enrollment saved — starting service")
+                    Toast.makeText(this, "✅ Enrolled successfully!", Toast.LENGTH_LONG).show()
+                    AgentForegroundService.start(this)
+                    updateUI()
+                } else {
+                    Log.e(tag, "Manual enrollment failed — invalid code")
+                    Toast.makeText(this, "❌ Invalid enrollment code", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     /**
