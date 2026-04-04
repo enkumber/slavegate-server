@@ -270,10 +270,11 @@ export class DirectWsServer {
     remoteIp: string,
     onAuth: (conn: ConnectedDevice) => void,
   ): Promise<void> {
-    const { deviceId, deviceKey, fingerprint } = msg as { 
+    const { deviceId, deviceKey, fingerprint, deviceInfo } = msg as { 
       deviceId?: string; 
       deviceKey?: string; 
-      fingerprint?: string; 
+      fingerprint?: string;
+      deviceInfo?: { model?: string; manufacturer?: string; androidVersion?: string; sdkVersion?: number; agentVersion?: string };
     };
 
     try {
@@ -362,10 +363,33 @@ export class DirectWsServer {
       this.connections.set(finalDeviceId, conn);
       devicesConnected?.set(this.connections.size);
 
-      // Update DB — mark online
+      // Update DB — mark online + device info
       await devicesService.markOnline(finalDeviceId, remoteIp).catch(err =>
         console.warn("[direct-ws] markOnline error:", err.message)
       );
+
+      // Save device info (model, android version, agent version)
+      if (deviceInfo) {
+        const friendlyName = deviceInfo.manufacturer && deviceInfo.model
+          ? `${deviceInfo.manufacturer} ${deviceInfo.model}` : undefined;
+        const androidVer = deviceInfo.androidVersion || undefined;
+        const agentVersion = deviceInfo.agentVersion;
+        const modelStr = deviceInfo.model;
+        const updates: string[] = [];
+        const vals: unknown[] = [];
+        let idx = 1;
+        if (friendlyName) { updates.push(`friendly_name = $${idx++}`); vals.push(friendlyName); }
+        if (modelStr) { updates.push(`model = $${idx++}`); vals.push(modelStr); }
+        if (androidVer) { updates.push(`android_version = $${idx++}`); vals.push(androidVer); }
+        if (agentVersion) { updates.push(`agent_version = $${idx++}`); vals.push(agentVersion); }
+        if (updates.length > 0) {
+          vals.push(finalDeviceId);
+          await db.query(`UPDATE devices SET ${updates.join(', ')} WHERE id = $${idx}`, vals).catch(err =>
+            console.warn("[direct-ws] deviceInfo update error:", err.message)
+          );
+          console.log(`[direct-ws] Device info: ${friendlyName} Android ${androidVer} agent=${agentVersion}`);
+        }
+      }
 
       // Send AUTH_OK with deviceId + deviceKey (so device can save for future reconnects)
       this._send(ws, { 
