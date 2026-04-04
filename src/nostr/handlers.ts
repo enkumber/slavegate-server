@@ -108,12 +108,19 @@ export function createHandlers(
       payload: object,
       _event: NostrEvent
     ): Promise<void> => {
-      const deviceId = registry.lookupDeviceId(pubkey);
+      let deviceId = registry.lookupDeviceId(pubkey);
       if (!deviceId) {
-        console.warn(
-          `[handlers] HEARTBEAT from unknown pubkey ${pubkey}`
+        // Auto-register unknown device from heartbeat
+        console.log(`[handlers] HEARTBEAT from new pubkey ${pubkey.slice(0, 8)} — auto-registering`);
+        const db = getDb();
+        const { v4: uuidv4 } = await import("uuid");
+        deviceId = uuidv4();
+        await db.query(
+          `INSERT INTO devices (id, friendly_name, status, nostr_pubkey, created_at) VALUES ($1, $2, 'pending', $3, NOW())`,
+          [deviceId, `Device-${pubkey.slice(0, 8)}`, pubkey]
         );
-        return;
+        registry.register(pubkey, deviceId);
+        console.log(`[handlers] Auto-registered device ${deviceId} for pubkey ${pubkey.slice(0, 8)}`);
       }
 
       // Update DB last_seen_at
