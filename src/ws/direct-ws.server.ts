@@ -275,13 +275,8 @@ export class DirectWsServer {
       nostrPubkey?: string; 
     };
 
-    if (!deviceId) {
-      ws.close(4001, "deviceId required");
-      return;
-    }
-    
-    if (!deviceKey && !nostrPubkey) {
-      ws.close(4001, "deviceKey or nostrPubkey required");
+    if (!nostrPubkey) {
+      ws.close(4001, "nostrPubkey required for enrollment");
       return;
     }
 
@@ -289,32 +284,58 @@ export class DirectWsServer {
       const db = getDb();
       let device: { id: string; status: string; device_key: string | null } | null = null;
       
-      // Try deviceId lookup first
-      if (deviceId) {
+      // If device has deviceId + deviceKey → normal auth flow
+      if (deviceId && deviceKey) {
         const result = await db.query<{ id: string; status: string; device_key: string | null }>(
-          `SELECT id, status, device_key FROM devices WHERE id = $1`,
-          [deviceId]
+          `SELECT id, status, device_key FROM devices WHERE id = $1 AND device_key = $2`,
+          [deviceId, deviceKey]
         );
         device = result.rows[0] || null;
+        if (device) {
+          console.log(`[direct-ws] Normal auth for ${device.id.slice(0,8)}`);
+        }
       }
       
-      // If no device by deviceId, try nostr_pubkey lookup
-      if (!device && nostrPubkey) {
-        console.log(`[direct-ws] Device not found by ID, trying nostr_pubkey lookup: ${nostrPubkey.slice(0,16)}...`);
+      // If no deviceId/deviceKey OR device not found → try enrollment flow
+      if (!device) {
+        console.log(`[direct-ws] No device by deviceId+key, trying enrollment by nostr_pubkey: ${nostrPubkey.slice(0,16)}...`);
         const result = await db.query<{ id: string; status: string; device_key: string | null }>(
           `SELECT id, status, device_key FROM devices WHERE nostr_pubkey = $1`,
           [nostrPubkey]
         );
-        device = result.rows[0] || null;
-        if (device) {
-          console.log(`[direct-ws] Found device by nostr_pubkey: ${device.id.slice(0,8)}`);
+        const existing = result.rows[0] || null;
+        
+        if (existing) {
+          // Device exists by nostr_pubkey → authenticate
+          device = existing;
+          console.log(`[direct-ws] Found existing device by nostr_pubkey: ${device.id.slice(0,8)}`);
+        } else {
+          // NEW ENROLLMENT FLOW: Create device with status 'pending'
+          console.log(`[direct-ws] Creating NEW device for nostr_pubkey: ${nostrPubkey.slice(0,16)}...`);
+          const crypto = require('crypto');
+          const newDeviceId = crypto.randomUUID();
+          const newDeviceKey = crypto.randomBytes(32).toString('hex');
+          
+          await db.query(
+            `INSERT INTO devices (id, nostr_pubkey, device_key, status, first_seen_at, last_seen_at) 
+             VALUES ($1, $2, $3, 'pending', NOW(), NOW())`,
+            [newDeviceId, nostrPubkey, newDeviceKey]
+          );
+          
+          device = {
+            id: newDeviceId,
+            status: 'pending', 
+            device_key: newDeviceKey
+          };
+          
+          console.log(`[direct-ws] NEW device created: ${newDeviceId.slice(0,8)} status=pending`);
         }
       }
 
       if (!device) {
-        console.warn(`[direct-ws] AUTH failed: device not found (deviceId=${deviceId?.slice(0,8)} nostrPubkey=${nostrPubkey?.slice(0,16)}) from ${remoteIp}`);
-        this._send(ws, { type: "AUTH_FAIL", reason: "Device not found" });
-        ws.close(4003, "Device not found");
+        console.warn(`[direct-ws] AUTH failed: could not resolve device (deviceId=${deviceId?.slice(0,8)} nostrPubkey=${nostrPubkey?.slice(0,16)}) from ${remoteIp}`);
+        this._send(ws, { type: "AUTH_FAIL", reason: "Device enrollment failed" });
+        ws.close(4003, "Device enrollment failed");
         return;
       }
 
@@ -324,27 +345,11 @@ export class DirectWsServer {
         ws.close(4003, "Blocked");
         return;
       }
-
-      // Auth by deviceKey (preferred) or fallback to nostr_pubkey
-      let authValid = false;
-      if (deviceKey && device.device_key && device.device_key === deviceKey) {
-        authValid = true;
-        console.log(`[direct-ws] Auth by deviceKey for ${device.id.slice(0,8)}`);
-      } else if (nostrPubkey && !deviceKey) {
-        // If no deviceKey provided, allow nostr_pubkey auth
-        authValid = true;
-        console.log(`[direct-ws] Auth by nostr_pubkey for ${device.id.slice(0,8)}`);
-      }
       
-      if (!authValid) {
-        console.warn(`[direct-ws] AUTH failed: invalid credentials for ${device.id.slice(0,8)} from ${remoteIp}`);
-        this._send(ws, { type: "AUTH_FAIL", reason: "Invalid credentials" });
-        ws.close(4003, "Invalid credentials");
-        return;
-      }
-      
-      // Use the found device ID (in case it was looked up by nostr_pubkey)
+      // Use the resolved device ID
       const finalDeviceId = device.id;
+      const finalDeviceKey = device.device_key!;
+      const finalStatus = device.status;
 
       // Kick existing connection for same device
       const existing = this.connections.get(finalDeviceId);
@@ -372,8 +377,14 @@ export class DirectWsServer {
         console.warn("[direct-ws] markOnline error:", err.message)
       );
 
-      this._send(ws, { type: "AUTH_OK", deviceId: finalDeviceId });
-      console.log(`[direct-ws] Device ${finalDeviceId.slice(0,8)} authenticated from ${remoteIp}`);
+      // Send AUTH_OK with deviceId + deviceKey (so device can save for future reconnects)
+      this._send(ws, { 
+        type: "AUTH_OK", 
+        deviceId: finalDeviceId,
+        deviceKey: finalDeviceKey,
+        status: finalStatus
+      });
+      console.log(`[direct-ws] Device ${finalDeviceId.slice(0,8)} authenticated (status=${finalStatus}) from ${remoteIp}`);
       onAuth(conn);
 
     } catch (err) {
