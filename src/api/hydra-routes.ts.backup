@@ -120,13 +120,13 @@ async function performVerification(
       params: {},
       timeoutMs: 30000,
     });
-    sendJobToDevice(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: verifyScreenshot.jobId,
       type: "screenshot_for_vlm",
       params: {},
       timeoutMs: 30000,
     });
-    const screenshot = await waitForResult(verifyScreenshot.jobId, 30000);
+    const screenshot = await waitForJobResult(verifyScreenshot.jobId, 30000);
     
     if (screenshot?.output?.image_base64) {
       const verifyResult = await visionService.handleVerifyRequest(
@@ -166,14 +166,14 @@ async function executeTapAtCoords(
       params: { x: pixelX, y: pixelY },
       timeoutMs: 30000,
     });
-    sendJobToDevice(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: tapJob.jobId,
       type: "tap",
       params: { x: pixelX, y: pixelY },
       timeoutMs: 30000,
     });
     console.log(`[cascade] Tap sent: (${pixelX}, ${pixelY}) jobId=${tapJob.jobId}`);
-    const result = await waitForResult(tapJob.jobId, 30000);
+    const result = await waitForJobResult(tapJob.jobId, 30000);
     const success = result?.status === "completed";
     console.log(`[cascade] Tap result: ${success ? 'SUCCESS' : 'FAILED'}`);
     return success;
@@ -212,7 +212,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
     }
 
     // Check device connected
-    if (!isDeviceOnline(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -279,13 +279,13 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             params: { x: pixelX, y: pixelY },
             timeoutMs: 30000,
           });
-          sendJobToDevice(deviceId, {
+          await getNostrAdapter()?.sendJob(deviceId, {
             jobId: tapJob.jobId,
             type: "tap",
             params: { x: pixelX, y: pixelY },
             timeoutMs: 30000,
           });
-          const tapResult = await waitForResult(tapJob.jobId, 30000);
+          const tapResult = await waitForJobResult(tapJob.jobId, 30000);
           
           if (tapResult?.status === "completed") {
             // Verify if requested
@@ -329,13 +329,13 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: uiJob.jobId,
           type: "ui_tree_dump",
           params: {},
           timeoutMs: 30000,
         });
-        const uiTreeResult = await waitForResult(uiJob.jobId, 30000);
+        const uiTreeResult = await waitForJobResult(uiJob.jobId, 30000);
         
         if (uiTreeResult?.output?.uiTree) {
           const uiTree = typeof uiTreeResult.output.uiTree === 'string'
@@ -397,13 +397,13 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: { searchText: parsedTarget.value, partialMatch: true } as unknown as OcrFindTapParams,
           timeoutMs: 30000,
         });
-        sendJobToDevice(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: ocrJob.jobId,
           type: "ocr_find_tap",
           params: { searchText: parsedTarget.value, partialMatch: true } as unknown as OcrFindTapParams,
           timeoutMs: 30000,
         });
-        const ocrResult = await waitForResult(ocrJob.jobId, 30000);
+        const ocrResult = await waitForJobResult(ocrJob.jobId, 30000);
         
         if (ocrResult?.output?.found) {
           const normalizedCoords = { x: ocrResult.output.x as number, y: ocrResult.output.y as number };
@@ -451,13 +451,13 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: screenshotJob.jobId,
           type: "screenshot_for_vlm",
           params: {},
           timeoutMs: 30000,
         });
-        const screenshot = await waitForResult(screenshotJob.jobId, 30000);
+        const screenshot = await waitForJobResult(screenshotJob.jobId, 30000);
         
         if (screenshot?.output?.image_base64) {
           // Save screenshot to file for OpenClaw CLI
@@ -567,13 +567,13 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
         params: {},
         timeoutMs: 30000,
       });
-      sendJobToDevice(deviceId, {
+      await getNostrAdapter()?.sendJob(deviceId, {
         jobId: preCheckJob.jobId,
         type: "ui_tree_dump",
         params: {},
         timeoutMs: 30000,
       });
-      const preCheckResult = await waitForResult(preCheckJob.jobId, 30000);
+      const preCheckResult = await waitForJobResult(preCheckJob.jobId, 30000);
       
       if (preCheckResult?.output?.uiTree) {
         const detection = await detectCurrentScreen(preCheckResult, platform);
@@ -621,13 +621,13 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           timeoutMs: 30000,
         });
         // IMPORTANT: Send job to device via Nostr (dispatch only creates DB record)
-        sendJobToDevice(devId, {
+        await getNostrAdapter()?.sendJob(devId, {
           jobId: job.jobId,
           type: "ui_tree_dump",
           params: {},
           timeoutMs: 30000,
         });
-        return await waitForResult(job.jobId, 30000);
+        return await waitForJobResult(job.jobId, 30000);
       },
       // OCR provider (Level 2.5) — ML Kit text recognition
       async (devId, searchText) => {
@@ -638,13 +638,13 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: { searchText, partialMatch: false } as unknown as OcrFindTapParams,
           timeoutMs: 30000,
         });
-        sendJobToDevice(devId, {
+        await getNostrAdapter()?.sendJob(devId, {
           jobId: ocrJob.jobId,
           type: "ocr_find_tap",
           params: { searchText, partialMatch: false } as unknown as OcrFindTapParams,
           timeoutMs: 30000,
         });
-        const result = await waitForResult(ocrJob.jobId, 30000);
+        const result = await waitForJobResult(ocrJob.jobId, 30000);
         if (result?.output?.found) {
           return {
             x: result.output.x as number,
@@ -661,13 +661,13 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(devId, {
+        await getNostrAdapter()?.sendJob(devId, {
           jobId: screenshotResult.jobId,
           type: "screenshot_for_vlm",
           params: {},
           timeoutMs: 30000,
         });
-        const screenshot = await waitForResult(screenshotResult.jobId, 30000);
+        const screenshot = await waitForJobResult(screenshotResult.jobId, 30000);
         if (!screenshot?.output?.image_base64) return null;
 
         const vlmResult = await visionService.handleVisionRequest({
@@ -704,14 +704,14 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             params: { x: pixelX, y: pixelY },
             timeoutMs: 30000,
           });
-          sendJobToDevice(devId, {
+          await getNostrAdapter()?.sendJob(devId, {
             jobId: job.jobId,
             type: "tap",
             params: { x: pixelX, y: pixelY },
             timeoutMs: 30000,
           });
           console.log(`[cascade] Tap sent: (${pixelX}, ${pixelY}) jobId=${job.jobId}`);
-          const result = await waitForResult(job.jobId, 30000);
+          const result = await waitForJobResult(job.jobId, 30000);
           const success = result?.status === "completed";
           console.log(`[cascade] Tap result: ${success ? 'SUCCESS' : 'FAILED'} status=${result?.status}`);
           return success;
@@ -741,13 +741,13 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(deviceId, {
+        await getNostrAdapter()?.sendJob(deviceId, {
           jobId: uiJob.jobId,
           type: "ui_tree_dump",
           params: {},
           timeoutMs: 30000,
         });
-        const uiTreeResult = await waitForResult(uiJob.jobId, 30000);
+        const uiTreeResult = await waitForJobResult(uiJob.jobId, 30000);
         
         if (uiTreeResult?.output?.uiTree) {
           // Detect current screen
@@ -777,13 +777,13 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
                   params: { key: "back" },
                   timeoutMs: 3000,
                 });
-                sendJobToDevice(deviceId, {
+                await getNostrAdapter()?.sendJob(deviceId, {
                   jobId: backJob.jobId,
                   type: "press_key",
                   params: { key: "back" },
                   timeoutMs: 3000,
                 });
-                await waitForResult(backJob.jobId, 3000);
+                await waitForJobResult(backJob.jobId, 3000);
               }
             }
           } else {
@@ -828,7 +828,7 @@ router.post("/verify-tap", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId, platform, or expectedScreen" });
     }
 
-    if (!isDeviceOnline(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -842,13 +842,13 @@ router.post("/verify-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(devId, {
+        await getNostrAdapter()?.sendJob(devId, {
           jobId: job.jobId,
           type: "ui_tree_dump",
           params: {},
           timeoutMs: 30000,
         });
-        return await waitForResult(job.jobId, 30000);
+        return await waitForJobResult(job.jobId, 30000);
       },
       // Vision verifier
       async (devId, screen) => {
@@ -858,13 +858,13 @@ router.post("/verify-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(devId, {
+        await getNostrAdapter()?.sendJob(devId, {
           jobId: screenshotResult.jobId,
           type: "screenshot_for_vlm",
           params: {},
           timeoutMs: 30000,
         });
-        const screenshot = await waitForResult(screenshotResult.jobId, 30000);
+        const screenshot = await waitForJobResult(screenshotResult.jobId, 30000);
         if (!screenshot?.output?.image_base64) return false;
 
         const verifyResult = await visionService.handleVerifyRequest(
@@ -897,7 +897,7 @@ router.post("/screenshot-to-file", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId" });
     }
 
-    if (!isDeviceOnline(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -911,13 +911,13 @@ router.post("/screenshot-to-file", async (req: Request, res: Response) => {
       params: {},
       timeoutMs: 30000,
     });
-    sendJobToDevice(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: screenshotJob.jobId,
       type: "screenshot_for_vlm",
       params: {},
       timeoutMs: 30000,
     });
-    const screenshot = await waitForResult(screenshotJob.jobId, 30000);
+    const screenshot = await waitForJobResult(screenshotJob.jobId, 30000);
 
     if (!screenshot?.output?.image_base64) {
       return res.status(500).json({ ok: false, error: "Failed to capture screenshot" });
@@ -957,7 +957,7 @@ router.post("/analyze-screen", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId or task" });
     }
 
-    if (!isDeviceOnline(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -968,13 +968,13 @@ router.post("/analyze-screen", async (req: Request, res: Response) => {
       params: {},
       timeoutMs: 30000,
     });
-    sendJobToDevice(deviceId, {
+    await getNostrAdapter()?.sendJob(deviceId, {
       jobId: screenshotJob.jobId,
       type: "screenshot_for_vlm",
       params: {},
       timeoutMs: 30000,
     });
-    const screenshot = await waitForResult(screenshotJob.jobId, 30000);
+    const screenshot = await waitForJobResult(screenshotJob.jobId, 30000);
 
     if (!screenshot?.output?.image_base64) {
       return res.status(500).json({ ok: false, error: "Failed to capture screenshot" });
@@ -1113,7 +1113,7 @@ router.post("/vlm/analyze", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId or requestType" });
     }
 
-    if (!isDeviceOnline(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -1124,7 +1124,7 @@ router.post("/vlm/analyze", async (req: Request, res: Response) => {
       params: {},
       timeoutMs: 30000,
     });
-    const screenshot = await waitForResult(screenshotJob.jobId, 30000);
+    const screenshot = await waitForJobResult(screenshotJob.jobId, 30000);
 
     if (!screenshot?.output?.image_base64) {
       return res.status(500).json({ ok: false, error: "Failed to capture screenshot" });
@@ -1158,7 +1158,7 @@ router.post("/vlm/evaluate-profile", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId" });
     }
 
-    if (!isDeviceOnline(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -1169,7 +1169,7 @@ router.post("/vlm/evaluate-profile", async (req: Request, res: Response) => {
       params: {},
       timeoutMs: 30000,
     });
-    const screenshot = await waitForResult(screenshotJob.jobId, 30000);
+    const screenshot = await waitForJobResult(screenshotJob.jobId, 30000);
 
     if (!screenshot?.output?.image_base64) {
       return res.status(500).json({ ok: false, error: "Failed to capture screenshot" });
@@ -1203,7 +1203,7 @@ router.post("/vlm/detect-block", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId" });
     }
 
-    if (!isDeviceOnline(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
 
@@ -1214,7 +1214,7 @@ router.post("/vlm/detect-block", async (req: Request, res: Response) => {
       params: {},
       timeoutMs: 30000,
     });
-    const screenshot = await waitForResult(screenshotJob.jobId, 30000);
+    const screenshot = await waitForJobResult(screenshotJob.jobId, 30000);
 
     if (!screenshot?.output?.image_base64) {
       return res.status(500).json({ ok: false, error: "Failed to capture screenshot" });
@@ -1422,7 +1422,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
       return res.status(400).json({ ok: false, error: "Missing deviceId" });
     }
     
-    if (!isDeviceOnline(deviceId)) {
+    if (!getNostrAdapter()?.isDeviceOnline(deviceId)) {
       return res.status(503).json({ ok: false, error: "Device not connected" });
     }
     
@@ -1440,13 +1440,13 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
         params,
         timeoutMs,
       });
-      sendJobToDevice(deviceId, {
+      await getNostrAdapter()?.sendJob(deviceId, {
         jobId: job.jobId,
         type: type as any,
         params,
         timeoutMs,
       });
-      return await waitForResult(job.jobId, timeoutMs);
+      return await waitForJobResult(job.jobId, timeoutMs);
     }
     
     // Helper to get UI tree

@@ -175,6 +175,12 @@ async function bootstrap(): Promise<void> {
     console.log("[server] DirectWs transport attached on /ws-direct");
   }
 
+  if (transportMode === "gateway" || transportMode === "both") {
+    // New WebSocket Gateway (v4, primary) — path: /ws
+    createWsGateway(httpServer);
+    console.log(`[server] WebSocket Gateway attached on /ws`);
+  }
+
   if (transportMode === "ws") {
     // Legacy WebSocket transport (v1)
     wsServer.attach(httpServer);
@@ -187,6 +193,9 @@ async function bootstrap(): Promise<void> {
     console.log(`[server] Listening on :${PORT}`);
     if (transportMode === "nostr" || transportMode === "both") {
       console.log(`[server] Nostr relay: ${process.env.NOSTR_RELAY_PRIMARY}`);
+    }
+    if (transportMode === "gateway" || transportMode === "both") {
+      console.log(`[server] WebSocket Gateway: ws://localhost:${PORT}/ws`);
     }
     if (transportMode === "direct" || transportMode === "both") {
       console.log(`[server] DirectWs endpoint: ws://localhost:${PORT}/ws-direct`);
@@ -201,6 +210,9 @@ async function bootstrap(): Promise<void> {
   async function shutdown(signal: string): Promise<void> {
     console.log(`\n[server] ${signal} received — shutting down...`);
     httpServer.close();
+    if (transportMode === "gateway" || transportMode === "both") {
+      await wsGateway.close();
+    }
     if (transportMode === "nostr" || transportMode === "both") {
       const adapter = getNostrAdapter();
       await adapter?.close();

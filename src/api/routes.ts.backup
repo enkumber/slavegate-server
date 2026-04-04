@@ -14,7 +14,6 @@ import { devicesService } from "../modules/devices/devices.service";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { authService } from "../modules/auth/auth.service";
 import { getNostrAdapter } from "../nostr/adapter";
-import { sendJobToDevice, isDeviceOnline } from "../transport/transport";
 import { workflowService } from "../modules/workflows/workflow.service";
 import { startWorkflow } from "../modules/workflows/workflow.executor";
 import { hbeService } from "../modules/hbe/hbe.service";
@@ -672,19 +671,45 @@ function getWsServer() { return _wsServerRef; }
 export function setWsServerRef(srv: import("../ws/ws.server").WsServer) { _wsServerRef = srv; }
 
 /**
- * getActiveTransport() — returns the unified transport interface.
- * Uses transport.ts abstraction layer.
+ * getActiveTransport() — returns the best available transport for a device.
+ * Priority: DirectWs > Nostr > legacy WsServer
+ * Returns an object with isDeviceOnline() + sendJob() interface.
  */
 type TransportHandle = {
   isDeviceOnline: (id: string) => boolean;
-  sendJob: (id: string, payload: import("../../shared/protocol/messages").JobDispatchPayload) => boolean;
+  sendJob: (id: string, payload: import("../../shared/protocol/messages").JobDispatchPayload) => boolean | Promise<boolean | void>;
 };
 
-function getActiveTransport(_deviceId?: string): TransportHandle {
-  return {
-    isDeviceOnline: (id) => isDeviceOnline(id),
-    sendJob:        (id, p) => sendJobToDevice(id, p),
-  };
+function getActiveTransport(deviceId?: string): TransportHandle | null {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { directWsServer } = require("../ws/direct-ws.server") as { directWsServer: import("../ws/direct-ws.server").DirectWsServer };
+  const nostrAdapter = getNostrAdapter();
+  const wsRef = getWsServer();
+
+  // Adapters wrapped in TransportHandle for uniform interface
+  const directHandle: TransportHandle | null = directWsServer ? {
+    isDeviceOnline: (id) => directWsServer.isDeviceOnline(id),
+    sendJob:        (id, p) => directWsServer.sendJob(id, p),
+  } : null;
+
+  const nostrHandle: TransportHandle | null = nostrAdapter ? {
+    isDeviceOnline: (id) => nostrAdapter.isDeviceOnline(id),
+    sendJob:        (id, p) => nostrAdapter.sendJob(id, p as unknown as Parameters<typeof nostrAdapter.sendJob>[1]),
+  } : null;
+
+  const wsHandle: TransportHandle | null = wsRef ? {
+    isDeviceOnline: (id) => wsRef.isDeviceConnected(id),
+    sendJob:        (id, p) => wsRef.sendJob(id, p),
+  } : null;
+
+  if (deviceId) {
+    if (directHandle?.isDeviceOnline(deviceId)) return directHandle;
+    if (nostrHandle?.isDeviceOnline(deviceId))  return nostrHandle;
+    if (wsHandle?.isDeviceOnline(deviceId))     return wsHandle;
+    return null;
+  }
+
+  return directHandle ?? nostrHandle ?? wsHandle ?? null;
 }
 
 router.get("/kill-switch", requireAuth, async (_req, res) => {
