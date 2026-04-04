@@ -116,15 +116,15 @@ async function performVerification(
       deviceId,
       type: "screenshot_for_vlm",
       params: {},
-      timeoutMs: 30000,
+      timeoutMs: 10000,
     });
     await getNostrAdapter()?.sendJob(deviceId, {
       jobId: verifyScreenshot.jobId,
       type: "screenshot_for_vlm",
       params: {},
-      timeoutMs: 30000,
+      timeoutMs: 10000,
     });
-    const screenshot = await waitForJobResult(waitForJobResult(verifyScreenshot.jobId, 30000);
+    const screenshot = await waitForJobResult(verifyScreenshot.jobId, 10000);
     
     if (screenshot?.output?.image_base64) {
       const verifyResult = await visionService.handleVerifyRequest(
@@ -171,7 +171,7 @@ async function executeTapAtCoords(
       timeoutMs: 8000,
     });
     console.log(`[cascade] Tap sent: (${pixelX}, ${pixelY}) jobId=${tapJob.jobId}`);
-    const result = await waitForJobResult(tapJob.jobId, 30000);
+    const result = await waitForJobResult(tapJob.jobId, 8000);
     const success = result?.status === "completed";
     console.log(`[cascade] Tap result: ${success ? 'SUCCESS' : 'FAILED'}`);
     return success;
@@ -283,7 +283,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             params: { x: pixelX, y: pixelY },
             timeoutMs: 5000,
           });
-          const tapResult = await waitForJobResult(tapJob.jobId, 30000);
+          const tapResult = await waitForJobResult(tapJob.jobId, 5000);
           
           if (tapResult?.status === "completed") {
             // Verify if requested
@@ -393,15 +393,15 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           deviceId,
           type: "ocr_find_tap",
           params: { searchText: parsedTarget.value, partialMatch: true } as unknown as OcrFindTapParams,
-          timeoutMs: 30000,
+          timeoutMs: 10000,
         });
         await getNostrAdapter()?.sendJob(deviceId, {
           jobId: ocrJob.jobId,
           type: "ocr_find_tap",
           params: { searchText: parsedTarget.value, partialMatch: true } as unknown as OcrFindTapParams,
-          timeoutMs: 30000,
+          timeoutMs: 10000,
         });
-        const ocrResult = await waitForJobResult(waitForJobResult(ocrJob.jobId, 30000);
+        const ocrResult = await waitForJobResult(ocrJob.jobId, 10000);
         
         if (ocrResult?.output?.found) {
           const normalizedCoords = { x: ocrResult.output.x as number, y: ocrResult.output.y as number };
@@ -563,15 +563,15 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
         deviceId,
         type: "ui_tree_dump",
         params: {},
-        timeoutMs: 30000,
+        timeoutMs: 10000,
       });
       await getNostrAdapter()?.sendJob(deviceId, {
         jobId: preCheckJob.jobId,
         type: "ui_tree_dump",
         params: {},
-        timeoutMs: 30000,
+        timeoutMs: 10000,
       });
-      const preCheckResult = await waitForJobResult(waitForJobResult(preCheckJob.jobId, 30000);
+      const preCheckResult = await waitForJobResult(preCheckJob.jobId, 10000);
       
       if (preCheckResult?.output?.uiTree) {
         const detection = await detectCurrentScreen(preCheckResult, platform);
@@ -642,7 +642,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: { searchText, partialMatch: false } as unknown as OcrFindTapParams,
           timeoutMs: 8000,
         });
-        const result = await waitForJobResult(ocrJob.jobId, 30000);
+        const result = await waitForJobResult(ocrJob.jobId, 8000);
         if (result?.output?.found) {
           return {
             x: result.output.x as number,
@@ -657,15 +657,15 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           deviceId: devId,
           type: "screenshot_for_vlm",
           params: {},
-          timeoutMs: 30000,
+          timeoutMs: 10000,
         });
         await getNostrAdapter()?.sendJob(devId, {
           jobId: screenshotResult.jobId,
           type: "screenshot_for_vlm",
           params: {},
-          timeoutMs: 30000,
+          timeoutMs: 10000,
         });
-        const screenshot = await waitForJobResult(waitForJobResult(screenshotResult.jobId, 30000);
+        const screenshot = await waitForJobResult(screenshotResult.jobId, 10000);
         if (!screenshot?.output?.image_base64) return null;
 
         const vlmResult = await visionService.handleVisionRequest({
@@ -709,7 +709,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             timeoutMs: 8000,
           });
           console.log(`[cascade] Tap sent: (${pixelX}, ${pixelY}) jobId=${job.jobId}`);
-          const result = await waitForJobResult(job.jobId, 30000);
+          const result = await waitForJobResult(job.jobId, 8000);
           const success = result?.status === "completed";
           console.log(`[cascade] Tap result: ${success ? 'SUCCESS' : 'FAILED'} status=${result?.status}`);
           return success;
@@ -737,15 +737,15 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           deviceId,
           type: "ui_tree_dump",
           params: {},
-          timeoutMs: 30000,
+          timeoutMs: 10000,
         });
         await getNostrAdapter()?.sendJob(deviceId, {
           jobId: uiJob.jobId,
           type: "ui_tree_dump",
           params: {},
-          timeoutMs: 30000,
+          timeoutMs: 10000,
         });
-        const uiTreeResult = await waitForJobResult(waitForJobResult(uiJob.jobId, 30000);
+        const uiTreeResult = await waitForJobResult(uiJob.jobId, 10000);
         
         if (uiTreeResult?.output?.uiTree) {
           // Detect current screen
@@ -854,15 +854,15 @@ router.post("/verify-tap", async (req: Request, res: Response) => {
           deviceId: devId,
           type: "screenshot_for_vlm",
           params: {},
-          timeoutMs: 30000,
+          timeoutMs: 10000,
         });
         await getNostrAdapter()?.sendJob(devId, {
           jobId: screenshotResult.jobId,
           type: "screenshot_for_vlm",
           params: {},
-          timeoutMs: 30000,
+          timeoutMs: 10000,
         });
-        const screenshot = await waitForJobResult(waitForJobResult(screenshotResult.jobId, 30000);
+        const screenshot = await waitForJobResult(screenshotResult.jobId, 10000);
         if (!screenshot?.output?.image_base64) return false;
 
         const verifyResult = await visionService.handleVerifyRequest(
