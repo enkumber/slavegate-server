@@ -155,7 +155,7 @@ export class DevicesService {
   async updateHealth(deviceId: string, health: DeviceHealth): Promise<void> {
     const db = getDb();
     await db.query(
-      "UPDATE devices SET health = $1, last_seen_at = NOW(), status = 'online' WHERE id = $2 AND status != 'maintenance'",
+      "UPDATE devices SET health = $1, last_seen_at = NOW(), status = CASE WHEN status IN ('approved', 'online', 'offline') THEN 'online' ELSE status END WHERE id = $2",
       [JSON.stringify(health), deviceId]
     );
 
