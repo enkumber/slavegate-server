@@ -1006,8 +1006,9 @@ router.post("/nostr/enroll", requireAuth, async (req, res) => {
     const deviceId = result.rows[0].id as string;
     console.log(`[api] Nostr enrollment created: ${deviceId}`);
     
-    // Build QR payload
-    const relays = relaySecondary ? [relayPrimary, relaySecondary] : [relayPrimary];
+    // Build QR payload — use public relay URL for device enrollment
+    const relayPublic = process.env.NOSTR_RELAY_PUBLIC || relayPrimary;
+    const relays = [relayPublic];
     const qrPayload = {
       v: 2,
       s: serverPubkey,
