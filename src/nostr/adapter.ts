@@ -128,7 +128,8 @@ class NostrAdapterImpl implements NostrAdapter {
     if (!this.registry.isOnline(pubkey)) {
       throw new Error(`Device ${deviceId} is offline`);
     }
-    const jobId = crypto.randomUUID();
+    // Use job.jobId if provided (from dispatcher), otherwise generate new
+    const jobId = (job as any).jobId ?? crypto.randomUUID();
     await this.client.publishJob(pubkey, jobId, job);
   }
 

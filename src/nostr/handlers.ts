@@ -95,9 +95,25 @@ export function createHandlers(
         }`
       );
 
-      // TODO Sprint 3: Wire to dispatcherService.handleJobResult() or orchestrator
-      // Example:
-      // await dispatcherService.handleJobResult(deviceId, jobId, typedPayload);
+      // Update job in DB so waitForJobResult() poll picks it up
+      if (jobId) {
+        try {
+          const db = getDb();
+          await db.query(
+            `UPDATE jobs SET status = $1, output = $2, error = $3, completed_at = NOW(),
+             duration_ms = EXTRACT(EPOCH FROM (NOW() - created_at)) * 1000
+             WHERE id = $4`,
+            [
+              typedPayload.success ? 'completed' : 'failed',
+              typedPayload.result ? JSON.stringify(typedPayload.result) : null,
+              typedPayload.error || null,
+              jobId
+            ]
+          );
+        } catch (e: any) {
+          console.warn(`[handlers] Failed to update job ${jobId} in DB: ${e.message}`);
+        }
+      }
     },
 
     // ───────────────────────────────────────────────────────────────────────
