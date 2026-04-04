@@ -397,6 +397,7 @@ export class DirectWsServer {
       pending.resolve({
         jobId,
         success: Boolean(msg.success),
+        status:  Boolean(msg.success) ? "completed" : "failed",
         output:  msg.output,
         error:   msg.error as string | undefined,
       });
