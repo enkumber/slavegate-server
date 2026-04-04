@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS devices (
   last_seen_at     TIMESTAMPTZ,
   last_ip          INET,
   health           JSONB       DEFAULT '{}',
+  nostr_pubkey     TEXT,
   is_canary        BOOLEAN     NOT NULL DEFAULT FALSE,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

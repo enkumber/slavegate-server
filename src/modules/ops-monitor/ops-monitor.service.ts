@@ -202,7 +202,7 @@ async function collectUIMetrics(db: any, lookbackHours: number): Promise<UIMetri
       SUM(CASE WHEN method_used = 'vision' THEN 1 ELSE 0 END) as vision_success,
       SUM(CASE WHEN NOT verified THEN 1 ELSE 0 END) as element_not_found_count
     FROM navigation_logs
-    WHERE timestamp > NOW() - INTERVAL '${lookbackHours} hours'
+    WHERE created_at > NOW() - INTERVAL '${lookbackHours} hours'
     GROUP BY app
   `);
   
