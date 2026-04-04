@@ -26,6 +26,7 @@ import type { OcrFindTapParams } from "../../shared/protocol/messages";
 import { skillDbService } from "../modules/skills/skill-db.service";
 import { checkpointService } from "../modules/checkpoints/checkpoint.service";
 import { getNostrAdapter } from "../nostr/adapter";
+import { directWsServer } from "../ws/direct-ws.server";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 
 const router = Router();

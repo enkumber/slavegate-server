@@ -212,9 +212,31 @@ router.get("/devices/:id", async (req, res) => {
 });
 
 router.get("/devices/:id/connected", (req, res) => {
-  const adapter = getNostrAdapter();
-  const connected = adapter?.isDeviceOnline(req.params.id) ?? false;
+  const transport = getActiveTransport(req.params.id);
+  const connected = transport?.isDeviceOnline(req.params.id) ?? false;
   res.json({ ok: true, data: { connected } });
+});
+
+// GET /devices/:id/key — retrieve DirectWs device key (for onboarding/config)
+router.get("/devices/:id/key", requireAuth, async (req, res) => {
+  const db = getDb();
+  const result = await db.query<{ device_key: string | null }>(
+    `SELECT device_key FROM devices WHERE id = $1`, [req.params.id]
+  );
+  if (!result.rows.length) return res.status(404).json({ ok: false, error: "Not found" });
+  const key = result.rows[0].device_key;
+  res.json({ ok: true, data: { deviceKey: key } });
+});
+
+// POST /devices/:id/rotate-key — generate new DirectWs key (invalidates old)
+router.post("/devices/:id/rotate-key", requireAuth, async (req, res) => {
+  const db = getDb();
+  const result = await db.query<{ device_key: string }>(
+    `UPDATE devices SET device_key = encode(gen_random_bytes(32), 'hex') WHERE id = $1 RETURNING device_key`,
+    [req.params.id]
+  );
+  if (!result.rows.length) return res.status(404).json({ ok: false, error: "Not found" });
+  res.json({ ok: true, data: { deviceKey: result.rows[0].device_key } });
 });
 
 router.post("/devices/:id/approve", requireAuth, async (req, res) => {
@@ -303,17 +325,17 @@ router.post("/jobs", async (req, res) => {
     });
   }
   
-  const adapter = getNostrAdapter();
-  if (!adapter?.isDeviceOnline(body.deviceId)) {
+  const transport = getActiveTransport(body.deviceId);
+  if (!transport?.isDeviceOnline(body.deviceId)) {
     return res.status(409).json({ ok: false, error: "Device is not connected" });
   }
   try {
     const { jobId, timeoutMs } = await dispatcherService.dispatch(body);
-    await adapter.sendJob(body.deviceId, {
+    await transport.sendJob(body.deviceId, {
       jobId,
       type: body.type,
       params: body.params,
-      timeoutMs, // Use calculated timeout from dispatcher
+      timeoutMs,
       requiresRoot: body.confirmRoot,
     });
     // Audit log INSERT is done by dispatcherService.dispatch() — do NOT insert here.
@@ -643,10 +665,52 @@ router.post("/kill-switch", requireAuth, async (req, res) => {
   res.json({ ok: true, data: { killSwitchActive: activate, scope, deviceId } });
 });
 
-// Legacy WsServer ref — kept for backward compat, will be removed in final cleanup
+// Legacy WsServer ref — kept for backward compat
 let _wsServerRef: import("../ws/ws.server").WsServer | null = null;
 function getWsServer() { return _wsServerRef; }
 export function setWsServerRef(srv: import("../ws/ws.server").WsServer) { _wsServerRef = srv; }
+
+/**
+ * getActiveTransport() — returns the best available transport for a device.
+ * Priority: DirectWs > Nostr > legacy WsServer
+ * Returns an object with isDeviceOnline() + sendJob() interface.
+ */
+type TransportHandle = {
+  isDeviceOnline: (id: string) => boolean;
+  sendJob: (id: string, payload: import("../../shared/protocol/messages").JobDispatchPayload) => boolean | Promise<boolean | void>;
+};
+
+function getActiveTransport(deviceId?: string): TransportHandle | null {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { directWsServer } = require("../ws/direct-ws.server") as { directWsServer: import("../ws/direct-ws.server").DirectWsServer };
+  const nostrAdapter = getNostrAdapter();
+  const wsRef = getWsServer();
+
+  // Adapters wrapped in TransportHandle for uniform interface
+  const directHandle: TransportHandle | null = directWsServer ? {
+    isDeviceOnline: (id) => directWsServer.isDeviceOnline(id),
+    sendJob:        (id, p) => directWsServer.sendJob(id, p),
+  } : null;
+
+  const nostrHandle: TransportHandle | null = nostrAdapter ? {
+    isDeviceOnline: (id) => nostrAdapter.isDeviceOnline(id),
+    sendJob:        (id, p) => nostrAdapter.sendJob(id, p as unknown as Parameters<typeof nostrAdapter.sendJob>[1]),
+  } : null;
+
+  const wsHandle: TransportHandle | null = wsRef ? {
+    isDeviceOnline: (id) => wsRef.isDeviceConnected(id),
+    sendJob:        (id, p) => wsRef.sendJob(id, p),
+  } : null;
+
+  if (deviceId) {
+    if (directHandle?.isDeviceOnline(deviceId)) return directHandle;
+    if (nostrHandle?.isDeviceOnline(deviceId))  return nostrHandle;
+    if (wsHandle?.isDeviceOnline(deviceId))     return wsHandle;
+    return null;
+  }
+
+  return directHandle ?? nostrHandle ?? wsHandle ?? null;
+}
 
 router.get("/kill-switch", requireAuth, async (_req, res) => {
   const active = await isKillSwitchActive();

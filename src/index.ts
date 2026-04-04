@@ -10,6 +10,8 @@ import express from "express";
 import cors from "cors";
 import { wsServer } from "./ws/ws.server";
 import { createNostrAdapter, getNostrAdapter } from "./nostr/adapter";
+import { directWsServer } from "./ws/direct-ws.server";
+import { createWsGateway, wsGateway } from "./ws";
 import apiRouter from "./api/routes";
 import agencyRouter from "./api/agency-routes";
 import hydraRouter from "./api/hydra-routes";
@@ -151,29 +153,46 @@ async function bootstrap(): Promise<void> {
   // ─── HTTP server ──────────────────────────────────────────────────────────
   const httpServer = http.createServer(app);
 
-  // ─── Transport layer (WebSocket or Nostr) ─────────────────────────────────
-  const useNostr = process.env.NOSTR_ENABLED === "true";
+  // ─── Transport layer — TRANSPORT_MODE controls which transports are active ────
+  // TRANSPORT_MODE=gateway  → New WebSocket Gateway (v4, primary)
+  // TRANSPORT_MODE=ws       → legacy WsServer only (v1)
+  // TRANSPORT_MODE=nostr    → Nostr only (v2)
+  // TRANSPORT_MODE=direct   → DirectWs only (v3, low-latency)
+  // TRANSPORT_MODE=both     → Nostr + DirectWs simultaneously
+  // NOSTR_ENABLED=true      → alias for TRANSPORT_MODE=nostr (backward compat)
+  const transportMode = process.env.TRANSPORT_MODE
+    ?? (process.env.NOSTR_ENABLED === "true" ? "nostr" : "gateway");
 
-  if (useNostr) {
-    // Nostr transport (v2)
+  if (transportMode === "nostr" || transportMode === "both") {
     console.log("[server] Starting Nostr transport...");
     const nostrAdapter = await createNostrAdapter();
     await nostrAdapter.connect();
     console.log(`[server] Nostr connected. Server pubkey: ${nostrAdapter.getServerPubkey().slice(0, 16)}...`);
-  } else {
+  }
+
+  if (transportMode === "direct" || transportMode === "both") {
+    directWsServer.attach(httpServer);
+    console.log("[server] DirectWs transport attached on /ws-direct");
+  }
+
+  if (transportMode === "ws") {
     // Legacy WebSocket transport (v1)
     wsServer.attach(httpServer);
     setWsServerRef(wsServer);  // C1: allow routes.ts to send KILL_SWITCH WS commands
-    console.log("[server] WebSocket transport attached.");
+    console.log("[server] Legacy WebSocket transport attached.");
   }
 
   // ─── Start listening ──────────────────────────────────────────────────────
   httpServer.listen(PORT, () => {
     console.log(`[server] Listening on :${PORT}`);
-    if (useNostr) {
+    if (transportMode === "nostr" || transportMode === "both") {
       console.log(`[server] Nostr relay: ${process.env.NOSTR_RELAY_PRIMARY}`);
-    } else {
-      console.log(`[server] WebSocket endpoint: ws://localhost:${PORT}/ws`);
+    }
+    if (transportMode === "direct" || transportMode === "both") {
+      console.log(`[server] DirectWs endpoint: ws://localhost:${PORT}/ws-direct`);
+    }
+    if (transportMode === "ws") {
+      console.log(`[server] Legacy WebSocket endpoint: ws://localhost:${PORT}/ws`);
     }
     console.log(`[server] REST API: http://localhost:${PORT}/api`);
   });
@@ -182,10 +201,14 @@ async function bootstrap(): Promise<void> {
   async function shutdown(signal: string): Promise<void> {
     console.log(`\n[server] ${signal} received — shutting down...`);
     httpServer.close();
-    if (useNostr) {
+    if (transportMode === "nostr" || transportMode === "both") {
       const adapter = getNostrAdapter();
       await adapter?.close();
-    } else {
+    }
+    if (transportMode === "direct" || transportMode === "both") {
+      await directWsServer.close();
+    }
+    if (transportMode === "ws") {
       await wsServer.close();
     }
     await dispatcherService.close();

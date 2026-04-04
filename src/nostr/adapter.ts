@@ -328,6 +328,8 @@ function getRelayUrls(): string[] {
 
   const urls = [primary];
   if (secondary) urls.push(secondary);
+  const publicRelay = process.env.NOSTR_RELAY_PUBLIC;
+  if (publicRelay) urls.push(publicRelay);
   return urls;
 }
 

@@ -1,0 +1,453 @@
+/**
+ * ws/gateway.ts
+ * Direct WebSocket Gateway — Simplified protocol for Phone Network.
+ * 
+ * Designed to be the primary transport method:
+ * - Uses simple device key authentication
+ * - Path: /ws (main endpoint)
+ * - Protocol matches task specification exactly
+ * - Integrates seamlessly with existing dispatcher flow
+ */
+
+import { WebSocketServer, WebSocket } from "ws";
+import type { IncomingMessage, Server } from "http";
+import { getDb } from "../db/client";
+import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
+import { devicesService } from "../modules/devices/devices.service";
+import { devicesConnected, deviceOfflineEvents, recordDeviceHealth } from "../modules/observability/metrics";
+import { alerting } from "../modules/observability/alerts";
+import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const AUTH_TIMEOUT_MS       = 30_000;   // 30s to send AUTH message
+const PONG_TIMEOUT_MS       = 90_000;   // 90s without PONG = dead connection
+const PING_INTERVAL_MS      = 30_000;   // send PING every 30s
+const OFFLINE_THRESHOLD_MS  = 90_000;   // heartbeat gap before marking offline
+const MAX_MSG_BYTES         = 5 * 1024 * 1024;  // 5MB
+const RATE_LIMIT            = 20;       // msgs/sec per device
+const RATE_WINDOW_MS        = 1_000;
+const HEARTBEAT_INTERVAL_MS = 30_000;   // device sends heartbeat every 30s
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface ConnectedDevice {
+  ws:           WebSocket;
+  deviceId:     string;
+  connectedAt:  number;
+  lastSeenAt:   number;
+  lastPongAt:   number;
+  msgCount:     number;
+  windowStart:  number;
+}
+
+interface PendingJob {
+  resolve: (result: JobResult) => void;
+  reject:  (err: Error) => void;
+  timer:   ReturnType<typeof setTimeout>;
+}
+
+interface JobResult {
+  jobId:    string;
+  success:  boolean;
+  output:   unknown;
+  error?:   string;
+}
+
+// ─── Protocol Messages ────────────────────────────────────────────────────────
+
+interface AuthMessage {
+  type: "AUTH";
+  deviceId: string;
+  deviceKey: string;
+}
+
+interface JobMessage {
+  type: "JOB";
+  jobId: string;
+  jobType: string;
+  params: unknown;
+}
+
+interface JobResultMessage {
+  type: "JOB_RESULT";
+  jobId: string;
+  success: boolean;
+  output: unknown;
+  error?: string;
+}
+
+interface HeartbeatMessage {
+  type: "HEARTBEAT";
+  deviceId: string;
+  battery?: number;
+  charging?: boolean;
+  foregroundApp?: string;
+}
+
+interface AckMessage {
+  type: "ACK";
+}
+
+// ─── Rate limiter ─────────────────────────────────────────────────────────────
+
+class RateLimiter {
+  private windows = new Map<string, number[]>();
+  allow(key: string, limit = RATE_LIMIT, windowMs = RATE_WINDOW_MS): boolean {
+    const now   = Date.now();
+    const times = (this.windows.get(key) ?? []).filter(t => now - t < windowMs);
+    if (times.length >= limit) return false;
+    times.push(now);
+    this.windows.set(key, times);
+    return true;
+  }
+  delete(key: string): void { this.windows.delete(key); }
+}
+
+// ─── WebSocketGateway ─────────────────────────────────────────────────────────
+
+export class WebSocketGateway {
+  private wss:          WebSocketServer | null = null;
+  private connections = new Map<string, ConnectedDevice>();   // deviceId → conn
+  private pendingJobs = new Map<string, PendingJob>();        // jobId → awaiter
+  private rateLimiter = new RateLimiter();
+  private pingTimer:    ReturnType<typeof setInterval> | null = null;
+
+  // ─── Lifecycle ──────────────────────────────────────────────────────────
+
+  attach(httpServer: Server): void {
+    this.wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+    this.wss.on("connection", (ws, req) => this._onConnection(ws, req));
+    this.wss.on("error", (err) => console.error("[ws-gateway] WSS error:", err.message));
+
+    // Periodic PING + stale connection cleanup
+    this.pingTimer = setInterval(() => this._pingAll(), PING_INTERVAL_MS);
+    console.log("[ws-gateway] Attached to HTTP server on /ws");
+  }
+
+  async close(): Promise<void> {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.wss?.close();
+    // Reject all pending jobs
+    for (const [jobId, pending] of this.pendingJobs) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Server shutting down"));
+      this.pendingJobs.delete(jobId);
+    }
+  }
+
+  // ─── Public API (transport interface) ────────────────────────────────────
+
+  /**
+   * Send a job to a device. Returns true if sent, false if device not connected.
+   * Does NOT wait for result — use waitForJobResult() for that.
+   */
+  sendJob(deviceId: string, payload: JobDispatchPayload): boolean {
+    const conn = this.connections.get(deviceId);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+
+    this._send(conn.ws, {
+      type: "JOB",
+      jobId: payload.jobId,
+      jobType: payload.type,
+      params: payload.params,
+    });
+    console.log(`[ws-gateway] sendJob: device=${deviceId.slice(0,8)} jobId=${payload.jobId?.slice(0,8)} type=${payload.type}`);
+    return true;
+  }
+
+  /**
+   * Returns a Promise that resolves when JOB_RESULT arrives for this jobId.
+   * Rejects after timeoutMs (default: 5 min).
+   */
+  waitForJobResult(jobId: string, timeoutMs = 300_000): Promise<JobResult> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingJobs.delete(jobId);
+        reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pendingJobs.set(jobId, { resolve, reject, timer });
+    });
+  }
+
+  isDeviceOnline(deviceId: string): boolean {
+    const conn = this.connections.get(deviceId);
+    if (!conn) return false;
+    return conn.ws.readyState === WebSocket.OPEN &&
+           Date.now() - conn.lastSeenAt < OFFLINE_THRESHOLD_MS;
+  }
+
+  getConnectedDeviceIds(): string[] {
+    return Array.from(this.connections.keys()).filter(id => this.isDeviceOnline(id));
+  }
+
+  getConnectionCount(): number {
+    return this.connections.size;
+  }
+
+  // ─── Connection handler ───────────────────────────────────────────────────
+
+  private _onConnection(ws: WebSocket, _req: IncomingMessage): void {
+    const remoteIp = (_req.socket.remoteAddress ?? "unknown");
+    console.log(`[ws-gateway] New connection from ${remoteIp}`);
+
+    let deviceConn: ConnectedDevice | null = null;
+    let authTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    // Close if not authenticated within AUTH_TIMEOUT_MS
+    authTimeout = setTimeout(() => {
+      if (!deviceConn) {
+        console.warn(`[ws-gateway] Auth timeout from ${remoteIp} — closing`);
+        ws.close(4001, "Auth timeout");
+      }
+    }, AUTH_TIMEOUT_MS);
+
+    ws.on("message", async (raw) => {
+      // Size guard
+      if (Buffer.byteLength(raw as Buffer) > MAX_MSG_BYTES) {
+        console.warn("[ws-gateway] Oversized message — closing connection");
+        ws.close(4008, "Message too large");
+        return;
+      }
+
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        console.warn("[ws-gateway] Invalid JSON from", remoteIp);
+        return;
+      }
+
+      const type = msg.type as string;
+
+      // ── Not yet authenticated ─────────────────────────────────────────
+      if (!deviceConn) {
+        if (type === "AUTH") {
+          await this._handleAuth(ws, msg as unknown as AuthMessage, remoteIp, (conn) => {
+            deviceConn = conn;
+            if (authTimeout) { clearTimeout(authTimeout); authTimeout = null; }
+          });
+        } else {
+          ws.close(4001, "Must authenticate first");
+        }
+        return;
+      }
+
+      // ── Rate limit ────────────────────────────────────────────────────
+      if (!this.rateLimiter.allow(deviceConn.deviceId)) {
+        console.warn(`[ws-gateway] Rate limit exceeded for device ${deviceConn.deviceId.slice(0,8)}`);
+        return;
+      }
+
+      deviceConn.lastSeenAt = Date.now();
+      deviceConn.msgCount++;
+
+      // ── Route by type ─────────────────────────────────────────────────
+      switch (type) {
+        case "JOB_RESULT":   this._handleJobResult(deviceConn, msg as unknown as JobResultMessage);   break;
+        case "HEARTBEAT":    await this._handleHeartbeat(deviceConn, msg as unknown as HeartbeatMessage); break;
+        case "PING":         this._send(ws, { type: "PONG" });          break;
+        case "PONG":         deviceConn.lastPongAt = Date.now();         break;
+        default:             console.warn(`[ws-gateway] Unknown message type: ${type}`); break;
+      }
+    });
+
+    ws.on("close", (code, reason) => {
+      if (deviceConn) {
+        console.log(`[ws-gateway] Device ${deviceConn.deviceId.slice(0,8)} disconnected: ${code} ${reason}`);
+        this.connections.delete(deviceConn.deviceId);
+        this.rateLimiter.delete(deviceConn.deviceId);
+        devicesConnected?.set(this.connections.size);
+        deviceOfflineEvents?.inc();
+
+        // Reject any pending jobs for this device
+        for (const [jobId, pending] of this.pendingJobs) {
+          clearTimeout(pending.timer);
+          pending.reject(new Error(`Device ${deviceConn!.deviceId} disconnected`));
+          this.pendingJobs.delete(jobId);
+        }
+
+        // Update DB
+        devicesService.markOffline(deviceConn.deviceId).catch(err =>
+          console.error("[ws-gateway] markOffline error:", err)
+        );
+
+        alerting.deviceOffline(deviceConn.deviceId, "direct-ws").catch(() => {});
+      }
+      if (authTimeout) clearTimeout(authTimeout);
+    });
+
+    ws.on("error", (err) => {
+      console.error(`[ws-gateway] WebSocket error (device=${deviceConn?.deviceId?.slice(0,8) ?? "unauth"}):`, err.message);
+    });
+  }
+
+  // ─── Auth handler ─────────────────────────────────────────────────────────
+
+  private async _handleAuth(
+    ws: WebSocket,
+    msg: AuthMessage,
+    remoteIp: string,
+    onAuth: (conn: ConnectedDevice) => void,
+  ): Promise<void> {
+    const { deviceId, deviceKey } = msg;
+
+    if (!deviceId || !deviceKey) {
+      ws.close(4001, "deviceId and deviceKey required");
+      return;
+    }
+
+    try {
+      const db = getDb();
+      // Validate: device exists, key matches, not blocked
+      const result = await db.query<{ id: string; status: string; device_key: string | null }>(
+        `SELECT id, status, device_key FROM devices WHERE id = $1`,
+        [deviceId]
+      );
+
+      if (result.rows.length === 0) {
+        console.warn(`[ws-gateway] AUTH failed: unknown deviceId=${deviceId.slice(0,8)} from ${remoteIp}`);
+        this._send(ws, { type: "AUTH_FAIL", reason: "Device not found" });
+        ws.close(4003, "Device not found");
+        return;
+      }
+
+      const device = result.rows[0];
+
+      if (device.status === "blocked") {
+        console.warn(`[ws-gateway] AUTH failed: device ${deviceId.slice(0,8)} is blocked`);
+        this._send(ws, { type: "AUTH_FAIL", reason: "Device blocked" });
+        ws.close(4003, "Blocked");
+        return;
+      }
+
+      if (!device.device_key || device.device_key !== deviceKey) {
+        console.warn(`[ws-gateway] AUTH failed: bad deviceKey for ${deviceId.slice(0,8)} from ${remoteIp}`);
+        this._send(ws, { type: "AUTH_FAIL", reason: "Invalid key" });
+        ws.close(4003, "Invalid key");
+        return;
+      }
+
+      // Kick existing connection for same device
+      const existing = this.connections.get(deviceId);
+      if (existing && existing.ws.readyState === WebSocket.OPEN) {
+        console.log(`[ws-gateway] Superseding existing connection for device ${deviceId.slice(0,8)}`);
+        existing.ws.close(4000, "Replaced by newer connection");
+      }
+
+      // Register connection
+      const now = Date.now();
+      const conn: ConnectedDevice = {
+        ws,
+        deviceId,
+        connectedAt: now,
+        lastSeenAt:  now,
+        lastPongAt:  now,
+        msgCount:    0,
+        windowStart: now,
+      };
+      this.connections.set(deviceId, conn);
+      devicesConnected?.set(this.connections.size);
+
+      // Update DB — mark online
+      await devicesService.markOnline(deviceId, remoteIp).catch(err =>
+        console.warn("[ws-gateway] markOnline error:", err.message)
+      );
+
+      this._send(ws, { type: "AUTH_OK", deviceId });
+      console.log(`[ws-gateway] Device ${deviceId.slice(0,8)} authenticated from ${remoteIp}`);
+      onAuth(conn);
+
+    } catch (err) {
+      console.error("[ws-gateway] Auth DB error:", (err as Error).message);
+      this._send(ws, { type: "AUTH_FAIL", reason: "Server error" });
+      ws.close(4003, "Server error");
+    }
+  }
+
+  // ─── Message handlers ─────────────────────────────────────────────────────
+
+  private _handleJobResult(conn: ConnectedDevice, msg: JobResultMessage): void {
+    const { jobId, success, output, error } = msg;
+    if (!jobId) return;
+
+    const pending = this.pendingJobs.get(jobId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingJobs.delete(jobId);
+      pending.resolve({
+        jobId,
+        success,
+        output,
+        error,
+      });
+    }
+
+    // Forward to dispatcherService for DB update + metrics
+    dispatcherService.handleJobResult({
+      jobId,
+      deviceId:   conn.deviceId,
+      status:     success ? "completed" : "failed",
+      output:     output as Record<string, unknown>,
+      error:      error,
+      durationMs: 0, // Not provided in simple protocol
+    }).catch(err => console.error("[ws-gateway] handleJobResult error:", err.message));
+
+    // Send ACK
+    this._send(conn.ws, { type: "ACK" });
+  }
+
+  private async _handleHeartbeat(conn: ConnectedDevice, msg: HeartbeatMessage): Promise<void> {
+    const health: DeviceHealth = {
+      batteryLevel:     msg.battery ?? 0,
+      charging:         msg.charging ?? false,
+      storageFreeBytes: 0,
+      thermalStatus:    "nominal",
+      networkType:      "none",
+      networkQuality:   "none",
+      activeApp:        msg.foregroundApp,
+      agentVersion:     "unknown",
+    };
+
+    try {
+      await devicesService.updateHealth(conn.deviceId, health);
+      recordDeviceHealth(conn.deviceId, { batteryLevel: health.batteryLevel });
+    } catch (err) {
+      console.warn("[ws-gateway] heartbeat update error:", (err as Error).message);
+    }
+
+    this._send(conn.ws, { type: "ACK" });
+  }
+
+  // ─── Keepalive ────────────────────────────────────────────────────────────
+
+  private _pingAll(): void {
+    const now = Date.now();
+    for (const [deviceId, conn] of this.connections) {
+      if (conn.ws.readyState !== WebSocket.OPEN) {
+        this.connections.delete(deviceId);
+        continue;
+      }
+
+      // PONG timeout — zombie connection
+      if (now - conn.lastPongAt > PONG_TIMEOUT_MS) {
+        console.warn(`[ws-gateway] PONG timeout for device ${deviceId.slice(0,8)} — closing`);
+        conn.ws.close(4002, "PONG timeout");
+        this.connections.delete(deviceId);
+        continue;
+      }
+
+      this._send(conn.ws, { type: "PING" });
+    }
+  }
+
+  // ─── Util ─────────────────────────────────────────────────────────────────
+
+  private _send(ws: WebSocket, payload: Record<string, unknown>): void {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ ...payload, ts: Date.now() }));
+    }
+  }
+}
+
+export const wsGateway = new WebSocketGateway();
