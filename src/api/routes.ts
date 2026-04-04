@@ -171,6 +171,22 @@ router.post("/auth/refresh", (req, res) => {
   res.json({ ok: true, data: { accessToken: newAccess } });
 });
 
+// ─── APK download (public, no auth) ──────────────────────────────────────────
+router.get("/apk/download", async (_req, res) => {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const apkPath = path.join(process.cwd(), "apk", "phone-network.apk");
+  try {
+    await fs.access(apkPath);
+    res.setHeader("Content-Type", "application/vnd.android.package-archive");
+    res.setHeader("Content-Disposition", 'attachment; filename="phone-network.apk"');
+    const { createReadStream } = await import("fs");
+    createReadStream(apkPath).pipe(res);
+  } catch {
+    res.status(404).json({ ok: false, error: "APK not found" });
+  }
+});
+
 // ─── All routes below require auth ───────────────────────────────────────────
 
 router.use(requireAuth);
@@ -1519,22 +1535,6 @@ router.get("/debug/connections", requireAuth, (_req, res) => {
     online: true,
   }));
   res.json({ ok: true, data: { count: list.length, connections: list } });
-});
-
-// ─── APK download endpoint ─────────────────────────────────────────────────
-router.get("/apk/download", async (_req, res) => {
-  const fs = await import("fs/promises");
-  const path = await import("path");
-  const apkPath = path.join(process.cwd(), "apk", "phone-network.apk");
-  try {
-    await fs.access(apkPath);
-    res.setHeader("Content-Type", "application/vnd.android.package-archive");
-    res.setHeader("Content-Disposition", 'attachment; filename="phone-network.apk"');
-    const { createReadStream } = await import("fs");
-    createReadStream(apkPath).pipe(res);
-  } catch {
-    res.status(404).json({ ok: false, error: "APK not found" });
-  }
 });
 
 export default router;
