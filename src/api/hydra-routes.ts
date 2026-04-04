@@ -1449,7 +1449,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
     
     // Helper to get UI tree
     async function getUiTree(): Promise<UIElement | null> {
-      const result = await dispatchAndWait("ui_tree_dump", {}, 10000);
+      const result = await dispatchAndWait("ui_tree_dump", {}, 30000);
       if (result?.output?.uiTree) {
         return typeof result.output.uiTree === "string"
           ? JSON.parse(result.output.uiTree)
@@ -1470,7 +1470,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
       const coords = findElementInUiTree(uiTree, options);
       if (!coords) return false;
       
-      const result = await dispatchAndWait("tap", { x: coords.x, y: coords.y }, 5000);
+      const result = await dispatchAndWait("tap", { x: coords.x, y: coords.y }, 30000);
       return result?.status === "completed";
     }
     
@@ -1484,7 +1484,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
         ? { contentDescription: searchText, partialMatch }
         : { text: searchText, partialMatch };
       
-      const result = await dispatchAndWait("a11y_find_tap", params, 8000);
+      const result = await dispatchAndWait("a11y_find_tap", params, 30000);
       return result?.status === "completed" && result?.output?.found !== false;
     }
     
@@ -1497,10 +1497,10 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
       console.log(`[rustdesk] Preamble: Device on lockscreen — waking + unlocking`);
       
       // screen_wake
-      await dispatchAndWait("screen_wake", {}, 5000);
+      await dispatchAndWait("screen_wake", {}, 30000);
       
       // unlock
-      await dispatchAndWait("unlock", {}, 5000);
+      await dispatchAndWait("unlock", {}, 30000);
       
       // wait for unlock animation
       await new Promise(r => setTimeout(r, 500));
@@ -1520,7 +1520,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
       console.log(`[rustdesk] Step 1: RustDesk already in foreground, skipping open_app`);
     } else {
       console.log(`[rustdesk] Step 1: Opening app ${RUSTDESK_PACKAGE}`);
-      const openResult = await dispatchAndWait("open_app", { packageName: RUSTDESK_PACKAGE }, 8000);
+      const openResult = await dispatchAndWait("open_app", { packageName: RUSTDESK_PACKAGE }, 30000);
       if (openResult?.status !== "completed") {
         return res.status(500).json({ ok: false, error: "Failed to open RustDesk app" });
       }
@@ -1536,7 +1536,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
     if (!shareScreenTapped) {
       console.warn(`[rustdesk] Could not find Share screen tab via a11y, trying fixed coords (Tab 3: 675, 1960)`);
       // Fallback: tap fixed coordinates for Tab 3 on 1080x2160 screen
-      await dispatchAndWait("tap", { x: 675, y: 1960 }, 5000);
+      await dispatchAndWait("tap", { x: 675, y: 1960 }, 30000);
     }
     await new Promise(r => setTimeout(r, 2000));
     
