@@ -388,6 +388,7 @@ export class DirectWsServer {
   private _handleJobResult(conn: ConnectedDevice, msg: Record<string, unknown>): void {
     const jobId = msg.jobId as string;
     if (!jobId) return;
+    console.log(`[direct-ws] JOB_RESULT received: jobId=${jobId.slice(0,8)} success=${msg.success} error=${msg.error || 'none'} device=${conn.deviceId.slice(0,8)}`);
 
     const pending = this.pendingJobs.get(jobId);
     if (pending) {
