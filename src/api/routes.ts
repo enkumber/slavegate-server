@@ -777,25 +777,17 @@ router.post("/ota/push", requireAuth, async (req, res) => {
   const path = await import("path");
 
   const apkPath = path.join(process.cwd(), "apk", "phone-network.apk");
-  const keyPath = path.join(process.cwd(), "keys", "ota_private.pem");
 
-  // Check files exist
+  // Check APK exists
   try {
     await fs.access(apkPath);
-    await fs.access(keyPath);
   } catch {
-    return res.status(500).json({ ok: false, error: "APK or signing key not found" });
+    return res.status(500).json({ ok: false, error: "APK not found on server. Upload it to /app/apk/phone-network.apk" });
   }
 
   // Read APK and calculate SHA256
   const apkBuffer = await fs.readFile(apkPath);
   const apkSha256 = crypto.createHash("sha256").update(apkBuffer).digest("hex");
-
-  // Sign the SHA256 hash
-  const privateKey = await fs.readFile(keyPath, "utf8");
-  const sign = crypto.createSign("SHA256");
-  sign.update(apkSha256);
-  const apkSignature = sign.sign(privateKey, "base64");
 
   // Get version from request or default
   const { version = "1.0.0", versionCode = 1, mandatory = false, deviceIds } = req.body as {
@@ -803,15 +795,6 @@ router.post("/ota/push", requireAuth, async (req, res) => {
     versionCode?: number;
     mandatory?: boolean;
     deviceIds?: string[];
-  };
-
-  const payload = {
-    version,
-    versionCode,
-    apkUrl: `${process.env.BASE_URL || "https://relay.pozesexy.com"}/app`,
-    apkSha256,
-    apkSignature,
-    mandatory,
   };
 
   // Send OTA_UPDATE command via DirectWs to online devices
@@ -842,7 +825,10 @@ router.post("/ota/push", requireAuth, async (req, res) => {
     ok: true,
     data: {
       count: sentTo,
-      payload: { ...payload, apkSignature: apkSignature.slice(0, 20) + "..." },
+      version,
+      versionCode,
+      apkSha256,
+      mandatory,
     },
   });
 });
