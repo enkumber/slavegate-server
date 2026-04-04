@@ -64,6 +64,7 @@ interface PendingJob {
 interface JobResult {
   jobId:    string;
   success:  boolean;
+  status:   string;
   output:   unknown;
   error?:   string;
 }
