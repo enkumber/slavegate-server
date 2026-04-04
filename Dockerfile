@@ -41,6 +41,9 @@ COPY --from=builder /build/package.json ./package.json
 COPY src/db/schema.sql ./schema.sql
 COPY migrations/ ./migrations/
 
+# Dashboard static files
+COPY dashboard-dist/ ./dashboard-dist/
+
 # APK directory — mount or docker cp the APK here
 RUN mkdir -p ./apk
 

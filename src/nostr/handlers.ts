@@ -111,7 +111,7 @@ export function createHandlers(
       const deviceId = registry.lookupDeviceId(pubkey);
       if (!deviceId) {
         console.warn(
-          `[handlers] HEARTBEAT from unknown pubkey ${pubkey.slice(0, 8)}`
+          `[handlers] HEARTBEAT from unknown pubkey ${pubkey}`
         );
         return;
       }

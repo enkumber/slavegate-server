@@ -134,11 +134,10 @@ async function bootstrap(): Promise<void> {
   });
 
   // ─── Dashboard static files ───────────────────────────────────────────────
-  // __dirname in compiled dist: dist/phone-network-server/src/
-  // rootDir=".." so path to dashboard from src/ is: ../../../dashboard/dist (3 levels up to workspace-kraken)
-  // Use DASHBOARD_DIST env var for flexibility; fallback to relative path.
+  // __dirname in compiled dist: dist/src/
+  // Two levels up to project root: ../../dashboard-dist
   const dashboardDist = process.env.DASHBOARD_DIST
-    ?? path.resolve(__dirname, "../../../dashboard-dist");
+    ?? path.resolve(__dirname, "../../dashboard-dist");
   app.use(express.static(dashboardDist));
   app.get("*", (req, res, next) => {
     // Skip WebSocket upgrade requests and API routes
