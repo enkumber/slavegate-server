@@ -1659,8 +1659,16 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
 
 // Job result waiting — polls dispatcherService.getJob until completed
 async function waitForJobResult(jobId: string, timeoutMs: number): Promise<any> {
+  const adapter = getNostrAdapter() as any;
+  
+  // If adapter has pendingJobs, register a promise there for instant resolution
+  if (adapter?.registerWaiter) {
+    return adapter.registerWaiter(jobId, timeoutMs);
+  }
+
+  // Fallback: poll DB
   const startTime = Date.now();
-  const pollInterval = 100;
+  const pollInterval = 200;
 
   while (Date.now() - startTime < timeoutMs) {
     try {

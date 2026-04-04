@@ -262,6 +262,28 @@ class NostrAdapterImpl implements NostrAdapter {
     }
   }
 
+  /**
+   * Register a waiter for a job result. Used by waitForJobResult() in hydra-routes.
+   * Returns a promise that resolves when resolveJob() is called for this jobId.
+   */
+  registerWaiter(jobId: string, timeoutMs: number): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingJobs.delete(jobId);
+        reject(new Error(`Job ${jobId} timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      this.pendingJobs.set(jobId, {
+        deviceId: "waiter",
+        jobId,
+        createdAt: Date.now(),
+        timer,
+        resolve,
+        reject,
+      });
+    });
+  }
+
   // ─── Internals (expose for handlers) ──────────────────────────────────────
 
   getClient(): NostrPhoneClient {
