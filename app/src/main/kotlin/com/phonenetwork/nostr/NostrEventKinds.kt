@@ -29,19 +29,19 @@ object NostrEventKinds {
     const val CONFIG_PUSH = 21005
     
     /** Device → Server: Initial registration/hello */
-    const val DEVICE_HELLO = 21006
+    const val DEVICE_HELLO = 21010
     
     /** Server → Device: Registration acknowledged */
-    const val DEVICE_ACK = 21007
+    const val DEVICE_ACK = 21011
     
     /** Server → Device: Registration rejected / revoked */
-    const val DEVICE_REJECT = 21008
+    const val DEVICE_REJECT = 21012
     
     /** Device → Server: Vision analysis request (screenshot + query) */
-    const val VISION_REQUEST = 21009
+    const val VISION_REQUEST = 21020
     
     /** Server → Device: Vision analysis result */
-    const val VISION_RESULT = 21010
+    const val VISION_RESULT = 21021
     
     /**
      * Get human-readable name for a kind (logging/debugging).

@@ -13,6 +13,7 @@ import com.phonenetwork.accessibility.AgentAccessibilityService
 import com.phonenetwork.anti_detection.DnsBackgroundService
 import com.phonenetwork.automation.AutomationController
 import com.phonenetwork.capture.CaptureController
+import com.phonenetwork.connection.DirectWsClient
 import com.phonenetwork.connection.WifiWatchdog
 import com.phonenetwork.executor.JobExecutor
 import com.phonenetwork.health.HealthMonitor
@@ -87,8 +88,9 @@ class AgentForegroundService : Service() {
     private lateinit var otaInstaller:  OtaInstaller
     private lateinit var automation:    AutomationController
     private lateinit var jobExecutor:   JobExecutor
-    private lateinit var nostrClient:   NostrClient
-    private lateinit var wifiWatchdog:  WifiWatchdog
+    private lateinit var nostrClient:    NostrClient
+    private          var directWsClient: DirectWsClient? = null
+    private lateinit var wifiWatchdog:   WifiWatchdog
 
     // ─── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -144,6 +146,33 @@ class AgentForegroundService : Service() {
             Log.i(TAG, "NostrClient started")
         }
 
+        // Start DirectWs transport if configured and enabled
+        serviceScope.launch {
+            try {
+                val dwc = DirectWsClient(
+                    context    = applicationContext,
+                    executor   = jobExecutor,
+                    scope      = serviceScope,
+                    onConnected = { deviceId ->
+                        Log.i(TAG, "DirectWs connected: deviceId=$deviceId")
+                        updateNotification("Connected (DirectWs)")
+                    },
+                    onDisconnected = {
+                        Log.i(TAG, "DirectWs disconnected")
+                    },
+                )
+                directWsClient = dwc
+                if (dwc.isEnabled) {
+                    dwc.connect()
+                    Log.i(TAG, "DirectWsClient started")
+                } else {
+                    Log.d(TAG, "DirectWs transport disabled — skipped")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "DirectWsClient init failed: ${e.message}")
+            }
+        }
+
         return START_STICKY  // Android restarts service after OOM kill
     }
 
@@ -158,6 +187,7 @@ class AgentForegroundService : Service() {
                 }
             }
         }
+        directWsClient?.disconnect()
         if (::wifiWatchdog.isInitialized)  wifiWatchdog.stop()
         DnsBackgroundService.stop()
         serviceScope.cancel()

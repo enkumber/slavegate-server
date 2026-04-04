@@ -35,8 +35,8 @@ class NostrClient(
         private const val TAG = "NostrClient"
         private const val RECONNECT_DELAY_MS = 5000L
         private const val HEARTBEAT_INTERVAL_MS = 30000L
-        private const val FETCH_INTERVAL_MS = 5000L  // Poll for new events
-        private const val FETCH_TIMEOUT_SECS = 10L
+        private const val FETCH_INTERVAL_MS = 1000L  // Poll for new events (1s for responsiveness)
+        private const val FETCH_TIMEOUT_SECS = 3L
     }
 
     private var client: Client? = null
@@ -110,9 +110,7 @@ class NostrClient(
     }
 
     /**
-     * Poll for events targeted at this device.
-     * Uses fetchEvents since stream/subscribe is not yet supported in Kotlin bindings.
-     *
+     * Poll for events from server. Uses fetchEvents with 1s interval.
      * Filter: events from server pubkey tagged to us (p tag = our pubkey)
      */
     private fun startEventPolling() {
@@ -122,10 +120,9 @@ class NostrClient(
                 try {
                     val myPubkey = keys!!.publicKey()
 
-                    // Build filter for events from server to us, since last fetch
                     val filter = Filter()
                         .author(PublicKey.parse(serverPubkey))
-                        .pubkey(myPubkey)  // p tag filter
+                        .pubkey(myPubkey)
                         .kinds(listOf(
                             Kind(NostrEventKinds.JOB_DISPATCH.toUShort()),
                             Kind(NostrEventKinds.KILL_SWITCH.toUShort()),
@@ -136,20 +133,16 @@ class NostrClient(
                             Kind(NostrEventKinds.VISION_RESULT.toUShort())
                         ))
 
-                    // Add since filter if we have a last timestamp
                     val filterWithSince = lastEventTimestamp?.let { filter.since(it) } ?: filter
 
-                    // Fetch events
                     val events = client!!.fetchEvents(
                         filter = filterWithSince,
                         timeout = Duration.ofSeconds(FETCH_TIMEOUT_SECS)
                     )
 
-                    // Process each event
                     for (event in events.toVec()) {
                         try {
                             handleIncomingEvent(event)
-                            // Update last timestamp to this event's timestamp + 1 second
                             lastEventTimestamp = Timestamp.fromSecs(event.createdAt().asSecs() + 1u)
                         } catch (e: Exception) {
                             Log.e(TAG, "Error handling event: ${e.message}")
