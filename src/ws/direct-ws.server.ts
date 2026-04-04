@@ -269,48 +269,87 @@ export class DirectWsServer {
     remoteIp: string,
     onAuth: (conn: ConnectedDevice) => void,
   ): Promise<void> {
-    const { deviceId, deviceKey } = msg as { deviceId?: string; deviceKey?: string };
+    const { deviceId, deviceKey, nostrPubkey } = msg as { 
+      deviceId?: string; 
+      deviceKey?: string; 
+      nostrPubkey?: string; 
+    };
 
-    if (!deviceId || !deviceKey) {
-      ws.close(4001, "deviceId and deviceKey required");
+    if (!deviceId) {
+      ws.close(4001, "deviceId required");
+      return;
+    }
+    
+    if (!deviceKey && !nostrPubkey) {
+      ws.close(4001, "deviceKey or nostrPubkey required");
       return;
     }
 
     try {
       const db = getDb();
-      // Validate: device exists, key matches, not blocked
-      const result = await db.query<{ id: string; status: string; device_key: string | null }>(
-        `SELECT id, status, device_key FROM devices WHERE id = $1`,
-        [deviceId]
-      );
+      let device: { id: string; status: string; device_key: string | null } | null = null;
+      
+      // Try deviceId lookup first
+      if (deviceId) {
+        const result = await db.query<{ id: string; status: string; device_key: string | null }>(
+          `SELECT id, status, device_key FROM devices WHERE id = $1`,
+          [deviceId]
+        );
+        device = result.rows[0] || null;
+      }
+      
+      // If no device by deviceId, try nostr_pubkey lookup
+      if (!device && nostrPubkey) {
+        console.log(`[direct-ws] Device not found by ID, trying nostr_pubkey lookup: ${nostrPubkey.slice(0,16)}...`);
+        const result = await db.query<{ id: string; status: string; device_key: string | null }>(
+          `SELECT id, status, device_key FROM devices WHERE nostr_pubkey = $1`,
+          [nostrPubkey]
+        );
+        device = result.rows[0] || null;
+        if (device) {
+          console.log(`[direct-ws] Found device by nostr_pubkey: ${device.id.slice(0,8)}`);
+        }
+      }
 
-      if (result.rows.length === 0) {
-        console.warn(`[direct-ws] AUTH failed: unknown deviceId=${deviceId.slice(0,8)} from ${remoteIp}`);
+      if (!device) {
+        console.warn(`[direct-ws] AUTH failed: device not found (deviceId=${deviceId?.slice(0,8)} nostrPubkey=${nostrPubkey?.slice(0,16)}) from ${remoteIp}`);
         this._send(ws, { type: "AUTH_FAIL", reason: "Device not found" });
         ws.close(4003, "Device not found");
         return;
       }
 
-      const device = result.rows[0];
-
       if (device.status === "blocked") {
-        console.warn(`[direct-ws] AUTH failed: device ${deviceId.slice(0,8)} is blocked`);
+        console.warn(`[direct-ws] AUTH failed: device ${device.id.slice(0,8)} is blocked`);
         this._send(ws, { type: "AUTH_FAIL", reason: "Device blocked" });
         ws.close(4003, "Blocked");
         return;
       }
 
-      if (!device.device_key || device.device_key !== deviceKey) {
-        console.warn(`[direct-ws] AUTH failed: bad deviceKey for ${deviceId.slice(0,8)} from ${remoteIp}`);
-        this._send(ws, { type: "AUTH_FAIL", reason: "Invalid key" });
-        ws.close(4003, "Invalid key");
+      // Auth by deviceKey (preferred) or fallback to nostr_pubkey
+      let authValid = false;
+      if (deviceKey && device.device_key && device.device_key === deviceKey) {
+        authValid = true;
+        console.log(`[direct-ws] Auth by deviceKey for ${device.id.slice(0,8)}`);
+      } else if (nostrPubkey && !deviceKey) {
+        // If no deviceKey provided, allow nostr_pubkey auth
+        authValid = true;
+        console.log(`[direct-ws] Auth by nostr_pubkey for ${device.id.slice(0,8)}`);
+      }
+      
+      if (!authValid) {
+        console.warn(`[direct-ws] AUTH failed: invalid credentials for ${device.id.slice(0,8)} from ${remoteIp}`);
+        this._send(ws, { type: "AUTH_FAIL", reason: "Invalid credentials" });
+        ws.close(4003, "Invalid credentials");
         return;
       }
+      
+      // Use the found device ID (in case it was looked up by nostr_pubkey)
+      const finalDeviceId = device.id;
 
       // Kick existing connection for same device
-      const existing = this.connections.get(deviceId);
+      const existing = this.connections.get(finalDeviceId);
       if (existing && existing.ws.readyState === WebSocket.OPEN) {
-        console.log(`[direct-ws] Superseding existing connection for device ${deviceId.slice(0,8)}`);
+        console.log(`[direct-ws] Superseding existing connection for device ${finalDeviceId.slice(0,8)}`);
         existing.ws.close(4000, "Replaced by newer connection");
       }
 
@@ -318,23 +357,23 @@ export class DirectWsServer {
       const now = Date.now();
       const conn: ConnectedDevice = {
         ws,
-        deviceId,
+        deviceId: finalDeviceId,
         connectedAt: now,
         lastSeenAt:  now,
         lastPongAt:  now,
         msgCount:    0,
         windowStart: now,
       };
-      this.connections.set(deviceId, conn);
+      this.connections.set(finalDeviceId, conn);
       devicesConnected?.set(this.connections.size);
 
       // Update DB — mark online
-      await devicesService.markOnline(deviceId, remoteIp).catch(err =>
+      await devicesService.markOnline(finalDeviceId, remoteIp).catch(err =>
         console.warn("[direct-ws] markOnline error:", err.message)
       );
 
-      this._send(ws, { type: "AUTH_OK", deviceId });
-      console.log(`[direct-ws] Device ${deviceId.slice(0,8)} authenticated from ${remoteIp}`);
+      this._send(ws, { type: "AUTH_OK", deviceId: finalDeviceId });
+      console.log(`[direct-ws] Device ${finalDeviceId.slice(0,8)} authenticated from ${remoteIp}`);
       onAuth(conn);
 
     } catch (err) {
