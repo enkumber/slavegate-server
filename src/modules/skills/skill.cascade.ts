@@ -14,7 +14,20 @@
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../../db/client";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { getNostrAdapter } from "../../nostr/adapter";
+import { sendJobToDevice, isDeviceOnline } from "../../transport/transport";
+
+// DirectWS transport adapter for legacy code
+function getNostrAdapter() {
+  return {
+    sendJob: (deviceId: string, payload: any) => {
+      return Promise.resolve(sendJobToDevice(deviceId, payload));
+    },
+    isDeviceOnline: (deviceId: string) => {
+      return isDeviceOnline(deviceId);
+    },
+  };
+}
+
 import * as skillService from "./skill.service";
 import { coordCacheService } from "./skill-db.service";
 import type { DeviceInfo } from "./skill-db.service";

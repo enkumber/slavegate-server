@@ -2,29 +2,20 @@
  * transport/transport.ts
  * 
  * Transport abstraction layer for device communication.
- * Handles fallback between DirectWS (primary) and Nostr (fallback).
+ * DirectWS only transport.
  */
 
 import { directWsServer } from "../ws/direct-ws.server";
-import { getNostrAdapter } from "../nostr/adapter";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
 
 /**
- * Send a job to a device via the best available transport.
- * Priority: DirectWS first (instant), then Nostr fallback.
- * Returns true if sent via any transport, false if device unreachable.
+ * Send a job to a device via DirectWS transport.
+ * Returns true if sent successfully, false if device unreachable.
  */
 export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
-  // Priority 1: DirectWs (sub-second latency)
+  // DirectWs only
   if (directWsServer.isDeviceOnline(deviceId)) {
     return directWsServer.sendJob(deviceId, payload);
-  }
-  
-  // Priority 2: Nostr (8-10s latency, but reliable fallback)
-  const nostr = getNostrAdapter();
-  if (nostr) {
-    nostr.sendJob(deviceId, payload as unknown as Parameters<typeof nostr.sendJob>[1]);
-    return true;
   }
   
   return false;
@@ -40,21 +31,15 @@ export function waitForResult(jobId: string, timeoutMs: number): Promise<any> {
 }
 
 /**
- * Check if device is online via any transport.
+ * Check if device is online via DirectWS transport.
  */
 export function isDeviceOnline(deviceId: string): boolean {
-  return directWsServer.isDeviceOnline(deviceId) || 
-         (getNostrAdapter()?.isDeviceOnline(deviceId) ?? false);
+  return directWsServer.isDeviceOnline(deviceId);
 }
 
 /**
- * Get list of devices online via any transport.
+ * Get list of devices online via DirectWS transport.
  */
 export function getOnlineDevices(): string[] {
-  const directWsDevices = directWsServer.getConnectedDeviceIds();
-  const nostrDevices = getNostrAdapter()?.getOnlineDeviceIds() ?? [];
-  
-  // Deduplicate
-  const allDevices = new Set([...directWsDevices, ...nostrDevices]);
-  return Array.from(allDevices);
+  return directWsServer.getConnectedDeviceIds();
 }

@@ -25,7 +25,7 @@ import {
 import type { OcrFindTapParams } from "../../shared/protocol/messages";
 import { skillDbService } from "../modules/skills/skill-db.service";
 import { checkpointService } from "../modules/checkpoints/checkpoint.service";
-import { getNostrAdapter } from "../nostr/adapter";
+
 import { sendJobToDevice, isDeviceOnline, waitForResult } from "../transport/transport";
 import { directWsServer } from "../ws/direct-ws.server";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
@@ -1661,39 +1661,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Job result waiting — polls dispatcherService.getJob until completed
-async function waitForJobResult(jobId: string, timeoutMs: number): Promise<any> {
-  const adapter = getNostrAdapter() as any;
-  
-  // If adapter has pendingJobs, register a promise there for instant resolution
-  if (adapter?.registerWaiter) {
-    return adapter.registerWaiter(jobId, timeoutMs);
-  }
 
-  // Fallback: poll DB
-  const startTime = Date.now();
-  const pollInterval = 200;
-
-  while (Date.now() - startTime < timeoutMs) {
-    try {
-      const job = await dispatcherService.getJob(jobId);
-      if (job && job.status !== "pending") {
-        return {
-          jobId: job.id,
-          status: job.status,
-          output: job.output,
-          error: job.error,
-          durationMs: job.durationMs,
-        };
-      }
-    } catch {
-      // Continue polling
-    }
-    await new Promise(r => setTimeout(r, pollInterval));
-  }
-
-  throw new Error(`Job ${jobId} timeout after ${timeoutMs}ms`);
-}
 
 function evaluateCriteria(vlmResult: any, criteria?: Record<string, any>): boolean {
   if (!criteria) return true;

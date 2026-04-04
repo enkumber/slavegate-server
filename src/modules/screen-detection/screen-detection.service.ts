@@ -5,7 +5,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import { getNostrAdapter } from '../../nostr/adapter';
+import { sendJobToDevice } from '../../transport/transport';
 import { visionService } from '../vision/vision.service';
 import { getDb } from '../../db/client';
 import { UiTreeDetector } from './detectors/ui-tree.detector';
@@ -363,23 +363,18 @@ export class ScreenDetectionService {
       }, timeoutMs);
       pendingUiTree.set(jobId, { resolve, timer });
 
-      const uiTreeAdapter = getNostrAdapter();
-      if (!uiTreeAdapter) {
-        clearTimeout(timer);
-        pendingUiTree.delete(jobId);
-        resolve(null);
-        return;
-      }
-      uiTreeAdapter.sendJob(deviceId, {
+      // Send job to device via DirectWS transport
+      const sent = sendJobToDevice(deviceId, {
         jobId,
         type: 'ui_tree_dump' as import('../../../shared/protocol/messages').JobType,
         params: { format: 'json' } as Record<string, unknown>,
         timeoutMs,
-      }).catch(() => {
+      });
+      if (!sent) {
         clearTimeout(timer);
         pendingUiTree.delete(jobId);
         resolve(null);
-      });
+      }
     });
 
     if (!result) throw new Error(`ui_tree_dump timed out (${timeoutMs}ms) for device ${deviceId.slice(0, 8)}`);
@@ -396,23 +391,18 @@ export class ScreenDetectionService {
       }, timeoutMs);
       pendingOcr.set(jobId, { resolve, timer });
 
-      const ocrAdapter = getNostrAdapter();
-      if (!ocrAdapter) {
-        clearTimeout(timer);
-        pendingOcr.delete(jobId);
-        resolve(null);
-        return;
-      }
-      ocrAdapter.sendJob(deviceId, {
+      // Send job to device via DirectWS transport
+      const sent = sendJobToDevice(deviceId, {
         jobId,
         type: 'ocr_full' as import('../../../shared/protocol/messages').JobType,
         params: {} as Record<string, unknown>,
         timeoutMs,
-      }).catch(() => {
+      });
+      if (!sent) {
         clearTimeout(timer);
         pendingOcr.delete(jobId);
         resolve(null);
-      });
+      }
     });
 
     if (!result) throw new Error(`ocr_full timed out (${timeoutMs}ms) for device ${deviceId.slice(0, 8)}`);
@@ -431,23 +421,19 @@ export class ScreenDetectionService {
       }, timeoutMs);
       pendingScreenshots.set(jobId, { resolve, timer });
 
-      const screenshotAdapter = getNostrAdapter();
-      if (!screenshotAdapter) {
-        clearTimeout(timer);
-        pendingScreenshots.delete(jobId);
-        resolve(null);
-        return;
-      }
-      screenshotAdapter.sendJob(deviceId, {
+      // Send job to device via DirectWS transport
+      // Send job to device via DirectWS transport
+      const sent = sendJobToDevice(deviceId, {
         jobId,
         type: 'screenshot_for_vlm' as import('../../../shared/protocol/messages').JobType,
         params: { quality: 85, maxWidth: 540 } as Record<string, unknown>,
         timeoutMs,
-      }).catch(() => {
+      });
+      if (!sent) {
         clearTimeout(timer);
         pendingScreenshots.delete(jobId);
         resolve(null);
-      });
+      }
     });
 
     if (!result) throw new Error(`screenshot timed out (${timeoutMs}ms) for device ${deviceId.slice(0, 8)}`);
@@ -456,15 +442,13 @@ export class ScreenDetectionService {
 
   private async pressBack(deviceId: string): Promise<void> {
     const jobId = uuidv4();
-    const backAdapter = getNostrAdapter();
-    if (backAdapter) {
-      await backAdapter.sendJob(deviceId, {
-        jobId,
-        type: 'press_key' as import('../../../shared/protocol/messages').JobType,
-        params: { key: 'back' } as Record<string, unknown>,
-        timeoutMs: 3_000,
-      });
-    }
+    // Send job to device via DirectWS transport
+    sendJobToDevice(deviceId, {
+      jobId,
+      type: 'press_key' as import('../../../shared/protocol/messages').JobType,
+      params: { key: 'back' } as Record<string, unknown>,
+      timeoutMs: 3_000,
+    });
     await sleep(300);
   }
 

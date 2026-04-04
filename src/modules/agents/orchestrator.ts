@@ -11,7 +11,7 @@ import { getCachedPlan, savePlanToCache, recordPlanOutcome } from "./plan-cache"
 import { learnFromSuccess, learnFromFailure } from "./self-evolution";
 import { getLlmClient } from "./llm-client";
 import { agentConfig } from "../../config/agents.config";
-import { getNostrAdapter } from "../../nostr/adapter";
+import { sendJobToDevice, isDeviceOnline } from "../../transport/transport";
 import { getDb } from "../../db/client";
 import * as skillService from "../skills/skill.service";
 import { screenDetectionService } from "../screen-detection";
@@ -213,8 +213,7 @@ export class AgentOrchestrator {
     };
 
     // Check device is online
-    const adapter = getNostrAdapter();
-    if (!adapter?.isDeviceOnline(deviceId)) {
+    if (!isDeviceOnline(deviceId)) {
       return {
         success: false, stepsCompleted: 0, totalSteps: 0,
         failReason: `Device ${deviceId} is offline`,
@@ -365,7 +364,7 @@ export class AgentOrchestrator {
               console.log(`[orchestrator] Pressing back + will retry`);
               const backJobId = uuidv4();
               const backPromise = awaitAction(backJobId, 3_000);
-              await getNostrAdapter()?.sendJob(deviceId, {
+              sendJobToDevice(deviceId, {
                 jobId: backJobId,
                 type: "press_key" as import("../../../shared/protocol/messages").JobType,
                 params: { key: "back" } as Record<string, unknown>,
@@ -500,7 +499,7 @@ export class AgentOrchestrator {
                 console.log(`[orchestrator] Pressing back before retry (escape potential overlay)`);
                 const backJobId = uuidv4();
                 const backPromise = awaitAction(backJobId, 3_000);
-                await getNostrAdapter()?.sendJob(deviceId, {
+                sendJobToDevice(deviceId, {
                   jobId: backJobId,
                   type: "press_key" as import("../../../shared/protocol/messages").JobType,
                   params: { key: "back" } as Record<string, unknown>,
@@ -677,7 +676,7 @@ export class AgentOrchestrator {
       });
       
       // Send job to device via Nostr
-      await getNostrAdapter()?.sendJob(deviceId, {
+      sendJobToDevice(deviceId, {
         jobId: treeDispatch.jobId,
         type: "ui_tree_dump" as import("../../../shared/protocol/messages").JobType,
         params: {} as Record<string, unknown>,
@@ -736,7 +735,7 @@ export class AgentOrchestrator {
           timeoutMs: 5_000,
         });
         
-        await getNostrAdapter()?.sendJob(deviceId, {
+        sendJobToDevice(deviceId, {
           jobId: tapDispatch.jobId,
           type: "a11y_find_tap" as import("../../../shared/protocol/messages").JobType,
           params: { text: "Home" } as Record<string, unknown>,
@@ -754,7 +753,7 @@ export class AgentOrchestrator {
           timeoutMs: 5_000,
         });
         
-        await getNostrAdapter()?.sendJob(deviceId, {
+        sendJobToDevice(deviceId, {
           jobId: verifyDispatch.jobId,
           type: "ui_tree_dump" as import("../../../shared/protocol/messages").JobType,
           params: {} as Record<string, unknown>,
@@ -834,7 +833,7 @@ export class AgentOrchestrator {
   private async sendBackKey(deviceId: string): Promise<void> {
     const backId = uuidv4();
     const backP = awaitAction(backId, 3_000);
-    await getNostrAdapter()?.sendJob(deviceId, {
+    sendJobToDevice(deviceId, {
       jobId: backId,
       type: "press_key" as import("../../../shared/protocol/messages").JobType,
       params: { key: "back" } as Record<string, unknown>,
@@ -862,7 +861,7 @@ export class AgentOrchestrator {
     console.log(`[orchestrator] Preamble P0: screen_wake + unlock`);
     const wakeId = uuidv4();
     const wakeP = awaitAction(wakeId, 5_000);
-    await getNostrAdapter()?.sendJob(deviceId, {
+    sendJobToDevice(deviceId, {
       jobId: wakeId,
       type: "screen_wake" as import("../../../shared/protocol/messages").JobType,
       params: {} as Record<string, unknown>,
@@ -872,7 +871,7 @@ export class AgentOrchestrator {
 
     const unlockId = uuidv4();
     const unlockP = awaitAction(unlockId, 5_000);
-    await getNostrAdapter()?.sendJob(deviceId, {
+    sendJobToDevice(deviceId, {
       jobId: unlockId,
       type: "unlock" as import("../../../shared/protocol/messages").JobType,
       params: {} as Record<string, unknown>,
@@ -889,7 +888,7 @@ export class AgentOrchestrator {
       // Open Reddit app first
       const openId = uuidv4();
       const openP = awaitAction(openId, 10_000);
-      await getNostrAdapter()?.sendJob(deviceId, {
+      sendJobToDevice(deviceId, {
         jobId: openId,
         type: "open_app" as import("../../../shared/protocol/messages").JobType,
         params: { packageName: pkg } as Record<string, unknown>,
@@ -907,7 +906,7 @@ export class AgentOrchestrator {
     console.log(`[orchestrator] Preamble P1: open_app_fresh ${pkg}`);
     const freshId = uuidv4();
     const freshP = awaitAction(freshId, 10_000);
-    await getNostrAdapter()?.sendJob(deviceId, {
+    sendJobToDevice(deviceId, {
       jobId: freshId,
       type: "open_app_fresh" as import("../../../shared/protocol/messages").JobType,
       params: { packageName: pkg } as Record<string, unknown>,
@@ -936,7 +935,7 @@ export class AgentOrchestrator {
       for (let i = 0; i < 3; i++) {
         const backTapId = uuidv4();
         const backTapP = awaitAction(backTapId, 3_000);
-        await getNostrAdapter()?.sendJob(deviceId, {
+        sendJobToDevice(deviceId, {
           jobId: backTapId,
           type: "tap" as import("../../../shared/protocol/messages").JobType,
           params: {
@@ -953,7 +952,7 @@ export class AgentOrchestrator {
       console.log(`[orchestrator] Preamble P2: tapping nav.home (0.1, 0.912)`);
       const navId2 = uuidv4();
       const navP2 = awaitAction(navId2, 5_000);
-      await getNostrAdapter()?.sendJob(deviceId, {
+      sendJobToDevice(deviceId, {
         jobId: navId2,
         type: "tap" as import("../../../shared/protocol/messages").JobType,
         params: {
@@ -1001,7 +1000,7 @@ Reply with EXACTLY one word: YES or NO`,
           console.log(`[orchestrator] Preamble P2.5: keyboard detected, dismissing...`);
           const kbBackId = uuidv4();
           const kbBackP = awaitAction(kbBackId, 3_000);
-          await getNostrAdapter()?.sendJob(deviceId, {
+          sendJobToDevice(deviceId, {
             jobId: kbBackId,
             type: "press_key" as import("../../../shared/protocol/messages").JobType,
             params: { key: "back" } as Record<string, unknown>,
@@ -1028,7 +1027,7 @@ Reply with EXACTLY one word: YES or NO`,
     const dims = await getScreenDims(deviceId);
     const navHomeId = uuidv4();
     const navHomeP = awaitAction(navHomeId, 5_000);
-    await getNostrAdapter()?.sendJob(deviceId, {
+    sendJobToDevice(deviceId, {
       jobId: navHomeId,
       type: "tap" as import("../../../shared/protocol/messages").JobType,
       params: {
@@ -1180,8 +1179,7 @@ Respond with ONLY the label, nothing else.`,
   // ─── Device helpers ─────────────────────────────────────────────────────────
 
   private async captureScreenshot(deviceId: string): Promise<string | null> {
-    const adapter = getNostrAdapter();
-    if (!adapter?.isDeviceOnline(deviceId)) {
+    if (!isDeviceOnline(deviceId)) {
       console.warn(`[orchestrator] captureScreenshot: device ${deviceId.slice(0, 8)} not connected`);
       return null;
     }
@@ -1192,7 +1190,7 @@ Respond with ONLY the label, nothing else.`,
     const promise = awaitScreenshot(jobId, timeoutMs);
 
     try {
-      await adapter.sendJob(deviceId, {
+      sendJobToDevice(deviceId, {
         jobId,
         type: "screenshot" as import("../../../shared/protocol/messages").JobType,
         params: { quality: 70, maxWidth: 1080 } as Record<string, unknown>,
@@ -1290,7 +1288,7 @@ Respond with ONLY the label, nothing else.`,
     const promise = awaitAction(jobId, agentConfig.orchestrator.stepTimeoutMs);
 
     try {
-      await getNostrAdapter()?.sendJob(deviceId, {
+      sendJobToDevice(deviceId, {
         jobId,
         type: jobType as import("../../../shared/protocol/messages").JobType,
         params: params as Record<string, unknown>,

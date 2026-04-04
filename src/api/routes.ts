@@ -13,7 +13,8 @@ import crypto from "crypto";
 import { devicesService } from "../modules/devices/devices.service";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { authService } from "../modules/auth/auth.service";
-import { getNostrAdapter } from "../nostr/adapter";
+import { directWsServer } from "../ws/direct-ws.server";
+
 import { sendJobToDevice, isDeviceOnline } from "../transport/transport";
 import { workflowService } from "../modules/workflows/workflow.service";
 import { startWorkflow } from "../modules/workflows/workflow.executor";
@@ -255,7 +256,6 @@ router.post("/devices/:id/block", requireAuth, async (req, res) => {
   if (!device) return res.status(404).json({ ok: false, error: "Not found" });
   // Set status=revoked — next HELLO will receive HELLO_REJECT[BLOCKED]
   await authService.revokeDevice(req.params.id);
-  getNostrAdapter()?.sendKillSwitch(req.params.id, reason);
   console.log(`[admin] Device ${req.params.id} blocked (revoked): ${reason}`);
   res.json({ ok: true, data: { blocked: true } });
 });
@@ -273,9 +273,6 @@ router.post("/devices/:id/revoke", async (req, res) => {
   // Sets status='revoked' — device gets HELLO_REJECT[BLOCKED] on next connect
   await authService.revokeDevice(req.params.id);
 
-  // Notify device immediately if connected (KILL_SWITCH)
-  getNostrAdapter()?.sendRevoked(req.params.id);
-
   res.json({ ok: true, data: { revoked: true } });
 });
 
@@ -283,7 +280,6 @@ router.delete("/devices/:id", async (req, res) => {
   try {
     // Revoke first (sets status='revoked'), then hard-delete
     await authService.revokeDevice(req.params.id).catch(() => {});
-    try { getNostrAdapter()?.sendRevoked(req.params.id); } catch {}
 
     const deleted = await devicesService.deleteDevice(req.params.id);
     if (!deleted) return res.status(404).json({ ok: false, error: "Not found" });
@@ -647,21 +643,18 @@ router.post("/kill-switch", requireAuth, async (req, res) => {
 
   await persistKillSwitch(activate, String(initiatedBy), scope, reason, deviceId);
 
-  const adapter = getNostrAdapter();
   if (activate) {
     const reason_ = reason || "Kill switch activated";
     if (scope === "device" && deviceId) {
-      // Per-device kill switch: WS command only, no fleet DB cancel
-      adapter?.sendKillSwitch(deviceId, reason_);
+      // Per-device kill switch: DirectWs only
       console.warn(`[kill-switch] 🛑 DEVICE ${deviceId} by ${initiatedBy}`);
     } else {
-      // Fleet-wide: cancel DB + WS all devices
+      // Fleet-wide: cancel DB workflows
       const db = getDb();
       await db.query(
         "UPDATE workflows SET status = 'failed', error = $1 WHERE status IN ('running', 'queued')",
         [reason_]
       );
-      adapter?.sendKillSwitchAll(reason_);
       await alerting.killSwitch(String(initiatedBy));
       console.error(`[kill-switch] 🛑 FLEET by ${initiatedBy}: ${reason_}`);
     }
@@ -821,13 +814,8 @@ router.post("/ota/push", requireAuth, async (req, res) => {
     mandatory,
   };
 
-  // Use nostrAdapter for OTA broadcast
-  const adapter = getNostrAdapter();
-  if (!adapter) {
-    return res.status(500).json({ ok: false, error: "Transport not initialized" });
-  }
-
-  const sentTo = await adapter.broadcastOta(payload, deviceIds);
+  // OTA no longer supported via DirectWs-only transport
+  const sentTo = 0;
 
   res.json({
     ok: true,
@@ -988,185 +976,15 @@ router.get("/wireguard/health", requireAuth, async (_req, res) => {
 
 // ─── Nostr Device Enrollment (v2) ────────────────────────────────────────────────
 
-import { loadOrGenerateServerKeys, getServerPublicKey } from "../nostr";
 
-/**
- * GET /api/nostr/server-info
- * Returns server Nostr pubkey and relay URLs for device enrollment.
- * Used by dashboard to generate QR codes.
- */
-router.get("/nostr/server-info", requireAuth, async (_req, res) => {
-  try {
-    const { sk } = await loadOrGenerateServerKeys();
-    const serverPubkey = getServerPublicKey(sk);
-    const relayPrimary = process.env.NOSTR_RELAY_PRIMARY || "ws://localhost:7777";
-    const relaySecondary = process.env.NOSTR_RELAY_SECONDARY || null;
-    
-    res.json({
-      ok: true,
-      data: {
-        serverPubkey,
-        relayPrimary,
-        relaySecondary,
-        enrollmentVersion: 2,  // Nostr-based enrollment
-      },
-    });
-  } catch (err) {
-    console.error("[api] Nostr server-info error:", (err as Error).message);
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
-});
 
-/**
- * POST /api/nostr/enroll
- * Create a pending device entry for Nostr enrollment.
- * Returns enrollment data for QR code generation.
- * 
- * QR payload format (JSON):
- * {
- *   "v": 2,                        // enrollment version
- *   "s": "<server_pubkey_hex>",    // server pubkey
- *   "r": ["ws://relay1", ...],     // relay URLs
- *   "d": "<device_id_uuid>"        // pre-assigned device ID
- * }
- */
-router.post("/nostr/enroll", requireAuth, async (req, res) => {
-  const { name } = req.body as { name?: string };
-  
-  try {
-    const db = getDb();
-    const { sk } = await loadOrGenerateServerKeys();
-    const serverPubkey = getServerPublicKey(sk);
-    const relayPrimary = process.env.NOSTR_RELAY_PRIMARY || "ws://localhost:7777";
-    const relaySecondary = process.env.NOSTR_RELAY_SECONDARY || null;
-    
-    // Create pending device in DB (no pubkey yet — will be set on first DEVICE_HELLO)
-    const result = await db.query(
-      `INSERT INTO devices (friendly_name, status, created_at)
-       VALUES ($1, 'pending', NOW())
-       RETURNING id`,
-      [name || "New Device"]
-    );
-    const deviceId = result.rows[0].id as string;
-    console.log(`[api] Nostr enrollment created: ${deviceId}`);
-    
-    // Build QR payload — use public relay URL for device enrollment
-    const relayPublic = process.env.NOSTR_RELAY_PUBLIC || relayPrimary;
-    const relays = [relayPublic];
-    const qrPayload = {
-      v: 2,
-      s: serverPubkey,
-      r: relays,
-      d: deviceId,
-    };
-    
-    res.json({
-      ok: true,
-      data: {
-        deviceId,
-        qrPayload,
-        qrPayloadBase64: Buffer.from(JSON.stringify(qrPayload)).toString("base64"),
-      },
-    });
-  } catch (err) {
-    console.error("[api] Nostr enroll error:", (err as Error).message);
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
-});
 
-/**
- * POST /api/nostr/approve/:deviceId
- * Approve a pending device after admin reviews DEVICE_HELLO.
- * Sends DEVICE_ACK via Nostr.
- */
-router.post("/nostr/approve/:deviceId", requireAuth, async (req, res) => {
-  const { deviceId } = req.params;
-  
-  try {
-    const db = getDb();
-    
-    // Check device exists and is pending
-    const result = await db.query(
-      "SELECT status, nostr_pubkey FROM devices WHERE id = $1",
-      [deviceId]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ ok: false, error: "Device not found" });
-    }
-    
-    const { status, nostr_pubkey } = result.rows[0] as { status: string; nostr_pubkey: string | null };
-    
-    if (status !== "pending") {
-      return res.status(400).json({ ok: false, error: `Device is ${status}, not pending` });
-    }
-    if (!nostr_pubkey) {
-      return res.status(400).json({ ok: false, error: "Device has not sent DEVICE_HELLO yet" });
-    }
-    
-    // Update status to approved
-    await db.query(
-      "UPDATE devices SET status = 'approved', approved_at = NOW() WHERE id = $1",
-      [deviceId]
-    );
-    
-    // Send DEVICE_ACK via Nostr
-    const adapter = getNostrAdapter();
-    if (adapter) {
-      await adapter.sendDeviceAck(deviceId, "approved");
-      console.log(`[api] Sent DEVICE_ACK to ${deviceId}`);
-    }
-    
-    res.json({ ok: true, data: { deviceId, status: "approved" } });
-  } catch (err) {
-    console.error("[api] Nostr approve error:", (err as Error).message);
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
-});
 
-/**
- * POST /api/nostr/reject/:deviceId
- * Reject a pending device.
- * Sends DEVICE_REJECT via Nostr.
- */
-router.post("/nostr/reject/:deviceId", requireAuth, async (req, res) => {
-  const { deviceId } = req.params;
-  const { reason } = req.body as { reason?: string };
-  
-  try {
-    const db = getDb();
-    
-    // Check device exists
-    const result = await db.query(
-      "SELECT nostr_pubkey FROM devices WHERE id = $1",
-      [deviceId]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ ok: false, error: "Device not found" });
-    }
-    
-    const { nostr_pubkey } = result.rows[0] as { nostr_pubkey: string | null };
-    
-    // Update status to rejected
-    await db.query(
-      "UPDATE devices SET status = 'rejected' WHERE id = $1",
-      [deviceId]
-    );
-    
-    // Send DEVICE_REJECT via Nostr if pubkey exists
-    if (nostr_pubkey) {
-      const adapter = getNostrAdapter();
-      if (adapter) {
-        await adapter.sendRevoked(deviceId);
-        console.log(`[api] Sent DEVICE_REJECT to ${deviceId}`);
-      }
-    }
-    
-    res.json({ ok: true, data: { deviceId, status: "rejected", reason: reason || "Admin rejected" } });
-  } catch (err) {
-    console.error("[api] Nostr reject error:", (err as Error).message);
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
-});
+
+
+
+
+
 
 // ─── Health check (no auth) ─────────────────────────────────────────────────────────
 
@@ -1414,8 +1232,7 @@ router.post("/orchestrator/execute", requireAuth, async (req, res) => {
     return res.status(400).json({ ok: false, error: "task and deviceId required" });
   }
 
-  const adapter = getNostrAdapter();
-  if (!adapter?.isDeviceOnline(deviceId)) {
+  if (!isDeviceOnline(deviceId)) {
     return res.status(409).json({ ok: false, error: "Device is not connected" });
   }
 
@@ -1570,11 +1387,8 @@ router.patch("/tasks/:id", requireAuth, async (req, res) => {
 // ─── Debug: WebSocket connections ─────────────────────────────────────────────
 
 router.get("/debug/connections", requireAuth, (_req, res) => {
-  const adapter = getNostrAdapter();
-  if (!adapter) {
-    return res.json({ ok: false, error: "Transport not available" });
-  }
-  const onlineDevices = adapter.getOnlineDeviceIds();
+  // DirectWs only - show connected devices
+  const onlineDevices = directWsServer.getConnectedDeviceIds();
   const list = onlineDevices.map((id) => ({
     deviceId: id.slice(0, 8),
     online: true,

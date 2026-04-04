@@ -22,7 +22,7 @@ import { getRedisConnectionOptions } from "../../redis/client";
 import { workflowService } from "./workflow.service";
 import { hbeService } from "../hbe/hbe.service";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { getNostrAdapter } from "../../nostr/adapter";
+import { sendJobToDevice, isDeviceOnline } from "../../transport/transport";
 import { getDb } from "../../db/client";
 import type {
   WorkflowStep,
@@ -384,9 +384,8 @@ async function executeSkillActionStep(
         workflowId,
         stepIndex,
       });
-      const dispatchAdapter = getNostrAdapter();
-      if (!dispatchAdapter) throw new Error("Transport not initialized");
-      await dispatchAdapter.sendJob(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs });
+      const sent = sendJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs });
+      if (!sent) throw new Error("Failed to send job to device");
       return awaitJobResult(jobId, timeoutMs + 5_000);
     },
 
@@ -454,9 +453,7 @@ async function executeActionStep(
   checkpoint: WorkflowCheckpoint,
   stepIndex:  number
 ): Promise<void> {
-  const wfAdapter = getNostrAdapter();
-  if (!wfAdapter) throw new Error("Transport not initialized");
-  if (!wfAdapter.isDeviceOnline(deviceId)) {
+  if (!isDeviceOnline(deviceId)) {
     // Device offline — pause and let BullMQ retry on reconnect
     await workflowService.markPaused(workflowId);
     throw new Error(`Device ${deviceId} offline at step ${stepIndex}`);
@@ -646,8 +643,8 @@ async function executeActionStep(
     [deviceId, jobId, step.action, `workflow:${workflowId} step:${stepIndex} ${step.action}`, JSON.stringify(finalParams)]
   );
 
-  // Send to device via Nostr adapter
-  await wfAdapter.sendJob(deviceId, {
+  // Send to device via DirectWS transport
+  sendJobToDevice(deviceId, {
     jobId,
     type:     jobType,
     params:   finalParams as import("../../../shared/protocol/messages").JobParams,
