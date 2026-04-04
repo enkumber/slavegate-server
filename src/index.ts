@@ -114,9 +114,10 @@ async function bootstrap(): Promise<void> {
   const app = express();
 
   app.use(cors({
-    origin: process.env.DASHBOARD_ORIGIN ?? "http://localhost:5173",
+    origin: process.env.DASHBOARD_ORIGIN ?? true,  // true = reflect request origin
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "X-Api-Key"],
+    allowedHeaders: ["Content-Type", "X-Api-Key", "Authorization"],
+    credentials: true,
   }));
 
   app.use(express.json({ limit: "1mb" }));
