@@ -280,13 +280,18 @@ router.post("/devices/:id/revoke", async (req, res) => {
 });
 
 router.delete("/devices/:id", async (req, res) => {
-  // Revoke first (sets status='revoked'), then hard-delete
-  await authService.revokeDevice(req.params.id);
-  getNostrAdapter()?.sendRevoked(req.params.id);
+  try {
+    // Revoke first (sets status='revoked'), then hard-delete
+    await authService.revokeDevice(req.params.id).catch(() => {});
+    try { getNostrAdapter()?.sendRevoked(req.params.id); } catch {}
 
-  const deleted = await devicesService.deleteDevice(req.params.id);
-  if (!deleted) return res.status(404).json({ ok: false, error: "Not found" });
-  res.json({ ok: true, data: { deleted: true } });
+    const deleted = await devicesService.deleteDevice(req.params.id);
+    if (!deleted) return res.status(404).json({ ok: false, error: "Not found" });
+    res.json({ ok: true, data: { deleted: true } });
+  } catch (err: any) {
+    console.error("[delete-device] Error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // ─── Jobs ─────────────────────────────────────────────────────────────────────

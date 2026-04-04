@@ -99,17 +99,15 @@ export class DevicesService {
     // Order matters: delete from referencing tables first to avoid FK violations.
     // Tables with device_id FK: accounts, auth_challenges, command_log, detection_events,
     // extracted_data, jobs, ota_deployment_devices, vlm_usage_log, workflows, device_tokens
-    await db.query("DELETE FROM accounts WHERE device_id = $1", [id]);
-    await db.query("DELETE FROM auth_challenges WHERE device_id = $1", [id]);
-    await db.query("DELETE FROM command_log WHERE device_id = $1", [id]);
-    await db.query("DELETE FROM detection_events WHERE device_id = $1", [id]);
-    await db.query("DELETE FROM extracted_data WHERE device_id = $1", [id]);
-    await db.query("DELETE FROM jobs WHERE device_id = $1", [id]);
-    await db.query("DELETE FROM ota_deployment_devices WHERE device_id = $1", [id]);
-    await db.query("DELETE FROM vlm_usage_log WHERE device_id = $1", [id]);
-    await db.query("DELETE FROM workflows WHERE device_id = $1", [id]);
-    // device_tokens table may not exist in all deployments
-    await db.query("DELETE FROM device_tokens WHERE device_id = $1", [id]).catch(() => {});
+    // Safe delete from all related tables (some may not exist in all deployments)
+    const relatedTables = [
+      'accounts', 'auth_challenges', 'command_log', 'detection_events',
+      'extracted_data', 'jobs', 'ota_deployment_devices', 'vlm_usage_log',
+      'workflows', 'device_tokens'
+    ];
+    for (const table of relatedTables) {
+      await db.query(`DELETE FROM ${table} WHERE device_id = $1`, [id]).catch(() => {});
+    }
 
     // Finally delete the device itself
     const result = await db.query(
