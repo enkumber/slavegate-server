@@ -165,6 +165,17 @@ export class DirectWsServer {
     return this.connections.size;
   }
 
+  sendToDevice(deviceId: string, msg: Record<string, unknown>): boolean {
+    const conn = this.connections.get(deviceId);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+    this._send(conn.ws, msg);
+    return true;
+  }
+
+  getOnlineDevices(): Array<{ deviceId: string }> {
+    return this.getConnectedDeviceIds().map(id => ({ deviceId: id }));
+  }
+
   // ─── Connection handler ───────────────────────────────────────────────────
 
   private _onConnection(ws: WebSocket, _req: IncomingMessage): void {

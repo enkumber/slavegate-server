@@ -814,8 +814,29 @@ router.post("/ota/push", requireAuth, async (req, res) => {
     mandatory,
   };
 
-  // OTA no longer supported via DirectWs-only transport
-  const sentTo = 0;
+  // Send OTA_UPDATE command via DirectWs to online devices
+  const { directWsServer } = await import("../ws/direct-ws.server");
+  const onlineDevices = directWsServer.getOnlineDevices();
+  const targets = deviceIds 
+    ? onlineDevices.filter(d => deviceIds.includes(d.deviceId))
+    : onlineDevices;
+  
+  let sentTo = 0;
+  const baseUrl = process.env.BASE_URL || `http://${process.env.HOST || 'localhost'}:${process.env.PORT || 3000}`;
+  for (const device of targets) {
+    try {
+      directWsServer.sendToDevice(device.deviceId, {
+        type: "OTA_UPDATE",
+        version,
+        versionCode,
+        apkUrl: `${baseUrl}/api/apk/download`,
+        apkSha256,
+        mandatory,
+      });
+      sentTo++;
+    } catch {}
+  }
+  console.log(`[ota] Push sent to ${sentTo}/${targets.length} devices`);
 
   res.json({
     ok: true,
