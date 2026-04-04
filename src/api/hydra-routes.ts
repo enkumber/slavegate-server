@@ -1440,13 +1440,15 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
         params,
         timeoutMs,
       });
+      // Register waiter BEFORE sending — result can arrive before await
+      const resultPromise = waitForResult(job.jobId, timeoutMs);
       sendJobToDevice(deviceId, {
         jobId: job.jobId,
         type: type as any,
         params,
         timeoutMs,
       });
-      return await waitForResult(job.jobId, timeoutMs);
+      return await resultPromise;
     }
     
     // Helper to get UI tree
