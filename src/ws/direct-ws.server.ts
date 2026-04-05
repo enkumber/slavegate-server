@@ -389,7 +389,15 @@ export class DirectWsServer {
         const updates: string[] = [];
         const vals: unknown[] = [];
         let idx = 1;
-        if (friendlyName) { updates.push(`friendly_name = $${idx++}`); vals.push(friendlyName); }
+
+        // Only set friendly_name if not already set (preserve user-defined names)
+        const existingDevice = await db.query<{ friendly_name: string | null }>(
+          `SELECT friendly_name FROM devices WHERE id = $1`, [finalDeviceId]
+        ).catch(() => null);
+        const hasCustomName = existingDevice?.rows[0]?.friendly_name && existingDevice.rows[0].friendly_name !== '';
+        if (friendlyName && !hasCustomName) {
+          updates.push(`friendly_name = $${idx++}`); vals.push(friendlyName);
+        }
         if (modelStr) { updates.push(`model = $${idx++}`); vals.push(modelStr); }
         if (androidVer) { updates.push(`android_version = $${idx++}`); vals.push(androidVer); }
         if (agentVersion) { updates.push(`agent_version = $${idx++}`); vals.push(agentVersion); }
