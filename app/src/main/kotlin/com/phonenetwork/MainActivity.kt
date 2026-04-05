@@ -151,10 +151,24 @@ class MainActivity : AppCompatActivity() {
             manualButton?.visibility = android.view.View.GONE
             rescanButton?.visibility = android.view.View.VISIBLE
         } else {
-            statusText?.text = "⚠️ Not enrolled\nScan QR or paste enrollment code"
-            scanButton?.visibility = android.view.View.VISIBLE
-            manualButton?.visibility = android.view.View.VISIBLE
-            rescanButton?.visibility = android.view.View.GONE
+            // Check DirectWs auto-discovery status
+            val directWsPrefs = getSharedPreferences("phone_network_direct", MODE_PRIVATE)
+            val dwEnabled = directWsPrefs.getBoolean("direct_ws_enabled", false)
+            val dwUrl = directWsPrefs.getString("direct_ws_url", null)
+            val dwDeviceId = directWsPrefs.getString("direct_ws_device_id", null)
+
+            if (dwEnabled && dwUrl != null) {
+                val shortId = dwDeviceId?.take(8) ?: "?"
+                statusText?.text = "✅ DirectWs Connected (device: $shortId…)\n🔌 Auto-discovery active"
+                scanButton?.visibility = android.view.View.GONE
+                manualButton?.visibility = android.view.View.GONE
+                rescanButton?.visibility = android.view.View.VISIBLE
+            } else {
+                statusText?.text = "⚠️ Not enrolled\nScan QR or paste enrollment code"
+                scanButton?.visibility = android.view.View.VISIBLE
+                manualButton?.visibility = android.view.View.VISIBLE
+                rescanButton?.visibility = android.view.View.GONE
+            }
         }
     }
 
