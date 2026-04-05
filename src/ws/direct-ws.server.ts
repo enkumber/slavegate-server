@@ -464,14 +464,14 @@ export class DirectWsServer {
   private async _handleHeartbeat(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {
     // Direct-WS heartbeat uses a simplified format; map to DeviceHealth
     const health: DeviceHealth = {
-      batteryLevel:    (msg.battery as number)      ?? 0,
-      charging:        Boolean(msg.charging),
-      storageFreeBytes: 0,
-      thermalStatus:   "nominal",
-      networkType:     (msg.networkType as DeviceHealth["networkType"]) ?? "none",
-      networkQuality:  (msg.networkQuality as DeviceHealth["networkQuality"]) ?? "none",
-      activeApp:       msg.foregroundApp as string | undefined,
-      agentVersion:    (msg.agentVersion as string) ?? "unknown",
+      batteryLevel:      (msg.battery as number)          ?? 0,
+      charging:          Boolean(msg.charging),
+      storageFreeBytes:  (msg.storageFreeBytes as number) ?? 0,
+      thermalStatus:     "nominal",
+      networkType:       (msg.networkType as DeviceHealth["networkType"])    ?? "none",
+      networkQuality:    (msg.networkQuality as DeviceHealth["networkQuality"]) ?? "none",
+      activeApp:         msg.foregroundApp as string | undefined,
+      agentVersion:      (msg.agentVersion as string) ?? "unknown",
     };
 
     try {
