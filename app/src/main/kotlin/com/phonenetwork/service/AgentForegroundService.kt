@@ -162,6 +162,18 @@ class AgentForegroundService : Service() {
                     },
                 )
                 directWsClient = dwc
+
+                // Auto-discovery: if no enrollment, configure DirectWs with hardcoded defaults and connect
+                if (enrollment == null) {
+                    Log.i(TAG, "Auto-discovery: configuring DirectWs with default server")
+                    val prefs = applicationContext.getSharedPreferences("phone_network_direct", Context.MODE_PRIVATE)
+                    prefs.edit()
+                        .putString("direct_ws_url", "ws://enkzoned.go.ro:3000/ws-direct")
+                        .putString("direct_ws_device_key", "")  // Will be assigned by server on first connect
+                        .putBoolean("direct_ws_enabled", true)
+                        .apply()
+                }
+
                 if (dwc.isEnabled) {
                     dwc.connect()
                     Log.i(TAG, "DirectWsClient started")
