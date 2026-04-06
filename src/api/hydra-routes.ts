@@ -22,6 +22,7 @@ import {
   setSessionLearnedCoords,
   type ParsedTarget 
 } from "../modules/skills/target-parser";
+import { isElementFixed } from "../modules/skills/fixed-elements/fixed-elements";
 import type { OcrFindTapParams } from "../../shared/protocol/messages";
 import { skillDbService } from "../modules/skills/skill-db.service";
 import { checkpointService } from "../modules/checkpoints/checkpoint.service";
@@ -411,9 +412,8 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           const tapSuccess = await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
           
           if (tapSuccess) {
-            // L2 (OCR): save only if learn=true (explicit) — OCR detects dynamic content (search results, feed, etc)
-            // Only save if caller knows the element is stable (e.g. a fixed button)
-            if (learn === true) {
+            // L2 (OCR): save only if element is in fixed-elements registry for this app
+            if (isElementFixed(platform, parsedTarget.value)) {
               setSessionLearnedCoords(parsedTarget.value, normalizedCoords, platform);
             }
 
@@ -510,9 +510,8 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             const tapSuccess = await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
             
             if (tapSuccess) {
-              // L3 (VLM): save only if learn=true (explicit) — VLM detects dynamic visual content
-              // Only save if caller knows the element is stable (e.g. a fixed UI element)
-              if (learn === true) {
+              // L3 (VLM): save only if element is in fixed-elements registry for this app
+              if (isElementFixed(platform, parsedTarget.value)) {
                 setSessionLearnedCoords(parsedTarget.value, normalizedCoords, platform);
               }
 
