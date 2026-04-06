@@ -353,8 +353,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             const tapSuccess = await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
             
             if (tapSuccess) {
-              // Session learning for literals — ONLY save for L1 (ui_tree) which has stable coords
-              // DO NOT save for L2 (OCR) or L3 (VLM) — these detect visual elements that change position
+              // L1 (ui_tree): save coords always — ui_tree elements are stable (buttons, nav, etc.)
               if (learn !== false) {
                 setSessionLearnedCoords(parsedTarget.value, normalizedCoords, platform);
               }
@@ -412,9 +411,12 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           const tapSuccess = await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
           
           if (tapSuccess) {
-            // L2 (OCR) — do NOT save to session learning (coords vary by screen content)
-            // Only L1 (ui_tree) coords are stable enough to learn
-            
+            // L2 (OCR): save only if learn=true (explicit) — OCR detects dynamic content (search results, feed, etc)
+            // Only save if caller knows the element is stable (e.g. a fixed button)
+            if (learn === true) {
+              setSessionLearnedCoords(parsedTarget.value, normalizedCoords, platform);
+            }
+
             const verifyResult = verify
               ? await performVerification(deviceId, verify, verifyTimeout)
               : { verified: undefined, verifyError: undefined };
@@ -508,9 +510,12 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             const tapSuccess = await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
             
             if (tapSuccess) {
-              // L3 (VLM) — do NOT save to session learning (coords vary by screen content)
-              // Only L1 (ui_tree) coords are stable enough to learn
-              
+              // L3 (VLM): save only if learn=true (explicit) — VLM detects dynamic visual content
+              // Only save if caller knows the element is stable (e.g. a fixed UI element)
+              if (learn === true) {
+                setSessionLearnedCoords(parsedTarget.value, normalizedCoords, platform);
+              }
+
               const verifyResult = verify
                 ? await performVerification(deviceId, verify, verifyTimeout)
                 : { verified: undefined, verifyError: undefined };
