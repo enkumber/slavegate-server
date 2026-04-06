@@ -353,7 +353,8 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             const tapSuccess = await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
             
             if (tapSuccess) {
-              // Session learning for literals
+              // Session learning for literals — ONLY save for L1 (ui_tree) which has stable coords
+              // DO NOT save for L2 (OCR) or L3 (VLM) — these detect visual elements that change position
               if (learn !== false) {
                 setSessionLearnedCoords(parsedTarget.value, normalizedCoords, platform);
               }
@@ -411,9 +412,8 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           const tapSuccess = await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
           
           if (tapSuccess) {
-            if (learn !== false) {
-              setSessionLearnedCoords(parsedTarget.value, normalizedCoords, platform);
-            }
+            // L2 (OCR) — do NOT save to session learning (coords vary by screen content)
+            // Only L1 (ui_tree) coords are stable enough to learn
             
             const verifyResult = verify
               ? await performVerification(deviceId, verify, verifyTimeout)
@@ -508,9 +508,8 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             const tapSuccess = await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
             
             if (tapSuccess) {
-              if (learn !== false) {
-                setSessionLearnedCoords(parsedTarget.value, normalizedCoords, platform);
-              }
+              // L3 (VLM) — do NOT save to session learning (coords vary by screen content)
+              // Only L1 (ui_tree) coords are stable enough to learn
               
               const verifyResult = verify
                 ? await performVerification(deviceId, verify, verifyTimeout)
