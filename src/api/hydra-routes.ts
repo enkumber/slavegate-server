@@ -354,8 +354,8 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             const tapSuccess = await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
             
             if (tapSuccess) {
-              // L1 (ui_tree): save coords always — ui_tree elements are stable (buttons, nav, etc.)
-              if (learn !== false) {
+              // L1 (ui_tree): save only if element is fixed in registry
+              if (isElementFixed(platform, parsedTarget.value)) {
                 setSessionLearnedCoords(parsedTarget.value, normalizedCoords, platform);
               }
               
