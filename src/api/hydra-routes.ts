@@ -1672,18 +1672,16 @@ router.delete("/session-learning/clear", async (req: Request, res: Response) => 
     res.json({ ok: true, message: "Session learning cleared" });
 });
 
-// RAW TAP: tap at absolute pixel coords — bypasses cascade/session coords entirely
-// Body: { deviceId: string, x: number, y: number, screenWidth?: number, screenHeight?: number }
+// RAW TAP: tap at normalized coords (0.0-1.0) — bypasses cascade/session coords entirely
+// Body: { deviceId: string, x: number (0-1), y: number (0-1) }
 router.post("/tap-raw", async (req: Request, res: Response) => {
-    const { deviceId, x, y, screenWidth = 1080, screenHeight = 2400 } = req.body as {
-        deviceId: string;
-        x: number;
-        y: number;
-        screenWidth?: number;
-        screenHeight?: number;
-    };
+    const { deviceId, x, y } = req.body as { deviceId: string; x: number; y: number };
     if (!deviceId || x === undefined || y === undefined) {
-        res.status(400).json({ ok: false, error: "deviceId, x, y required (absolute pixels)" });
+        res.status(400).json({ ok: false, error: "deviceId, x, y required (normalized 0-1)" });
+        return;
+    }
+    if (x < 0 || x > 1 || y < 0 || y > 1) {
+        res.status(400).json({ ok: false, error: "x and y must be between 0 and 1" });
         return;
     }
     try {
@@ -1699,7 +1697,6 @@ router.post("/tap-raw", async (req: Request, res: Response) => {
             params: { x, y },
             timeoutMs: 15000,
         });
-        // Don't wait - return jobId immediately
         res.json({ ok: true, jobId: job.jobId });
     } catch (err: any) {
         res.status(500).json({ ok: false, error: err.message });
