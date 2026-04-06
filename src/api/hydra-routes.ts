@@ -1663,6 +1663,15 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
 
 
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// SESSION LEARNING CLEAR (dev/testing)
+// ═══════════════════════════════════════════════════════════════════════════════
+router.delete("/session-learning/clear", async (req: Request, res: Response) => {
+    const { clearSessionLearning } = await import("../modules/skills/target-parser");
+    clearSessionLearning();
+    res.json({ ok: true, message: "Session learning cleared" });
+});
+
 function evaluateCriteria(vlmResult: any, criteria?: Record<string, any>): boolean {
   if (!criteria) return true;
   // Simple criteria evaluation — extend as needed
