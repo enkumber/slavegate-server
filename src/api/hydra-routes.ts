@@ -1672,6 +1672,40 @@ router.delete("/session-learning/clear", async (req: Request, res: Response) => 
     res.json({ ok: true, message: "Session learning cleared" });
 });
 
+// RAW TAP: tap at absolute pixel coords — bypasses cascade/session coords entirely
+// Body: { deviceId: string, x: number, y: number, screenWidth?: number, screenHeight?: number }
+router.post("/tap-raw", async (req: Request, res: Response) => {
+    const { deviceId, x, y, screenWidth = 1080, screenHeight = 2400 } = req.body as {
+        deviceId: string;
+        x: number;
+        y: number;
+        screenWidth?: number;
+        screenHeight?: number;
+    };
+    if (!deviceId || x === undefined || y === undefined) {
+        res.status(400).json({ ok: false, error: "deviceId, x, y required (absolute pixels)" });
+        return;
+    }
+    try {
+        const job = await dispatcherService.dispatch({
+            deviceId,
+            type: "tap",
+            params: { x, y },
+            timeoutMs: 15000,
+        });
+        sendJobToDevice(deviceId, {
+            jobId: job.jobId,
+            type: "tap",
+            params: { x, y },
+            timeoutMs: 15000,
+        });
+        // Don't wait - return jobId immediately
+        res.json({ ok: true, jobId: job.jobId });
+    } catch (err: any) {
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
 function evaluateCriteria(vlmResult: any, criteria?: Record<string, any>): boolean {
   if (!criteria) return true;
   // Simple criteria evaluation — extend as needed
