@@ -261,19 +261,34 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
       });
     }
 
-    // ─── LEVEL 0: Session-learned coords (for literals only) ──────────────────
+    // ─── LEVEL 0: DB-learned coords (persistent, survives restarts) ─────────────
     if (parsedTarget.type === "literal") {
-      const sessionCoords = getSessionLearnedCoords(parsedTarget.value, platform);
-      if (sessionCoords) {
-        fallbackChain.push("L0_session_coords");
-        console.log(`[cascade] L0: Found session-learned coords for "${parsedTarget.value}"`);
-        
-        const screenWidth = 1080;
-        const screenHeight = 2160;
-        const pixelX = Math.round(sessionCoords.x * screenWidth);
-        const pixelY = Math.round(sessionCoords.y * screenHeight);
-        
-        try {
+      // Try DB lookup via coordCacheService (L0 = persistent DB cache)
+      try {
+        // Build deviceInfo from available data
+        const cachedCoord = await coordCacheService.getCoord(
+          {
+            app: platform,
+            appVersion: "1.0",
+            resolution: "1080x2160",
+            deviceClass: "phone",
+            orientation: "portrait",
+            fontScaleBucket: "normal",
+          },
+          "rustdesk", // screenType
+          parsedTarget.value,
+          0.7
+        );
+        if (cachedCoord) {
+          fallbackChain.push("L0_db_cache");
+          console.log(`[cascade] L0: Found DB coords for "${parsedTarget.value}" (confidence=${cachedCoord.confidence})`);
+          const sessionCoords = { x: cachedCoord.x, y: cachedCoord.y };
+          
+          const screenWidth = 1080;
+          const screenHeight = 2160;
+          const pixelX = Math.round(sessionCoords.x * screenWidth);
+          const pixelY = Math.round(sessionCoords.y * screenHeight);
+          
           const tapJob = await dispatcherService.dispatch({
             deviceId,
             type: "tap",
@@ -289,35 +304,35 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           const tapResult = await waitForResult(tapJob.jobId, 30000);
           
           if (tapResult?.status === "completed") {
-            // Verify if requested
-            const verifyResult = verify 
+            const verifyResult = verify
               ? await performVerification(deviceId, verify, verifyTimeout)
               : { verified: undefined, verifyError: undefined };
             
             return res.json({
               ok: true,
               success: verify ? (verifyResult.verified ?? false) : true,
-              method_used: "session_coords",
+              method_used: "db_cache",
               target_type: "literal",
               target_value: parsedTarget.value,
               coords_used: sessionCoords,
               fallback_chain: fallbackChain,
               learned: false,
-              learn_type: "session",
+              learn_type: "none",
               ...verifyResult,
               latency_ms: Date.now() - startTime,
             });
           }
-          fallbackChain.push("L0_tap_failed");
-        } catch (err) {
-          fallbackChain.push(`L0_error:${(err as Error).message.slice(0, 30)}`);
         }
+      } catch (err) {
+        console.warn(`[cascade] L0 DB lookup failed: ${(err as Error).message}`);
       }
+      
+      // Fall through to L1 if DB miss
+      console.log(`[cascade] L0: No DB coords for "${parsedTarget.value}", falling through to L1`);
     }
 
-    // ─── For LITERAL: Full cascade (ui_tree → OCR → VLM) with session learning ─
+    // ─── L1: UI Tree search ─────────────────────────────────────────────────
     if (parsedTarget.type === "literal") {
-      // Continue with cascade levels (L0 session coords already tried above)
       const screenWidth = 1080;
       const screenHeight = 2160;
       
@@ -1754,9 +1769,7 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
             confidence: 1.0,
             learnMethod: (result.method_used as "ui_tree" | "ocr" | "vlm" | "manual") || "cascade",
           });
-          // Also save to session cache so L0 cascade finds it next time (L0 uses session, not DB)
-          setSessionLearnedCoords(elementName, result.coords_used, platform);
-          console.log(`[rustdesk-cascade] Persisted ${elementName} (${result.method_used}) to DB + session`);
+          console.log(`[rustdesk-cascade] Persisted ${elementName} (${result.method_used}) to DB`);
         } catch (err) {
           console.warn(`[rustdesk-cascade] Failed to persist ${elementName}:`, (err as Error).message);
         }
