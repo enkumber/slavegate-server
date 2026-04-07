@@ -1,0 +1,71 @@
+{
+  "name": "rustdesk-enable",
+  "description": "Enable RustDesk screen sharing on Android",
+  "version": "1.0",
+  "steps": [
+    {
+      "id": "wake",
+      "type": "screen_wake"
+    },
+    {
+      "id": "unlock",
+      "type": "unlock",
+      "requires": ["wake"]
+    },
+    {
+      "id": "open_rustdesk",
+      "type": "open_app",
+      "package": "com.carriez.flutter_hbb",
+      "requires": ["unlock"]
+    },
+    {
+      "id": "tap_share_screen",
+      "type": "cascade_tap",
+      "target": "Share screen",
+      "requires": ["open_rustdesk"],
+      "delay_after": 2000
+    },
+    {
+      "id": "check_share_screen",
+      "type": "decide",
+      "check": "screen_has_element",
+      "element": "Start service",
+      "requires": ["tap_share_screen"]
+    },
+    {
+      "id": "tap_start_service",
+      "type": "cascade_tap",
+      "target": "Start service",
+      "requires": ["check_share_screen"],
+      "delay_after": 2000
+    },
+    {
+      "id": "check_dialog",
+      "type": "decide",
+      "check": "screen_has_element",
+      "element": "OK",
+      "requires": ["tap_start_service"]
+    },
+    {
+      "id": "tap_ok",
+      "type": "cascade_tap",
+      "target": "OK",
+      "requires": ["check_dialog"],
+      "delay_after": 1000,
+      "optional": true
+    },
+    {
+      "id": "tap_start_now",
+      "type": "cascade_tap",
+      "target": "START NOW",
+      "requires": ["tap_ok"],
+      "delay_after": 3000
+    },
+    {
+      "id": "verify",
+      "type": "decide",
+      "check": "rustdesk_running",
+      "requires": ["tap_start_now"]
+    }
+  ]
+}

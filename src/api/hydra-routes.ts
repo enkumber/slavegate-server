@@ -2044,6 +2044,113 @@ router.post("/rustdesk/enable-cascade-fast", async (req: Request, res: Response)
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// WORKFLOW EXECUTION
+// Phone-side workflow orchestration with server-side decision support
+// ═══════════════════════════════════════════════════════════════════════════════
+
+import { loadWorkflow } from "../modules/workflows/workflow-manager";
+
+// Dispatch a workflow to a device — phone executes it locally
+router.post("/workflow/:workflowName/dispatch", async (req: Request, res: Response) => {
+  try {
+    const { workflowName } = req.params;
+    const { deviceId } = req.body;
+    
+    if (!deviceId) {
+      return res.status(400).json({ ok: false, error: "Missing deviceId" });
+    }
+    
+    if (!isDeviceOnline(deviceId)) {
+      return res.status(503).json({ ok: false, error: "Device not connected" });
+    }
+    
+    const workflow = loadWorkflow(workflowName);
+    if (!workflow) {
+      return res.status(404).json({ ok: false, error: `Workflow "${workflowName}" not found` });
+    }
+    
+    console.log(`[workflow] Dispatching "${workflowName}" to device ${deviceId.slice(0, 8)}`);
+    
+    // Dispatch workflow_execute job to phone
+    const job = await dispatcherService.dispatch({
+      deviceId,
+      type: "workflow_execute",
+      params: { workflow },
+      timeoutMs: 300000, // 5 min timeout
+    });
+    
+    sendJobToDevice(deviceId, {
+      jobId: job.jobId,
+      type: "workflow_execute",
+      params: { workflow },
+      timeoutMs: 300000,
+    });
+    
+    res.json({ ok: true, jobId: job.jobId, workflowName, status: "dispatched" });
+  } catch (err) {
+    console.error(`[workflow] Dispatch error:`, err);
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// Decision endpoint — phone calls this when it needs a decision
+router.post("/workflow/decide", async (req: Request, res: Response) => {
+  try {
+    const { workflowName, stepName, context, screenshot_base64 } = req.body as {
+      workflowName?: string;
+      stepName?: string;
+      context?: Record<string, any>;
+      screenshot_base64?: string;
+    };
+    
+    console.log(`[workflow-decide] ${workflowName}/${stepName} — need decision`);
+    
+    // Default decisions for common scenarios
+    const result: { action: string; nextStep?: string; error?: string } = { action: "continue" };
+    
+    // RustDesk-specific decisions
+    if (workflowName === "rustdesk-enable") {
+      if (stepName === "open_app_check") {
+        // After opening app, is RustDesk in foreground?
+        const pkg = context?.packageName;
+        if (pkg === "com.carriez.flutter_hbb") {
+          result.action = "continue";
+        } else {
+          result.action = "retry";
+          result.error = `Expected RustDesk but got ${pkg}`;
+        }
+      }
+      else if (stepName === "service_check") {
+        // After Start service, did dialog appear?
+        const hasDialog = context?.hasOkButton;
+        if (hasDialog) {
+          result.action = "continue";
+        } else {
+          result.action = "wait_retry";
+          result.error = "OK button not found, waiting...";
+        }
+      }
+      else if (stepName === "verify_running") {
+        // Final check — is service running?
+        const status = context?.rustdeskStatus;
+        if (status?.running) {
+          result.action = "done";
+        } else {
+          result.action = "retry_step";
+          result.nextStep = "Start service";
+        }
+      }
+    }
+    
+    console.log(`[workflow-decide] → action=${result.action}`);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error("[workflow-decide] Error:", err);
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
