@@ -2,6 +2,7 @@ package com.phonenetwork.connection
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.provider.Settings
 import android.util.Log
 import com.phonenetwork.executor.JobExecutor
 import kotlinx.coroutines.*
@@ -39,6 +40,8 @@ class DirectWsClient(
     private val scope: CoroutineScope,
     private val onConnected: (deviceId: String) -> Unit = {},
     private val onDisconnected: () -> Unit = {},
+    private val onOtaUpdate: (version: String, versionCode: Int, apkUrl: String, apkSha256: String, mandatory: Boolean) -> Unit = { _, _, _, _, _ -> },
+    private val onTaskResult: (taskType: String, success: Boolean, result: Map<String, Any?>, error: String?) -> Unit = { _, _, _, _ -> },
 ) {
     companion object {
         private const val TAG = "DirectWsClient"
@@ -86,9 +89,9 @@ class DirectWsClient(
             return
         }
         val url = prefs.getString(PREF_URL, null)
-        val key = prefs.getString(PREF_KEY, null)
-        if (url.isNullOrBlank() || key.isNullOrBlank()) {
-            Log.w(TAG, "DirectWs not configured (url or key missing)")
+        val key = prefs.getString(PREF_KEY, null) ?: ""
+        if (url.isNullOrBlank()) {
+            Log.w(TAG, "DirectWs not configured (url missing)")
             return
         }
         active = true
@@ -118,12 +121,24 @@ class DirectWsClient(
                 Log.i(TAG, "Connected to $url — sending AUTH")
                 lastPongAt = System.currentTimeMillis()
 
-                // AUTH
+                // AUTH — send deviceId+key+deviceInfo for enrollment
                 val deviceId = prefs.getString(PREF_DEVICE_ID, null) ?: ""
+                val fingerprint = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+                val agentVersion = getAgentVersion()
+                val manufacturer = android.os.Build.MANUFACTURER
+                val model = android.os.Build.MODEL
+                val androidVersion = android.os.Build.VERSION.RELEASE
                 sendRaw(webSocket, JSONObject().apply {
                     put("type", "AUTH")
                     put("deviceId", deviceId)
                     put("deviceKey", key)
+                    put("fingerprint", fingerprint)
+                    put("deviceInfo", JSONObject().apply {
+                        put("manufacturer", manufacturer)
+                        put("model", model)
+                        put("androidVersion", androidVersion)
+                        put("agentVersion", agentVersion)
+                    })
                 })
 
                 // Auth timeout watchdog
@@ -172,7 +187,13 @@ class DirectWsClient(
         when (val type = msg.optString("type")) {
             "AUTH_OK" -> {
                 val deviceId = msg.optString("deviceId")
-                prefs.edit().putString(PREF_DEVICE_ID, deviceId).apply()
+                val deviceKey = msg.optString("deviceKey")
+                if (deviceId.isNotBlank()) {
+                    prefs.edit()
+                        .putString(PREF_DEVICE_ID, deviceId)
+                        .putString(PREF_KEY, deviceKey)
+                        .apply()
+                }
                 authenticated = true
                 reconnectDelay = RECONNECT_BASE_MS  // reset backoff
                 Log.i(TAG, "AUTH_OK — deviceId=$deviceId")
@@ -203,6 +224,25 @@ class DirectWsClient(
             }
 
             "ACK" -> Log.d(TAG, "ACK: ${msg.optString("ref")}")
+
+            "OTA_UPDATE" -> {
+                val version = msg.optString("version")
+                val versionCode = msg.optInt("versionCode", 0)
+                val apkUrl = msg.optString("apkUrl")
+                val apkSha256 = msg.optString("apkSha256")
+                val mandatory = msg.optBoolean("mandatory", false)
+                Log.i(TAG, "OTA_UPDATE: version=$version code=$versionCode mandatory=$mandatory")
+                onOtaUpdate(version, versionCode, apkUrl, apkSha256, mandatory)
+            }
+
+            "EXECUTE_TASK" -> {
+                val taskType = msg.optString("taskType", "")
+                val params = msg.optJSONObject("params")?.let { obj ->
+                    obj.keys()?.asSequence()?.associateWith { obj.opt(it) } ?: emptyMap()
+                } ?: emptyMap()
+                Log.i(TAG, "EXECUTE_TASK: $taskType params=$params")
+                executeJob(webSocket, "", taskType, JSONObject(params))
+            }
 
             else -> Log.w(TAG, "Unknown message type: $type")
         }
@@ -281,10 +321,13 @@ class DirectWsClient(
     private fun sendHeartbeat(webSocket: WebSocket) {
         val battery = getBatteryLevel()
         val charging = isCharging()
+        val stat = android.os.StatFs(context.filesDir.absolutePath)
+        val storageFreeBytes = stat.availableBlocksLong * stat.blockSizeLong
         sendRaw(webSocket, JSONObject().apply {
             put("type", "HEARTBEAT")
             put("battery", battery)
             put("charging", charging)
+            put("storageFreeBytes", storageFreeBytes)
             put("foregroundApp", getForegroundApp())
             put("agentVersion", getAgentVersion())
         })

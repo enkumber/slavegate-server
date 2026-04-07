@@ -11,8 +11,8 @@ android {
         applicationId = "com.phonenetwork"
         minSdk = 29          // Android 10 (OP5T fleet minimum)
         targetSdk = 34       // Android 14
-        versionCode = 44
-        versionName = "3.0.0"
+        versionCode = 49
+        versionName = "3.0.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -77,7 +77,7 @@ android {
 }
 
 dependencies {
-    // ─── Core library desugaring (required for wireguard-android Java Records) ─
+    // ─── Core library desugaring (for Java 8+ APIs on older Android) ─────────────
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 
     // ─── AndroidX core ────────────────────────────────────────────────────────
@@ -94,19 +94,6 @@ dependencies {
     // OkHttp 4.x — WebSocket client for server connection
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // ─── Security (EncryptedSharedPreferences for WireGuard keys) ────────────
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
-
-    // ─── WireGuard VPN (native Android VPN, no root needed) ──────────────────
-    // Using older version compatible with AGP 8.x and minSdk 29
-    implementation("com.wireguard.android:tunnel:1.0.20210926")
-
-    // ─── CameraX + ML Kit (QR Scanner) ───────────────────────────────────────
-    implementation("androidx.camera:camera-camera2:1.3.1")
-    implementation("androidx.camera:camera-lifecycle:1.3.1")
-    implementation("androidx.camera:camera-view:1.3.1")
-    implementation("com.google.mlkit:barcode-scanning:17.2.0")
-
     // ─── ML Kit Text Recognition (OCR — bundled, offline capable) ────────────
     // Used by OcrController for cascade-tap Level 3: text detection on screen
     // Bundled model (+~3MB APK) — no internet required at runtime
@@ -115,9 +102,6 @@ dependencies {
     // ─── Lifecycle (ForegroundService + coroutines scope) ────────────────────
     implementation("androidx.lifecycle:lifecycle-service:2.6.2")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.2")
-
-    // ─── Nostr SDK (Rust bindings) ────────────────────────────────────────────
-    implementation("org.rust-nostr:nostr-sdk:0.44.2")
 
     // ─── Testing ──────────────────────────────────────────────────────────────
     testImplementation("junit:junit:4.13.2")

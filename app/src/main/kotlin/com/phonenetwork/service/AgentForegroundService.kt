@@ -17,38 +17,21 @@ import com.phonenetwork.connection.DirectWsClient
 import com.phonenetwork.connection.WifiWatchdog
 import com.phonenetwork.executor.JobExecutor
 import com.phonenetwork.health.HealthMonitor
-import com.phonenetwork.nostr.DefaultNostrMessageHandler
-import com.phonenetwork.nostr.EnrollmentStore
-import com.phonenetwork.nostr.NostrClient
-import com.phonenetwork.nostr.NostrEventKinds
-import com.phonenetwork.nostr.NostrConfig
-import com.phonenetwork.nostr.NostrMessageHandler
 import com.phonenetwork.ota.OtaInstaller
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import org.json.JSONObject
-import rust.nostr.sdk.Event
 
 /**
  * AgentForegroundService — sticky foreground service, owns all agent components.
- *
- * DI strategy: manual construction (no Hilt) — flat dependency graph,
- * components are singletons within service lifetime.
+ * Uses DirectWs only (no Nostr).
  *
  * Lifecycle:
  *   onCreate()        → create NotificationChannel
- *   onStartCommand()  → startForeground, init components, connect Nostr
- *   onDestroy()       → disconnect Nostr, stop DNS, cancel scope
- *
- * Connectivity state is reflected in the notification text.
- *
- * AccessibilityService integration:
- *   AgentAccessibilityService is a separate component; it registers itself here via
- *   [registerAccessibilityService] when connected. JobExecutor then routes automation
- *   through it. Until registered, gesture-based actions will fail gracefully.
+ *   onStartCommand()  → startForeground, init components, connect DirectWs
+ *   onDestroy()       → disconnect DirectWs, stop DNS, cancel scope
  */
 class AgentForegroundService : Service() {
 
@@ -70,29 +53,23 @@ class AgentForegroundService : Service() {
             context.stopService(intent)
         }
 
-        /** Called by AgentAccessibilityService.onServiceConnected() */
         fun registerAccessibilityService(svc: AgentAccessibilityService) {
             pendingA11y = svc
             instance?.onAccessibilityServiceConnected(svc)
         }
 
-        // Holds A11y reference if it connected before AgentForegroundService started.
         var pendingA11y: AgentAccessibilityService? = null
     }
 
-    // ─── Component lifetime tied to service ───────────────────────────────────
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private lateinit var captureCtrl:   CaptureController
-    private lateinit var healthMonitor: HealthMonitor
-    private lateinit var otaInstaller:  OtaInstaller
-    private lateinit var automation:    AutomationController
-    private lateinit var jobExecutor:   JobExecutor
-    private lateinit var nostrClient:    NostrClient
+    private lateinit var captureCtrl:    CaptureController
+    private lateinit var healthMonitor:  HealthMonitor
+    private lateinit var otaInstaller:   OtaInstaller
+    private lateinit var automation:      AutomationController
+    private lateinit var jobExecutor:     JobExecutor
     private          var directWsClient: DirectWsClient? = null
-    private lateinit var wifiWatchdog:   WifiWatchdog
-
-    // ─── Lifecycle ────────────────────────────────────────────────────────────
+    private lateinit var wifiWatchdog:    WifiWatchdog
 
     override fun onCreate() {
         super.onCreate()
@@ -104,62 +81,31 @@ class AgentForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "Service starting (startId=$startId)")
 
-        // Must call startForeground() within 5s — do it immediately
         startForeground(NOTIFICATION_ID, buildNotification("Connecting…"))
 
-        // Build dependency graph — manual DI
         initComponents()
-
-        // Start DNS background traffic diversification
         DnsBackgroundService.start(serviceScope)
 
-        // Start WiFi watchdog — monitors and recovers stuck WiFi connections
-        wifiWatchdog = WifiWatchdog(applicationContext, serviceScope) { report ->
-            if (::nostrClient.isInitialized) {
-                serviceScope.launch {
-                    try {
-                        nostrClient.sendHeartbeat(report)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to send WiFi health report: ${e.message}")
-                    }
-                }
-            }
+        wifiWatchdog = WifiWatchdog(applicationContext, serviceScope) { _ ->
+            // HealthMonitor sends via DirectWs heartbeat automatically
         }
         wifiWatchdog.start()
 
-        // Enable AccessibilityService via root (Magisk) — no user interaction needed
         enableAccessibilityServiceViaRoot()
-
-        // Wire A11y if it already connected before this service started (race condition fix)
         pendingA11y?.let { onAccessibilityServiceConnected(it) }
 
-        // Check enrollment — if not enrolled, use hardcoded defaults (auto-discovery)
-        val enrollment = EnrollmentStore.getEnrollment(applicationContext)
-        if (enrollment == null) {
-            Log.i(TAG, "No enrollment — using default config (auto-discovery mode)")
-            updateNotification("Connecting (auto-discovery)...")
-        }
+        // Configure DirectWs auto-discovery
+        Log.i(TAG, "Configuring DirectWs auto-discovery")
+        val prefs = applicationContext.getSharedPreferences("phone_network_direct", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString("direct_ws_url", "ws://enkzoned.go.ro:3000/ws-direct")
+            .putString("direct_ws_device_key", "")
+            .putBoolean("direct_ws_enabled", true)
+            .apply()
 
-        // Connect to Nostr relays
-        serviceScope.launch {
-            nostrClient.connect()
-            Log.i(TAG, "NostrClient started")
-        }
-
-        // Start DirectWs transport if configured and enabled
+        // Start DirectWs transport
         serviceScope.launch {
             try {
-                // Auto-discovery: if no enrollment, configure DirectWs BEFORE creating the client
-                if (enrollment == null) {
-                    Log.i(TAG, "Auto-discovery: configuring DirectWs with default server")
-                    val prefs = applicationContext.getSharedPreferences("phone_network_direct", Context.MODE_PRIVATE)
-                    prefs.edit()
-                        .putString("direct_ws_url", "ws://enkzoned.go.ro:3000/ws-direct")
-                        .putString("direct_ws_device_key", "")  // Will be assigned by server on first connect
-                        .putBoolean("direct_ws_enabled", true)
-                        .apply()
-                }
-
                 val dwc = DirectWsClient(
                     context    = applicationContext,
                     executor   = jobExecutor,
@@ -171,45 +117,49 @@ class AgentForegroundService : Service() {
                     onDisconnected = {
                         Log.i(TAG, "DirectWs disconnected")
                     },
+                    onOtaUpdate = { version, versionCode, apkUrl, apkSha256, mandatory ->
+                        Log.i(TAG, "OTA update available: $version (code=$versionCode)")
+                        updateNotification("Downloading update $version…")
+                        serviceScope.launch {
+                            try {
+                                val result = otaInstaller.downloadVerifyInstall(
+                                    apkUrl          = apkUrl,
+                                    expectedSha256   = apkSha256,
+                                    signature        = "",
+                                    versionCode      = versionCode,
+                                    forceDowngrade   = false
+                                )
+                                Log.i(TAG, "OTA update result: $result")
+                                updateNotification("Update applied — restart to activate")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "OTA update error: ${e.message}")
+                                updateNotification("Update failed")
+                            }
+                        }
+                    },
                 )
                 directWsClient = dwc
-
-                if (dwc.isEnabled) {
-                    dwc.connect()
-                    Log.i(TAG, "DirectWsClient started")
-                } else {
-                    Log.d(TAG, "DirectWs transport disabled — skipped")
-                }
+                dwc.connect()
+                Log.i(TAG, "DirectWsClient started")
             } catch (e: Exception) {
-                Log.w(TAG, "DirectWsClient init failed: ${e.message}")
+                Log.e(TAG, "DirectWsClient failed: ${e.message}")
             }
         }
 
-        return START_STICKY  // Android restarts service after OOM kill
+        return START_STICKY
     }
 
     override fun onDestroy() {
         Log.i(TAG, "Service stopping")
         instance = null
-
-        if (::nostrClient.isInitialized) {
-            serviceScope.launch {
-                try { nostrClient.disconnect() } catch (e: Exception) {
-                    Log.w(TAG, "Disconnect error: ${e.message}")
-                }
-            }
-        }
         directWsClient?.disconnect()
         if (::wifiWatchdog.isInitialized)  wifiWatchdog.stop()
         DnsBackgroundService.stop()
         serviceScope.cancel()
-
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
-    // ─── Dependency construction ──────────────────────────────────────────────
 
     private fun enableAccessibilityServiceViaRoot() {
         val component = "$packageName/${AgentAccessibilityService::class.java.name}"
@@ -229,7 +179,7 @@ class AgentForegroundService : Service() {
             ))
             val exitCode = proc.waitFor()
             if (exitCode == 0) {
-                Log.i(TAG, "A11y service enabled via root (exitCode=0)")
+                Log.i(TAG, "A11y service enabled via root")
             } else {
                 Log.w(TAG, "su command exited with code $exitCode")
             }
@@ -240,15 +190,11 @@ class AgentForegroundService : Service() {
 
     private fun initComponents() {
         val ctx = applicationContext
-        val enrollment = EnrollmentStore.getEnrollment(ctx)
 
-        captureCtrl   = CaptureController()
-        healthMonitor = HealthMonitor(ctx)
-        otaInstaller  = OtaInstaller(ctx)
-
-        // AutomationController: AccessibilityService may not be connected yet —
-        // it will be injected via registerAccessibilityService() when ready.
-        automation = AutomationController(service = null)
+        captureCtrl    = CaptureController()
+        healthMonitor  = HealthMonitor(ctx)
+        otaInstaller   = OtaInstaller(ctx)
+        automation     = AutomationController(service = null)
 
         jobExecutor = JobExecutor(
             context      = ctx,
@@ -256,115 +202,26 @@ class AgentForegroundService : Service() {
             capture      = captureCtrl,
             otaInstaller = otaInstaller,
         )
-
-        // Build NostrClient — use enrollment data or hardcoded defaults (auto-discovery)
-        val relayUrls    = enrollment?.relayUrls?.takeIf { it.isNotEmpty() } ?: NostrConfig.DEFAULT_RELAYS
-        val serverPubkey = enrollment?.serverPubkey?.takeIf { it.isNotEmpty() } ?: NostrConfig.SERVER_PUBKEY
-        val deviceId     = enrollment?.deviceId ?: android.provider.Settings.Secure.getString(
-            ctx.contentResolver, android.provider.Settings.Secure.ANDROID_ID
-        )
-
-        nostrClient = NostrClient(
-            context      = ctx,
-            relayUrls    = relayUrls,
-            serverPubkey = serverPubkey,
-            deviceId     = deviceId,
-            scope        = serviceScope
-        )
-
-        // Wire message handler: routes incoming Nostr events to service components
-        nostrClient.messageHandler = object : DefaultNostrMessageHandler() {
-
-            override suspend fun onJobDispatch(payload: JSONObject, rawEvent: Event) {
-                Log.i(TAG, "JOB_DISPATCH received: ${payload.optString("jobId", "?").take(8)}")
-                jobExecutor.execute(payload) { result ->
-                    serviceScope.launch {
-                        try {
-                            nostrClient.sendJobResult(
-                                jobId   = result.getString("jobId"),
-                                result  = result,
-                                success = result.optString("status") == "completed"
-                            )
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Failed to send JOB_RESULT: ${e.message}")
-                        }
-                    }
-                }
-            }
-
-            override suspend fun onKillSwitch(payload: JSONObject, rawEvent: Event) {
-                val reason = payload.optString("reason", "unspecified")
-                Log.w(TAG, "KILL_SWITCH received: $reason — stopping service")
-                updateNotification("Kill switch activated")
-                jobExecutor.cancelCurrentJob(reason)
-                stopSelf()
-            }
-
-            override suspend fun onOta(payload: JSONObject, rawEvent: Event) {
-                val version = payload.optString("version", "?")
-                val apkUrl  = payload.optString("apkUrl", "")
-                Log.i(TAG, "OTA received: version=$version")
-                try {
-                    otaInstaller.downloadVerifyInstall(
-                        apkUrl        = apkUrl,
-                        expectedSha256 = payload.getString("apkSha256"),
-                        signature     = payload.getString("apkSignature"),
-                        versionCode   = payload.getInt("versionCode"),
-                        forceDowngrade = payload.optBoolean("forceDowngrade", false)
-                    )
-                } catch (e: Exception) {
-                    Log.e(TAG, "OTA install failed: ${e.message}")
-                }
-            }
-
-            override suspend fun onDeviceAck(payload: JSONObject, rawEvent: Event) {
-                Log.i(TAG, "DEVICE_ACK — device approved by server")
-                updateNotification("Connected ✓")
-                // Notify WiFi watchdog about reconnection
-                if (::wifiWatchdog.isInitialized) {
-                    wifiWatchdog.onReconnected()
-                }
-            }
-
-            override suspend fun onDeviceReject(payload: JSONObject, rawEvent: Event) {
-                val reason = payload.optString("reason", "unspecified")
-                Log.w(TAG, "DEVICE_REJECT: $reason — stopping service")
-                updateNotification("Blocked — contact admin")
-                stopSelf()
-            }
-        }
-
-        // Start periodic heartbeat (30s interval)
-        nostrClient.startHeartbeat {
-            healthMonitor.getHealth().toJson()
-        }
     }
 
-    // ─── AccessibilityService integration ────────────────────────────────────
-
     private fun onAccessibilityServiceConnected(svc: AgentAccessibilityService) {
-        Log.i(TAG, "AccessibilityService connected — wiring to executor")
+        Log.i(TAG, "AccessibilityService connected")
         if (::jobExecutor.isInitialized) {
             jobExecutor.setAccessibilityService(svc)
-            // Replace stub AutomationController with live one in BOTH places
             automation = AutomationController(service = svc)
             jobExecutor.setAutomationController(automation)
-            Log.i(TAG, "AutomationController wired to live AccessibilityService")
-        } else {
-            Log.w(TAG, "jobExecutor not initialized yet — A11y wiring deferred")
+            Log.i(TAG, "AutomationController wired to A11yService")
         }
         updateNotification("Connected")
     }
-
-    // ─── Notifications ────────────────────────────────────────────────────────
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
             CHANNEL_NAME,
-            NotificationManager.IMPORTANCE_LOW  // No sound/popup, stays in tray
+            NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Phone Network Agent — keeps device connected to control server"
+            description = "Phone Network Agent"
             setShowBadge(false)
         }
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
