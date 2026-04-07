@@ -1934,6 +1934,116 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// RUSTDESK ENABLE (CASCADE-FAST — no I Agree step)
+// Use for devices that don't show the I Agree dialog
+// ════════════════════════════════════════════════════════════════════════════════
+
+router.post("/rustdesk/enable-cascade-fast", async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const cascadeTapBase = `http://localhost:${process.env.PORT || 3000}`;
+  
+  try {
+    const { deviceId } = req.body;
+    if (!deviceId) return res.status(400).json({ ok: false, error: "Missing deviceId" });
+    if (!isDeviceOnline(deviceId)) return res.status(503).json({ ok: false, error: "Device not connected" });
+    
+    console.log(`[rustdesk-fast] Starting fast enable for device ${deviceId.slice(0, 8)}...`);
+    
+    async function dispatchAndWait(type: string, params: Record<string, unknown>, timeoutMs: number): Promise<any> {
+      const job = await dispatcherService.dispatch({ deviceId, type: type as any, params, timeoutMs });
+      const rp = waitForResult(job.jobId, timeoutMs);
+      sendJobToDevice(deviceId, { jobId: job.jobId, type: type as any, params, timeoutMs });
+      return await rp;
+    }
+    
+    async function cascadeTap(elementName: string, platform = "rustdesk"): Promise<any> {
+      const response = await fetch(`${cascadeTapBase}/api/hydra/cascade-tap`, {
+        method: "POST",
+        headers: { "X-Api-Key": process.env.API_KEY || "", "Content-Type": "application/json" },
+        body: JSON.stringify({ deviceId, platform, target: elementName }),
+      });
+      const result = await response.json() as { success?: boolean; coords_used?: { x: number; y: number }; method_used?: string };
+      console.log(`[rustdesk-fast] "${elementName}": success=${result?.success} method=${result?.method_used}`);
+      if (result?.success && result?.coords_used && isElementFixed(platform, elementName)) {
+        try {
+          await coordCacheService.learnCoord({
+            deviceInfo: { app: platform, appVersion: "1.0", resolution: "1080x2160", deviceClass: "phone", orientation: "portrait", fontScaleBucket: "normal" },
+            screenType: "rustdesk", elementName,
+            x: result.coords_used.x, y: result.coords_used.y, width: 0, height: 0, confidence: 1.0,
+            learnMethod: (result.method_used as "ui_tree" | "ocr" | "vlm" | "manual") || "cascade",
+          });
+        } catch (err) { console.warn(`[rustdesk-fast] persist err:`, (err as Error).message); }
+      }
+      return result;
+    }
+    
+    async function getUiTree(): Promise<UIElement | null> {
+      const r = await dispatchAndWait("ui_tree_dump", {}, 30000);
+      return r?.output?.uiTree ? (typeof r.output.uiTree === "string" ? JSON.parse(r.output.uiTree) : r.output.uiTree) : null;
+    }
+    
+    // PREAMBLE: Wake if locked
+    const preambleTree = await getUiTree();
+    if (preambleTree?.packageName === "com.android.systemui") {
+      await dispatchAndWait("screen_wake", {}, 30000);
+      await dispatchAndWait("unlock", {}, 30000);
+      await new Promise(r => setTimeout(r, 500));
+    }
+    
+    // STEP 1: Open RustDesk
+    const preOpenTree = await getUiTree();
+    if (preOpenTree?.packageName !== RUSTDESK_PACKAGE) {
+      const r = await dispatchAndWait("open_app", { packageName: RUSTDESK_PACKAGE }, 30000);
+      if (r?.status !== "completed") return res.status(500).json({ ok: false, error: "Failed to open RustDesk" });
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    
+    // STEP 1.5: Skip if already running
+    const preCheckTree = await getUiTree();
+    if (preCheckTree) {
+      const s = checkRustDeskStatus(preCheckTree);
+      if (s.running) return res.json({ ok: true, data: { status: "running", id: s.id, password: s.password }, latency_ms: Date.now() - startTime });
+    }
+    
+    // STEP 2: Share screen
+    await cascadeTap("Share screen");
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // STEP 3: Check
+    let uiTree = await getUiTree();
+    if (!uiTree) return res.status(500).json({ ok: false, error: "Failed to get UI tree" });
+    let status = checkRustDeskStatus(uiTree);
+    if (status.running) return res.json({ ok: true, data: { status: "running" }, latency_ms: Date.now() - startTime });
+    
+    // STEP 4: Start service
+    await cascadeTap("Start service");
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // STEP 5: OK (skip I Agree — not present on this device)
+    await cascadeTap("OK");
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // STEP 6: START NOW
+    await cascadeTap("START NOW");
+    await new Promise(r => setTimeout(r, 3000));
+    
+    // STEP 7: Verify
+    for (let i = 0; i < 3; i++) {
+      uiTree = await getUiTree();
+      if (uiTree) { status = checkRustDeskStatus(uiTree); if (status.running) break; }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    
+    if (status.running) return res.json({ ok: true, data: { status: "running", id: status.id, password: status.password }, latency_ms: Date.now() - startTime });
+    return res.status(500).json({ ok: false, error: "Service did not start", latency_ms: Date.now() - startTime });
+    
+  } catch (err) {
+    console.error("[rustdesk-fast] Error:", err);
+    return res.status(500).json({ ok: false, error: (err as Error).message, latency_ms: Date.now() - startTime });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
