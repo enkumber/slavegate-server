@@ -1733,7 +1733,7 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
       const isFixed = isElementFixed(platform, elementName);
       console.log(`[rustdesk-cascade] isElementFixed("${platform}", "${elementName}") = ${isFixed}`);
       
-      // Persist to DB if successful and coords were used
+      // Persist to DB + session cache if successful and coords were used
       if (result?.success && result?.coords_used && isFixed) {
         try {
           await coordCacheService.learnCoord({
@@ -1754,12 +1754,14 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
             confidence: 1.0,
             learnMethod: (result.method_used as "ui_tree" | "ocr" | "vlm" | "manual") || "cascade",
           });
-          console.log(`[rustdesk-cascade] Persisted ${elementName} (${result.method_used}) to DB`);
+          // Also save to session cache so L0 cascade finds it next time (L0 uses session, not DB)
+          setSessionLearnedCoords(elementName, result.coords_used, platform);
+          console.log(`[rustdesk-cascade] Persisted ${elementName} (${result.method_used}) to DB + session`);
         } catch (err) {
           console.warn(`[rustdesk-cascade] Failed to persist ${elementName}:`, (err as Error).message);
         }
       } else {
-        console.log(`[rustdesk-cascade] Skipping DB persist for "${elementName}": success=${result?.success}, coords=${!!result?.coords_used}, fixed=${isFixed}`);
+        console.log(`[rustdesk-cascade] Skipping persist for "${elementName}": success=${result?.success}, coords=${!!result?.coords_used}, fixed=${isFixed}`);
       }
       
       return result;
