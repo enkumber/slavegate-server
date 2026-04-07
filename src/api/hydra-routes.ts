@@ -1661,6 +1661,204 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// RUSTDESK ENABLE (CASCADE-TAP VERSION)
+// Same flow as /rustdesk/enable but uses cascade-tap for fixed elements
+// Cascade-tap persists coords to DB via coordCacheService (L0 cache)
+// ════════════════════════════════════════════════════════════════════════════════
+
+router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const cascadeTapBase = `http://localhost:${process.env.PORT || 3000}`;
+  
+  try {
+    const { deviceId } = req.body;
+    
+    if (!deviceId) {
+      return res.status(400).json({ ok: false, error: "Missing deviceId" });
+    }
+    
+    if (!isDeviceOnline(deviceId)) {
+      return res.status(503).json({ ok: false, error: "Device not connected" });
+    }
+    
+    console.log(`[rustdesk-cascade] Starting enable flow for device ${deviceId.slice(0, 8)}...`);
+    
+    // Helper to dispatch job and wait
+    async function dispatchAndWait(
+      type: string,
+      params: Record<string, unknown>,
+      timeoutMs: number
+    ): Promise<any> {
+      const job = await dispatcherService.dispatch({
+        deviceId,
+        type: type as any,
+        params,
+        timeoutMs,
+      });
+      const resultPromise = waitForResult(job.jobId, timeoutMs);
+      sendJobToDevice(deviceId, {
+        jobId: job.jobId,
+        type: type as any,
+        params,
+        timeoutMs,
+      });
+      return await resultPromise;
+    }
+    
+    // Helper: cascade-tap via internal HTTP call
+    async function cascadeTap(elementName: string, platform = "rustdesk"): Promise<any> {
+      const response = await fetch(`${cascadeTapBase}/api/hydra/cascade-tap`, {
+        method: "POST",
+        headers: {
+          "X-Api-Key": process.env.API_KEY || "",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          deviceId,
+          platform,
+          target: elementName, // literal text — cascade-tap handles detection
+        }),
+      });
+      return response.json();
+    }
+    
+    // Helper to get UI tree
+    async function getUiTree(): Promise<UIElement | null> {
+      const result = await dispatchAndWait("ui_tree_dump", {}, 30000);
+      if (result?.output?.uiTree) {
+        return typeof result.output.uiTree === "string"
+          ? JSON.parse(result.output.uiTree)
+          : result.output.uiTree;
+      }
+      return null;
+    }
+    
+    // ─── PREAMBLE: Wake + Unlock if on lockscreen ──────────────────────────────
+    console.log(`[rustdesk-cascade] Preamble: Checking screen state...`);
+    const preambleTree = await getUiTree();
+    const isLockscreen = preambleTree?.packageName === "com.android.systemui";
+    
+    if (isLockscreen) {
+      console.log(`[rustdesk-cascade] Preamble: Device on lockscreen — waking + unlocking`);
+      await dispatchAndWait("screen_wake", {}, 30000);
+      await dispatchAndWait("unlock", {}, 30000);
+      await new Promise(r => setTimeout(r, 500));
+      console.log(`[rustdesk-cascade] Preamble: Wake + unlock complete`);
+    } else {
+      console.log(`[rustdesk-cascade] Preamble: Screen already active (pkg=${preambleTree?.packageName || "unknown"})`);
+    }
+    
+    // ─── STEP 1: Open RustDesk app ─────────────────────────────────────────────
+    console.log(`[rustdesk-cascade] Step 1: Checking if RustDesk already open...`);
+    const preOpenTree = await getUiTree();
+    const rustdeskAlreadyOpen = preOpenTree?.packageName === RUSTDESK_PACKAGE;
+    
+    if (!rustdeskAlreadyOpen) {
+      console.log(`[rustdesk-cascade] Step 1: Opening app ${RUSTDESK_PACKAGE}`);
+      const openResult = await dispatchAndWait("open_app", { packageName: RUSTDESK_PACKAGE }, 30000);
+      if (openResult?.status !== "completed") {
+        return res.status(500).json({ ok: false, error: "Failed to open RustDesk app" });
+      }
+      await new Promise(r => setTimeout(r, 3000));
+    } else {
+      console.log(`[rustdesk-cascade] Step 1: RustDesk already in foreground`);
+    }
+    
+    // ─── STEP 2: Navigate to "Share screen" tab via cascade-tap ────────────────
+    console.log(`[rustdesk-cascade] Step 2: Cascade-tap "Share screen"`);
+    const shareResult = await cascadeTap("Share screen");
+    console.log(`[rustdesk-cascade] Share screen:`, JSON.stringify(shareResult));
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // ─── STEP 3: Check current status ──────────────────────────────────────────
+    console.log(`[rustdesk-cascade] Step 3: Checking current status`);
+    let uiTree = await getUiTree();
+    if (!uiTree) {
+      return res.status(500).json({ ok: false, error: "Failed to get UI tree" });
+    }
+    
+    let status = checkRustDeskStatus(uiTree);
+    if (status.running) {
+      console.log(`[rustdesk-cascade] Service already running`);
+      return res.json({
+        ok: true,
+        data: { status: "running" },
+        latency_ms: Date.now() - startTime,
+      });
+    }
+    
+    // ─── STEP 4: Start service via cascade-tap ──────────────────────────────────
+    console.log(`[rustdesk-cascade] Step 4: Cascade-tap "Start service"`);
+    const startResult = await cascadeTap("Start service");
+    console.log(`[rustdesk-cascade] Start service:`, JSON.stringify(startResult));
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // ─── STEP 5: Handle "I Agree" warning dialog via cascade-tap ───────────────
+    console.log(`[rustdesk-cascade] Step 5: Cascade-tap "I Agree"`);
+    const agreeResult = await cascadeTap("I Agree");
+    console.log(`[rustdesk-cascade] I Agree:`, JSON.stringify(agreeResult));
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // ─── STEP 6: Handle screen capture permission (OK) via cascade-tap ─────────
+    console.log(`[rustdesk-cascade] Step 6: Cascade-tap "OK"`);
+    const okResult = await cascadeTap("OK");
+    console.log(`[rustdesk-cascade] OK:`, JSON.stringify(okResult));
+    await new Promise(r => setTimeout(r, 2000));
+    
+    // ─── STEP 7: Handle system dialog (START NOW) via cascade-tap ───────────────
+    console.log(`[rustdesk-cascade] Step 7: Cascade-tap "START NOW"`);
+    const startNowResult = await cascadeTap("START NOW");
+    console.log(`[rustdesk-cascade] START NOW:`, JSON.stringify(startNowResult));
+    await new Promise(r => setTimeout(r, 3000));
+    
+    // ─── STEP 8: Verify service started ─────────────────────────────────────────
+    console.log(`[rustdesk-cascade] Step 8: Verifying service status`);
+    
+    for (let attempt = 0; attempt < 3; attempt++) {
+      uiTree = await getUiTree();
+      if (uiTree) {
+        status = checkRustDeskStatus(uiTree);
+        if (status.running) break;
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    
+    if (!status.running) {
+      // Retry Start service one more time
+      console.log(`[rustdesk-cascade] Service not running, retrying Start service`);
+      await cascadeTap("Start service");
+      await new Promise(r => setTimeout(r, 3000));
+      
+      uiTree = await getUiTree();
+      if (uiTree) status = checkRustDeskStatus(uiTree);
+    }
+    
+    if (status.running) {
+      console.log(`[rustdesk-cascade] Success! Service is running`);
+      return res.json({
+        ok: true,
+        data: { status: "running", id: status.id, password: status.password },
+        latency_ms: Date.now() - startTime,
+      });
+    }
+    
+    return res.status(500).json({
+      ok: false,
+      error: "Service did not start - 'Stop service' button not found in UI",
+      latency_ms: Date.now() - startTime,
+    });
+    
+  } catch (err) {
+    console.error("[rustdesk-cascade] Enable error:", err);
+    return res.status(500).json({ 
+      ok: false, 
+      error: (err as Error).message,
+      latency_ms: Date.now() - startTime,
+    });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
