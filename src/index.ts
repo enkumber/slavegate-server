@@ -126,11 +126,21 @@ async function bootstrap(): Promise<void> {
   app.use("/api/agency", agencyRouter);
   app.use("/api/hydra", hydraRouter);
 
-  // ─── APK download endpoint ────────────────────────────────────────────────
+  // ─── APK download endpoints ───────────────────────────────────────────────
   // GET /app → serves latest agent APK for device onboarding (no auth required)
   const apkPath = process.env.APK_PATH ?? path.join(__dirname, "../../../apk/phone-network.apk");
   app.get("/app", (_req, res) => {
     res.download(apkPath, "phone-network.apk", (err) => {
+      if (err) res.status(404).json({ ok: false, error: "APK not found" });
+    });
+  });
+  
+  // GET /apk/:filename → serves specific APK from apk/ folder
+  const apkDir = path.join(__dirname, "../../../apk");
+  app.get("/apk/:filename", (_req, res) => {
+    const filename = _req.params.filename;
+    const filePath = path.join(apkDir, filename);
+    res.sendFile(filePath, (err) => {
       if (err) res.status(404).json({ ok: false, error: "APK not found" });
     });
   });

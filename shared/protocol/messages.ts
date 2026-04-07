@@ -332,7 +332,9 @@ export type JobType =
   | "a11y_find_tap"   // find element via A11y and tap
   | "ocr_find_tap"    // find text via ML Kit OCR and tap
   // Screen detection cascade
-  | "ocr_full";       // full-screen ML Kit OCR — returns all blocks, fullText, bounds
+  | "ocr_full"       // full-screen ML Kit OCR — returns all blocks, fullText, bounds
+  // Workflow execution
+  | "workflow_execute"; // execute workflow JSON locally on device
 
 export type JobParams =
   | TapParams
