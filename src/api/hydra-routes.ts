@@ -1725,8 +1725,13 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
         method_used?: string;
       };
       
+      // Debug logging
+      console.log(`[rustdesk-cascade] cascadeTap "${elementName}" result:`, JSON.stringify(result));
+      const isFixed = isElementFixed(platform, elementName);
+      console.log(`[rustdesk-cascade] isElementFixed("${platform}", "${elementName}") = ${isFixed}`);
+      
       // Persist to DB if successful and coords were used
-      if (result?.success && result?.coords_used && isElementFixed(platform, elementName)) {
+      if (result?.success && result?.coords_used && isFixed) {
         try {
           await coordCacheService.learnCoord({
             deviceInfo: {
@@ -1750,6 +1755,8 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
         } catch (err) {
           console.warn(`[rustdesk-cascade] Failed to persist ${elementName}:`, (err as Error).message);
         }
+      } else {
+        console.log(`[rustdesk-cascade] Skipping DB persist for "${elementName}": success=${result?.success}, coords=${!!result?.coords_used}, fixed=${isFixed}`);
       }
       
       return result;
@@ -1795,6 +1802,23 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
       await new Promise(r => setTimeout(r, 3000));
     } else {
       console.log(`[rustdesk-cascade] Step 1: RustDesk already in foreground`);
+    }
+    
+    // ─── STEP 1.5: Check if service is already running ──────────────────────────
+    // IMPORTANT: Skip all taps if RustDesk is already active — tapping "Share screen"
+    // again when already on that tab would TOGGLE IT OFF and stop the service!
+    console.log(`[rustdesk-cascade] Step 1.5: Checking if service is already running...`);
+    const preCheckTree = await getUiTree();
+    if (preCheckTree) {
+      const preStatus = checkRustDeskStatus(preCheckTree);
+      if (preStatus.running) {
+        console.log(`[rustdesk-cascade] Service already running! Skipping all taps, returning success.`);
+        return res.json({
+          ok: true,
+          data: { status: "running", id: preStatus.id, password: preStatus.password },
+          latency_ms: Date.now() - startTime,
+        });
+      }
     }
     
     // ─── STEP 2: Navigate to "Share screen" tab via cascade-tap ────────────────
