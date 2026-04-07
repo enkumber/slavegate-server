@@ -1,0 +1,27 @@
+{
+  "description": "Fixed UI elements for RustDesk app — these have stable positions and CAN be learned via OCR/VLM",
+  "elements": {
+    "Share screen": { "fixed": true, "note": "Tab in RustDesk main nav" },
+    "Start service": { "fixed": true, "note": "Service start button on Share screen tab" },
+    "OK": { "fixed": true, "note": "Warning dialog confirm button" },
+    "START NOW": { "fixed": true, "note": "MediaProjection permission dialog button" },
+    "Connection": { "fixed": true, "note": "Tab in RustDesk main nav" },
+    "ID": { "fixed": true, "note": "Field label in connection tab" },
+    "Password": { "fixed": true, "note": "Field label in connection tab" },
+    "Confirm": { "fixed": true, "note": "Confirm dialog button" },
+    "Cancel": { "fixed": true, "note": "Cancel button" },
+    "Settings": { "fixed": true, "note": "Settings icon/tab" },
+    "About": { "fixed": true, "note": "About section" },
+    "Help": { "fixed": true, "note": "Help icon" },
+    "Close": { "fixed": true, "note": "Close button" },
+    "Refresh": { "fixed": true, "note": "Refresh button" },
+    "Copy": { "fixed": true, "note": "Copy button for ID/password" }
+  },
+  "dynamic": [
+    "ID value (changes each session)",
+    "Password value (changes each session)",
+    "Device names in connection list",
+    "Status messages",
+    "Error messages"
+  ]
+}
