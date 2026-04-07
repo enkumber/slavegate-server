@@ -13,9 +13,9 @@ import type { SkillElement, NormalizedCoords, TapMethod } from "./types";
 import { MIN_CONFIDENCE_FOR_COORDS } from "./types";
 import { CD_MAP } from "./constants";
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// TYPES
-// ═══════════════════════════════════════════════════════════════════════════════
+// Re-export isElementFixed from the fixed-elements registry
+// so both cascade implementations can use it without circular imports
+export { isElementFixed, loadFixedElements } from "./fixed-elements/fixed-elements";
 
 export interface CascadeContext {
   elementName: string;

@@ -129,8 +129,13 @@ export function denormalizeCoords(normalized: NormalizedCoords, resolution: Scre
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // NOTE: Shared cascade logic is now consolidated in cascadeCore.ts
-// Import buildOcrSearchText from there for consistency.
-import { buildOcrSearchText } from "./cascadeCore";
+// Import utils for consistency.
+import {
+  buildOcrSearchText,
+  buildCompleteA11yParams,
+  isElementFixed,
+} from "./cascadeCore";
+import type { DeviceInfo } from "./skill-db.service";
 
 export async function cascadeTap(
   request: TapRequest,
@@ -141,36 +146,80 @@ export async function cascadeTap(
 ): Promise<TapResult> {
   const startTime = Date.now();
   const fallbackChain: string[] = [];
-  
+
+  // ─── Load device info for L0 DB lookup ──────────────────────────────────────
+  const deviceInfo = await getDeviceInfoForApp(request.app, request.device_id);
+
+  // ─── L0: DB Persistent Cache (coordinate_cache table) ────────────────────────
+  // Check DB first — persistent across restarts. Skip for variable elements.
+  fallbackChain.push('L0_db_lookup');
+  try {
+    const cached = await coordCacheService.getCoord(
+      deviceInfo,
+      'unknown',  // screenType: cascade tap doesn't know current screen
+      request.element_name,
+      MIN_CONFIDENCE_FOR_COORDS,
+    );
+    if (cached) {
+      const coords: NormalizedCoords = { x: cached.x, y: cached.y };
+      console.log(`[cascade] L0 DB cache hit: ${request.element_name} (conf=${cached.confidence.toFixed(2)})`);
+      try {
+        const success = await tapExecutor(request.device_id, coords);
+        if (success) {
+          coordCacheService.incrementSuccess(cached.id).catch(() => {});
+          return {
+            success: true,
+            method_used: 'coords',
+            method_attempted_first: 'coords',
+            fallback_chain: fallbackChain,
+            coords_used: coords,
+            latency_ms: Date.now() - startTime,
+          };
+        }
+        coordCacheService.incrementFail(cached.id).catch(() => {});
+        fallbackChain.push('L0_tap_failed');
+      } catch (err) {
+        coordCacheService.incrementFail(cached.id).catch(() => {});
+        fallbackChain.push(`L0_error:${(err as Error).message.slice(0, 30)}`);
+      }
+    } else {
+      fallbackChain.push('L0_miss');
+    }
+  } catch (err) {
+    fallbackChain.push(`L0_db_error:${(err as Error).message.slice(0, 30)}`);
+    console.warn(`[cascade] L0 DB lookup error: ${err}`);
+  }
+
+  // ─── Load skill file ────────────────────────────────────────────────────────
   const skill = await loadSkillFile(request.app);
   if (!skill) {
     return {
       success: false,
       method_used: 'coords',
-      method_attempted_first: 'coords',
-      fallback_chain: ['skill_not_found'],
+      method_attempted_first: 'L0',
+      fallback_chain: fallbackChain,
       latency_ms: Date.now() - startTime,
       error: `Skill file not found for ${request.app}`,
     };
   }
-  
+
   const element = getElement(skill, request.element_name);
   if (!element) {
     return {
       success: false,
       method_used: 'coords',
-      method_attempted_first: 'coords',
-      fallback_chain: ['element_not_found'],
+      method_attempted_first: 'L0',
+      fallback_chain: fallbackChain,
       latency_ms: Date.now() - startTime,
       error: `Element not found: ${request.element_name}`,
     };
   }
-  
-  // ─── LEVEL 1: Coords (if available and confident) ───────────────────────────
+
+  // ─── L1: Skill file coords ──────────────────────────────────────────────────
   if (element.type !== 'variable') {
     const fixedOrContextual = element as FixedElement | ContextualElement;
     const confidence = fixedOrContextual.confidence ?? 0;
-    
+
     if (fixedOrContextual.coords && confidence >= MIN_CONFIDENCE_FOR_COORDS) {
       try {
         const success = await tapExecutor(request.device_id, fixedOrContextual.coords);
@@ -178,129 +227,200 @@ export async function cascadeTap(
           return {
             success: true,
             method_used: 'coords',
-            method_attempted_first: 'coords',
+            method_attempted_first: 'L0',
             fallback_chain: fallbackChain,
             coords_used: fixedOrContextual.coords,
             latency_ms: Date.now() - startTime,
           };
         }
-        fallbackChain.push('coords_failed');
+        fallbackChain.push('L1_coords_failed');
       } catch (err) {
-        fallbackChain.push('coords_error');
+        fallbackChain.push('L1_coords_error');
       }
     } else {
-      fallbackChain.push('coords_low_confidence');
+      fallbackChain.push('L1_low_confidence');
     }
+  } else {
+    fallbackChain.push('L1_variable_element');
   }
-  
-  // ─── LEVEL 2: UI Tree ───────────────────────────────────────────────────────
+
+  // ─── L2: UI Tree ────────────────────────────────────────────────────────────
+  fallbackChain.push('L2_ui_tree');
   try {
-    console.log(`[cascade] L2: Getting UI tree for ${request.element_name}`);
-    let uiTree;
-    try {
-      uiTree = await uiTreeProvider(request.device_id);
-      console.log(`[cascade] L2: UI tree received, keys: ${Object.keys(uiTree || {}).slice(0, 5)}`);
-    } catch (providerErr) {
-      console.error(`[cascade] L2: UI tree provider error:`, providerErr);
-      throw providerErr;
-    }
-    console.log(`[cascade] L2: Selector type: ${typeof element.selector}, value: ${JSON.stringify(element.selector).slice(0, 100)}`);
+    const uiTree = await uiTreeProvider(request.device_id);
     const foundCoords = findElementInUiTree(uiTree, element.selector);
-    console.log(`[cascade] L2: Found coords: ${JSON.stringify(foundCoords)}`);
-    
+
     if (foundCoords) {
-      const success = await tapExecutor(request.device_id, foundCoords);
-      if (success) {
-        // Auto-learn: log coordinate update
-        await logCoordinateUpdate(request, element, foundCoords, skill.app_version);
-        
-        return {
-          success: true,
-          method_used: 'ui_tree',
-          method_attempted_first: element.type === 'variable' ? 'ui_tree' : 'coords',
-          fallback_chain: fallbackChain,
-          coords_used: foundCoords,
-          latency_ms: Date.now() - startTime,
-        };
+      console.log(`[cascade] L2 ui_tree hit: ${request.element_name} → (${foundCoords.x.toFixed(3)}, ${foundCoords.y.toFixed(3)})`);
+      try {
+        const success = await tapExecutor(request.device_id, foundCoords);
+        if (success) {
+          // Save to DB if element is fixed (registry check)
+          if (isElementFixed(request.app, request.element_name)) {
+            await coordCacheService.learnCoord({
+              deviceInfo,
+              screenType: 'unknown',
+              elementName: request.element_name,
+              x: foundCoords.x,
+              y: foundCoords.y,
+              learnMethod: 'ui_tree',
+              confidence: 0.95,
+            }).catch(() => {});
+          }
+          return {
+            success: true,
+            method_used: 'ui_tree',
+            method_attempted_first: 'L0',
+            fallback_chain: fallbackChain,
+            coords_used: foundCoords,
+            latency_ms: Date.now() - startTime,
+          };
+        }
+        fallbackChain.push('L2_tap_failed');
+      } catch (err) {
+        fallbackChain.push(`L2_error:${(err as Error).message.slice(0, 30)}`);
       }
-      fallbackChain.push('ui_tree_tap_failed');
     } else {
-      fallbackChain.push('ui_tree_not_found');
+      fallbackChain.push('L2_not_found');
     }
   } catch (err) {
-    fallbackChain.push('ui_tree_error');
+    fallbackChain.push(`L2_error:${(err as Error).message.slice(0, 30)}`);
   }
-  
-  // ─── LEVEL 2.5: OCR (ML Kit) ────────────────────────────────────────────────
+
+  // ─── L3: OCR (ML Kit) ──────────────────────────────────────────────────────
   if (ocrProvider) {
-    try {
-      const searchText = buildOcrSearchText(element);
-
-      if (searchText) {
-        console.log(`[cascade] L2.5: OCR find "${searchText}" for ${request.element_name}`);
+    fallbackChain.push('L3_ocr');
+    const searchText = buildOcrSearchText(element);
+    if (searchText) {
+      try {
+        console.log(`[cascade] L3 OCR find "${searchText}" for ${request.element_name}`);
         const ocrCoords = await ocrProvider(request.device_id, searchText);
-
         if (ocrCoords) {
-          const success = await tapExecutor(request.device_id, ocrCoords);
-          if (success) {
-            await logCoordinateUpdate(request, element, ocrCoords, skill.app_version);
-            return {
-              success: true,
-              method_used: 'ocr',
-              method_attempted_first: element.type === 'variable' ? 'ui_tree' : 'coords',
-              fallback_chain: fallbackChain,
-              coords_used: ocrCoords,
-              latency_ms: Date.now() - startTime,
-            };
+          try {
+            const success = await tapExecutor(request.device_id, ocrCoords);
+            if (success) {
+              if (isElementFixed(request.app, request.element_name)) {
+                await coordCacheService.learnCoord({
+                  deviceInfo,
+                  screenType: 'unknown',
+                  elementName: request.element_name,
+                  x: ocrCoords.x,
+                  y: ocrCoords.y,
+                  learnMethod: 'ocr',
+                  confidence: 0.90,
+                }).catch(() => {});
+              }
+              return {
+                success: true,
+                method_used: 'ocr',
+                method_attempted_first: 'L0',
+                fallback_chain: fallbackChain,
+                coords_used: ocrCoords,
+                latency_ms: Date.now() - startTime,
+              };
+            }
+            fallbackChain.push('L3_tap_failed');
+          } catch (err) {
+            fallbackChain.push(`L3_error:${(err as Error).message.slice(0, 30)}`);
           }
-          fallbackChain.push('ocr_tap_failed');
         } else {
-          fallbackChain.push('ocr_not_found');
+          fallbackChain.push('L3_not_found');
         }
-      } else {
-        fallbackChain.push('ocr_no_search_text');
+      } catch (err) {
+        fallbackChain.push(`L3_ocr_error:${(err as Error).message.slice(0, 30)}`);
       }
-    } catch (err) {
-      fallbackChain.push('ocr_error');
+    } else {
+      fallbackChain.push('L3_no_search_text');
     }
   }
 
-  // ─── LEVEL 3: Vision ────────────────────────────────────────────────────────
+  // ─── L4: Vision (VLM) ──────────────────────────────────────────────────────
+  fallbackChain.push('L4_vision');
   try {
     const visionCoords = await visionProvider(request.device_id, element.visual_hint);
-    
     if (visionCoords) {
-      const success = await tapExecutor(request.device_id, visionCoords);
-      if (success) {
-        // Auto-learn: log coordinate update
-        await logCoordinateUpdate(request, element, visionCoords, skill.app_version);
-        
-        return {
-          success: true,
-          method_used: 'vision',
-          method_attempted_first: element.type === 'variable' ? 'ui_tree' : 'coords',
-          fallback_chain: fallbackChain,
-          coords_used: visionCoords,
-          latency_ms: Date.now() - startTime,
-        };
+      try {
+        const success = await tapExecutor(request.device_id, visionCoords);
+        if (success) {
+          if (isElementFixed(request.app, request.element_name)) {
+            await coordCacheService.learnCoord({
+              deviceInfo,
+              screenType: 'unknown',
+              elementName: request.element_name,
+              x: visionCoords.x,
+              y: visionCoords.y,
+              learnMethod: 'vlm',
+              confidence: 0.85,
+            }).catch(() => {});
+          }
+          return {
+            success: true,
+            method_used: 'vision',
+            method_attempted_first: 'L0',
+            fallback_chain: fallbackChain,
+            coords_used: visionCoords,
+            latency_ms: Date.now() - startTime,
+          };
+        }
+        fallbackChain.push('L4_tap_failed');
+      } catch (err) {
+        fallbackChain.push(`L4_error:${(err as Error).message.slice(0, 30)}`);
       }
-      fallbackChain.push('vision_tap_failed');
     } else {
-      fallbackChain.push('vision_not_found');
+      fallbackChain.push('L4_not_found');
     }
   } catch (err) {
-    fallbackChain.push('vision_error');
+    fallbackChain.push(`L4_error:${(err as Error).message.slice(0, 30)}`);
   }
-  
-  // All methods failed
+
+  // All levels failed
   return {
     success: false,
     method_used: 'vision',
-    method_attempted_first: element.type === 'variable' ? 'ui_tree' : 'coords',
+    method_attempted_first: 'L0',
     fallback_chain: fallbackChain,
     latency_ms: Date.now() - startTime,
     error: 'All cascade levels failed',
   };
+}
+
+/**
+ * Fetch device info for an app from DB (resolution, app version, etc.).
+ * Used for L0 DB coordinate cache lookup.
+ */
+async function getDeviceInfoForApp(app: string, deviceId: string): Promise<DeviceInfo> {
+  const defaults: DeviceInfo = {
+    app,
+    appVersion: 'unknown',
+    resolution: '1080x2160',
+    deviceClass: 'phone',
+    orientation: 'portrait',
+    fontScaleBucket: 'normal',
+  };
+
+  try {
+    const db = getDb();
+    const row = await db.query<Record<string, unknown>>(
+      `SELECT health, agent_version FROM devices WHERE id = $1`, [deviceId],
+    );
+    if (!row.rows.length) return defaults;
+
+    const health = (row.rows[0].health as Record<string, unknown>) || {};
+    const info: DeviceInfo = {
+      app,
+      appVersion: (typeof health.appVersion === 'string' ? health.appVersion : row.rows[0].agent_version) as string || 'unknown',
+      resolution: typeof health.screenResolution === 'string'
+        ? health.screenResolution
+        : (health.screenWidth && health.screenHeight ? `${health.screenWidth}x${health.screenHeight}` : '1080x2160'),
+      density: typeof health.density === 'number' ? health.density : undefined,
+      deviceClass: 'phone',
+      orientation: 'portrait',
+      fontScaleBucket: 'normal',
+    };
+    return info;
+  } catch {
+    return defaults;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

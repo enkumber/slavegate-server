@@ -101,7 +101,7 @@ export interface SkillFile {
 // CASCADE TAP
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export type TapMethod = 'coords' | 'ui_tree' | 'ocr' | 'vision';
+export type TapMethod = 'coords' | 'ui_tree' | 'ocr' | 'vision' | 'L0';
 
 export interface TapRequest {
   element_name: string;       // e.g., "bottom_nav.home"
