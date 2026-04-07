@@ -24,7 +24,7 @@ import {
 } from "../modules/skills/target-parser";
 import { isElementFixed } from "../modules/skills/fixed-elements/fixed-elements";
 import type { OcrFindTapParams } from "../../shared/protocol/messages";
-import { skillDbService } from "../modules/skills/skill-db.service";
+import { skillDbService, coordCacheService } from "../modules/skills/skill-db.service";
 import { checkpointService } from "../modules/checkpoints/checkpoint.service";
 
 import { sendJobToDevice, isDeviceOnline, waitForResult } from "../transport/transport";
@@ -1705,7 +1705,7 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
       return await resultPromise;
     }
     
-    // Helper: cascade-tap via internal HTTP call
+    // Helper: cascade-tap via internal HTTP call + persist to DB
     async function cascadeTap(elementName: string, platform = "rustdesk"): Promise<any> {
       const response = await fetch(`${cascadeTapBase}/api/hydra/cascade-tap`, {
         method: "POST",
@@ -1719,7 +1719,40 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
           target: elementName, // literal text — cascade-tap handles detection
         }),
       });
-      return response.json();
+      const result = await response.json() as {
+        success?: boolean;
+        coords_used?: { x: number; y: number };
+        method_used?: string;
+      };
+      
+      // Persist to DB if successful and coords were used
+      if (result?.success && result?.coords_used && isElementFixed(platform, elementName)) {
+        try {
+          await coordCacheService.learnCoord({
+            deviceInfo: {
+              app: platform,
+              appVersion: "1.0",
+              resolution: "1080x2160",
+              deviceClass: "phone",
+              orientation: "portrait",
+              fontScaleBucket: "normal",
+            },
+            screenType: "rustdesk",
+            elementName,
+            x: result.coords_used.x,
+            y: result.coords_used.y,
+            width: 0,
+            height: 0,
+            confidence: 1.0,
+            learnMethod: (result.method_used as "ui_tree" | "ocr" | "vlm" | "manual") || "cascade",
+          });
+          console.log(`[rustdesk-cascade] Persisted ${elementName} (${result.method_used}) to DB`);
+        } catch (err) {
+          console.warn(`[rustdesk-cascade] Failed to persist ${elementName}:`, (err as Error).message);
+        }
+      }
+      
+      return result;
     }
     
     // Helper to get UI tree
