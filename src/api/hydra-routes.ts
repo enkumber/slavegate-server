@@ -409,7 +409,10 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
         if (ocrResult?.output?.found) {
           const normalizedCoords = { x: ocrResult.output.x as number, y: ocrResult.output.y as number };
           
-          const tapSuccess = await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
+          // NOTE: ocr_find_tap already tapped on the phone side.
+          // We only need to verify/log the success, not send another tap.
+          // executeTapAtCoords would cause a DOUBLE TAP since phone already tapped.
+          const tapSuccess = ocrResult.output.tapped === true ? true : await executeTapAtCoords(deviceId, normalizedCoords, screenWidth, screenHeight);
           
           if (tapSuccess) {
             // L2 (OCR): save only if element is in fixed-elements registry for this app
