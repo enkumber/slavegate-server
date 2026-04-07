@@ -20,7 +20,7 @@ export function loadFixedElements(appId: string): FixedElementsRegistry | null {
     return registryCache[appId];
   }
 
-  const registryPath = path.join(__dirname, "fixed-elements", `${appId}.json`);
+  const registryPath = path.join(__dirname, `${appId}.json`);
   
   if (!fs.existsSync(registryPath)) {
     return null;
