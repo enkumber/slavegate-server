@@ -368,6 +368,21 @@ CREATE INDEX IF NOT EXISTS idx_wf_screen_verify_workflow ON workflow_screen_veri
 CREATE INDEX IF NOT EXISTS idx_wf_screen_verify_match    ON workflow_screen_verifications(match) WHERE match = false;
 CREATE INDEX IF NOT EXISTS idx_wf_screen_verify_created  ON workflow_screen_verifications(created_at);
 
+-- ─── API Tokens (programmatic access for agents, admin, monitoring) ────────────
+-- Tokens stored as SHA-256 hashes. Raw token returned ONLY at generation.
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  token_hash  TEXT        NOT NULL UNIQUE,  -- SHA256(raw_token)
+  purpose     TEXT        NOT NULL CHECK (purpose IN ('openclaw_agent', 'admin', 'monitoring')),
+  expires_at  TIMESTAMPTZ NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revoked_at  TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_tokens_hash    ON api_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_purpose ON api_tokens(purpose);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_expires ON api_tokens(expires_at);
+
 -- system_config: key-value store for server-side persistent state
 CREATE TABLE IF NOT EXISTS system_config (
   key        TEXT PRIMARY KEY,
