@@ -14,6 +14,7 @@ import { createWsGateway, wsGateway } from "./ws";
 import apiRouter from "./api/routes";
 import agencyRouter from "./api/agency-routes";
 import hydraRouter from "./api/hydra-routes";
+import deviceTokenRouter from "./api/device-tokens.routes";
 import { getDb, closeDb } from "./db/client";
 import { closeRedis } from "./redis/client";
 import { dispatcherService } from "./modules/dispatcher/dispatcher.service";
@@ -125,6 +126,7 @@ async function bootstrap(): Promise<void> {
   app.use("/api", apiRouter);
   app.use("/api/agency", agencyRouter);
   app.use("/api/hydra", hydraRouter);
+  app.use("/api/device-tokens", deviceTokenRouter);
 
   // ─── APK download endpoints ───────────────────────────────────────────────
   // GET /app → serves latest agent APK for device onboarding (no auth required)
@@ -165,6 +167,18 @@ async function bootstrap(): Promise<void> {
   // ─── Transport layer — DirectWs only ───────────────────────────────────────
   directWsServer.attach(httpServer);
   console.log("[server] DirectWs transport attached on /ws-direct");
+
+  // ─── Startup check: warn if no openclaw_agent API token ────────────────────
+  {
+    const { rows } = await getDb().query(
+      `SELECT 1 FROM api_tokens WHERE purpose = 'openclaw_agent' AND revoked_at IS NULL AND expires_at > NOW() LIMIT 1`
+    );
+    if (rows.length === 0) {
+      console.warn("[device-tokens] No openclaw_agent token found. Generate one via POST /api/device-tokens/generate");
+    } else {
+      console.log("[device-tokens] openclaw_agent token present.");
+    }
+  }
 
   // ─── Start listening ──────────────────────────────────────────────────────
   httpServer.listen(PORT, () => {
