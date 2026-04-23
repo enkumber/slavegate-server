@@ -123,10 +123,10 @@ async function bootstrap(): Promise<void> {
   }));
 
   app.use(express.json({ limit: "1mb" }));
+  app.use("/api/device-tokens", deviceTokenRouter);
   app.use("/api", apiRouter);
   app.use("/api/agency", agencyRouter);
   app.use("/api/hydra", hydraRouter);
-  app.use("/api/device-tokens", deviceTokenRouter);
 
   // ─── APK download endpoints ───────────────────────────────────────────────
   // GET /app → serves latest agent APK for device onboarding (no auth required)
