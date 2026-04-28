@@ -5,7 +5,7 @@
  * Designed for phones behind DDNS + port-forward where sub-second latency matters.
  *
  * Auth flow:
- *   1. Device connects: ws://host:3000/ws-direct
+ *   1. Device connects: ws://host:21211/ws-direct
  *   2. Device → { type: "AUTH", deviceKey: "<token>", deviceId: "<uuid>" }
  *   3. Server validates token from DB (devices.device_key column)
  *   4. Server → { type: "AUTH_OK", deviceId }  or  { type: "AUTH_FAIL", reason }

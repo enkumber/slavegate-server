@@ -32,7 +32,7 @@ import smartUnfollowTemplate from "./modules/workflows/templates/smart_unfollow.
 import outreachCommentTemplate from "./modules/workflows/templates/outreach_comment.json";
 import type { WorkflowTemplate } from "./modules/workflows/types";
 
-const PORT = parseInt(process.env.PORT ?? "3000", 10);
+const PORT = parseInt(process.env.PORT ?? "21211", 10);
 
 async function bootstrap(): Promise<void> {
   // ─── Required env vars check — fail fast before anything else ────────────

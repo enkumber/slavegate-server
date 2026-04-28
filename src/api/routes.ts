@@ -545,7 +545,7 @@ router.patch("/vision/config", requireAuth, async (req, res) => {
 // ─── Metrics (Prometheus scrape) ─────────────────────────────────────────────
 // Auth: optional Bearer token via METRICS_AUTH_TOKEN env var.
 // If not set: restrict at network level (docker-compose internal port only).
-// Production: set METRICS_AUTH_TOKEN and expose :3000/metrics on internal network.
+// Production: set METRICS_AUTH_TOKEN and expose :21211/metrics on internal network.
 
 router.get("/metrics", async (req, res) => {
   const token = process.env.METRICS_AUTH_TOKEN;
@@ -805,7 +805,7 @@ router.post("/ota/push", requireAuth, async (req, res) => {
     : onlineDevices;
   
   let sentTo = 0;
-  const baseUrl = process.env.BASE_URL || `http://${process.env.HOST || 'localhost'}:${process.env.PORT || 3000}`;
+  const baseUrl = process.env.BASE_URL || `http://${process.env.HOST || 'localhost'}:${process.env.PORT || 21211}`;
   for (const device of targets) {
     try {
       directWsServer.sendToDevice(device.deviceId, {

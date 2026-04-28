@@ -708,7 +708,7 @@ async function handleVlmExtractFollowingList(
   const targetVar = (params.target_variable as string) || 'following_list_rows';
 
   // Read server connection details from env (same process → localhost)
-  const port  = (params.server_port as number)  || parseInt(process.env['PORT'] ?? '3000', 10);
+  const port  = (params.server_port as number)  || parseInt(process.env['PORT'] ?? '21211', 10);
   const token = (params.server_token as string) || process.env['API_KEY'] || '';
 
   const task =
@@ -816,7 +816,7 @@ async function handleEnsureOnScreen(
     `Suntem pe ecranul "${expectedScreen}" acum? Răspunde JSON: {"on_screen": bool, "current_screen": string}`;
   const recoverySteps  = (params.recovery_steps as WorkflowStep[]) || [];
 
-  const port  = (params.server_port as number)  || parseInt(process.env['PORT'] ?? '3000', 10);
+  const port  = (params.server_port as number)  || parseInt(process.env['PORT'] ?? '21211', 10);
   const token = (params.server_token as string) || process.env['API_KEY'] || '';
 
   info(ctx, `ensure_on_screen: checking if on "${expectedScreen}"`);
@@ -877,7 +877,7 @@ async function handleHydraCascadeTap(
   params: Record<string, unknown>,
   ctx:    SkillActionContext,
 ): Promise<void> {
-  const port    = parseInt(process.env['PORT'] ?? '3000', 10);
+  const port    = parseInt(process.env['PORT'] ?? '21211', 10);
   const token   = process.env['API_KEY'] || '';
   const retries = (params.retries as number) ?? 2;
   const waitMs  = (params.wait_ms as number) ?? 1500;
@@ -1523,7 +1523,7 @@ async function handleVlmAnalyzePostForOutreach(
   const minAge      = (params.min_age as number)         || 20;
   const maxAge      = (params.max_age as number)         || 35;
 
-  const port  = parseInt(process.env['PORT'] ?? '3000', 10);
+  const port  = parseInt(process.env['PORT'] ?? '21211', 10);
   const token = process.env['API_KEY'] || '';
 
   const task = `Analizează această postare Instagram vizibilă pe ecran.

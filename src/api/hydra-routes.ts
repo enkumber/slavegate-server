@@ -1686,7 +1686,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
 
 router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
   const startTime = Date.now();
-  const cascadeTapBase = `http://localhost:${process.env.PORT || 3000}`;
+  const cascadeTapBase = `http://localhost:${process.env.PORT || 21211}`;
   
   try {
     const { deviceId } = req.body;
@@ -1940,7 +1940,7 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
 
 router.post("/rustdesk/enable-cascade-fast", async (req: Request, res: Response) => {
   const startTime = Date.now();
-  const cascadeTapBase = `http://localhost:${process.env.PORT || 3000}`;
+  const cascadeTapBase = `http://localhost:${process.env.PORT || 21211}`;
   
   try {
     const { deviceId } = req.body;
