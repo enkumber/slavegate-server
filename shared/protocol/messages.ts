@@ -50,9 +50,7 @@ export type MessageType =
   | "VISION_RESULT"     // Phase 3: VLM structured output for device
   | "CONFIG_UPDATE"   // Phase 3: push updated agent config (e.g. VLM settings)
   | "CLOAK_CONFIG"    // Phase 4: push fingerprint/spoofing profile to LSPosed module
-  | "KILL_SWITCH"     // Phase 4: server → device — stop all activity immediately
-  | "WG_CONFIG"       // Server → Device: push WireGuard config remotely
-  | "WG_CONFIG_ACK";  // Device → Server: WireGuard config applied result
+  | "KILL_SWITCH";     // Phase 4: server → device — stop all activity immediately
 
 // ─── ECDSA Auth Flow ─────────────────────────────────────────────────────────
 

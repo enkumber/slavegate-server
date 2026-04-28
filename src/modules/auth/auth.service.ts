@@ -39,31 +39,6 @@ export class AuthService {
     };
   }
 
-  // ─── WireGuard IP lookup (for provisioned devices) ────────────────────────
-
-  async findByWireguardIp(wireguardIp: string): Promise<{
-    deviceId: string;
-    status: string;
-    publicKeyPem: string | null;
-  } | null> {
-    const db = getDb();
-    const result = await db.query(
-      "SELECT id, status, public_key_pem FROM devices WHERE wireguard_ip = $1 LIMIT 1",
-      [wireguardIp]
-    );
-    if (result.rows.length === 0) return null;
-    return {
-      deviceId:     result.rows[0].id as string,
-      status:       result.rows[0].status as string,
-      publicKeyPem: (result.rows[0].public_key_pem as string | null) ?? null,
-    };
-  }
-
-  async updateImei(deviceId: string, imei: string): Promise<void> {
-    const db = getDb();
-    await db.query("UPDATE devices SET imei = $1 WHERE id = $2", [imei, deviceId]);
-  }
-
   // ─── Registration ──────────────────────────────────────────────────────────
 
   /**

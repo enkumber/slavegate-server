@@ -54,8 +54,6 @@ interface DeviceConnection {
   deviceId: string;
   imei: string;
   location?: string;
-  wireguardIp?: string;
-  connectionType?: "wireguard" | "relay";
   connectedAt: number;
   lastMessageAt: number;
   heartbeatInterval: "active" | "idle";
@@ -70,8 +68,6 @@ interface HelloPayload {
   model?: string;
   androidVersion?: string;
   agentVersion?: string;
-  wireguardIp?: string;  // For matching provisioned devices
-  connectionType?: "wireguard" | "relay";
 }
 
 interface ChallengeResponsePayload {
@@ -145,9 +141,7 @@ export class WsServer {
     return this.sendToDevice(deviceId, "AUTH_REVOKED", {});
   }
 
-  sendWgConfig(deviceId: string, config: string): boolean {
-    return this.sendToDevice(deviceId, "WG_CONFIG", { config });
-  }
+
 
   sendKillSwitch(deviceId: string | "ALL", reason: string): number {
     const payload = { reason, ts: Date.now() };
@@ -194,7 +188,7 @@ export class WsServer {
       ?? (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim()
       ?? req.socket.remoteAddress 
       ?? "unknown";
-    const state = { conn: null as DeviceConnection | null, isPending: false, helloWireguardIp: undefined as string | undefined, helloConnectionType: undefined as "wireguard" | "relay" | undefined };
+    const state = { conn: null as DeviceConnection | null, isPending: false };
 
     ws.on("error", (err) => {
       console.error(`[ws] Socket error from ${ip}:`, err.message);
@@ -270,7 +264,7 @@ export class WsServer {
   private async routeMessage(
     ws: WebSocket,
     msg: WsMessage,
-    state: { conn: DeviceConnection | null; isPending: boolean; helloWireguardIp?: string; helloConnectionType?: "wireguard" | "relay" },
+    state: { conn: DeviceConnection | null; isPending: boolean },
     ip: string
   ): Promise<void> {
     switch (msg.type) {
@@ -307,16 +301,6 @@ export class WsServer {
         }
         break;
 
-      case "WG_CONFIG_ACK":
-        if (state.conn) {
-          const ack = msg.payload as { deviceId: string; success: boolean; wireguardIp?: string; error?: string };
-          console.log(`[ws] WG_CONFIG_ACK from ${state.conn.deviceId.slice(0,8)}: success=${ack.success} ip=${ack.wireguardIp ?? 'N/A'}`);
-          if (ack.success && ack.wireguardIp) {
-            await devicesService.updateWireguardIp(state.conn.deviceId, ack.wireguardIp);
-          }
-        }
-        break;
-
       case "VISION_REQUEST":
         if (state.conn) {
           if (!this.visionRateLimit.allow(state.conn.deviceId)) {
@@ -350,26 +334,13 @@ export class WsServer {
     ws: WebSocket,
     payload: HelloPayload,
     ip: string,
-    state: { conn: DeviceConnection | null; isPending: boolean; helloWireguardIp?: string; helloConnectionType?: "wireguard" | "relay" }
+    state: { conn: DeviceConnection | null; isPending: boolean }
   ): Promise<void> {
-    const { imei, publicKeyPem, model, androidVersion, agentVersion, wireguardIp, connectionType } = payload;
-    state.helloWireguardIp = wireguardIp;
-    state.helloConnectionType = connectionType;
-    console.log(`[ws] HELLO from IMEI ${imei.slice(0, 6)}…${wireguardIp ? ` (WG: ${wireguardIp})` : ""}`);
+    const { imei, publicKeyPem, model, androidVersion, agentVersion } = payload;
+    console.log(`[ws] HELLO from IMEI ${imei.slice(0, 6)}…`);
 
     // Check if device exists by IMEI
     let existing = await authService.findByImei(imei);
-
-    // Fallback: if not found by IMEI but wireguardIp provided, try matching by WG IP
-    // This links provisioned devices (which have wireguard_ip but no IMEI yet)
-    if (!existing && wireguardIp) {
-      existing = await authService.findByWireguardIp(wireguardIp);
-      if (existing) {
-        console.log(`[ws] Device matched by WireGuard IP ${wireguardIp} → linking IMEI`);
-        // Link IMEI to this device for future lookups
-        await authService.updateImei(existing.deviceId, imei);
-      }
-    }
 
     if (existing) {
       // Device exists — check status
@@ -445,7 +416,7 @@ export class WsServer {
     ws: WebSocket,
     deviceId: string,
     imei: string,
-    state: { conn: DeviceConnection | null; isPending: boolean; helloWireguardIp?: string; helloConnectionType?: "wireguard" | "relay" }
+    state: { conn: DeviceConnection | null; isPending: boolean }
   ): Promise<void> {
     const POLL_INTERVAL_MS = 30_000;
     const MAX_POLLS = 60;  // 30 min
@@ -490,7 +461,7 @@ export class WsServer {
     ws: WebSocket,
     payload: ChallengeResponsePayload,
     ip: string,
-    state: { conn: DeviceConnection | null; isPending: boolean; helloWireguardIp?: string; helloConnectionType?: "wireguard" | "relay" }
+    state: { conn: DeviceConnection | null; isPending: boolean }
   ): Promise<void> {
     const { deviceId, signature } = payload;
     console.log(`[ws] CHALLENGE_RESPONSE for deviceId=${deviceId.slice(0, 8)}…`);
@@ -513,7 +484,7 @@ export class WsServer {
     await devicesService.markOnline(deviceId, ip);
 
     // Create connection (pass WG IP from HELLO to detect active tunnel)
-    const conn = this.addConnection(ws, deviceId, imei, state.helloWireguardIp, state.helloConnectionType);
+    const conn = this.addConnection(ws, deviceId, imei);
     state.conn = conn;
     state.isPending = false;
 
@@ -524,43 +495,6 @@ export class WsServer {
     const verifyInMap = this.connections.has(deviceId);
     console.log(`[ws] Device ${imei.slice(0, 6)}… authenticated. deviceId=${deviceId.slice(0, 8)} inMap=${verifyInMap} mapSize=${this.connections.size}`);
 
-    // Auto-push WireGuard config if device is NOT connected through WG tunnel.
-    // Don't trust HELLO's wireguardIp — it comes from saved config, not actual tunnel state.
-    // Instead, check actual connection IP: 10.21.0.x = through WG/socat, anything else = public.
-    const isViaWg = ip.includes("10.21.0.") || ip.includes("192.168.50.");
-    this.autoPushWgConfig(deviceId, ws, isViaWg ? "via-wg" : undefined).catch(err => {
-      console.warn(`[ws] WG auto-push error for ${deviceId.slice(0,8)}: ${(err as Error).message}`);
-    });
-  }
-
-  // ─── WireGuard auto-push ──────────────────────────────────────────────────
-
-  private async autoPushWgConfig(deviceId: string, ws: WebSocket, reportedWgIp?: string): Promise<void> {
-    // If device already reports an active WG IP, skip push — tunnel is running
-    if (reportedWgIp) {
-      console.log(`[ws] Device ${deviceId.slice(0,8)} already has WG active (${reportedWgIp}) — skipping auto-push`);
-      return;
-    }
-
-    const db = getDb();
-    const row = await db.query(
-      `SELECT wireguard_peer_id, wireguard_ip FROM devices WHERE id = $1`,
-      [deviceId]
-    );
-    const peerId = row.rows[0]?.wireguard_peer_id;
-    if (!peerId) return; // No WG peer assigned — skip
-
-    // Device has a peer assigned. Push config so it can auto-connect.
-    try {
-      const { wireGuardService } = await import("../modules/wireguard/wireguard.service");
-      const config = await wireGuardService.getConfig(peerId);
-      if (config && ws.readyState === WebSocket.OPEN) {
-        this.send(ws, "WG_CONFIG", { config });
-        console.log(`[ws] WG_CONFIG auto-pushed to device ${deviceId.slice(0,8)} (peer ${peerId})`);
-      }
-    } catch (err) {
-      console.warn(`[ws] Failed to fetch WG config for peer ${peerId}: ${(err as Error).message}`);
-    }
   }
 
   // ─── Message handlers ──────────────────────────────────────────────────────
@@ -569,12 +503,7 @@ export class WsServer {
     conn: DeviceConnection,
     payload: HeartbeatPayload
   ): Promise<void> {
-    // Inject connectionType from HELLO into health JSON for dashboard visibility
-    const enrichedHealth = { ...payload.health } as Record<string, unknown>;
-    if (conn.connectionType) {
-      enrichedHealth.connectionType = conn.connectionType;
-    }
-    await devicesService.updateHealth(conn.deviceId, enrichedHealth as unknown as import("../../shared/protocol/messages").DeviceHealth);
+    await devicesService.updateHealth(conn.deviceId, payload.health);
     recordDeviceHealth(conn.deviceId, {
       batteryLevel:      payload.health?.batteryLevel as number | undefined,
       memoryAvailableMb: payload.health?.memoryAvailableMb as number | undefined,
@@ -757,7 +686,7 @@ export class WsServer {
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
-  private addConnection(ws: WebSocket, deviceId: string, imei: string, wireguardIp?: string, connectionType?: "wireguard" | "relay"): DeviceConnection {
+  private addConnection(ws: WebSocket, deviceId: string, imei: string): DeviceConnection {
     // Check if device already has a connection
     const existing = this.connections.get(deviceId);
     if (existing) {
@@ -780,8 +709,6 @@ export class WsServer {
       ws,
       deviceId,
       imei,
-      wireguardIp,
-      connectionType,
       connectedAt: Date.now(),
       lastMessageAt: Date.now(),
       heartbeatInterval: "idle",

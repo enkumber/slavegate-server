@@ -144,12 +144,6 @@ export class DevicesService {
     console.log("[devices] Startup: all devices marked offline — will go online at HELLO");
   }
 
-  async updateWireguardIp(deviceId: string, ip: string): Promise<void> {
-    const db = getDb();
-    await db.query("UPDATE devices SET wireguard_ip = $1 WHERE id = $2", [ip, deviceId]);
-    console.log(`[devices] Updated wireguard_ip for ${deviceId.slice(0,8)}: ${ip}`);
-  }
-
   async updateHealth(deviceId: string, health: DeviceHealth): Promise<void> {
     const db = getDb();
     await db.query(
