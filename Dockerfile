@@ -56,7 +56,7 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 RUN mkdir -p /data && chown appuser:appgroup /data
 USER appuser
 
-EXPOSE 3000
+EXPOSE 21211
 
 # tini handles signal forwarding and zombie reaping
 ENTRYPOINT ["/sbin/tini", "--", "/app/scripts/entrypoint.sh"]
