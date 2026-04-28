@@ -1,0 +1,69 @@
+services:
+  phone-network-server:
+    image: ghcr.io/enkumber/slavegate-server:latest
+    restart: unless-stopped
+    ports:
+      - ${APP_PHONE_NETWORK_PORT:-21211}:21211
+    environment:
+      NODE_ENV: production
+      PORT: 21211
+      DATABASE_URL: >-
+        postgresql://phoneNetwork:${POSTGRES_PASSWORD:-changeme}@phone-network-db:5432/phoneNetwork
+      REDIS_URL: redis://phone-network-redis:6379
+      TRANSPORT_MODE: direct
+      BASE_URL: http://enkzoned.go.ro:21211
+      API_KEY: ${API_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
+      DATA_DIR: /data
+    volumes:
+      - ${APP_DATA_DIR:-./data}/phone-network:/data
+    networks:
+      - default
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    container_name: slavegate-phone-network_phone-network-server_1
+  redis:
+    hostname: phone-network-redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+    container_name: slavegate-phone-network_redis_1
+  postgres:
+    hostname: phone-network-db
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: phoneNetwork
+      POSTGRES_USER: phoneNetwork
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - ${APP_DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U phoneNetwork -d phoneNetwork
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - default
+    container_name: slavegate-phone-network_postgres_1
+networks:
+  default:
+    name: umbrel_main_network
+    external: true
