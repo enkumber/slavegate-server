@@ -675,14 +675,14 @@ export class AgentOrchestrator {
         timeoutMs: 10_000,
       });
       
-      // Send job to device via Nostr
+      // Send job to device via DirectWS
       sendJobToDevice(deviceId, {
         jobId: treeDispatch.jobId,
         type: "ui_tree_dump" as import("../../../shared/protocol/messages").JobType,
         params: {} as Record<string, unknown>,
         timeoutMs: 10_000,
       });
-      const sent = true; // NostrAdapter throws on error, so if we reach here it's sent
+      const sent = true; // sendJobToDevice returns true if sent
       
       if (!sent) {
         console.warn(`[orchestrator] Reddit preamble: sendJob failed, sending back`);

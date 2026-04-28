@@ -641,7 +641,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        // IMPORTANT: Send job to device via Nostr (dispatch only creates DB record)
+        // IMPORTANT: Send job to device via DirectWS (dispatch only creates DB record)
         sendJobToDevice(devId, {
           jobId: job.jobId,
           type: "ui_tree_dump",

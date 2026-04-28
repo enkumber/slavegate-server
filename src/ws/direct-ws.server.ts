@@ -1,12 +1,8 @@
 /**
  * ws/direct-ws.server.ts
- * Direct WebSocket transport — low-latency alternative to Nostr relay.
+ * Direct WebSocket transport for device communication.
  *
  * Designed for phones behind DDNS + port-forward where sub-second latency matters.
- * Operates alongside Nostr transport — selectable via TRANSPORT_MODE env var:
- *   TRANSPORT_MODE=direct     → only DirectWs
- *   TRANSPORT_MODE=nostr      → only Nostr
- *   TRANSPORT_MODE=both       → both active (phones choose)
  *
  * Auth flow:
  *   1. Device connects: ws://host:3000/ws-direct
@@ -21,7 +17,7 @@
  *   Server → Device: { type: "ACK",        ref }
  *   Both ways:       { type: "PING" } / { type: "PONG" }
  *
- * Transport interface compatible with NostrAdapter for drop-in use in routes.ts.
+ * Transport interface compatible with routes.ts.
  */
 
 import { WebSocketServer, WebSocket } from "ws";

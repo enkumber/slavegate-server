@@ -833,7 +833,7 @@ router.post("/ota/push", requireAuth, async (req, res) => {
   });
 });
 
-// NOTE: WireGuard Config Push endpoint REMOVED — WireGuard replaced by Nostr transport
+// NOTE: WireGuard Config Push endpoint REMOVED — WireGuard replaced by DirectWS transport
 
 // ─── WireGuard Provisioning ───────────────────────────────────────────────────
 
@@ -980,18 +980,6 @@ router.get("/wireguard/health", requireAuth, async (_req, res) => {
   const healthy = await wireGuardService.healthCheck();
   res.json({ ok: true, data: { wgEasyReachable: healthy } });
 });
-
-// ─── Nostr Device Enrollment (v2) ────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
 
 // ─── Health check (no auth) ─────────────────────────────────────────────────────────
 

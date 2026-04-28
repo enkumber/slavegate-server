@@ -23,8 +23,6 @@ export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): 
 
 /**
  * Wait for a job result with timeout.
- * Currently only DirectWS supports waiting for results.
- * Nostr results come via callbacks to dispatcherService.
  */
 export function waitForResult(jobId: string, timeoutMs: number): Promise<any> {
   return directWsServer.waitForJobResult(jobId, timeoutMs);
