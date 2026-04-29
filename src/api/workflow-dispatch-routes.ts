@@ -11,7 +11,6 @@
 import { Router, Request, Response } from "express";
 import {
   validateWorkflowDispatch,
-  WorkflowDispatchSchema,
 } from "../modules/workflows/workflow-validator";
 import {
   dispatchWorkflow,
@@ -26,9 +25,9 @@ router.post("/dispatch", async (req: Request, res: Response) => {
   const reqId = Math.random().toString(36).slice(2, 8);
 
   try {
-    // Validate (including body size check)
-    const bodySize = req.socket.bytesRead || 0;
-    const validation = validateWorkflowDispatch(req.body, JSON.stringify(req.body).length);
+    // Validate (including body size check) — single parse, data returned
+    const bodySizeBytes = JSON.stringify(req.body).length;
+    const validation = validateWorkflowDispatch(req.body, bodySizeBytes);
     if (!validation.ok) {
       console.warn(`[workflow-dispatch:${reqId}] Validation failed: ${validation.errors!.join(", ")}`);
       return res.status(400).json({
@@ -38,12 +37,8 @@ router.post("/dispatch", async (req: Request, res: Response) => {
       });
     }
 
-    const parsed = WorkflowDispatchSchema.parse(req.body);
-    const result = await dispatchWorkflow({
-      deviceId: parsed.deviceId,
-      workflow: parsed.workflow,
-      timeoutMs: parsed.timeoutMs,
-    });
+    const { deviceId, workflow, timeoutMs } = validation.data!;
+    const result = await dispatchWorkflow({ deviceId, workflow, timeoutMs });
 
     console.log(`[workflow-dispatch:${reqId}] OK — jobId=${result.jobId}`);
     res.json({ ok: true, ...result });
@@ -93,7 +88,12 @@ router.post("/decide", async (req: Request, res: Response) => {
       context?: Record<string, any>;
     };
 
-    console.log(`[workflow-decide] ${workflowName}/${stepName}`);
+    // Basic validation
+    if (!stepName) {
+      return res.status(400).json({ ok: false, code: "MISSING_STEP_NAME", error: "stepName is required" });
+    }
+
+    console.log(`[workflow-decide] ${workflowName ?? "dynamic"}/${stepName}`);
     const result = decide(workflowName, stepName, context);
     console.log(`[workflow-decide] → action=${result.action}`);
     res.json({ ok: true, ...result });

@@ -66,18 +66,10 @@ export async function dispatchWorkflow(params: DispatchParams) {
     `[workflow-dispatch] Dispatching "${workflow.name}" to ${deviceId.slice(0, 8)} (${workflow.steps.length} steps)`,
   );
 
-  // Dispatch via dispatcher service (workflow_execute handled by device agent)
+  // Dispatch via dispatcher service (creates DB record + sends to device)
   const job = await dispatcherService.dispatch({
     deviceId,
-    type: "open_app" as any, // placeholder — device agent handles workflow natively
-    params: { workflow },
-    timeoutMs,
-  });
-
-  // Send actual workflow to device
-  sendJobToDevice(deviceId, {
-    jobId: job.jobId,
-    type: "open_app" as any,
+    type: "workflow_execute" as any,
     params: { workflow },
     timeoutMs,
   });
@@ -107,20 +99,16 @@ export async function cancelWorkflow(jobId: string) {
     throw Object.assign(new Error("Workflow already cancelled"), { code: "ALREADY_CANCELLED" });
   }
 
-  // Cancel via dispatcher
-  await dispatcherService.cancelJob(jobId);
-
-  // Notify device to cancel
+  // Notify device to cancel (use dedicated cancel signal)
   if (isDeviceOnline(entry.deviceId)) {
     sendJobToDevice(entry.deviceId, {
       jobId,
-      type: "press_key" as any, // signal cancel via press_key (home)
-      params: { key: "home" },
+      type: "cancel_workflow" as any,
+      params: { reason: "cancelled_by_user" },
       timeoutMs: 5000,
     });
   }
 
-  entry.status = "cancelled";
   activeWorkflows.delete(jobId);
 
   console.log(`[workflow-dispatch] Cancelled job ${jobId} (${entry.workflowName})`);
@@ -155,5 +143,6 @@ export function decide(
 
   // Default: continue if no error
   if (ctx.error) return { action: "error", error: ctx.error };
+  console.warn(`[workflow-decide] No pattern matched for step "${stepName}" — defaulting to continue`);
   return { action: "continue" };
 }

@@ -22,9 +22,15 @@ const BLOCKED_PACKAGES = [
   "com.android.settings",
   "com.android.providers.settings",
   "com.android.packageinstaller",
-  "com.google.android.apps.wallet",
-  "com.squareup.pos",
-  "com.paypal.android.p2pmobile",
+  "com.android.vending",           // Play Store
+  "com.android.shell",             // ADB shell
+  "com.termux",                    // Terminal access
+  "com.noshufou.android.su",       // SuperSU
+  "eu.chainfire.supersu",          // SuperSU
+  "com.topjohnwu.magisk",          // Magisk root
+  "com.google.android.apps.wallet", // Google Wallet
+  "com.squareup.pos",              // Square POS
+  "com.paypal.android.p2pmobile",  // PayPal
   "com.banking",
 ];
 
@@ -38,7 +44,7 @@ const WorkflowStepSchema = z.object({
   check: z.string().optional(),
   context: z.record(z.any()).optional(),
   requires: z.array(z.string()).optional(),
-  delay_after: z.number().min(0).max(60000).optional(),
+  delay_after: z.number().min(1).max(60000).optional(),
   optional: z.boolean().optional(),
 });
 
@@ -54,10 +60,7 @@ export const WorkflowDispatchSchema = z.object({
 export type WorkflowDispatchInput = z.infer<typeof WorkflowDispatchSchema>;
 
 // ── Validation result ───────────────────────────────────────────────────────
-export interface ValidationResult {
-  ok: boolean;
-  errors?: string[];
-}
+// ValidationResult moved below — see end of file
 
 // ── Semantic validators ─────────────────────────────────────────────────────
 
@@ -145,13 +148,20 @@ function validateUniqueIds(steps: { id: string }[]): string[] {
 }
 
 // ── Main validation function ────────────────────────────────────────────────
+export interface ValidationResult {
+  ok: boolean;
+  errors?: string[];
+  /** Parsed data — only present when ok=true. Avoids double-parse. */
+  data?: WorkflowDispatchInput;
+}
+
 export function validateWorkflowDispatch(body: unknown, bodySizeBytes: number): ValidationResult {
   // Size check
   if (bodySizeBytes > 65536) {
     return { ok: false, errors: ["Request body exceeds 64KB limit"] };
   }
 
-  // Zod parse
+  // Zod parse (single parse — data returned for caller reuse)
   const parsed = WorkflowDispatchSchema.safeParse(body);
   if (!parsed.success) {
     return {
@@ -168,5 +178,5 @@ export function validateWorkflowDispatch(body: unknown, bodySizeBytes: number): 
     ...detectCycles(steps),
   ];
 
-  return errors.length > 0 ? { ok: false, errors } : { ok: true };
+  return errors.length > 0 ? { ok: false, errors } : { ok: true, data: parsed.data };
 }
