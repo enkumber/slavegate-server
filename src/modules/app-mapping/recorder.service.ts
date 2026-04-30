@@ -29,7 +29,7 @@ import type {
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const DATA_DIR = path.resolve(process.env.APP_MAPS_DIR || path.join(process.env.DATA_DIR || "./data", "app-maps"));
+const DATA_DIR = path.resolve(process.env.DATA_DIR || "/data", "app-maps");
 const TAP_WAIT_MS = 1500;
 const BACK_WAIT_MS = 800;
 const UI_TREE_TIMEOUT = 8000;
