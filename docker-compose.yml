@@ -7,8 +7,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 21211
-      DATABASE_URL: >-
-        postgresql://phoneNetwork:${POSTGRES_PASSWORD:-changeme}@phone-network-db:5432/phoneNetwork
+      DATABASE_URL: postgresql://phoneNetwork:${POSTGRES_PASSWORD}@phone-network-db:5432/phoneNetwork
       REDIS_URL: redis://phone-network-redis:6379
       TRANSPORT_MODE: direct
       BASE_URL: http://enkzoned.go.ro:21211
@@ -20,6 +19,17 @@ services:
       DATA_DIR: /data
     volumes:
       - ${APP_DATA_DIR:-./data}/phone-network:/data
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --spider
+        - --tries=1
+        - http://localhost:21211/
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     networks:
       - default
     depends_on:
@@ -50,7 +60,7 @@ services:
     environment:
       POSTGRES_DB: phoneNetwork
       POSTGRES_USER: phoneNetwork
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ${APP_DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
     healthcheck:
