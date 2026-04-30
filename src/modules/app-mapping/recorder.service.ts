@@ -37,7 +37,7 @@ const LAUNCH_TIMEOUT = 10000;
 const MAX_PAGES = 50;
 const MAX_EXPLORATIONS = 200;
 
-// ─── State ───────────────────────────────────────────────────────────────────
+// ─── State (module-level singleton) ────────────────────────────────────────
 
 let recorderState: RecorderState = { status: "idle", appId: "", deviceId: "", pagesFound: 0, elementsExplored: 0, totalElements: 0, queueRemaining: 0 };
 
@@ -45,6 +45,15 @@ const pageHashMap = new Map<string, string>(); // hash → pageId
 const bfsQueue: ExplorationEntry[] = [];
 let currentMap: AppMap | null = null;
 let stopRequested = false;
+let activeDeviceId: string | null = null;
+
+function resetState(): void {
+  stopRequested = false;
+  bfsQueue.length = 0;
+  pageHashMap.clear();
+  currentMap = null;
+  activeDeviceId = null;
+}
 
 export function getRecorderState(): RecorderState {
   return { ...recorderState };
@@ -81,6 +90,10 @@ async function getUiTree(deviceId: string): Promise<{ nodes: UiTreeNode[]; scree
   const screenWidth = result.output.screenWidth || result.output.width || 1080;
   const screenHeight = result.output.screenHeight || result.output.height || 2400;
 
+  if (screenWidth <= 0 || screenHeight <= 0) {
+    throw new Error(`Invalid screen dimensions: ${screenWidth}x${screenHeight}`);
+  }
+
   return { nodes: Array.isArray(nodes) ? nodes : [], screenWidth, screenHeight };
 }
 
@@ -96,11 +109,16 @@ async function goBack(deviceId: string): Promise<void> {
 }
 
 async function launchApp(deviceId: string, appId: string): Promise<void> {
-  await dispatchAndAwait(deviceId, "launch_app", { package: appId }, LAUNCH_TIMEOUT);
+  await dispatchAndAwait(deviceId, "open_app", { packageName: appId }, LAUNCH_TIMEOUT);
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Sanitize appId to prevent path traversal in file operations. */
+function sanitizeAppId(appId: string): string {
+  return appId.replace(/[^a-zA-Z0-9._-]/g, "");
 }
 
 // ─── Page Management ─────────────────────────────────────────────────────────
@@ -191,10 +209,9 @@ export async function startRecording(deviceId: string, appId: string, appName?: 
   }
 
   // Reset state
-  stopRequested = false;
+  resetState();
   pageCounter = 0;
-  bfsQueue.length = 0;
-  pageHashMap.clear();
+  activeDeviceId = deviceId;
 
   currentMap = {
     appId,
@@ -218,7 +235,8 @@ export async function startRecording(deviceId: string, appId: string, appName?: 
     startedAt: new Date().toISOString(),
   };
 
-  console.log(`[app-mapping] Starting mapping for ${appId} on device ${deviceId.slice(0, 8)}`);
+  const deviceLabel = deviceId.slice(0, 8);
+  console.log(`[app-mapping] Starting mapping for ${appId} on device ${deviceLabel}**`);
 
   try {
     // 1. Launch app
@@ -261,6 +279,7 @@ export async function startRecording(deviceId: string, appId: string, appName?: 
     }
 
     recorderState.status = stopRequested ? "idle" : "idle";
+    activeDeviceId = null;
     console.log(
       `[app-mapping] Done: ${recorderState.pagesFound} pages, ${recorderState.elementsExplored} elements explored`,
     );
@@ -268,6 +287,7 @@ export async function startRecording(deviceId: string, appId: string, appName?: 
     console.error(`[app-mapping] Recording failed: ${err.message}`);
     recorderState.status = "error";
     recorderState.error = err.message;
+    activeDeviceId = null;
   }
 }
 
@@ -282,9 +302,16 @@ async function exploreElement(deviceId: string, entry: ExplorationEntry, explora
   const expectedHash = currentMap.pages[entry.sourcePageId]?.detection.signatureHash;
 
   if (expectedHash && !isSamePage(preHash, expectedHash)) {
-    // We're not on the expected page — try to navigate back
-    console.warn(`[app-mapping] Not on expected page (expected ${entry.sourcePageId}), skipping element`);
-    return;
+    // We're not on the expected page — attempt recovery
+    console.warn(`[app-mapping] Not on expected page (expected ${entry.sourcePageId}), attempting back recovery`);
+    await goBack(deviceId);
+    await sleep(BACK_WAIT_MS);
+    const retryTree = await getUiTree(deviceId);
+    const retryHash = computePageSignature(retryTree.nodes);
+    if (!isSamePage(retryHash, expectedHash)) {
+      console.warn(`[app-mapping] Recovery failed, skipping element ${entry.elementId}`);
+      return;
+    }
   }
 
   // Tap the element
@@ -344,13 +371,15 @@ export function stopRecording(): void {
 
 async function saveMap(map: AppMap): Promise<void> {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  const filePath = path.join(DATA_DIR, `${map.appId}.json`);
+  const safeId = sanitizeAppId(map.appId);
+  const filePath = path.join(DATA_DIR, `${safeId}.json`);
   fs.writeFileSync(filePath, JSON.stringify(map, null, 2), "utf8");
   console.log(`[app-mapping] Saved map to ${filePath}`);
 }
 
 export function loadMap(appId: string): AppMap | null {
-  const filePath = path.join(DATA_DIR, `${appId}.json`);
+  const safeId = sanitizeAppId(appId);
+  const filePath = path.join(DATA_DIR, `${safeId}.json`);
   if (!fs.existsSync(filePath)) return null;
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8")) as AppMap;
@@ -360,7 +389,8 @@ export function loadMap(appId: string): AppMap | null {
 }
 
 export function deleteMap(appId: string): boolean {
-  const filePath = path.join(DATA_DIR, `${appId}.json`);
+  const safeId = sanitizeAppId(appId);
+  const filePath = path.join(DATA_DIR, `${safeId}.json`);
   if (!fs.existsSync(filePath)) return false;
   fs.unlinkSync(filePath);
   return true;

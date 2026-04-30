@@ -32,6 +32,11 @@ router.post("/start", async (req: Request, res: Response) => {
       });
     }
 
+    // Validate deviceId format (UUID or hex string)
+    if (!/^[a-zA-Z0-9_-]+$/.test(deviceId)) {
+      return res.status(400).json({ ok: false, error: "Invalid deviceId format" });
+    }
+
     // Validate appId format
     if (!/^[a-z][a-z0-9_.]+(\.[a-z][a-z0-9_.]+)+$/.test(appId)) {
       return res.status(400).json({
