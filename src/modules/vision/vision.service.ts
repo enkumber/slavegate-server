@@ -18,7 +18,7 @@ import { resolvePrompt, type RequestType } from "./templates/prompt-templates";
 import { AnthropicVisionProvider } from "./providers/anthropic.provider";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.provider";
 import { MiniMaxVisionProvider }    from "./providers/minimax.provider";
-import type { VisionProvider, VisionResult, VerifyResult } from "./vision-provider.interface";
+import type { VisionProvider, VisionResult, VerifyResult, VisionOptions } from "./vision-provider.interface";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -229,6 +229,25 @@ export class VisionService {
   invalidateCache(): void {
     this.cachedProvider = null;
     this.configCachedAt = 0;
+  }
+
+  /**
+   * Analyze screenshot with a custom prompt (for Smart-Path recovery).
+   * Returns raw text response from VLM.
+   */
+  async analyzeCustomPrompt(
+    screenshotBase64: string,
+    prompt: string,
+    options?: VisionOptions
+  ): Promise<string> {
+    const provider = await this.getProvider();
+    const buffer = Buffer.from(screenshotBase64, "base64");
+    const result = await provider.analyze(buffer, prompt, options);
+    return result._rawResponse
+      ? typeof result._rawResponse === "string"
+        ? result._rawResponse as string
+        : JSON.stringify(result._rawResponse)
+      : JSON.stringify(result);
   }
 
   // ─── Token logging ────────────────────────────────────────────────────────

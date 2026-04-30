@@ -23,6 +23,7 @@ import { workflowService } from "./workflow.service";
 import { hbeService } from "../hbe/hbe.service";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
 import { sendJobToDevice, isDeviceOnline } from "../../transport/transport";
+import { directWsServer } from "../../ws/direct-ws.server";
 import { getDb } from "../../db/client";
 import type {
   WorkflowStep,
@@ -219,44 +220,100 @@ async function executeSteps(
   job?: import("bullmq").Job,
   isNested: boolean = false  // true when called from loop/condition (skip checkpoint)
 ): Promise<void> {
-  for (let i = startIndex; i < steps.length; i++) {
-    const step = steps[i];
+  // ── Batch checkpoint recovery ─────────────────────────────────────────────
+  // If resuming from a checkpoint that had an in-progress batch,
+  // load the partial results and resume from the failed step.
+  const cp = checkpoint as unknown as Record<string, unknown>;
+  if (!isNested && cp.batchId) {
+    const batchId = cp.batchId as string;
+    const batchResults = (cp.batchResults as import("../../protocol/batch-types").StepResult[]) ?? [];
+    const nextIdx = cp.nextStepIndex as number | undefined;
 
-    // Check for cancellation before each step
+    if (batchId && nextIdx !== undefined && nextIdx < steps.length) {
+      console.log(`[workflow] ${workflowId}: resuming batch ${batchId.slice(0,8)} from step ${nextIdx} (${batchResults.length} results already collected)`);
+
+      // Find first failed step in batchResults to resume from
+      const firstFailed = batchResults.findIndex(
+        r => r.status === "failed" || r.status === "timeout"
+      );
+
+      if (firstFailed >= 0) {
+        // There was a failure in the partial batch — retry remaining steps
+        const resumeFrom = startIndex + firstFailed;
+        console.log(`[workflow] ${workflowId}: batch had failure at step ${firstFailed} → retry from index ${resumeFrom}`);
+        // Continue execution from the failed step (batchResults already collected for earlier steps)
+        // This effectively skips re-running already-completed steps in the batch
+        // but since device state has advanced, we accept the re-execution risk for retries
+        startIndex = resumeFrom;
+      } else {
+        // No failure in collected results — batch was still running
+        // Resume from nextStepIndex
+        startIndex = nextIdx;
+      }
+    }
+
+    // Clear batch checkpoint fields (don't carry over to next checkpoint)
+    delete cp.batchId;
+    delete cp.batchResults;
+    delete cp.nextStepIndex;
+  }
+
+  // ── Compile steps into batch segments ────────────────────────────────────
+  const segments = compileBatchSegments(steps, startIndex);
+
+  for (const segment of segments) {
+    // ── Cancellation / pause check ─────────────────────────────────────────
     const current = await workflowService.get(workflowId);
     if (current?.status === "cancelled") {
-      console.log(`[workflow] ${workflowId} cancelled at step ${i}`);
+      console.log(`[workflow] ${workflowId} cancelled`);
       return;
     }
     if (current?.status === "paused") {
-      // Re-throw so BullMQ retries after reconnect
-      throw new Error(`Workflow paused at step ${i}`);
+      throw new Error(`Workflow paused`);
     }
 
-    await executeStep(workflowId, deviceId, template, step, checkpoint, i, job);
-
-    // Extend BullMQ lock after each step to prevent timeout during long workflows
-    if (job) {
-      try {
-        await job.extendLock(job.token!, 60000); // Extend lock by 60 seconds
-      } catch (lockErr) {
-        console.warn(`[workflow] ${workflowId} failed to extend lock at step ${i}: ${lockErr}`);
-      }
-    }
-
-    // Checkpoint after each step — ONLY for top-level steps (not nested in loops/conditions)
-    // Nested steps use parent's checkpoint tracked via loopStack
-    if (!isNested) {
-      const saved = await workflowService.saveCheckpoint(
-        workflowId,
-        { ...checkpoint, stepIndex: i + 1, checkpointAt: new Date().toISOString() },
-        i + 1,
-        i
+    if (segment.isBatched) {
+      // ══ BATCH SEGMENT ════════════════════════════════════════════════════
+      // 2+ consecutive batchable steps → execute as one Fast-Path batch
+      await executeBatchSegment(
+        workflowId, deviceId, template, segment, checkpoint, job, isNested
       );
-      if (!saved) {
-        throw new Error(`Checkpoint conflict at step ${i} — aborting (concurrent update)`);
+    } else {
+      // ══ SINGLE STEP ═══════════════════════════════════════════════════════
+      // Control flow, skill actions, singletons → execute individually
+      for (const step of segment.steps) {
+        const segIdx = segment.startIndex + segment.steps.indexOf(step);
+
+        // Cancellation / pause check per step
+        const cur = await workflowService.get(workflowId);
+        if (cur?.status === "cancelled") { return; }
+        if (cur?.status === "paused") { throw new Error(`Workflow paused at step ${segIdx}`); }
+
+        await executeStep(workflowId, deviceId, template, step, checkpoint, segIdx, job);
+
+        // Extend BullMQ lock after each step
+        if (job) {
+          try {
+            await job.extendLock(job.token!, 60000);
+          } catch (lockErr) {
+            console.warn(`[workflow] ${workflowId} failed to extend lock at step ${segIdx}: ${lockErr}`);
+          }
+        }
+
+        // Checkpoint after each step (top-level only)
+        if (!isNested) {
+          const saved = await workflowService.saveCheckpoint(
+            workflowId,
+            { ...checkpoint, stepIndex: segIdx + 1, checkpointAt: new Date().toISOString() },
+            segIdx + 1,
+            segIdx
+          );
+          if (!saved) {
+            throw new Error(`Checkpoint conflict at step ${segIdx} — aborting`);
+          }
+          checkpoint.stepIndex = segIdx + 1;
+        }
       }
-      checkpoint.stepIndex = i + 1;
     }
   }
 }
@@ -718,6 +775,401 @@ async function executeActionStep(
       console.warn(`[workflow] ${workflowId} step ${stepIndex}: screen mismatch (continue_with_warning mode)`);
     }
   }
+}
+
+// ─── Batch segmentation ───────────────────────────────────────────────────────
+
+/**
+ * A segment of steps that can be executed as one batch, or a single control-flow step.
+ */
+export interface BatchSegment {
+  /** Steps in this segment (length === 1 for non-batchable, length >= 1 for batchable) */
+  steps: WorkflowStep[];
+  /** If true: execute as single BATCH_START. If false: execute steps individually. */
+  isBatched: boolean;
+  /** Starting step index in the original workflow steps array */
+  startIndex: number;
+}
+
+/**
+ * Actions that can be executed inside a batch (Fast-Path).
+ * These map directly to BatchStepActionType in batch-types.ts.
+ */
+const BATCHABLE_ACTIONS = new Set([
+  "tap", "type", "swipe", "scroll",
+  "press_back", "press_home", "press_recent",
+  "open_app", "close_app",
+  "keyevent", "long_press", "double_tap",
+]);
+
+/**
+ * Actions that require server-side hooks and cannot be batched.
+ */
+const NON_BATCHABLE_ACTIONS = new Set([
+  "cascade_tap", "ui_tree_dump", "screenshot",
+  "pm_install", "pm_uninstall", "reboot",
+  "ota_update", "screen_detect",
+]);
+
+/**
+ * Check if a workflow action step is batchable (can run Fast-Path in a batch).
+ */
+function isBachableActionStep(step: WorkflowStep): boolean {
+  if (step.type !== "action") return false;
+  const actionStep = step as ActionStep;
+
+  // Must be a batchable action type
+  if (!BATCHABLE_ACTIONS.has(actionStep.action)) return false;
+
+  // Non-batchable action types
+  if (NON_BATCHABLE_ACTIONS.has(actionStep.action)) return false;
+
+  // Cascade tap (target element without explicit coords) → NOT batchable
+  if ((actionStep as { target?: string }).target && !actionStep.x && !actionStep.y) return false;
+
+  // Screen verification required → NOT batchable (needs server-side cascade)
+  if ((actionStep as { expectedScreen?: string }).expectedScreen) return false;
+
+  // Error simulation → NOT batchable (HBE server-side hook)
+  const hasErrorSim = (actionStep.params as Record<string, unknown>)?.["errorSimulation"];
+  if (hasErrorSim) return false;
+
+  // textFromVariable resolution → NOT batchable (server-side)
+  const textFromVar = (actionStep.params as Record<string, unknown>)?.["textFromVariable"];
+  if (textFromVar) return false;
+
+  // Needs retry logic → batched retries complicate state; execute individually
+  if ((actionStep as { retries?: number }).retries && (actionStep as { retries?: number }).retries! > 0) return false;
+
+  return true;
+}
+
+/**
+ * Compile consecutive workflow steps into BatchSegments.
+ *
+ * Rule: group consecutive batchable action steps into segments of size >= 2.
+ * Singletons and non-batchable steps become their own segments.
+ * Control flow steps (condition, loop, checkpoint) are always separate segments.
+ *
+ * Example:
+ *   [tap, tap, condition, tap, tap, tap, wait]
+ *   → [{batched:[tap,tap]}, {batched:false:[condition]},
+ *      {batched:[tap,tap,tap]}, {batched:false:[wait]}]
+ */
+export function compileBatchSegments(steps: WorkflowStep[], startIndex = 0): BatchSegment[] {
+  const segments: BatchSegment[] = [];
+  const slice = steps.slice(startIndex);
+
+  let i = 0;
+  while (i < slice.length) {
+    const step = slice[i];
+
+    // Non-action steps → always their own segment (not batched)
+    if (step.type !== "action") {
+      segments.push({ steps: [step], isBatched: false, startIndex: startIndex + i });
+      i++;
+      continue;
+    }
+
+    // Skill actions → not batched (server-side execution)
+    if (isSkillAction((step as ActionStep).action)) {
+      segments.push({ steps: [step], isBatched: false, startIndex: startIndex + i });
+      i++;
+      continue;
+    }
+
+    // Collect consecutive batchable action steps
+    const batchRun: WorkflowStep[] = [];
+    const batchStartIndex = i;
+
+    while (i < slice.length && isBachableActionStep(slice[i])) {
+      batchRun.push(slice[i]);
+      i++;
+    }
+
+    if (batchRun.length >= 2) {
+      // 2+ consecutive batchable steps → batch segment
+      segments.push({ steps: batchRun, isBatched: true, startIndex: startIndex + batchStartIndex });
+    } else if (batchRun.length === 1) {
+      // Single batchable step → execute individually (overhead not worth a round-trip)
+      segments.push({ steps: batchRun, isBatched: false, startIndex: startIndex + batchStartIndex });
+    }
+    // batchRun.length === 0 → already consumed by the while loop (non-batchable action)
+    // which is handled at the top of the next iteration
+  }
+
+  return segments;
+}
+
+/**
+ * Convert a WorkflowStep (action) to a BatchStep for executeBatchSteps.
+ */
+function workflowStepToBatchStep(step: WorkflowStep, stepId: number): import("../../protocol/batch-types").BatchStep | null {
+  if (step.type !== "action") return null;
+  const ws = step as ActionStep;
+
+  const batchStep: import("../../protocol/batch-types").ActionStep = {
+    id: stepId,
+    type: "action",
+    action: ws.action as import("../../protocol/batch-types").ActionType,
+    target: (ws as { target?: string }).target ?? null,
+    params: {
+      ...(ws.params as Record<string, unknown>),
+      // Resolve explicit coords if present (normalized 0.0-1.0 from workflow)
+      ...(ws.x !== undefined && ws.y !== undefined
+        ? ({ x: ws.x, y: ws.y } as Record<string, unknown>)
+        : {}),
+    } as Record<string, unknown>,
+    verify: (ws as unknown as Record<string, unknown>).verification as import("../../protocol/batch-types").VerificationConfig | null ?? undefined,
+  };
+
+  return batchStep as import("../../protocol/batch-types").BatchStep;
+}
+
+// ─── Batch segment execution ────────────────────────────────────────────────
+
+/**
+ * Execute a batch segment with checkpoint support.
+ *
+ * Flow:
+ *   1. Build BATCH_START from segment steps
+ *   2. Execute via executeBatchSteps()
+ *   3. On success / partial_failure (continueOnError=true): checkpoint + continue
+ *   4. On failure (continueOnError=false): checkpoint with batchResults + throw → retry
+ *   5. On timeout: checkpoint + throw → retry
+ */
+async function executeBatchSegment(
+  workflowId: string,
+  deviceId:   string,
+  template:   WorkflowTemplate,
+  segment:    BatchSegment,
+  checkpoint: WorkflowCheckpoint,
+  job:        import("bullmq").Job | undefined,
+  isNested:   boolean,
+): Promise<void> {
+  const batchId = uuidv4Batch();
+  const stepIndex = segment.startIndex; // global step index of first step in batch
+
+  // Convert workflow steps → batch steps (with 1-based ids matching step position in segment)
+  const batchSteps: import("../../protocol/batch-types").BatchStep[] = [];
+  for (let i = 0; i < segment.steps.length; i++) {
+    const converted = workflowStepToBatchStep(segment.steps[i], i + 1);
+    if (converted) batchSteps.push(converted);
+  }
+
+  // HBE: compute timing for the batch.
+  // Pre-compute post-action delays for the last step only (all other HBE delays
+  // are absorbed into the batch execution on device).
+  const hbeSession = checkpoint.hbeParams as unknown as HbeSessionParams;
+  const lastStep = segment.steps[segment.steps.length - 1] as ActionStep;
+  const hbeLast = hbeService.getActionParams(
+    mapActionToHbeType(lastStep?.action ?? "tap"),
+    hbeSession,
+    { verificationStrategy: "local_only" }
+  );
+
+  const batchTimeoutMs =
+    30_000 * segment.steps.length * 2;
+
+  // Pre-action HBE delay (human micro-pause before batch)
+  if (hbeLast.action.preActionDelayMs > 0) {
+    await sleep(hbeLast.action.preActionDelayMs);
+  }
+
+  let batchResult: import("../../protocol/batch-types").BATCH_RESULT;
+
+  try {
+    batchResult = await executeBatchSteps(deviceId, workflowId, stepIndex, batchSteps, {
+      continueOnError: false, // We handle continueOnError per-step via retry logic
+      timeoutMs: 30_000,
+      batchTimeoutMs,
+    });
+  } catch (err) {
+    // Batch failed to execute (device offline, timeout, network error)
+    // Save checkpoint with batch state for retry
+    if (!isNested) {
+      await workflowService.saveCheckpoint(
+        workflowId,
+        {
+          ...checkpoint,
+          stepIndex: stepIndex, // retry from first step of this batch
+          checkpointAt: new Date().toISOString(),
+        },
+        stepIndex,
+        stepIndex - 1,
+      );
+    }
+    throw err;
+  }
+
+  const { status, results } = batchResult;
+  const failedStepIdx = results.findIndex(
+    r => r.status === "failed" || r.status === "timeout"
+  );
+
+  if (status === "completed") {
+    // All steps succeeded → checkpoint after last step
+    const lastStepIndex = stepIndex + segment.steps.length;
+
+    if (!isNested) {
+      const saved = await workflowService.saveCheckpoint(
+        workflowId,
+        {
+          ...checkpoint,
+          stepIndex: lastStepIndex,
+          checkpointAt: new Date().toISOString(),
+        },
+        lastStepIndex,
+        stepIndex + segment.steps.length - 1,
+      );
+      if (!saved) throw new Error(`Checkpoint conflict after batch — aborting`);
+      checkpoint.stepIndex = lastStepIndex;
+    }
+
+    // Post-batch HBE settle
+    if (hbeLast.action.postActionDelayMs > 0) {
+      await sleep(hbeLast.action.postActionDelayMs);
+    }
+
+    console.log(`[workflow] ${workflowId} batch ${batchId.slice(0,8)} completed: ${results.length} steps`);
+    return;
+  }
+
+  if (status === "partial_failure") {
+    // Some steps failed, but continueOnError=true on device → we got partial results
+    // Log failures and continue to next segment
+    for (const r of results) {
+      if (r.status === "failed") {
+        console.warn(`[workflow] ${workflowId} batch step ${r.id} failed: ${r.error}`);
+      } else if (r.status === "timeout") {
+        console.warn(`[workflow] ${workflowId} batch step ${r.id} timed out`);
+      }
+    }
+
+    const nextStepIndex = stepIndex + segment.steps.length;
+
+    if (!isNested) {
+      const saved = await workflowService.saveCheckpoint(
+        workflowId,
+        {
+          ...checkpoint,
+          stepIndex: nextStepIndex,
+          checkpointAt: new Date().toISOString(),
+        },
+        nextStepIndex,
+        stepIndex + segment.steps.length - 1,
+      );
+      if (!saved) throw new Error(`Checkpoint conflict after partial batch — aborting`);
+      checkpoint.stepIndex = nextStepIndex;
+    }
+
+    // Post-batch HBE settle
+    if (hbeLast.action.postActionDelayMs > 0) {
+      await sleep(hbeLast.action.postActionDelayMs);
+    }
+
+    console.log(`[workflow] ${workflowId} batch ${batchId.slice(0,8)} partial_failure at step ${failedStepIdx} — continuing`);
+    return;
+  }
+
+  // status === "failed" or "timeout": abort the workflow
+  // Save batch state for retry (resume from failed step on next attempt)
+  const failedGlobalIndex = stepIndex + (failedStepIdx >= 0 ? failedStepIdx : 0);
+
+  if (!isNested) {
+    const saved = await workflowService.saveCheckpoint(
+      workflowId,
+      {
+        ...checkpoint,
+        stepIndex: failedGlobalIndex, // retry from this step on next attempt
+        checkpointAt: new Date().toISOString(),
+      },
+      failedGlobalIndex,
+      stepIndex + segment.steps.length - 1,
+    );
+    if (!saved) throw new Error(`Checkpoint conflict on batch failure — aborting`);
+    checkpoint.stepIndex = failedGlobalIndex;
+  }
+
+  const errorMsg =
+    status === "timeout"
+      ? `Batch timeout after ${batchTimeoutMs}ms`
+      : `Batch failed at step ${failedStepIdx + 1} (global=${failedGlobalIndex}): ${
+          results.find(r => r.status === "failed" || r.status === "timeout")?.error ?? "Unknown"
+        }`;
+
+  throw new Error(errorMsg);
+}
+
+// ─── Batch execution (Fast-Path) ────────────────────────────────────────────
+
+/**
+ * Send a BATCH_START to a device and await BATCH_RESULT.
+ *
+ * This replaces multiple individual JOB/JOB_RESULT round-trips with a single
+ * message pair. Used for consecutive steps that don't need server-side decisions.
+ *
+ * @param deviceId   Target device
+ * @param workflowId Workflow ID (for tracking)
+ * @param stepIndex  Starting step index in workflow
+ * @param steps      Array of BatchStep objects (from batch-types.ts)
+ * @param options    Batch options (timeout, continueOnError)
+ * @returns BATCH_RESULT from device
+ */
+export async function executeBatchSteps(
+  deviceId:   string,
+  workflowId: string,
+  stepIndex:  number,
+  steps:      import("../../protocol/batch-types").BatchStep[],
+  options?:   Partial<import("../../protocol/batch-types").BatchOptions>,
+): Promise<import("../../protocol/batch-types").BATCH_RESULT> {
+  const batchId = uuidv4Batch();
+
+  const batchPayload = {
+    type:       "BATCH_START",
+    batchId,
+    workflowId,
+    stepIndex,
+    steps,
+    options: {
+      continueOnError: options?.continueOnError ?? false,
+      timeoutMs:       options?.timeoutMs ?? 30_000,
+      batchTimeoutMs:  options?.batchTimeoutMs ??
+        (options?.timeoutMs ?? 30_000) * steps.length * 2,
+    },
+  };
+
+  const sent = directWsServer.sendBatch(deviceId, batchPayload);
+  if (!sent) {
+    throw new Error(`Device ${deviceId} offline — cannot send batch ${batchId}`);
+  }
+
+  console.log(`[workflow] Batch ${batchId.slice(0,8)} sent to ${deviceId.slice(0,8)}: ${steps.length} steps`);
+
+  const result = await directWsServer.waitForBatchResult(
+    batchId,
+    (batchPayload.options as Record<string, unknown>).batchTimeoutMs as number + 30_000,
+  );
+
+  console.log(`[workflow] Batch ${batchId.slice(0,8)} result: status=${result.status} steps=${result.results.length} totalMs=${result.totalDurationMs}`);
+
+  return {
+    type:       "BATCH_RESULT",
+    batchId:    result.batchId,
+    workflowId: result.workflowId,
+    status:     result.status as import("../../protocol/batch-types").BatchStatus,
+    results:    result.results as import("../../protocol/batch-types").StepResult[],
+    executedAt: result.executedAt,
+  };
+}
+
+/**
+ * Generate a batch UUID (v4).
+ * Uses the same uuid library as the rest of the executor.
+ */
+function uuidv4Batch(): string {
+  const { v4 } = require("uuid");
+  return v4();
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

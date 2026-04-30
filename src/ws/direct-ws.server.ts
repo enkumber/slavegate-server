@@ -57,12 +57,28 @@ interface PendingJob {
   timer:   ReturnType<typeof setTimeout>;
 }
 
+interface PendingBatch {
+  resolve: (result: BatchResult) => void;
+  reject:  (err: Error) => void;
+  timer:   ReturnType<typeof setTimeout>;
+}
+
 interface JobResult {
   jobId:    string;
   success:  boolean;
   status:   string;
   output:   unknown;
   error?:   string;
+}
+
+interface BatchResult {
+  batchId:         string;
+  workflowId:      string;
+  status:          string;
+  results:         unknown[];
+  executedAt:       string;
+  totalDurationMs: number;
+  error?:          string;
 }
 
 // ─── Rate limiter ─────────────────────────────────────────────────────────────
@@ -86,6 +102,7 @@ export class DirectWsServer {
   private wss:          WebSocketServer | null = null;
   private connections = new Map<string, ConnectedDevice>();   // deviceId → conn
   private pendingJobs = new Map<string, PendingJob>();        // jobId → awaiter
+  private pendingBatches = new Map<string, PendingBatch>();   // batchId → awaiter
   private rateLimiter = new RateLimiter();
   private pingTimer:    ReturnType<typeof setInterval> | null = null;
 
@@ -109,6 +126,12 @@ export class DirectWsServer {
       clearTimeout(pending.timer);
       pending.reject(new Error("Server shutting down"));
       this.pendingJobs.delete(jobId);
+    }
+    // Reject all pending batches
+    for (const [batchId, pending] of this.pendingBatches) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Server shutting down"));
+      this.pendingBatches.delete(batchId);
     }
   }
 
@@ -143,6 +166,34 @@ export class DirectWsServer {
         reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       this.pendingJobs.set(jobId, { resolve, reject, timer });
+    });
+  }
+
+  /**
+   * Send a BATCH_START message to a device.
+   * Returns true if sent, false if device not connected.
+   */
+  sendBatch(deviceId: string, batchPayload: Record<string, unknown>): boolean {
+    const conn = this.connections.get(deviceId);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+
+    this._send(conn.ws, batchPayload);
+    const batchId = (batchPayload.batchId as string) ?? "?";
+    console.log(`[direct-ws] sendBatch: device=${deviceId.slice(0,8)} batchId=${batchId.slice(0,8)} steps=${(batchPayload.steps as unknown[])?.length ?? 0}`);
+    return true;
+  }
+
+  /**
+   * Returns a Promise that resolves when BATCH_RESULT arrives for this batchId.
+   * Rejects after timeoutMs (default: 10 min — batches can be long).
+   */
+  waitForBatchResult(batchId: string, timeoutMs = 600_000): Promise<BatchResult> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingBatches.delete(batchId);
+        reject(new Error(`Batch ${batchId} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pendingBatches.set(batchId, { resolve, reject, timer });
     });
   }
 
@@ -232,6 +283,7 @@ export class DirectWsServer {
       // ── Route by type ─────────────────────────────────────────────────
       switch (type) {
         case "JOB_RESULT":   this._handleJobResult(deviceConn, msg);   break;
+        case "BATCH_RESULT": this._handleBatchResult(deviceConn, msg); break;
         case "HEARTBEAT":    await this._handleHeartbeat(deviceConn, msg); break;
         case "PING":         this._send(ws, { type: "PONG" });          break;
         case "PONG":         deviceConn.lastPongAt = Date.now();         break;
@@ -252,6 +304,13 @@ export class DirectWsServer {
           clearTimeout(pending.timer);
           pending.reject(new Error(`Device ${deviceConn!.deviceId} disconnected`));
           this.pendingJobs.delete(jobId);
+        }
+
+        // Reject any pending batches for this device
+        for (const [batchId, pending] of this.pendingBatches) {
+          clearTimeout(pending.timer);
+          pending.reject(new Error(`Device ${deviceConn!.deviceId} disconnected during batch ${batchId}`));
+          this.pendingBatches.delete(batchId);
         }
 
         // Update DB
@@ -455,6 +514,43 @@ export class DirectWsServer {
 
     // ACK
     this._send(conn.ws, { type: "ACK", ref: jobId });
+  }
+
+  // ─── Batch result handler ────────────────────────────────────────────────
+
+  private _handleBatchResult(conn: ConnectedDevice, msg: Record<string, unknown>): void {
+    const batchId = msg.batchId as string;
+    if (!batchId) {
+      console.warn("[direct-ws] BATCH_RESULT missing batchId — ignoring");
+      return;
+    }
+
+    const status = msg.status as string;
+    const results = (msg.results as unknown[]) ?? [];
+    const totalDurationMs = (msg.totalDurationMs as number) ?? 0;
+
+    console.log(`[direct-ws] BATCH_RESULT received: batchId=${batchId.slice(0,8)} status=${status} steps=${results.length} totalMs=${totalDurationMs} device=${conn.deviceId.slice(0,8)}`);
+
+    // Resolve waiting promise
+    const pending = this.pendingBatches.get(batchId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingBatches.delete(batchId);
+      pending.resolve({
+        batchId,
+        workflowId:      msg.workflowId as string ?? "",
+        status,
+        results,
+        executedAt:       msg.executedAt as string ?? new Date().toISOString(),
+        totalDurationMs,
+        error:           msg.error as string | undefined,
+      });
+    } else {
+      console.warn(`[direct-ws] BATCH_RESULT for unknown batchId=${batchId.slice(0,8)} — no pending awaiter`);
+    }
+
+    // ACK
+    this._send(conn.ws, { type: "ACK", ref: batchId });
   }
 
   private async _handleHeartbeat(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {
