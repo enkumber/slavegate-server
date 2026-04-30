@@ -86,15 +86,53 @@ async function getUiTree(deviceId: string): Promise<{ nodes: UiTreeNode[]; scree
     throw new Error("ui_tree_dump returned no output");
   }
 
-  const nodes = result.output.nodes || result.output.tree || result.output;
-  const screenWidth = result.output.screenWidth || result.output.width || 1080;
-  const screenHeight = result.output.screenHeight || result.output.height || 2400;
+  // Android agent returns {uiTree: "<json string>"}
+  let rawOutput = result.output;
+  let parsed: any = null;
+
+  if (typeof rawOutput.uiTree === "string") {
+    try {
+      parsed = JSON.parse(rawOutput.uiTree);
+    } catch {
+      throw new Error("Failed to parse uiTree JSON string");
+    }
+  } else if (typeof rawOutput === "object") {
+    parsed = rawOutput;
+  }
+
+  // Extract nodes — could be array at root or under .children
+  let nodes: any[] = [];
+  if (Array.isArray(parsed)) {
+    nodes = parsed;
+  } else if (parsed?.children && Array.isArray(parsed.children)) {
+    nodes = parsed.children;
+  } else if (parsed && typeof parsed === "object") {
+    // Single root node — wrap it
+    nodes = [parsed];
+  }
+
+  // Extract screen dimensions from root node bounds
+  let screenWidth = 1080;
+  let screenHeight = 2400;
+  if (nodes.length > 0 && nodes[0]?.bounds) {
+    const b = nodes[0].bounds;
+    screenWidth = (b.right || b.left + 1080) - 0; // use absolute values
+    screenHeight = (b.bottom || b.top + 2400) - 0;
+    // bounds are absolute pixels, get max from all top-level nodes
+    for (const n of nodes) {
+      if (n.bounds) {
+        screenWidth = Math.max(screenWidth, n.bounds.right || 0);
+        screenHeight = Math.max(screenHeight, n.bounds.bottom || 0);
+      }
+    }
+  }
 
   if (screenWidth <= 0 || screenHeight <= 0) {
     throw new Error(`Invalid screen dimensions: ${screenWidth}x${screenHeight}`);
   }
 
-  return { nodes: Array.isArray(nodes) ? nodes : [], screenWidth, screenHeight };
+  console.log(`[app-mapping] UI tree: ${nodes.length} root nodes, screen ${screenWidth}x${screenHeight}`);
+  return { nodes, screenWidth, screenHeight };
 }
 
 async function tapElement(deviceId: string, element: ElementDef, screenWidth: number, screenHeight: number): Promise<void> {
