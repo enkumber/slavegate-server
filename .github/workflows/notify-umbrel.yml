@@ -15,7 +15,7 @@ jobs:
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.PAT_UMBREL }}
-          repository: enkumber/phone-network-umbrel
+          repository: enkumber/slavegate
           event-type: server-updated
           client-payload: |
             {
