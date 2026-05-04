@@ -12,10 +12,9 @@
  * 3. Queue empty → save map
  */
 
-import fs from "fs";
-import path from "path";
 import { sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
+import { getDb } from "../../db/client";
 import { computePageSignature, buildPageDetection, isSamePage } from "./page-fingerprint";
 import { filterRelevantElements, generateElementId } from "./element-filter";
 import type {
@@ -29,7 +28,6 @@ import type {
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const DATA_DIR = path.resolve(process.env.DATA_DIR || "/data", "app-maps");
 const TAP_WAIT_MS = 1500;
 const BACK_WAIT_MS = 800;
 const UI_TREE_TIMEOUT = 8000;
@@ -152,11 +150,6 @@ async function launchApp(deviceId: string, appId: string): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Sanitize appId to prevent path traversal in file operations. */
-function sanitizeAppId(appId: string): string {
-  return appId.replace(/[^a-zA-Z0-9._-]/g, "");
 }
 
 // ─── Page Management ─────────────────────────────────────────────────────────
@@ -408,51 +401,61 @@ export function stopRecording(): void {
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
 async function saveMap(map: AppMap): Promise<void> {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const safeId = sanitizeAppId(map.appId);
-  const filePath = path.join(DATA_DIR, `${safeId}.json`);
-  fs.writeFileSync(filePath, JSON.stringify(map, null, 2), "utf8");
-  console.log(`[app-mapping] Saved map to ${filePath}`);
+  const db = getDb();
+  const pageCount = map.pageCount || Object.keys(map.pages).length;
+  const transitionCount = map.transitionCount ?? countTransitions(map);
+
+  await db.query(
+    `INSERT INTO app_maps (app_id, app_name, map_data, version, page_count, transition_count, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (app_id) DO UPDATE SET
+       app_name = EXCLUDED.app_name,
+       map_data = EXCLUDED.map_data,
+       version = EXCLUDED.version,
+       page_count = EXCLUDED.page_count,
+       transition_count = EXCLUDED.transition_count,
+       updated_at = NOW()`,
+    [map.appId, map.appName, JSON.stringify(map), map.version, pageCount, transitionCount],
+  );
+  console.log(`[app-mapping] Saved map for ${map.appId} to database`);
 }
 
-export function loadMap(appId: string): AppMap | null {
-  const safeId = sanitizeAppId(appId);
-  const filePath = path.join(DATA_DIR, `${safeId}.json`);
-  if (!fs.existsSync(filePath)) return null;
+export async function loadMap(appId: string): Promise<AppMap | null> {
+  const db = getDb();
+  const { rows } = await db.query(
+    "SELECT map_data FROM app_maps WHERE app_id = $1",
+    [appId],
+  );
+  if (rows.length === 0) return null;
   try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8")) as AppMap;
+    return typeof rows[0].map_data === "string"
+      ? JSON.parse(rows[0].map_data)
+      : (rows[0].map_data as AppMap);
   } catch {
     return null;
   }
 }
 
-export function deleteMap(appId: string): boolean {
-  const safeId = sanitizeAppId(appId);
-  const filePath = path.join(DATA_DIR, `${safeId}.json`);
-  if (!fs.existsSync(filePath)) return false;
-  fs.unlinkSync(filePath);
-  return true;
+export async function deleteMap(appId: string): Promise<boolean> {
+  const db = getDb();
+  const { rowCount } = await db.query(
+    "DELETE FROM app_maps WHERE app_id = $1",
+    [appId],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
-export function listMaps(): Array<{ appId: string; appName: string; pageCount: number; updatedAt: string }> {
-  if (!fs.existsSync(DATA_DIR)) return [];
-  return fs
-    .readdirSync(DATA_DIR)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => {
-      try {
-        const map = JSON.parse(fs.readFileSync(path.join(DATA_DIR, f), "utf8")) as AppMap;
-        return {
-          appId: map.appId,
-          appName: map.appName,
-          pageCount: map.pageCount || Object.keys(map.pages).length,
-          updatedAt: map.updatedAt,
-        };
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean) as Array<{ appId: string; appName: string; pageCount: number; updatedAt: string }>;
+export async function listMaps(): Promise<Array<{ appId: string; appName: string; pageCount: number; updatedAt: string }>> {
+  const db = getDb();
+  const { rows } = await db.query(
+    "SELECT app_id, app_name, page_count, updated_at FROM app_maps ORDER BY updated_at DESC",
+  );
+  return rows.map((r: any) => ({
+    appId: r.app_id,
+    appName: r.app_name,
+    pageCount: r.page_count,
+    updatedAt: r.updated_at,
+  }));
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

@@ -77,14 +77,14 @@ router.post("/stop", (_req: Request, res: Response) => {
 
 // ─── GET / — List all app maps ───────────────────────────────────────────────
 
-router.get("/", (_req: Request, res: Response) => {
-  const maps = listMaps();
+router.get("/", async (_req: Request, res: Response) => {
+  const maps = await listMaps();
   res.json({ ok: true, maps });
 });
 
 // ─── GET /:appId — Get a specific app map ────────────────────────────────────
 
-router.get("/:appId", (req: Request, res: Response) => {
+router.get("/:appId", async (req: Request, res: Response) => {
   const { appId } = req.params;
 
   // Prevent path traversal
@@ -92,7 +92,7 @@ router.get("/:appId", (req: Request, res: Response) => {
     return res.status(400).json({ ok: false, error: "Invalid appId" });
   }
 
-  const map = loadMap(appId);
+  const map = await loadMap(appId);
   if (!map) {
     return res.status(404).json({ ok: false, error: `Map not found: ${appId}` });
   }
@@ -100,16 +100,16 @@ router.get("/:appId", (req: Request, res: Response) => {
   res.json({ ok: true, map });
 });
 
-// ─── DELETE /:appId — Delete an app map ──────────────────────────────────────
+// ─── DELETE /:appId — Delete an app map ───────────────────────────────────────
 
-router.delete("/:appId", (req: Request, res: Response) => {
+router.delete("/:appId", async (req: Request, res: Response) => {
   const { appId } = req.params;
 
   if (appId.includes("..") || appId.includes("/")) {
     return res.status(400).json({ ok: false, error: "Invalid appId" });
   }
 
-  const deleted = deleteMap(appId);
+  const deleted = await deleteMap(appId);
   if (!deleted) {
     return res.status(404).json({ ok: false, error: `Map not found: ${appId}` });
   }
