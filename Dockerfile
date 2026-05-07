@@ -37,9 +37,10 @@ COPY --from=builder /build/dist ./dist
 COPY --from=builder /build/node_modules ./node_modules
 COPY --from=builder /build/package.json ./package.json
 
-# Copy migration SQL
+# Copy migration SQL — both top-level and src/db/migrations/
 COPY src/db/schema.sql ./schema.sql
 COPY migrations/ ./migrations/
+COPY src/db/migrations/ ./migrations/
 
 # Dashboard static files
 COPY dashboard-dist/ ./dashboard-dist/
