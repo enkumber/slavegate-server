@@ -1,17 +1,12 @@
 #!/bin/bash
 # entrypoint.sh — Phone Network server startup sequence
-set -euo pipefail
-
-echo "[entrypoint] Phone Network v3.0.0 starting..."
+# Migrations are handled by Node.js (db/migrate.ts) at server startup.
+# Shell-based migration removed — it was killing the container on any SQL error.
 
 DATA_DIR="${DATA_DIR:-/data}"
 
-# Run DB migrations (non-blocking — log errors but continue)
-echo "[entrypoint] Running database migrations..."
-/app/scripts/migrate.sh || {
-  echo "[entrypoint] WARNING: Migrations had errors, continuing with server startup..."
-}
+echo "[entrypoint] Phone Network starting..."
+echo "[entrypoint] Migrations will run automatically via Node.js."
 
-# Start the server
-echo "[entrypoint] Starting server on port ${PORT:-21211}..."
+# Start the server (auto-migrate happens inside index.ts before Express starts)
 exec node dist/src/index.js
