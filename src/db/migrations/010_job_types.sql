@@ -6,9 +6,11 @@ ALTER TABLE jobs ADD CONSTRAINT jobs_job_type_check CHECK (job_type IN (
   -- UI Automation
   'tap', 'long_press', 'swipe', 'scroll', 'type_text', 'press_key',
   -- App Control
-  'open_app', 'close_app', 'pm_uninstall',
+  'open_app', 'open_app_fresh', 'close_app', 'pm_uninstall',
   -- Screen
-  'screenshot', 'screen_record', 'ui_tree_dump', 'screen_wake', 'screen_off', 'get_screen_state', 'unlock',
+  'screenshot', 'screenshot_for_vlm', 'screen_record', 'ui_tree_dump', 'screen_wake', 'screen_off', 'get_screen_state', 'unlock',
+  -- Vision / OCR
+  'ocr_find_tap',
   -- Clipboard
   'get_clipboard', 'set_clipboard',
   -- Files
