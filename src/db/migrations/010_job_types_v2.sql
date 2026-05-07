@@ -1,4 +1,5 @@
 -- Migration 010: Add all supported job types to constraint
+-- Safe to re-run: drops old constraint first
 
 ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_job_type_check;
 
