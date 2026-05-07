@@ -26,6 +26,7 @@ import { workflowService } from "./modules/workflows/workflow.service";
 import { bootstrapParsers } from "./modules/data-pipeline/parser-registry";
 import { lifecycleManager } from "./modules/accounts/lifecycle";
 import { canaryService } from "./modules/canary/canary.service";
+import { runMigrations } from "./db/migrate";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
@@ -51,6 +52,10 @@ async function bootstrap(): Promise<void> {
   // ─── Verify DB connection ─────────────────────────────────────────────────
   await getDb().query("SELECT 1");
   console.log("[server] Database connected.");
+
+  // ─── Auto-migrate: ensure all schema + migrations are applied ─────────────
+  await runMigrations();
+  console.log("[server] Migrations applied.");
 
   // ─── Verify Redis connection — required for BullMQ (dispatcher + workflows) ──
   {

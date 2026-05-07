@@ -11,6 +11,7 @@ import {
   loadMap,
   deleteMap,
   listMaps,
+  saveMap,
 } from "./recorder.service";
 
 const router = Router();
@@ -116,5 +117,71 @@ router.delete("/:appId", async (req: Request, res: Response) => {
 
   res.json({ ok: true, deleted: appId });
 });
+
+// ─── POST /upload — Upload a pre-built app map ────────────────────────────
+
+router.post("/upload", async (req: Request, res: Response) => {
+  try {
+    const map = req.body as {
+      appId?: string;
+      appName?: string;
+      version?: string;
+      pages?: Record<string, any>;
+    };
+
+    if (!map?.appId || !map?.pages || Object.keys(map.pages).length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required fields: appId, pages",
+      });
+    }
+
+    // Validate appId format
+    if (!/^[a-z][a-z0-9_.]+(\.[a-z][a-z0-9_.]+)+$/.test(map.appId)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid appId format (expected: com.example.app)",
+      });
+    }
+
+    // Build full AppMap with metadata
+    const fullMap = {
+      appId: map.appId,
+      appName: map.appName || map.appId,
+      version: map.version || "1.0.0",
+      pages: map.pages,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      pageCount: Object.keys(map.pages).length,
+      transitionCount: countTransitions(map.pages),
+    };
+
+    await saveMap(fullMap as any);
+    console.log(`[mapping-routes] Uploaded map for ${map.appId}: ${fullMap.pageCount} pages, ${fullMap.transitionCount} transitions`);
+
+    res.json({
+      ok: true,
+      appId: map.appId,
+      pageCount: fullMap.pageCount,
+      transitionCount: fullMap.transitionCount,
+    });
+  } catch (err: any) {
+    console.error(`[mapping-routes] Upload error: ${err.message}`);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── Helper ──────────────────────────────────────────────────────────────────
+
+function countTransitions(pages: Record<string, any>): number {
+  let count = 0;
+  for (const page of Object.values(pages)) {
+    for (const el of Object.values(page?.elements || {})) {
+      const lt = (el as any)?.leadsTo;
+      if (lt && lt !== "self" && lt !== null) count++;
+    }
+  }
+  return count;
+}
 
 export default router;

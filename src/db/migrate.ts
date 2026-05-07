@@ -1,7 +1,7 @@
 /**
  * db/migrate.ts
  * Applies schema.sql + all migrations/*.sql to the database.
- * Run: npm run db:migrate
+ * Can be run standalone (npm run db:migrate) or called from bootstrap.
  *
  * Each migration is wrapped in its own transaction.
  * If any statement fails, that migration is rolled back (others keep changes).
@@ -9,7 +9,7 @@
 
 import fs from "fs";
 import path from "path";
-import { getDb, closeDb } from "./client";
+import { getDb } from "./client";
 
 async function applyFile(client: any, filePath: string): Promise<void> {
   const sql = fs.readFileSync(filePath, "utf-8").trim();
@@ -32,34 +32,53 @@ async function applyFile(client: any, filePath: string): Promise<void> {
   }
 }
 
-async function migrate(): Promise<void> {
+/**
+ * Run all pending migrations. Called from bootstrap at server startup.
+ * Searches for schema.sql and migrations/ in multiple locations
+ * (dist/src/db/, dist/, and project root) to work in all deployment scenarios.
+ */
+export async function runMigrations(): Promise<void> {
   const db = getDb();
   const client = await db.connect();
-  const srcDir = path.join(__dirname);
+
+  // Search paths: __dirname (dist/src/db/), two levels up (dist/), and project root
+  const searchDirs = [
+    path.join(__dirname),                     // dist/src/db/
+    path.join(__dirname, "..", ".."),         // dist/
+    path.join(__dirname, "..", "..", ".."),   // project root (Docker)
+  ];
 
   try {
-    // 1. Apply schema.sql
-    const schemaPath = path.join(srcDir, "schema.sql");
-    if (fs.existsSync(schemaPath)) {
-      console.log("[migrate] Applying schema.sql...");
-      const sql = fs.readFileSync(schemaPath, "utf-8").trim();
-      if (sql) {
-        await client.query("BEGIN");
-        await client.query(sql);
-        await client.query("COMMIT");
-        console.log("[migrate] schema.sql ✓");
+    for (const baseDir of searchDirs) {
+      // 1. Apply schema.sql
+      const schemaPath = path.join(baseDir, "schema.sql");
+      if (fs.existsSync(schemaPath)) {
+        console.log(`[migrate] Applying schema.sql from ${baseDir}...`);
+        const sql = fs.readFileSync(schemaPath, "utf-8").trim();
+        if (sql) {
+          await client.query("BEGIN");
+          await client.query(sql);
+          await client.query("COMMIT");
+          console.log("[migrate] schema.sql ✓");
+        }
+        break; // found schema, stop searching
       }
     }
 
-    // 2. Apply migration files
-    const migrationsDir = path.join(srcDir, "migrations");
-    if (fs.existsSync(migrationsDir)) {
-      const files = fs.readdirSync(migrationsDir)
-        .filter(f => f.endsWith(".sql"))
-        .sort();
-      console.log(`[migrate] Applying ${files.length} migration files...`);
-      for (const file of files) {
-        await applyFile(client, path.join(migrationsDir, file));
+    for (const baseDir of searchDirs) {
+      // 2. Apply migration files
+      const migrationsDir = path.join(baseDir, "migrations");
+      if (fs.existsSync(migrationsDir)) {
+        const files = fs.readdirSync(migrationsDir)
+          .filter(f => f.endsWith(".sql"))
+          .sort();
+        if (files.length > 0) {
+          console.log(`[migrate] Applying ${files.length} migration files from ${migrationsDir}...`);
+          for (const file of files) {
+            await applyFile(client, path.join(migrationsDir, file));
+          }
+        }
+        break; // found migrations, stop searching
       }
     }
 
@@ -67,11 +86,15 @@ async function migrate(): Promise<void> {
   } finally {
     client.release();
   }
-
-  await closeDb();
 }
 
-migrate().catch((err) => {
-  console.error("[migrate] Fatal:", err.message);
-  process.exit(1);
-});
+// Standalone execution: npm run db:migrate
+if (require.main === module) {
+  const { closeDb } = require("./client");
+  runMigrations()
+    .then(() => (closeDb as any)())
+    .catch((err) => {
+      console.error("[migrate] Fatal:", err.message);
+      process.exit(1);
+    });
+}

@@ -400,7 +400,7 @@ export function stopRecording(): void {
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
-async function saveMap(map: AppMap): Promise<void> {
+export async function saveMap(map: AppMap): Promise<void> {
   const db = getDb();
   const pageCount = map.pageCount || Object.keys(map.pages).length;
   const transitionCount = map.transitionCount ?? countTransitions(map);
