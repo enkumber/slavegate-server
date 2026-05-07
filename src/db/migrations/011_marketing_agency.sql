@@ -160,7 +160,7 @@ CREATE TABLE IF NOT EXISTS navigation_logs (
 
 CREATE INDEX IF NOT EXISTS idx_navigation_logs_device ON navigation_logs(device_id);
 CREATE INDEX IF NOT EXISTS idx_navigation_logs_app ON navigation_logs(app);
-CREATE INDEX IF NOT EXISTS idx_navigation_logs_timestamp ON navigation_logs(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_navigation_logs_timestamp ON navigation_logs(created_at DESC);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- COORDINATE_UPDATES — Actualizări de coordonate învățate de Hydra
