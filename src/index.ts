@@ -17,6 +17,7 @@ import hydraRouter from "./api/hydra-routes";
 import workflowDispatchRoutes from "./api/workflow-dispatch-routes";
 import deviceTokenRouter from "./api/device-tokens.routes";
 import mappingRoutes from "./modules/app-mapping/mapping-routes";
+import { compilerRoutes } from "./modules/workflow-compiler";
 import { getDb, closeDb } from "./db/client";
 import { closeRedis } from "./redis/client";
 import { dispatcherService } from "./modules/dispatcher/dispatcher.service";
@@ -135,6 +136,8 @@ async function bootstrap(): Promise<void> {
   app.use("/api/agency", agencyRouter);
   // Workflow dispatch — MUST be before hydraRouter so /workflow/dispatch matches before /workflow/:name/dispatch
   app.use("/api/hydra/workflow", workflowDispatchRoutes);
+  // Workflow compiler — compile-and-run, compile, run-compiled, compiled/:id
+  app.use("/api/hydra/workflow", compilerRoutes);
   app.use("/api/mapping", mappingRoutes);
   app.use("/api/hydra", hydraRouter);
 
