@@ -1,30 +1,20 @@
 /**
  * utils/llm.ts
  * LLM utilities for text generation tasks.
- * Uses OpenClaw Gateway for LLM calls (no separate API key needed).
+ *
+ * Configurable via env vars:
+ *   LLM_BASE_URL  — OpenAI-compatible endpoint (default: Qwen on GX10)
+ *   LLM_API_KEY   — API key for the endpoint
+ *   LLM_MODEL     — Model name (default: Qwen/Qwen3.5-122B-A10B)
  */
 
-import fs from "fs";
-
 // ═══════════════════════════════════════════════════════════════════════════════
-// GATEWAY CLIENT
+// LLM CLIENT CONFIG
 // ═══════════════════════════════════════════════════════════════════════════════
 
-interface OpenClawConfig {
-  gateway?: {
-    auth?: {
-      token?: string;
-    };
-  };
-}
-
-function getGatewayToken(): string {
-  const configPath = "/data/.openclaw/openclaw.json";
-  const config: OpenClawConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-  const token = config.gateway?.auth?.token;
-  if (!token) throw new Error("OpenClaw gateway token not found in openclaw.json");
-  return token;
-}
+const LLM_BASE_URL = process.env.LLM_BASE_URL || "http://enkzoned.go.ro:12321/v1/chat/completions";
+const LLM_API_KEY = process.env.LLM_API_KEY || "36fad768f6d47ec7da413f201360bb19689f4f8aa@!0347cecc";
+const LLM_MODEL = process.env.LLM_MODEL || "Qwen/Qwen3.5-122B-A10B";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE LLM FUNCTIONS
@@ -36,11 +26,10 @@ function getGatewayToken(): string {
  */
 export async function llmComplete(
   prompt: string,
-  model = "claude-3-5-haiku-20241022",
+  model = "Qwen/Qwen3.5-122B-A10B",
   options?: { max_tokens?: number; system?: string }
 ): Promise<string> {
-  const token = getGatewayToken();
-  const maxTokens = options?.max_tokens ?? 1024;
+  const maxTokens = options?.max_tokens ?? 2048;
 
   const messages: Array<{ role: string; content: string }> = [];
   if (options?.system) {
@@ -48,14 +37,14 @@ export async function llmComplete(
   }
   messages.push({ role: "user", content: prompt });
 
-  const response = await fetch("http://localhost:18790/v1/chat/completions", {
+  const response = await fetch(LLM_BASE_URL, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${LLM_API_KEY}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model,
+      model: model || LLM_MODEL,
       messages,
       max_tokens: maxTokens,
     }),
@@ -63,7 +52,7 @@ export async function llmComplete(
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`OpenClaw Gateway error: ${response.status} ${errText}`);
+    throw new Error(`LLM API error (${response.status}): ${errText}`);
   }
 
   const data = await response.json() as {
@@ -174,7 +163,7 @@ Return ONLY a JSON array of hashtag names WITHOUT the # symbol.
 Example: ["onlyfansmodel", "fanslymodel", "romanianmodel", "boudoirphotography"]`;
 
   try {
-    const hashtags = await llmJson<string[]>(prompt, "claude-3-5-haiku-20241022");
+    const hashtags = await llmJson<string[]>(prompt, "Qwen/Qwen3.5-122B-A10B");
 
     // Validate and normalize
     return hashtags
