@@ -804,7 +804,15 @@ const apkUpload = multer({
  * Upload APK to server. Sets it as the active APK for OTA push.
  * Body: multipart/form-data with "apk" field
  */
-router.post("/ota/upload", requireAuth, apkUpload.single("apk"), async (req, res) => {
+router.post("/ota/upload", requireAuth, (req, res, next) => {
+    apkUpload.single("apk")(req, res, (err) => {
+      if (err) {
+        console.error("[ota/upload] multer error:", err);
+        return res.status(500).json({ ok: false, error: err.message });
+      }
+      next();
+    });
+  }, async (req, res) => {
   const file = (req as any).file as Express.Multer.File | undefined;
   if (!file) {
     return res.status(400).json({ ok: false, error: "No APK file provided. Use 'apk' field." });
