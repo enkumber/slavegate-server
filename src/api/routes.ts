@@ -777,8 +777,9 @@ import nodePath from "path";
 const APK_DIR = nodePath.join(process.cwd(), "apk");
 
 const apkStorage = multer.diskStorage({
-  destination: async (_req: any, _file: any, cb: any) => {
-    await nodeFs.mkdir(APK_DIR, { recursive: true });
+  destination: (_req: any, _file: any, cb: any) => {
+    const fsSync = require("fs");
+    fsSync.mkdirSync(APK_DIR, { recursive: true });
     cb(null, APK_DIR);
   },
   filename: (_req: any, file: any, cb: any) => {
