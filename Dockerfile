@@ -47,7 +47,6 @@ COPY dashboard-dist/ ./dashboard-dist/
 
 # APK directory — bundled from repo
 COPY apk/ ./apk/
-RUN chown -R appuser:appgroup ./apk
 
 # Copy startup scripts
 COPY scripts/ ./scripts/
@@ -56,6 +55,7 @@ RUN chmod +x ./scripts/*.sh
 # Non-root user for security
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 RUN mkdir -p /data && chown appuser:appgroup /data
+RUN chown -R appuser:appgroup ./apk
 USER appuser
 
 EXPOSE 21211
