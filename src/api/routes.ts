@@ -770,18 +770,40 @@ router.patch("/canary/device/:id", requireAuth, async (req, res) => {
 });
 
 // ─── OTA Upload ────────────────────────────────────────────────────────────────
-import { multerSingle } from "../middleware/upload";
-import path from "path";
+import multer from "multer";
 import nodeFs from "fs/promises";
+import nodePath from "path";
 
-const APK_DIR = path.join(process.cwd(), "apk");
+const APK_DIR = nodePath.join(process.cwd(), "apk");
+
+const apkStorage = multer.diskStorage({
+  destination: async (_req: any, _file: any, cb: any) => {
+    await nodeFs.mkdir(APK_DIR, { recursive: true });
+    cb(null, APK_DIR);
+  },
+  filename: (_req: any, file: any, cb: any) => {
+    cb(null, file.originalname || "phone-network.apk");
+  },
+});
+
+const apkUpload = multer({
+  storage: apkStorage,
+  limits: { fileSize: 200 * 1024 * 1024 }, // 200MB
+  fileFilter: (_req: any, file: any, cb: any) => {
+    if (file.originalname.endsWith(".apk")) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only .apk files allowed"));
+    }
+  },
+});
 
 /**
  * POST /api/ota/upload
  * Upload APK to server. Sets it as the active APK for OTA push.
  * Body: multipart/form-data with "apk" field
  */
-router.post("/ota/upload", requireAuth, multerSingle("apk", APK_DIR), async (req, res) => {
+router.post("/ota/upload", requireAuth, apkUpload.single("apk"), async (req, res) => {
   const file = (req as any).file as Express.Multer.File | undefined;
   if (!file) {
     return res.status(400).json({ ok: false, error: "No APK file provided. Use 'apk' field." });
@@ -793,7 +815,7 @@ router.post("/ota/upload", requireAuth, multerSingle("apk", APK_DIR), async (req
   const apkSize = apkBuffer.length;
 
   // Also set as the default APK (phone-network.apk) for OTA push
-  const defaultPath = path.join(APK_DIR, "phone-network.apk");
+  const defaultPath = nodePath.join(APK_DIR, "phone-network.apk");
   if (uploaded !== defaultPath) {
     await nodeFs.copyFile(uploaded, defaultPath);
   }
