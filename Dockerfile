@@ -45,8 +45,8 @@ COPY src/db/migrations/ ./migrations/
 # Dashboard static files
 COPY dashboard-dist/ ./dashboard-dist/
 
-# APK directory — mount or docker cp the APK here
-RUN mkdir -p ./apk
+# APK directory — bundled from repo
+COPY apk/ ./apk/
 
 # Copy startup scripts
 COPY scripts/ ./scripts/

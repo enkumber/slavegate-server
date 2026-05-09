@@ -4,4 +4,5 @@ dist/
 .env
 *.env.*
 .DS_Store
-apk/
+# apk/ builds are tracked for Docker image
+# apk/*.apk
