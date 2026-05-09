@@ -47,6 +47,7 @@ COPY dashboard-dist/ ./dashboard-dist/
 
 # APK directory — bundled from repo
 COPY apk/ ./apk/
+RUN chown -R appuser:appgroup ./apk
 
 # Copy startup scripts
 COPY scripts/ ./scripts/
