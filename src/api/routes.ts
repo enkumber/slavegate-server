@@ -770,58 +770,40 @@ router.patch("/canary/device/:id", requireAuth, async (req, res) => {
 });
 
 // ─── OTA Upload ────────────────────────────────────────────────────────────────
-import multer from "multer";
+import { multerSingle } from "../middleware/upload";
 import path from "path";
-import fs from "fs/promises";
+import nodeFs from "fs/promises";
 
 const APK_DIR = path.join(process.cwd(), "apk");
-
-const apkUpload = multer({
-  storage: multer.diskStorage({
-    destination: async (_req, _file, cb) => {
-      await fs.mkdir(APK_DIR, { recursive: true });
-      cb(null, APK_DIR);
-    },
-    filename: (_req, file, cb) => {
-      // Keep original name or default to phone-network.apk
-      cb(null, file.originalname || "phone-network.apk");
-    },
-  }),
-  limits: { fileSize: 200 * 1024 * 1024 }, // 200MB max
-  fileFilter: (_req, file, cb) => {
-    if (file.originalname.endsWith(".apk")) cb(null, true);
-    else cb(new Error("Only .apk files allowed"));
-  },
-});
 
 /**
  * POST /api/ota/upload
  * Upload APK to server. Sets it as the active APK for OTA push.
  * Body: multipart/form-data with "apk" field
- * Optional fields: "as" (filename to save as, defaults to phone-network.apk)
  */
-router.post("/ota/upload", requireAuth, apkUpload.single("apk"), async (req, res) => {
-  if (!req.file) {
+router.post("/ota/upload", requireAuth, multerSingle("apk", APK_DIR), async (req, res) => {
+  const file = (req as any).file as Express.Multer.File | undefined;
+  if (!file) {
     return res.status(400).json({ ok: false, error: "No APK file provided. Use 'apk' field." });
   }
 
-  const uploaded = req.file.path;
-  const apkBuffer = await fs.readFile(uploaded);
+  const uploaded = file.path;
+  const apkBuffer = await nodeFs.readFile(uploaded);
   const apkSha256 = crypto.createHash("sha256").update(apkBuffer).digest("hex");
   const apkSize = apkBuffer.length;
 
   // Also set as the default APK (phone-network.apk) for OTA push
   const defaultPath = path.join(APK_DIR, "phone-network.apk");
   if (uploaded !== defaultPath) {
-    await fs.copyFile(uploaded, defaultPath);
+    await nodeFs.copyFile(uploaded, defaultPath);
   }
 
-  console.log(`[ota] APK uploaded: ${req.file.originalname} (${(apkSize / 1024 / 1024).toFixed(1)}MB) sha256=${apkSha256.slice(0, 12)}…`);
+  console.log(`[ota] APK uploaded: ${file.originalname} (${(apkSize / 1024 / 1024).toFixed(1)}MB) sha256=${apkSha256.slice(0, 12)}…`);
 
   res.json({
     ok: true,
     data: {
-      filename: req.file.originalname,
+      filename: file.originalname,
       size: apkSize,
       sha256: apkSha256,
       setAsDefault: true,
