@@ -102,7 +102,7 @@ function isRelevantElement(node: UiTreeNode, parentClassName: string, depth: num
   if (isDynamicContainer(parentClassName)) return false;
 
   // Skip very deep elements (likely dynamic content)
-  if (depth > 8) return false;
+  if (depth > 20) return false;
 
   // Skip elements with generic or empty content (probably decorative)
   const hasContent =
