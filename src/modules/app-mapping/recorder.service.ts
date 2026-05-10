@@ -31,7 +31,7 @@ import type {
 const TAP_WAIT_MS = 1500;
 const BACK_WAIT_MS = 800;
 const UI_TREE_TIMEOUT = 8000;
-const LAUNCH_TIMEOUT = 10000;
+const LAUNCH_TIMEOUT = 25000;
 const MAX_PAGES = 50;
 const MAX_EXPLORATIONS = 200;
 
