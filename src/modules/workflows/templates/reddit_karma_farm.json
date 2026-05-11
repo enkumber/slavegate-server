@@ -1,0 +1,392 @@
+{
+  "id": "reddit_karma_farm",
+  "name": "Reddit Karma Farm",
+  "platform": "reddit",
+  "description": "Navighează pe r/AskReddit, găsește postări cu potențial, generează comentarii dramatice/helpful/funny pentru a crește karma. Comentariu per run.",
+  "version": "1.0.0",
+  "defaultVerificationStrategy": "local_with_screenshot",
+  "dataRetentionDays": 30,
+  "steps": [
+    {
+      "type": "action",
+      "id": "wake_screen",
+      "action": "screen_wake",
+      "params": {},
+      "verification": "local_only",
+      "retries": 1,
+      "timeoutMs": 5000
+    },
+    {
+      "type": "wait",
+      "id": "wait_screen_on",
+      "duration": {
+        "min": 500,
+        "max": 1000,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "unlock_device",
+      "action": "unlock",
+      "params": {},
+      "verification": "local_only",
+      "retries": 2,
+      "timeoutMs": 10000
+    },
+    {
+      "type": "wait",
+      "id": "wait_unlock",
+      "duration": {
+        "min": 500,
+        "max": 1500,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "open_reddit",
+      "action": "open_app",
+      "params": {
+        "packageName": "com.reddit.frontpage"
+      },
+      "verification": "local_only",
+      "retries": 2,
+      "timeoutMs": 15000,
+      "expectedScreen": "home_feed",
+      "screenConfidenceThreshold": 0.70,
+      "screenMismatchPolicy": {
+        "maxRetries": 3,
+        "delayMs": 2000,
+        "action": "retry_step"
+      }
+    },
+    {
+      "type": "wait",
+      "id": "wait_feed_load",
+      "duration": {
+        "min": 2000,
+        "max": 3000,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "navigate_to_askreddit",
+      "action": "tap",
+      "target": "top.search",
+      "verification": "local_only",
+      "retries": 2
+    },
+    {
+      "type": "wait",
+      "id": "wait_search_open",
+      "duration": {
+        "min": 800,
+        "max": 1200,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "type_askreddit",
+      "action": "type_text",
+      "params": {
+        "text": "AskReddit"
+      },
+      "verification": "local_only",
+      "timeoutMs": 10000
+    },
+    {
+      "type": "wait",
+      "id": "wait_search_results",
+      "duration": {
+        "min": 1500,
+        "max": 2500,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "tap_askreddit_result",
+      "action": "tap",
+      "target": "search.result",
+      "params": {
+        "textMatch": "r/AskReddit"
+      },
+      "verification": "local_with_screenshot",
+      "retries": 2,
+      "expectedScreen": "subreddit",
+      "screenConfidenceThreshold": 0.65
+    },
+    {
+      "type": "wait",
+      "id": "wait_subreddit_load",
+      "duration": {
+        "min": 1500,
+        "max": 2500,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "init_variables",
+      "action": "set_variable",
+      "params": {
+        "variables": {
+          "scroll_count": 0,
+          "max_scrolls": 8,
+          "comment_posted": false
+        }
+      }
+    },
+    {
+      "type": "action",
+      "id": "find_and_comment_loop",
+      "action": "run_loop",
+      "params": {
+        "maxIterations": 8,
+        "exitConditions": [
+          "comment_posted == true",
+          "scroll_count >= max_scrolls"
+        ],
+        "steps": [
+          {
+            "type": "wait",
+            "id": "read_pause",
+            "duration": {
+              "min": 2500,
+              "max": 5000,
+              "distribution": "lognormal",
+              "mean": 3500
+            }
+          },
+          {
+            "type": "action",
+            "id": "analyze_post",
+            "action": "vlm_analyze_post_for_comment",
+            "params": {
+              "target_variable": "post_analysis",
+              "platform": "reddit",
+              "subreddit": "AskReddit",
+              "criteria": "Post should be a question that invites personal stories, dramatic experiences, or helpful advice. Skip meta posts, reposts, or posts with >500 comments already."
+            }
+          },
+          {
+            "type": "action",
+            "id": "branch_on_good_post",
+            "action": "branch_on_decision",
+            "params": {
+              "condition": "_good_post_found == true",
+              "if_true_steps": [
+                {
+                  "type": "action",
+                  "id": "tap_post",
+                  "action": "tap",
+                  "target": "post.card",
+                  "verification": "local_with_screenshot",
+                  "retries": 2,
+                  "expectedScreen": "post_detail",
+                  "screenConfidenceThreshold": 0.65,
+                  "screenMismatchPolicy": {
+                    "maxRetries": 2,
+                    "delayMs": 1000,
+                    "action": "continue_with_warning"
+                  }
+                },
+                {
+                  "type": "wait",
+                  "id": "wait_post_load",
+                  "duration": {
+                    "min": 1500,
+                    "max": 2500,
+                    "distribution": "uniform"
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "scroll_to_comment_area",
+                  "action": "scroll",
+                  "params": {
+                    "direction": "up",
+                    "distanceRatio": 0.3
+                  },
+                  "verification": "local_only"
+                },
+                {
+                  "type": "wait",
+                  "id": "wait_scroll_settle",
+                  "duration": {
+                    "min": 800,
+                    "max": 1200,
+                    "distribution": "uniform"
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "read_existing_comments",
+                  "action": "vlm_read_comments",
+                  "params": {
+                    "target_variable": "_existing_comments_summary",
+                    "max_comments": 5
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "generate_comment",
+                  "action": "vlm_generate_comment",
+                  "params": {
+                    "post_title_var": "_post_title",
+                    "existing_comments_var": "_existing_comments_summary",
+                    "target_variable": "_generated_comment",
+                    "platform": "reddit",
+                    "subreddit": "AskReddit",
+                    "max_chars": 500,
+                    "tone": "Mix of these styles (pick the one that fits the post best): 1) DRAMATIC personal story with plot twist 2) genuinely HELPFUL advice from experience 3) FUNNY unexpected take. Write naturally like a real Reddit user — casual, no emojis unless ironic, short paragraphs. Never sound like AI. Match the vibe of the post.",
+                    "language": "english"
+                  }
+                },
+                {
+                  "type": "wait",
+                  "id": "pause_before_comment",
+                  "duration": {
+                    "min": 1000,
+                    "max": 2000,
+                    "distribution": "uniform"
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "tap_add_comment",
+                  "action": "tap",
+                  "target": "post.add_comment",
+                  "verification": "local_only",
+                  "retries": 3
+                },
+                {
+                  "type": "wait",
+                  "id": "wait_compose_open",
+                  "duration": {
+                    "min": 800,
+                    "max": 1500,
+                    "distribution": "uniform"
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "type_comment",
+                  "action": "type_text",
+                  "params": {
+                    "textFromVariable": "_generated_comment"
+                  },
+                  "verification": "local_only",
+                  "timeoutMs": 20000
+                },
+                {
+                  "type": "wait",
+                  "id": "pause_after_typing",
+                  "duration": {
+                    "min": 800,
+                    "max": 1500,
+                    "distribution": "uniform"
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "tap_post_button",
+                  "action": "tap",
+                  "target": "compose.post_button",
+                  "verification": "local_with_screenshot",
+                  "retries": 2
+                },
+                {
+                  "type": "wait",
+                  "id": "wait_comment_posted",
+                  "duration": {
+                    "min": 2000,
+                    "max": 3000,
+                    "distribution": "uniform"
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "mark_comment_posted",
+                  "action": "set_variable",
+                  "params": {
+                    "variables": {
+                      "comment_posted": true
+                    }
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "log_success",
+                  "action": "append_to_list",
+                  "params": {
+                    "list": "comments_posted",
+                    "item_from_vars": {
+                      "post_title": "_post_title",
+                      "comment": "_generated_comment",
+                      "subreddit": "AskReddit"
+                    }
+                  }
+                }
+              ],
+              "if_false_steps": [
+                {
+                  "type": "action",
+                  "id": "scroll_feed",
+                  "action": "scroll",
+                  "params": {
+                    "direction": "up",
+                    "distanceRatio": 0.6
+                  },
+                  "verification": "local_only"
+                },
+                {
+                  "type": "action",
+                  "id": "increment_scroll",
+                  "action": "increment",
+                  "params": {
+                    "variable": "scroll_count"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "checkpoint",
+      "id": "pre_close_checkpoint",
+      "reason": "Comment cycle complete - save state"
+    },
+    {
+      "type": "wait",
+      "id": "final_pause",
+      "duration": {
+        "min": 1000,
+        "max": 2000,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "go_home",
+      "action": "tap",
+      "target": "nav.home",
+      "verification": "local_only",
+      "retries": 1
+    },
+    {
+      "type": "wait",
+      "id": "wait_home",
+      "duration": {
+        "min": 500,
+        "max": 1000,
+        "distribution": "uniform"
+      }
+    }
+  ]
+}
