@@ -60,7 +60,7 @@ const ALLOWED_JOB_TYPES = new Set<JobType>([
 const ROOT_COMMANDS = new Set<JobType>(["pm_uninstall", "reboot", "ota_update"]);
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-const MAX_TIMEOUT_MS = 300_000;
+const MAX_TIMEOUT_MS = 600_000;
 
 export class DispatcherService {
   private queues = new Map<string, Queue>();
