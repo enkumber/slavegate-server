@@ -46,6 +46,7 @@ const ALLOWED_JOB_TYPES = new Set<JobType>([
   "pm_uninstall",    // requires confirmRoot=true
   "reboot",          // requires confirmRoot=true
   "ota_update",      // signed APK — routes through full audit pipeline
+  "workflow_execute" as unknown as JobType, // server-side workflow engine
   // Skill system
   "skill_tap",       // tap at normalized coords from skill
   "a11y_find_tap",   // find element via A11y and tap
