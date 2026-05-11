@@ -10,6 +10,7 @@
 import { getLlmClient } from "./llm-client";
 import { agentConfig } from "../../config/agents.config";
 import { PLANNER_SYSTEM_PROMPT, buildPlannerUserPrompt } from "./prompts/planner.prompt";
+import { loadSystemPrompt } from "../../api/config-routes";
 import { extractJson } from "../../utils/json-extract";
 import type { PlannerInput, PlannerOutput, LlmContent } from "./types";
 
@@ -73,9 +74,16 @@ export class PlannerAgent {
 
     console.log(`[planner] Step 2: Planning task "${input.task}" for ${input.appContext} (text-only)`);
 
+    // Load system prompt from DB (runtime-editable), fallback to hardcoded
+    let systemPrompt = await loadSystemPrompt("planner_system_prompt");
+    if (!systemPrompt) {
+      console.log("[planner] No DB prompt found, using hardcoded fallback");
+      systemPrompt = PLANNER_SYSTEM_PROMPT;
+    }
+
     const response = await llm.complete({
       model: agentConfig.planner.model,
-      systemPrompt: PLANNER_SYSTEM_PROMPT,
+      systemPrompt,
       userContent,
       temperature: agentConfig.planner.temperature,
       maxTokens: agentConfig.planner.maxTokens,
