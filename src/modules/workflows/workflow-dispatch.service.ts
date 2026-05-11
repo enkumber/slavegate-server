@@ -14,7 +14,7 @@ const PRE_WORKFLOW_TYPES = new Set(["screen_wake", "unlock"]);
 async function runPreWorkflowSteps(
   deviceId: string,
   steps: any[],
-): Promise<{ remaining: any[]; preResults: Record<string, any> } {
+): Promise<{ remaining: any[]; preResults: Record<string, any> }> {
   const preResults: Record<string, any> = {};
   const remaining: any[] = [];
   let extracting = true;
