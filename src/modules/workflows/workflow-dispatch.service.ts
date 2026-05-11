@@ -66,13 +66,26 @@ export async function dispatchWorkflow(params: DispatchParams) {
     `[workflow-dispatch] Dispatching "${workflow.name}" to ${deviceId.slice(0, 8)} (${workflow.steps.length} steps)`,
   );
 
-  // Dispatch via dispatcher service (creates DB record + sends to device)
+  // 1. Create DB record via dispatcher service (audit + timeout tracking)
   const job = await dispatcherService.dispatch({
     deviceId,
     type: "workflow_execute" as any,
     params: { workflow },
     timeoutMs,
   });
+
+  // 2. Send to device via WebSocket (dispatcher only does DB + BullMQ)
+  const sent = sendJobToDevice(deviceId, {
+    jobId: job.jobId,
+    type: "workflow_execute" as any,
+    params: { workflow },
+    timeoutMs,
+  });
+
+  if (!sent) {
+    console.warn(`[workflow-dispatch] WebSocket send failed for ${job.jobId} — device may have gone offline`);
+    // Don't throw — dispatcher timeout handler will catch it
+  }
 
   // Track
   activeWorkflows.set(job.jobId, {
