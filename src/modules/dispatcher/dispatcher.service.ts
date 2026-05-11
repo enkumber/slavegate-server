@@ -50,6 +50,7 @@ const ALLOWED_JOB_TYPES = new Set<JobType>([
   // Skill system
   "skill_tap",       // tap at normalized coords from skill
   "a11y_find_tap",   // find element via A11y and tap
+  "cascade_tap" as unknown as JobType,    // VLM-guided tap: screenshot → VLM coords → tap
   "ocr_find_tap",    // find text via ML Kit OCR and tap (cascade Level 3)
   // Screen Detection Cascade (US-SCREEN-CASCADE)
   "ocr_full", // Full-screen ML Kit OCR → all text blocks (implemented by SPARK S-SD-01)
