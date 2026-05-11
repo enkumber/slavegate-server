@@ -3,8 +3,64 @@
  * Shared service for workflow dispatch, cancellation, rate limiting, and decisions.
  */
 
-import { sendJobToDevice, isDeviceOnline } from "../../transport/transport";
+import { sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
+
+// ── Pre-workflow steps (sent as individual jobs before workflow) ────────────
+// Device-side workflow executor may not handle these correctly,
+// so we extract them and send via the proven individual job path.
+const PRE_WORKFLOW_TYPES = new Set(["screen_wake", "unlock"]);
+
+async function runPreWorkflowSteps(
+  deviceId: string,
+  steps: any[],
+): Promise<{ remaining: any[]; preResults: Record<string, any> } {
+  const preResults: Record<string, any> = {};
+  const remaining: any[] = [];
+  let extracting = true;
+
+  for (const step of steps) {
+    if (extracting && PRE_WORKFLOW_TYPES.has(step.type)) {
+      // Send as individual job (works reliably)
+      const { jobId } = await dispatcherService.dispatch({
+        deviceId,
+        type: step.type as any,
+        params: step.params ?? step,
+        timeoutMs: 15_000,
+      });
+      const sent = sendJobToDevice(deviceId, {
+        jobId,
+        type: step.type as any,
+        params: step.params ?? {},
+        timeoutMs: 15_000,
+      });
+
+      if (sent) {
+        try {
+          const result = await waitForResult(jobId, 15_000);
+          preResults[step.id ?? step.type] = result;
+          console.log(`[workflow-dispatch] Pre-step ${step.type}: ${result?.success ? "ok" : JSON.stringify(result)?.slice(0, 100)}`);
+        } catch (e: any) {
+          console.warn(`[workflow-dispatch] Pre-step ${step.type} timed out: ${e.message}`);
+          preResults[step.id ?? step.type] = { status: "timeout" };
+        }
+      } else {
+        console.warn(`[workflow-dispatch] Pre-step ${step.type}: device offline`);
+        preResults[step.id ?? step.type] = { status: "device_offline" };
+      }
+
+      // Insert a wait step after unlock for the device to settle
+      if (step.type === "unlock") {
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    } else {
+      extracting = false;
+      remaining.push(step);
+    }
+  }
+
+  return { remaining, preResults };
+}
 
 // ── Rate limiter (in-memory, per-device) ────────────────────────────────────
 const RATE_WINDOW_MS = 60_000;
@@ -66,25 +122,35 @@ export async function dispatchWorkflow(params: DispatchParams) {
     `[workflow-dispatch] Dispatching "${workflow.name}" to ${deviceId.slice(0, 8)} (${workflow.steps.length} steps)`,
   );
 
-  // 1. Create DB record via dispatcher service (audit + timeout tracking)
+  // 1. Extract screen_wake + unlock and send as individual jobs
+  const { remaining, preResults } = await runPreWorkflowSteps(deviceId, workflow.steps);
+
+  if (remaining.length === 0) {
+    // All steps were pre-workflow, nothing left to send as workflow
+    console.log(`[workflow-dispatch] All steps handled as pre-workflow jobs`);
+    const jobId = `pre-${Date.now()}`;
+    return { jobId, workflowName: workflow.name, status: "completed", preResults };
+  }
+
+  // 2. Create DB record for the remaining workflow steps
+  const workflowWithRemaining = { ...workflow, steps: remaining };
   const job = await dispatcherService.dispatch({
     deviceId,
     type: "workflow_execute" as any,
-    params: { workflow },
+    params: { workflow: workflowWithRemaining },
     timeoutMs,
   });
 
-  // 2. Send to device via WebSocket (dispatcher only does DB + BullMQ)
+  // 3. Send remaining workflow to device via WebSocket
   const sent = sendJobToDevice(deviceId, {
     jobId: job.jobId,
     type: "workflow_execute" as any,
-    params: { workflow },
+    params: { workflow: workflowWithRemaining },
     timeoutMs,
   });
 
   if (!sent) {
     console.warn(`[workflow-dispatch] WebSocket send failed for ${job.jobId} — device may have gone offline`);
-    // Don't throw — dispatcher timeout handler will catch it
   }
 
   // Track
