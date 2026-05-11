@@ -329,6 +329,7 @@ export type JobType =
   | "skill_tap"       // tap at normalized coords from skill
   | "a11y_find_tap"   // find element via A11y and tap
   | "ocr_find_tap"    // find text via ML Kit OCR and tap
+  | "cascade_tap"     // VLM-guided tap: screenshot → VLM finds coords → tap
   // Screen detection cascade
   | "ocr_full"       // full-screen ML Kit OCR — returns all blocks, fullText, bounds
   // Workflow execution
