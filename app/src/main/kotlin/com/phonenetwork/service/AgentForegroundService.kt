@@ -126,6 +126,7 @@ class AgentForegroundService : Service() {
                     },
                     onDisconnected = {
                         Log.i(TAG, "DirectWs disconnected")
+                        updateNotification("Disconnected — reconnecting…")
                     },
                     onOtaUpdate = { version, versionCode, apkUrl, apkSha256, mandatory ->
                         Log.i(TAG, "OTA update available: $version (code=$versionCode)")

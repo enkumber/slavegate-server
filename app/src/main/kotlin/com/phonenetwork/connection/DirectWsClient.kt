@@ -2,6 +2,10 @@ package com.phonenetwork.connection
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.provider.Settings
 import android.util.Log
 import com.phonenetwork.executor.BatchExecutor
@@ -108,13 +112,15 @@ class DirectWsClient(
         private const val PREF_DEVICE_ID = "direct_ws_device_id"
         private const val PREF_ENABLED = "direct_ws_enabled"
 
+        private const val PING_INTERVAL_MS      = 15_000L
+        private const val PONG_TIMEOUT_MS       = 10_000L   // 10s timeout per spec
         private const val HEARTBEAT_INTERVAL_MS = 30_000L
-        private const val PING_INTERVAL_MS      = 30_000L
-        private const val PONG_TIMEOUT_MS       = 90_000L
         private const val AUTH_TIMEOUT_MS       = 15_000L
 
         private const val RECONNECT_BASE_MS     = 1_000L
         private const val RECONNECT_MAX_MS      = 60_000L
+        private const val RECONNECT_MAX_ATTEMPTS = 10
+        private const val SERVER_HEALTH_POLL_MS  = 60_000L
     }
 
     private val prefs: SharedPreferences =
@@ -133,8 +139,15 @@ class DirectWsClient(
     private var pingJob: Job? = null
     private var reconnectJob: Job? = null
 
-    @Volatile private var lastPongAt = System.currentTimeMillis()
+    @Volatile private var lastPongAt = 0L
+    @Volatile private var lastPingSentAt = 0L
     @Volatile private var active = true  // set to false on explicit disconnect()
+    @Volatile private var consecutiveReconnectAttempts = 0
+    @Volatile private var lastServerUrl: String? = null
+    @Volatile private var lastDeviceKey: String? = null
+
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var healthPollJob: Job? = null
 
     // ─── Public API ───────────────────────────────────────────────────────────
 
@@ -152,7 +165,11 @@ class DirectWsClient(
             return
         }
         active = true
+        lastServerUrl = url
+        lastDeviceKey = key
         doConnect(url, key)
+        registerNetworkCallback()
+        startHealthPoll()
     }
 
     fun disconnect() {
@@ -160,13 +177,24 @@ class DirectWsClient(
         heartbeatJob?.cancel(); heartbeatJob = null
         pingJob?.cancel();      pingJob = null
         reconnectJob?.cancel(); reconnectJob = null
+        healthPollJob?.cancel(); healthPollJob = null
+        unregisterNetworkCallback()
         ws?.close(1000, "Disconnecting"); ws = null
         authenticated = false
+        lastPingSentAt = 0L
+        lastPongAt = 0L
+        consecutiveReconnectAttempts = 0
     }
 
-    fun isConnected(): Boolean = authenticated && ws?.let {
-        it.queueSize() >= 0  // throws if closed, returns 0+ if open
-    } ?: false
+    fun isConnected(): Boolean {
+        val ws = ws ?: return false
+        if (!authenticated) return false
+        // Check PONG timeout (15s + 2s grace)
+        if (lastPingSentAt > lastPongAt && System.currentTimeMillis() - lastPingSentAt > PONG_TIMEOUT_MS + 2_000L) {
+            return false
+        }
+        return true
+    }
 
     // ─── Connection ───────────────────────────────────────────────────────────
 
@@ -254,6 +282,7 @@ class DirectWsClient(
                 }
                 authenticated = true
                 reconnectDelay = RECONNECT_BASE_MS  // reset backoff
+                consecutiveReconnectAttempts = 0
                 Log.i(TAG, "AUTH_OK — deviceId=$deviceId")
                 startKeepalive(webSocket)
                 onConnected(deviceId)
@@ -284,6 +313,10 @@ class DirectWsClient(
             "PONG" -> {
                 lastPongAt = System.currentTimeMillis()
                 Log.d(TAG, "PONG received")
+            }
+
+            "HEARTBEAT_ACK" -> {
+                Log.d(TAG, "HEARTBEAT_ACK received")
             }
 
             "ACK" -> Log.d(TAG, "ACK: ${msg.optString("ref")}")
@@ -408,25 +441,32 @@ class DirectWsClient(
     private fun startKeepalive(webSocket: WebSocket) {
         stopKeepalive()
 
-        // HEARTBEAT every 30s
+        // Unified heartbeat + ping/pong in single loop
         heartbeatJob = scope.launch {
-            while (isActive) {
-                delay(HEARTBEAT_INTERVAL_MS)
-                sendHeartbeat(webSocket)
-            }
-        }
-
-        // PING every 30s + PONG timeout check
-        pingJob = scope.launch {
+            var pingCounter = 0
             while (isActive) {
                 delay(PING_INTERVAL_MS)
-                val timeSincePong = System.currentTimeMillis() - lastPongAt
-                if (timeSincePong > PONG_TIMEOUT_MS) {
-                    Log.e(TAG, "PONG timeout (${timeSincePong}ms) — closing zombie connection")
-                    webSocket.close(4002, "PONG timeout")
-                    break
+
+                // Check PONG timeout from previous ping
+                if (lastPingSentAt > lastPongAt) {
+                    val timeSincePing = System.currentTimeMillis() - lastPingSentAt
+                    if (timeSincePing > PONG_TIMEOUT_MS) {
+                        Log.e(TAG, "PONG timeout (${timeSincePing}ms) — closing zombie connection")
+                        webSocket.close(4002, "PONG timeout")
+                        break
+                    }
                 }
+
+                // Send PING
+                lastPingSentAt = System.currentTimeMillis()
                 sendRaw(webSocket, JSONObject().put("type", "PING"))
+                pingCounter++
+
+                // Send HEARTBEAT every 2 pings (30s)
+                if (pingCounter >= 2) {
+                    pingCounter = 0
+                    sendHeartbeat(webSocket)
+                }
             }
         }
     }
@@ -456,11 +496,86 @@ class DirectWsClient(
     private fun scheduleReconnect(url: String, key: String) {
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
+            consecutiveReconnectAttempts++
+            if (consecutiveReconnectAttempts > RECONNECT_MAX_ATTEMPTS) {
+                Log.w(TAG, "Reconnect attempts cap reached ($RECONNECT_MAX_ATTEMPTS) — resetting backoff")
+                reconnectDelay = RECONNECT_BASE_MS
+                consecutiveReconnectAttempts = 0
+            }
             val jitter = (Math.random() * 1000).toLong()
-            Log.i(TAG, "Reconnecting in ${reconnectDelay}ms + ${jitter}ms jitter")
+            Log.i(TAG, "Reconnecting in ${reconnectDelay}ms + ${jitter}ms jitter (attempt $consecutiveReconnectAttempts)")
             delay(reconnectDelay + jitter)
             reconnectDelay = min(reconnectDelay * 2, RECONNECT_MAX_MS)
             if (active) doConnect(url, key)
+        }
+    }
+
+    // ─── Network Change Listener ──────────────────────────────────────────────
+
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) return
+        try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onLost(network: Network) {
+                    Log.w(TAG, "Network lost")
+                    if (isConnected()) {
+                        ws?.close(4004, "Network lost")
+                        scheduleReconnect(lastServerUrl ?: return, lastDeviceKey ?: "")
+                    }
+                }
+
+                override fun onAvailable(network: Network) {
+                    Log.i(TAG, "Network available")
+                    if (!isConnected() && active) {
+                        reconnectJob?.cancel()
+                        reconnectDelay = RECONNECT_BASE_MS
+                        doConnect(lastServerUrl ?: return, lastDeviceKey ?: "")
+                    }
+                }
+            }
+            networkCallback = callback
+            cm.registerNetworkCallback(request, callback)
+            Log.i(TAG, "Network callback registered")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register network callback: ${e.message}")
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        networkCallback?.let { callback ->
+            try {
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+                cm.unregisterNetworkCallback(callback)
+                Log.i(TAG, "Network callback unregistered")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to unregister network callback: ${e.message}")
+            }
+            networkCallback = null
+        }
+    }
+
+    // ─── Server Health Poll ───────────────────────────────────────────────────
+
+    private fun startHealthPoll() {
+        healthPollJob?.cancel()
+        healthPollJob = scope.launch {
+            while (isActive) {
+                delay(SERVER_HEALTH_POLL_MS)
+                if (!isConnected() && active) {
+                    val url = lastServerUrl
+                    val key = lastDeviceKey
+                    if (url != null) {
+                        Log.i(TAG, "Health poll: attempting reconnect")
+                        reconnectJob?.cancel()
+                        reconnectDelay = RECONNECT_BASE_MS
+                        doConnect(url, key ?: "")
+                    }
+                }
+            }
         }
     }
 

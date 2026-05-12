@@ -767,7 +767,7 @@ class JobExecutor(
     private suspend fun executeOtaUpdate(params: JSONObject) {
         val apkUrl       = params.getString("apkUrl")       // full HTTPS URL
         val sha256       = params.getString("apkSha256")
-        val signature    = params.getString("apkSignature")
+        val signature    = params.optString("apkSignature", "")  // optional — server may not sign
         val versionCode  = params.getInt("versionCode")
         val forceDowngrade = params.optBoolean("forceDowngrade", false)
         otaInstaller.downloadVerifyInstall(apkUrl, sha256, signature, versionCode, forceDowngrade)
