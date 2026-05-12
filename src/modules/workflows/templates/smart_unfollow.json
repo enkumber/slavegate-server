@@ -1,0 +1,514 @@
+{
+  "id": "smart_unfollow",
+  "name": "Smart Unfollow",
+  "platform": "instagram",
+  "description": "Iterates the account's Following list and unfollows qualifying accounts.",
+  "version": "2.0.2",
+  "defaultVerificationStrategy": "local_only",
+  "dataRetentionDays": 30,
+  "steps": [
+    {
+      "type": "action",
+      "id": "wake_screen",
+      "action": "screen_wake",
+      "params": {},
+      "retries": 1,
+      "timeoutMs": 5000
+    },
+    {
+      "type": "action",
+      "id": "check_screen",
+      "action": "get_screen_state",
+      "params": {},
+      "timeoutMs": 5000
+    },
+    {
+      "type": "action",
+      "id": "unlock_device",
+      "action": "unlock",
+      "params": {},
+      "retries": 1,
+      "timeoutMs": 8000
+    },
+    {
+      "type": "action",
+      "id": "open_fresh",
+      "action": "open_app_fresh",
+      "params": {
+        "packageName": "com.instagram.android"
+      },
+      "timeoutMs": 15000
+    },
+    {
+      "type": "wait",
+      "id": "wait_open",
+      "duration": {
+        "min": 5000,
+        "max": 6000,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "tap_home",
+      "action": "hydra_cascade_tap",
+      "params": {
+        "target": "@nav.home",
+        "platform": "instagram",
+        "wait_ms": 2000,
+        "retries": 4
+      },
+      "expectedScreen": "HOME_FEED",
+      "screenConfidenceThreshold": 0.72,
+      "screenMismatchPolicy": {
+        "maxRetries": 2,
+        "delayMs": 1000,
+        "action": "retry_step"
+      }
+    },
+    {
+      "type": "wait",
+      "id": "wait_home",
+      "duration": {
+        "min": 2000,
+        "max": 2500,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "tap_profile",
+      "action": "hydra_cascade_tap",
+      "params": {
+        "target": "@nav.profile",
+        "platform": "instagram",
+        "wait_ms": 2000,
+        "retries": 3
+      },
+      "expectedScreen": "PROFILE_OWN",
+      "screenConfidenceThreshold": 0.72,
+      "screenMismatchPolicy": {
+        "maxRetries": 2,
+        "delayMs": 1000,
+        "action": "retry_step"
+      }
+    },
+    {
+      "type": "wait",
+      "id": "wait_profile",
+      "duration": {
+        "min": 1500,
+        "max": 2000,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "tap_following_count",
+      "action": "hydra_cascade_tap",
+      "params": {
+        "text": "following"
+      },
+      "retries": 3,
+      "timeoutMs": 10000,
+      "expectedScreen": "FOLLOWING_LIST",
+      "screenConfidenceThreshold": 0.72,
+      "screenMismatchPolicy": {
+        "maxRetries": 2,
+        "delayMs": 1000,
+        "action": "retry_step"
+      }
+    },
+    {
+      "type": "wait",
+      "id": "wait_following_list",
+      "duration": {
+        "min": 2000,
+        "max": 2500,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "initial_checkpoint",
+      "action": "checkpoint_save",
+      "params": {
+        "phase": "following_list_open",
+        "state": {
+          "current_screen": "following_list",
+          "scroll_position": 0,
+          "unfollowed_count": 0,
+          "evaluated_count": 0,
+          "consecutive_empty_scrolls": 0,
+          "consecutive_unfollows": 0,
+          "consecutive_failures": 0,
+          "vlm_calls_this_hour": 0,
+          "processed_usernames": [],
+          "unfollowed_usernames": [],
+          "skipped_usernames": []
+        }
+      }
+    },
+    {
+      "type": "action",
+      "id": "unfollow_loop",
+      "action": "run_loop",
+      "params": {
+        "exitConditions": [
+          "unfollowed_count >= input_count",
+          "consecutive_empty_scrolls >= 3",
+          "stopped_reason is set"
+        ],
+        "maxIterations": 5000,
+        "steps": [
+          {
+            "type": "action",
+            "id": "ensure_following_list",
+            "action": "ensure_on_screen",
+            "params": {
+              "expected_screen": "following_list",
+              "check_task": "Suntem pe lista Following din Instagram (lista verticala cu useri si buton Following pe dreapta fiecarui rand)? Raspunde JSON: {\"on_screen\": bool, \"current_screen\": string}",
+              "recovery_steps": [
+                {
+                  "type": "action",
+                  "id": "rec_open",
+                  "action": "open_app_fresh",
+                  "params": {
+                    "packageName": "com.instagram.android"
+                  },
+                  "timeoutMs": 15000
+                },
+                {
+                  "type": "wait",
+                  "id": "rec_w_open",
+                  "duration": {
+                    "min": 4000,
+                    "max": 5000,
+                    "distribution": "uniform"
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "rec_home",
+                  "action": "hydra_cascade_tap",
+                  "params": {
+                    "target": "@nav.home",
+                    "platform": "instagram",
+                    "wait_ms": 1500,
+                    "retries": 3
+                  }
+                },
+                {
+                  "type": "wait",
+                  "id": "rec_w_home",
+                  "duration": {
+                    "min": 1500,
+                    "max": 2000,
+                    "distribution": "uniform"
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "rec_profile",
+                  "action": "hydra_cascade_tap",
+                  "params": {
+                    "target": "@nav.profile",
+                    "platform": "instagram",
+                    "wait_ms": 1500,
+                    "retries": 3
+                  }
+                },
+                {
+                  "type": "wait",
+                  "id": "rec_w_prof",
+                  "duration": {
+                    "min": 1500,
+                    "max": 2000,
+                    "distribution": "uniform"
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "rec_follow",
+                  "action": "hydra_cascade_tap",
+                  "params": {
+                    "text": "following"
+                  },
+                  "retries": 2,
+                  "timeoutMs": 8000
+                },
+                {
+                  "type": "wait",
+                  "id": "rec_w_list",
+                  "duration": {
+                    "min": 2000,
+                    "max": 2500,
+                    "distribution": "uniform"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "action",
+            "id": "vlm_parse",
+            "action": "vlm_extract_following_list",
+            "params": {
+              "target_variable": "following_list_rows"
+            }
+          },
+          {
+            "type": "action",
+            "id": "process_users",
+            "action": "for_each",
+            "params": {
+              "source": "following_list_rows",
+              "skip_if_in": "processed_usernames",
+              "steps": [
+                {
+                  "type": "action",
+                  "id": "check_mutual",
+                  "action": "check_mutual",
+                  "params": {
+                    "protected_by": "follows_back",
+                    "never_unfollow_if": [
+                      "follows_back",
+                      "bio_contains_keywords"
+                    ]
+                  }
+                },
+                {
+                  "type": "condition",
+                  "id": "skip_guard",
+                  "check": "random_probability",
+                  "probability": 0,
+                  "if_true": [],
+                  "if_false": [
+                    {
+                      "type": "action",
+                      "id": "nav_profile",
+                      "action": "conditional_navigate_to_profile",
+                      "params": {
+                        "conditions": [
+                          "_skip_current_user == false"
+                        ],
+                        "tapTextFromVar": "_current_item.username",
+                        "verify": "other_profile",
+                        "browseSeconds": [
+                          3,
+                          8
+                        ]
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "extract_data",
+                      "action": "extract_profile_data_for_eval",
+                      "params": {}
+                    },
+                    {
+                      "type": "action",
+                      "id": "decide",
+                      "action": "evaluate_criteria",
+                      "params": {
+                        "criteria": {
+                          "unfollow_if": [
+                            "not_following_back",
+                            "inactive_90_days",
+                            "following_3000_plus"
+                          ],
+                          "never_unfollow_if": [
+                            "follows_back",
+                            "bio_contains_keywords"
+                          ],
+                          "protected_keywords": [],
+                          "niche_description": ""
+                        }
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "branch",
+                      "action": "branch_on_decision",
+                      "params": {
+                        "on_unfollow": [
+                          {
+                            "type": "action",
+                            "id": "tap_following_btn",
+                            "action": "tap",
+                            "target": "profile.following",
+                            "params": {
+                              "wait_ms": 1000
+                            }
+                          },
+                          {
+                            "type": "action",
+                            "id": "tap_confirm",
+                            "action": "tap",
+                            "target": "dialog.confirm",
+                            "params": {
+                              "wait_ms": 1500
+                            }
+                          },
+                          {
+                            "type": "action",
+                            "id": "incr_unfollowed",
+                            "action": "increment",
+                            "params": {
+                              "counter": "unfollowed_count"
+                            }
+                          },
+                          {
+                            "type": "action",
+                            "id": "incr_consec",
+                            "action": "increment",
+                            "params": {
+                              "counter": "consecutive_unfollows"
+                            }
+                          }
+                        ],
+                        "on_skip": [
+                          {
+                            "type": "action",
+                            "id": "log_skip",
+                            "action": "append_to_list",
+                            "params": {
+                              "list": "skipped_usernames",
+                              "value": {
+                                "username": "_current_item_username",
+                                "reason": "_skip_reason"
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "back_home",
+                      "action": "hydra_cascade_tap",
+                      "params": {
+                        "target": "@nav.profile",
+                        "platform": "instagram",
+                        "wait_ms": 1500,
+                        "retries": 2
+                      }
+                    },
+                    {
+                      "type": "wait",
+                      "id": "w_back",
+                      "duration": {
+                        "min": 1000,
+                        "max": 1500,
+                        "distribution": "uniform"
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "retap_follow",
+                      "action": "hydra_cascade_tap",
+                      "params": {
+                        "text": "following"
+                      },
+                      "retries": 2,
+                      "timeoutMs": 8000
+                    },
+                    {
+                      "type": "wait",
+                      "id": "w_relist",
+                      "duration": {
+                        "min": 1500,
+                        "max": 2000,
+                        "distribution": "uniform"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "action",
+                  "id": "delay",
+                  "action": "random_delay",
+                  "params": {
+                    "range_seconds": [
+                      15,
+                      45
+                    ]
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "mark",
+                  "action": "mark_processed",
+                  "params": {}
+                },
+                {
+                  "type": "action",
+                  "id": "count",
+                  "action": "increment",
+                  "params": {
+                    "counter": "evaluated_count"
+                  }
+                },
+                {
+                  "type": "action",
+                  "id": "pause",
+                  "action": "conditional_pause",
+                  "params": {
+                    "trigger_every": 10,
+                    "counter": "evaluated_count",
+                    "duration_range_seconds": [
+                      60,
+                      180
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "type": "action",
+            "id": "scroll",
+            "action": "swipe",
+            "params": {
+              "startX": 0.5,
+              "startY": 0.69,
+              "endX": 0.5,
+              "endY": 0.37,
+              "durationMs": 400
+            }
+          },
+          {
+            "type": "wait",
+            "id": "w_scroll",
+            "duration": {
+              "min": 800,
+              "max": 1200,
+              "distribution": "uniform"
+            }
+          },
+          {
+            "type": "action",
+            "id": "track_scroll",
+            "action": "track_empty_scroll",
+            "params": {
+              "source": "following_list_rows",
+              "processed_set": "processed_usernames",
+              "counter": "consecutive_empty_scrolls"
+            }
+          },
+          {
+            "type": "action",
+            "id": "ckpt",
+            "action": "checkpoint_save",
+            "params": {
+              "phase": "iterating_following_list"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "compatibleAppVersions": [
+    "320+"
+  ]
+}

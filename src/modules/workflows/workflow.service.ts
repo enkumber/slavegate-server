@@ -1,0 +1,257 @@
+/**
+ * workflows/workflow.service.ts
+ * CRUD and state management for workflow executions.
+ * Checkpoint is stored in PostgreSQL (atomic via BEGIN/UPDATE/COMMIT).
+ *
+ * "write → fsync → rename" principle implemented as:
+ *   BEGIN → UPDATE workflows SET checkpoint = $new WHERE id = $id AND checkpoint_version = $old → COMMIT
+ * Optimistic locking via checkpoint_version prevents race conditions.
+ *
+ * Reference: ARCHITECTURE_AUDIT_v3.md §8
+ */
+
+import { getDb } from "../../db/client";
+import type {
+  WorkflowCheckpoint,
+  WorkflowStatus,
+  WorkflowTemplate,
+} from "./types";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export interface WorkflowRecord {
+  id:          string;
+  templateId:  string | null;
+  accountId:   string | null;
+  deviceId:    string | null;
+  status:      WorkflowStatus;
+  currentStep: number;
+  totalSteps:  number | null;
+  checkpoint:  WorkflowCheckpoint;
+  hbeParams:   Record<string, unknown>;
+  startedAt:   string | null;
+  completedAt: string | null;
+  error:       string | null;
+  createdAt:   string;
+}
+
+export interface CreateWorkflowInput {
+  templateId?:  string;
+  accountId?:   string;
+  deviceId:     string;
+  totalSteps?:  number;
+  hbeParams:    Record<string, unknown>;
+  checkpoint:   WorkflowCheckpoint;
+}
+
+// ─── Service ──────────────────────────────────────────────────────────────────
+
+export class WorkflowService {
+  // ─── CRUD ────────────────────────────────────────────────────────────────
+
+  async create(input: CreateWorkflowInput): Promise<WorkflowRecord> {
+    const db = getDb();
+    const result = await db.query(
+      `INSERT INTO workflows
+         (template_id, account_id, device_id, status, current_step, total_steps, checkpoint, hbe_params)
+       VALUES ($1, $2, $3, 'queued', 0, $4, $5, $6)
+       RETURNING *`,
+      [
+        input.templateId ?? null,
+        input.accountId  ?? null,
+        input.deviceId,
+        input.totalSteps ?? null,
+        JSON.stringify(input.checkpoint),
+        JSON.stringify(input.hbeParams),
+      ]
+    );
+    return rowToWorkflow(result.rows[0]);
+  }
+
+  async get(id: string): Promise<WorkflowRecord | null> {
+    const db = getDb();
+    const result = await db.query("SELECT * FROM workflows WHERE id = $1", [id]);
+    if (result.rows.length === 0) return null;
+    return rowToWorkflow(result.rows[0]);
+  }
+
+  async list(
+    deviceId?: string,
+    status?: WorkflowStatus,
+    page = 1,
+    pageSize = 50
+  ): Promise<{ items: WorkflowRecord[]; total: number }> {
+    const db = getDb();
+    const conditions: string[] = [];
+    const values: unknown[] = [];
+
+    if (deviceId) { values.push(deviceId); conditions.push(`device_id = $${values.length}`); }
+    if (status)   { values.push(status);   conditions.push(`status = $${values.length}`); }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    values.push(pageSize, (page - 1) * pageSize);
+
+    const [rows, countRow] = await Promise.all([
+      db.query(`SELECT * FROM workflows ${where} ORDER BY created_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`, values),
+      db.query(`SELECT COUNT(*) FROM workflows ${where}`, values.slice(0, -2)),
+    ]);
+
+    return {
+      items: rows.rows.map(rowToWorkflow),
+      total: parseInt(countRow.rows[0].count, 10),
+    };
+  }
+
+  async cancel(id: string): Promise<boolean> {
+    const db = getDb();
+    const result = await db.query(
+      `UPDATE workflows SET status = 'cancelled', completed_at = NOW()
+       WHERE id = $1 AND status IN ('queued', 'running', 'paused')
+       RETURNING id`,
+      [id]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  // ─── Checkpoint (atomic) ─────────────────────────────────────────────────
+
+  /**
+   * Atomically update checkpoint + step index.
+   *
+   * Implements "write → fsync → rename" principle as:
+   * BEGIN → UPDATE (with current_step guard) → COMMIT
+   * If another process updated the checkpoint concurrently, rowCount = 0 → error.
+   *
+   * @param expectedStep  Current step index — prevents overwrite from stale worker
+   */
+  async saveCheckpoint(
+    workflowId: string,
+    newCheckpoint: WorkflowCheckpoint,
+    newStep: number,
+    expectedStep: number
+  ): Promise<boolean> {
+    const db = getDb();
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(
+        `UPDATE workflows
+         SET checkpoint = $1, current_step = $2, status = 'running'
+         WHERE id = $3
+           AND current_step = $4
+           AND status NOT IN ('cancelled', 'completed', 'failed')`,
+        [JSON.stringify(newCheckpoint), newStep, workflowId, expectedStep]
+      );
+      if ((result.rowCount ?? 0) === 0) {
+        await client.query("ROLLBACK");
+        return false;  // Concurrent update or wrong expectedStep
+      }
+      await client.query("COMMIT");
+      return true;
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  // ─── Status transitions ────────────────────────────────────────────────
+
+  async markRunning(id: string): Promise<void> {
+    const db = getDb();
+    await db.query(
+      `UPDATE workflows SET status = 'running', started_at = COALESCE(started_at, NOW())
+       WHERE id = $1 AND status IN ('queued', 'paused')`,
+      [id]
+    );
+  }
+
+  async markCompleted(id: string): Promise<void> {
+    const db = getDb();
+    await db.query(
+      "UPDATE workflows SET status = 'completed', completed_at = NOW() WHERE id = $1",
+      [id]
+    );
+  }
+
+  async markFailed(id: string, error: string): Promise<void> {
+    const db = getDb();
+    await db.query(
+      "UPDATE workflows SET status = 'failed', completed_at = NOW(), error = $1 WHERE id = $2",
+      [error, id]
+    );
+  }
+
+  async markPaused(id: string): Promise<void> {
+    const db = getDb();
+    await db.query(
+      "UPDATE workflows SET status = 'paused' WHERE id = $1 AND status = 'running'",
+      [id]
+    );
+  }
+
+  // ─── Template management ─────────────────────────────────────────────────
+
+  async saveTemplate(template: WorkflowTemplate): Promise<void> {
+    const db = getDb();
+    await db.query(
+      `INSERT INTO workflow_templates
+         (id, platform, definition, data_retention_days, default_verification_strategy)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (id) DO UPDATE SET
+         platform                     = EXCLUDED.platform,
+         definition                   = EXCLUDED.definition,
+         data_retention_days          = EXCLUDED.data_retention_days,
+         default_verification_strategy = EXCLUDED.default_verification_strategy,
+         updated_at                   = NOW()`,
+      [
+        template.id,
+        template.platform,
+        JSON.stringify(template),
+        template.dataRetentionDays,
+        template.defaultVerificationStrategy,
+      ]
+    );
+  }
+
+  async getTemplate(id: string): Promise<WorkflowTemplate | null> {
+    const db = getDb();
+    const result = await db.query(
+      "SELECT definition FROM workflow_templates WHERE id = $1",
+      [id]
+    );
+    if (result.rows.length === 0) return null;
+    return result.rows[0].definition as WorkflowTemplate;
+  }
+
+  async listTemplates(): Promise<WorkflowTemplate[]> {
+    const db = getDb();
+    const rows = await db.query(
+      "SELECT definition FROM workflow_templates ORDER BY id"
+    );
+    return rows.rows.map(r => r.definition as WorkflowTemplate);
+  }
+}
+
+// ─── Row mapper ───────────────────────────────────────────────────────────────
+
+function rowToWorkflow(row: Record<string, unknown>): WorkflowRecord {
+  return {
+    id:          row.id as string,
+    templateId:  (row.template_id as string) ?? null,
+    accountId:   (row.account_id as string) ?? null,
+    deviceId:    (row.device_id as string) ?? null,
+    status:      row.status as WorkflowStatus,
+    currentStep: row.current_step as number,
+    totalSteps:  (row.total_steps as number) ?? null,
+    checkpoint:  row.checkpoint as WorkflowCheckpoint,
+    hbeParams:   row.hbe_params as Record<string, unknown>,
+    startedAt:   row.started_at ? (row.started_at as Date).toISOString() : null,
+    completedAt: row.completed_at ? (row.completed_at as Date).toISOString() : null,
+    error:       (row.error as string) ?? null,
+    createdAt:   (row.created_at as Date).toISOString(),
+  };
+}
+
+export const workflowService = new WorkflowService();

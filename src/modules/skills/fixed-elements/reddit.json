@@ -1,0 +1,253 @@
+{
+  "description": "Fixed UI elements for Reddit app — organized by screen/page",
+  "version": "2.0",
+  "updated": "2026-05-04",
+
+  "screens": {
+    "home_feed": {
+      "description": "Main feed — default landing screen",
+      "elements": {
+        "Home": { "fixed": true, "note": "Bottom nav tab" },
+        "Discover": { "fixed": true, "note": "Bottom nav tab" },
+        "Create": { "fixed": true, "note": "Bottom nav — center '+' button" },
+        "Inbox": { "fixed": true, "note": "Bottom nav tab" },
+        "You": { "fixed": true, "note": "Bottom nav — profile tab" },
+        "Search Reddit": { "fixed": true, "note": "Search bar placeholder" },
+        "Find": { "fixed": true, "note": "Search bar placeholder (variant)" },
+        "Find anything": { "fixed": true, "note": "Search bar placeholder (variant)" },
+        "Best": { "fixed": true, "note": "Feed sort tab" },
+        "Hot": { "fixed": true, "note": "Feed sort tab" },
+        "New": { "fixed": true, "note": "Feed sort tab" },
+        "Top": { "fixed": true, "note": "Feed sort tab" },
+        "Rising": { "fixed": true, "note": "Feed sort tab" },
+        "Upvote": { "fixed": true, "note": "Upvote arrow on post" },
+        "Downvote": { "fixed": true, "note": "Downvote arrow on post" },
+        "Comment": { "fixed": true, "note": "Comment button under post" },
+        "Share": { "fixed": true, "note": "Share button under post" },
+        "Save": { "fixed": true, "note": "Save/bookmark post" },
+        "Award": { "fixed": true, "note": "Award button" }
+      }
+    },
+
+    "search": {
+      "description": "Search screen — after tapping search bar",
+      "elements": {
+        "Search Reddit": { "fixed": true, "note": "Search input field" },
+        "Back": { "fixed": true, "note": "Back arrow" },
+        "Cancel": { "fixed": true, "note": "Cancel search" },
+        "Trending today": { "fixed": true, "note": "Trending section header" },
+        "Popular": { "fixed": true, "note": "Popular search tab" },
+        "Communities": { "fixed": true, "note": "Communities search filter" },
+        "People": { "fixed": true, "note": "People search filter" },
+        "Posts": { "fixed": true, "note": "Posts search filter" },
+        "Recent": { "fixed": true, "note": "Recent searches header" },
+        "Clear": { "fixed": true, "note": "Clear recent searches" },
+        "Follow": { "fixed": true, "note": "Follow community in results" },
+        "Following": { "fixed": true, "note": "Already following state" },
+        "Join": { "fixed": true, "note": "Join community in results" },
+        "Joined": { "fixed": true, "note": "Joined state" }
+      }
+    },
+
+    "post_detail": {
+      "description": "Individual post view — after tapping a post",
+      "elements": {
+        "Back": { "fixed": true, "note": "Back to feed" },
+        "Share": { "fixed": true, "note": "Share button" },
+        "More options": { "fixed": true, "note": "Three dots — post menu" },
+        "Upvote": { "fixed": true, "note": "Upvote on post" },
+        "Downvote": { "fixed": true, "note": "Downvote on post" },
+        "Reply": { "fixed": true, "note": "Reply to comment" },
+        "Award": { "fixed": true, "note": "Award post" },
+        "Sort by": { "fixed": true, "note": "Comment sort selector" },
+        "Best": { "fixed": true, "note": "Comment sort option" },
+        "New": { "fixed": true, "note": "Comment sort option" },
+        "Top": { "fixed": true, "note": "Comment sort option" },
+        "Controversial": { "fixed": true, "note": "Comment sort option" },
+        "Add a comment": { "fixed": true, "note": "Comment input placeholder" }
+      }
+    },
+
+    "post_menu": {
+      "description": "Post overflow menu — after tapping three dots on a post",
+      "elements": {
+        "Save": { "fixed": true, "note": "Save post" },
+        "Hide": { "fixed": true, "note": "Hide post from feed" },
+        "Report": { "fixed": true, "note": "Report post" },
+        "Block": { "fixed": true, "note": "Block user" },
+        "Share": { "fixed": true, "note": "Share" },
+        "Crosspost": { "fixed": true, "note": "Crosspost to another sub" },
+        "Copy link": { "fixed": true, "note": "Copy post link" },
+        "Edit": { "fixed": true, "note": "Edit post (own posts only)" },
+        "Delete": { "fixed": true, "note": "Delete post (own posts only)" },
+        "Follow": { "fixed": true, "note": "Follow post author" },
+        "Unfollow": { "fixed": true, "note": "Unfollow post author" },
+        "Mute": { "fixed": true, "note": "Mute community" },
+        "Unmute": { "fixed": true, "note": "Unmute community" }
+      }
+    },
+
+    "create_post": {
+      "description": "Create new post — after tapping '+' button",
+      "elements": {
+        "Back": { "fixed": true, "note": "Cancel creation" },
+        "Post": { "fixed": true, "note": "Submit button (top right)" },
+        "Image": { "fixed": true, "note": "Image post type" },
+        "Link": { "fixed": true, "note": "Link post type" },
+        "Video": { "fixed": true, "note": "Video post type" },
+        "Text": { "fixed": true, "note": "Text post type" },
+        "Poll": { "fixed": true, "note": "Poll post type" },
+        "Title": { "fixed": true, "note": "Post title input" },
+        "Body": { "fixed": true, "note": "Post body input" },
+        "Add body text": { "fixed": true, "note": "Body placeholder" },
+        "Choose a community": { "fixed": true, "note": "Community selector" },
+        "OC": { "fixed": true, "note": "Original Content tag" },
+        "Spoiler": { "fixed": true, "note": "Spoiler tag" },
+        "NSFW": { "fixed": true, "note": "NSFW tag" },
+        "Flair": { "fixed": true, "note": "Post flair selector" }
+      }
+    },
+
+    "settings": {
+      "description": "Settings screen — accessed via profile > settings gear",
+      "elements": {
+        "Back": { "fixed": true, "note": "Back button" },
+        "Account settings": { "fixed": true, "note": "Account section" },
+        "Edit profile": { "fixed": true, "note": "Edit profile" },
+        "Privacy": { "fixed": true, "note": "Privacy settings" },
+        "Notifications": { "fixed": true, "note": "Notification preferences" },
+        "Email": { "fixed": true, "note": "Email settings" },
+        "Appearance": { "fixed": true, "note": "Theme/display settings" },
+        "Dark mode": { "fixed": true, "note": "Dark mode toggle" },
+        "Light mode": { "fixed": true, "note": "Light mode toggle" },
+        "Auto": { "fixed": true, "note": "Auto theme toggle" },
+        "Language": { "fixed": true, "note": "Language selector" },
+        "Clear cache": { "fixed": true, "note": "Clear local cache" },
+        "Clear history": { "fixed": true, "note": "Clear search history" },
+        "Log out": { "fixed": true, "note": "Logout button" },
+        "Delete account": { "fixed": true, "note": "Account deletion" },
+        "About": { "fixed": true, "note": "App info" },
+        "Version": { "fixed": true, "note": "App version display" }
+      }
+    },
+
+    "profile": {
+      "description": "User profile screen — after tapping 'You' or avatar",
+      "elements": {
+        "Back": { "fixed": true, "note": "Back button" },
+        "Settings": { "fixed": true, "note": "Settings gear icon" },
+        "Edit profile": { "fixed": true, "note": "Edit profile button" },
+        "Posts": { "fixed": true, "note": "User's posts tab" },
+        "Comments": { "fixed": true, "note": "User's comments tab" },
+        "Saved": { "fixed": true, "note": "Saved content tab" },
+        "Upvoted": { "fixed": true, "note": "Upvoted content tab" },
+        "Downvoted": { "fixed": true, "note": "Downvoted content tab" },
+        "Hidden": { "fixed": true, "note": "Hidden posts tab" },
+        "Trophies": { "fixed": true, "note": "Trophy case" },
+        "Karma": { "fixed": true, "note": "Karma count display" },
+        "Cake day": { "fixed": true, "note": "Account age" },
+        "Follow": { "fixed": true, "note": "Follow user" },
+        "Unfollow": { "fixed": true, "note": "Unfollow user" },
+        "Block": { "fixed": true, "note": "Block user" },
+        "Share profile": { "fixed": true, "note": "Share profile link" },
+        "Add social links": { "fixed": true, "note": "Social links section" }
+      }
+    },
+
+    "community": {
+      "description": "Subreddit/community page — after tapping a community",
+      "elements": {
+        "Back": { "fixed": true, "note": "Back to previous screen" },
+        "Join": { "fixed": true, "note": "Join community button" },
+        "Joined": { "fixed": true, "note": "Joined state" },
+        "Community options": { "fixed": true, "note": "Three dots menu" },
+        "About": { "fixed": true, "note": "About community tab" },
+        "Menu": { "fixed": true, "note": "Community menu tab" },
+        "Posts": { "fixed": true, "note": "Posts tab in community" },
+        "Subscribers": { "fixed": true, "note": "Subscriber count" },
+        "Online": { "fixed": true, "note": "Online now count" },
+        "Hot": { "fixed": true, "note": "Hot sort" },
+        "New": { "fixed": true, "note": "New sort" },
+        "Top": { "fixed": true, "note": "Top sort" },
+        "Rising": { "fixed": true, "note": "Rising sort" },
+        "Share": { "fixed": true, "note": "Share community" },
+        "Add to custom feed": { "fixed": true, "note": "Custom feed option" },
+        "Notification bell": { "fixed": true, "note": "Toggle notifications" }
+      }
+    },
+
+    "inbox": {
+      "description": "Inbox/notifications screen — after tapping Inbox tab",
+      "elements": {
+        "Back": { "fixed": true, "note": "Back button" },
+        "All": { "fixed": true, "note": "All notifications tab" },
+        "Unread": { "fixed": true, "note": "Unread tab" },
+        "Mark all read": { "fixed": true, "note": "Mark all as read" },
+        "Upvotes": { "fixed": true, "note": "Upvote notifications" },
+        "Replies": { "fixed": true, "note": "Reply notifications" },
+        "New followers": { "fixed": true, "note": "Follower notifications" },
+        "Post replies": { "fixed": true, "note": "Post reply tab" },
+        "Comment replies": { "fixed": true, "note": "Comment reply tab" },
+        "Mentions": { "fixed": true, "note": "Username mentions" },
+        "Messages": { "fixed": true, "note": "Direct messages" }
+      }
+    },
+
+    "comment_menu": {
+      "description": "Comment overflow menu — after tapping three dots on a comment",
+      "elements": {
+        "Reply": { "fixed": true, "note": "Reply to comment" },
+        "Share": { "fixed": true, "note": "Share comment" },
+        "Save": { "fixed": true, "note": "Save comment" },
+        "Report": { "fixed": true, "note": "Report comment" },
+        "Block": { "fixed": true, "note": "Block user" },
+        "Copy text": { "fixed": true, "note": "Copy comment text" },
+        "Edit": { "fixed": true, "note": "Edit (own comments)" },
+        "Delete": { "fixed": true, "note": "Delete (own comments)" },
+        "Follow": { "fixed": true, "note": "Follow commenter" },
+        "Give award": { "fixed": true, "note": "Award comment" }
+      }
+    },
+
+    "discover": {
+      "description": "Discover tab — explore communities and topics",
+      "elements": {
+        "Search": { "fixed": true, "note": "Search bar" },
+        "Topics": { "fixed": true, "note": "Topic categories" },
+        "Trending": { "fixed": true, "note": "Trending communities" },
+        "Popular": { "fixed": true, "note": "Popular communities" },
+        "See all": { "fixed": true, "note": "See all communities" },
+        "Join": { "fixed": true, "note": "Join community" },
+        "Joined": { "fixed": true, "note": "Joined state" }
+      }
+    }
+  },
+
+  "dynamic": [
+    "r/Romania",
+    "r/AskReddit",
+    "r/pics",
+    "r/worldnews",
+    "post titles",
+    "community names in search results",
+    "usernames",
+    "post content/body text",
+    "comments text",
+    "votes count (numbers)",
+    "awards (names/icons)",
+    "Promoted / Sponsored",
+    "Community highlights",
+    "Trending topics",
+    "Karma numbers",
+    "Subscriber counts",
+    "Time stamps (2h, 1d, etc.)",
+    "Username displays",
+    "Subreddit names (r/*)",
+    "Comment counts",
+    "Share counts",
+    "Post flair labels",
+    "User avatars",
+    "Thumbnail images",
+    "Media previews"
+  ]
+}

@@ -1,0 +1,242 @@
+# Research Skill Template
+# Platform-agnostic research jobs executed by Kraken/Hydra
+# Used by Marketer to gather data asynchronously
+
+platform: instagram
+skill_type: research
+
+# Research window: 01:00 - 05:00 (low activity)
+schedule:
+  start_hour: 1
+  end_hour: 5
+  timezone: Europe/Bucharest
+
+# Rate limits (per device)
+rate_limits:
+  max_jobs_per_hour: 100
+  cooldown_between_jobs_ms: 5000
+  max_consecutive_failures: 3
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# JOB DEFINITIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+jobs:
+  # ─── Profile Research ──────────────────────────────────────────────────────
+  research_profile:
+    description: "Gather own profile data — account is already logged in, tap Profile icon directly"
+    input:
+      username:
+        type: string
+        required: true  # Used only for output labeling / logging, not for navigation
+    
+    steps:
+      - action: open_app
+        package: com.instagram.android
+        wait_for_idle: true
+      
+      # Tap the Profile tab (bottom-right nav icon) — no search needed, account is logged in
+      - action: a11y_find_tap
+        selector: "Profile"
+        fallback: ocr
+        wait_ms: 1500
+      
+      - action: wait
+        ms: 1500
+      
+      - action: extract_profile_data
+        fields:
+          - followers_count
+          - following_count
+          - posts_count
+          - bio
+          - is_verified
+          - is_private
+    
+    output:
+      followers_count:
+        type: number
+        nullable: true
+      following_count:
+        type: number
+        nullable: true
+      posts_count:
+        type: number
+        nullable: true
+      bio:
+        type: string
+        nullable: true
+      is_verified:
+        type: boolean
+        default: false
+      is_private:
+        type: boolean
+        default: false
+
+  # ─── Hashtag Research ──────────────────────────────────────────────────────
+  research_hashtag:
+    description: "Gather hashtag stats and top posts"
+    input:
+      hashtag:
+        type: string
+        required: true
+      limit:
+        type: number
+        default: 50
+        max: 100
+    
+    steps:
+      - action: open_app
+        package: com.instagram.android
+        wait_for_idle: true
+      
+      - action: a11y_find_tap
+        selector: "Search"
+        fallback: ocr
+        wait_ms: 1000
+      
+      - action: type_text
+        text: "#{hashtag}"
+        clear_first: true
+        wait_ms: 2000
+      
+      - action: tap_hashtag_result
+        hashtag: "{hashtag}"
+        description: "Tap hashtag result in dropdown"
+        fallback_chain:
+          - method: a11y_resourceId
+            selector: "com.instagram.android:id/row_hashtag_textview_tag_name"
+            text_contains: "#{hashtag}"
+          - method: a11y_text
+            text: "#{hashtag}"
+            partial_match: true
+          - method: ocr
+            search_text: "#{hashtag}"
+          - method: coordinate_first_result
+            y_offset: 0.15  # First result is typically ~15% down from search bar
+      
+      - action: wait
+        ms: 2000
+      
+      - action: extract_hashtag_data
+        fields:
+          - posts_count
+          - top_posts
+          - related_hashtags
+        top_posts_limit: "{limit}"
+    
+    output:
+      posts_count:
+        type: number
+        nullable: true
+      top_posts:
+        type: array
+        items:
+          username:
+            type: string
+          likes:
+            type: number
+          comments:
+            type: number
+      related_hashtags:
+        type: array
+        items:
+          type: string
+
+  # ─── Followers Research ────────────────────────────────────────────────────
+  research_followers:
+    description: "Extract follower usernames from a profile"
+    input:
+      username:
+        type: string
+        required: true
+      limit:
+        type: number
+        default: 100
+        max: 500
+    
+    steps:
+      - action: open_app
+        package: com.instagram.android
+        wait_for_idle: true
+      
+      - action: a11y_find_tap
+        selector: "Search"
+        fallback: ocr
+        wait_ms: 1000
+      
+      - action: type_text
+        text: "{username}"
+        clear_first: true
+        wait_ms: 2000
+      
+      - action: a11y_find_tap
+        selector: "{username}"
+        match_type: contains
+        timeout_ms: 5000
+      
+      - action: wait
+        ms: 2000
+      
+      - action: a11y_find_tap
+        selector: "followers"
+        match_type: contains
+        wait_ms: 1500
+      
+      - action: scroll_and_extract
+        direction: down
+        limit: "{limit}"
+        extract_selector: "username"
+        unique: true
+        cooldown_ms: 500
+    
+    output:
+      usernames:
+        type: array
+        items:
+          type: string
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CUSTOM ACTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+custom_actions:
+  extract_profile_data:
+    description: "Parse profile data from current screen UI tree"
+    implementation: "ProfileDataExtractor"
+    requires_screenshot: false
+    requires_ui_tree: true
+  
+  extract_hashtag_data:
+    description: "Parse hashtag page data including top posts"
+    implementation: "HashtagDataExtractor"
+    requires_screenshot: true
+    requires_ui_tree: true
+  
+  scroll_and_extract:
+    description: "Scroll through a list and extract data from each visible item"
+    implementation: "ScrollExtractor"
+    requires_screenshot: false
+    requires_ui_tree: true
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ERROR HANDLING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+error_handling:
+  on_element_not_found:
+    max_retries: 2
+    fallback: vision
+  
+  on_rate_limit:
+    action: abort
+    cooldown_ms: 3600000  # 1 hour
+  
+  on_account_private:
+    action: complete_partial
+    output:
+      is_private: true
+  
+  on_account_not_found:
+    action: fail
+    error: "Account not found"

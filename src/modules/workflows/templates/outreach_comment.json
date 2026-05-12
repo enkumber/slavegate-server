@@ -1,0 +1,311 @@
+{
+  "id": "outreach_comment",
+  "name": "Outreach Comment",
+  "platform": "instagram",
+  "description": "Scrollează feed-ul Instagram, găsește o postare de la o femeie tânără (potențial client glamour), lasă un comment admirativ contextual. UN SINGUR comment per run.",
+  "version": "1.0.0",
+  "defaultVerificationStrategy": "local_with_screenshot",
+  "dataRetentionDays": 30,
+  "steps": [
+    {
+      "type": "action",
+      "id": "wake_screen",
+      "action": "screen_wake",
+      "params": {},
+      "verification": "local_only",
+      "retries": 1,
+      "timeoutMs": 5000
+    },
+    {
+      "type": "wait",
+      "id": "wait_screen_on",
+      "duration": {
+        "min": 500,
+        "max": 1000,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "unlock_device",
+      "action": "unlock",
+      "params": {},
+      "verification": "local_only",
+      "retries": 2,
+      "timeoutMs": 10000
+    },
+    {
+      "type": "wait",
+      "id": "wait_unlock",
+      "duration": {
+        "min": 500,
+        "max": 1500,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "open_instagram",
+      "action": "open_app",
+      "params": {
+        "packageName": "com.instagram.android"
+      },
+      "verification": "local_only",
+      "retries": 2,
+      "timeoutMs": 15000,
+      "expectedScreen": "HOME_FEED",
+      "screenConfidenceThreshold": 0.70,
+      "screenMismatchPolicy": {
+        "maxRetries": 3,
+        "delayMs": 2000,
+        "action": "retry_step"
+      }
+    },
+    {
+      "type": "wait",
+      "id": "wait_feed_load",
+      "condition": "ui_element_visible",
+      "element": "feed_tab",
+      "timeoutMs": 10000
+    },
+    {
+      "type": "action",
+      "id": "init_variables",
+      "action": "set_variable",
+      "params": {
+        "variables": {
+          "scroll_count": 0,
+          "max_scrolls": 10,
+          "comment_posted": false,
+          "vlm_calls_this_run": 0,
+          "account_name": "@incitographer"
+        }
+      }
+    },
+    {
+      "type": "action",
+      "id": "scroll_and_find_loop",
+      "action": "run_loop",
+      "params": {
+        "maxIterations": 10,
+        "exitConditions": [
+          "comment_posted == true",
+          "scroll_count >= max_scrolls"
+        ],
+        "steps": [
+          {
+            "type": "wait",
+            "id": "read_pause",
+            "duration": {
+              "min": 2000,
+              "max": 4000,
+              "distribution": "lognormal",
+              "mean": 3000
+            }
+          },
+          {
+            "type": "action",
+            "id": "analyze_visible_post",
+            "action": "vlm_analyze_post_for_outreach",
+            "params": {
+              "target_variable": "post_analysis",
+              "account_name": "@incitographer",
+              "min_age": 20,
+              "max_age": 35
+            }
+          },
+          {
+            "type": "condition",
+            "id": "check_potential_client",
+            "check": "random_probability",
+            "probability": 1.0,
+            "if_true": [
+              {
+                "type": "action",
+                "id": "branch_on_client_found",
+                "action": "branch_on_decision",
+                "params": {
+                  "condition": "_found_potential_client == true",
+                  "if_true_steps": [
+                    {
+                      "type": "action",
+                      "id": "generate_comment",
+                      "action": "vlm_generate_comment",
+                      "params": {
+                        "post_description_var": "_post_description",
+                        "target_variable": "_generated_comment",
+                        "account_context": "fotograf glamour din România",
+                        "max_chars": 150,
+                        "tone": "admirativ, prietenos, natural"
+                      }
+                    },
+                    {
+                      "type": "wait",
+                      "id": "pause_before_comment",
+                      "duration": {
+                        "min": 1000,
+                        "max": 2000,
+                        "distribution": "uniform"
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "tap_comment_button",
+                      "action": "tap",
+                      "target": "post.comment",
+                      "verification": "local_with_screenshot",
+                      "retries": 3,
+                      "expectedScreen": "COMMENTS_OPEN",
+                      "screenConfidenceThreshold": 0.70,
+                      "screenMismatchPolicy": {
+                        "maxRetries": 2,
+                        "delayMs": 1000,
+                        "action": "continue_with_warning"
+                      }
+                    },
+                    {
+                      "type": "wait",
+                      "id": "wait_comments_open",
+                      "duration": {
+                        "min": 800,
+                        "max": 1500,
+                        "distribution": "uniform"
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "tap_comment_input",
+                      "action": "tap",
+                      "target": "comment.input",
+                      "verification": "local_only",
+                      "retries": 2
+                    },
+                    {
+                      "type": "wait",
+                      "id": "wait_keyboard",
+                      "duration": {
+                        "min": 500,
+                        "max": 1000,
+                        "distribution": "uniform"
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "type_comment",
+                      "action": "type_text",
+                      "params": {
+                        "textFromVariable": "_generated_comment"
+                      },
+                      "verification": "local_only",
+                      "timeoutMs": 15000
+                    },
+                    {
+                      "type": "wait",
+                      "id": "pause_after_typing",
+                      "duration": {
+                        "min": 500,
+                        "max": 1000,
+                        "distribution": "uniform"
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "tap_post_comment",
+                      "action": "tap",
+                      "target": "comment.post_button",
+                      "verification": "local_with_screenshot",
+                      "retries": 2
+                    },
+                    {
+                      "type": "wait",
+                      "id": "wait_comment_posted",
+                      "duration": {
+                        "min": 1500,
+                        "max": 2500,
+                        "distribution": "uniform"
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "mark_comment_posted",
+                      "action": "set_variable",
+                      "params": {
+                        "variables": {
+                          "comment_posted": true
+                        }
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "log_success",
+                      "action": "append_to_list",
+                      "params": {
+                        "list": "comments_posted",
+                        "item_from_vars": {
+                          "author": "_post_author",
+                          "comment": "_generated_comment",
+                          "description": "_post_description"
+                        }
+                      }
+                    },
+                    {
+                      "type": "action",
+                      "id": "go_back_to_feed",
+                      "action": "tap",
+                      "target": "nav.back",
+                      "verification": "local_only",
+                      "retries": 1
+                    }
+                  ],
+                  "if_false_steps": [
+                    {
+                      "type": "action",
+                      "id": "scroll_feed",
+                      "action": "scroll",
+                      "params": {
+                        "direction": "down",
+                        "distancePx": 800
+                      },
+                      "verification": "local_only"
+                    },
+                    {
+                      "type": "action",
+                      "id": "increment_scroll",
+                      "action": "increment",
+                      "params": {
+                        "variable": "scroll_count"
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "checkpoint",
+      "id": "pre_close_checkpoint",
+      "reason": "Before closing app - save state"
+    },
+    {
+      "type": "wait",
+      "id": "final_pause",
+      "duration": {
+        "min": 1000,
+        "max": 2000,
+        "distribution": "uniform"
+      }
+    },
+    {
+      "type": "action",
+      "id": "close_app",
+      "action": "close_app",
+      "params": {
+        "packageName": "com.instagram.android"
+      },
+      "verification": "local_only"
+    }
+  ]
+}

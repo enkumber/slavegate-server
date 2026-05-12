@@ -1,0 +1,1646 @@
+{
+  "appId": "com.reddit.frontpage",
+  "appName": "Reddit",
+  "version": "3.0.0",
+  "pages": {
+    "page_0": {
+      "name": "page_0",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "home_screen_surface",
+          "feed_lazy_column",
+          "post_unit",
+          "post_header",
+          "post_subreddit_icon"
+        ],
+        "signatureHash": "13a024bbc8f1d1a1"
+      },
+      "elements": {
+        "main_top_app_bar_search": {
+          "id": "main_top_app_bar_search",
+          "resourceId": "main_top_app_bar_search",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1463,
+            "y": 0.0319,
+            "w": 0.7074,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.061
+          },
+          "leadsTo": "page_1"
+        },
+        "bottom_nav_button": {
+          "id": "bottom_nav_button",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.25,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.375,
+            "y": 0.9113
+          },
+          "leadsTo": "page_2"
+        },
+        "bottom_nav_button_2": {
+          "id": "bottom_nav_button_2",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.5,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.625,
+            "y": 0.9113
+          },
+          "leadsTo": "page_3"
+        },
+        "bottom_nav_button_3": {
+          "id": "bottom_nav_button_3",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.75,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.875,
+            "y": 0.9113
+          },
+          "leadsTo": "page_4"
+        }
+      },
+      "discoveryOrder": 0
+    },
+    "page_1": {
+      "name": "page_1",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "top_app_bar",
+          "back_button",
+          "search_field",
+          "Search Reddit",
+          "trailing_ask_button"
+        ],
+        "signatureHash": "3fdaeb3adfa452ad"
+      },
+      "elements": {
+        "search_field": {
+          "id": "search_field",
+          "resourceId": "search_field",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1361,
+            "y": 0.0352,
+            "w": 0.825,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.5486,
+            "y": 0.0644
+          },
+          "leadsTo": "self"
+        },
+        "recent_search_topic_item": {
+          "id": "recent_search_topic_item",
+          "resourceId": "recent_search_topic_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.1417,
+            "w": 1.0,
+            "h": 0.062
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.1727
+          },
+          "leadsTo": "page_5"
+        },
+        "recent_search_topic_item_2": {
+          "id": "recent_search_topic_item_2",
+          "resourceId": "recent_search_topic_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.2037,
+            "w": 1.0,
+            "h": 0.062
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.2347
+          },
+          "leadsTo": "page_6"
+        },
+        "recent_search_topic_item_3": {
+          "id": "recent_search_topic_item_3",
+          "resourceId": "recent_search_topic_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.2657,
+            "w": 1.0,
+            "h": 0.062
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.2967
+          },
+          "leadsTo": "page_7"
+        },
+        "search_trending_item": {
+          "id": "search_trending_item",
+          "resourceId": "search_trending_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.3699,
+            "w": 1.0,
+            "h": 0.0847
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.4123
+          },
+          "leadsTo": "page_7"
+        },
+        "search_trending_item_2": {
+          "id": "search_trending_item_2",
+          "resourceId": "search_trending_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.4546,
+            "w": 1.0,
+            "h": 0.0847
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.497
+          },
+          "leadsTo": "page_6"
+        },
+        "search_trending_item_3": {
+          "id": "search_trending_item_3",
+          "resourceId": "search_trending_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.5394,
+            "w": 1.0,
+            "h": 0.0847
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.5817
+          },
+          "leadsTo": "page_5"
+        },
+        "search_trending_item_4": {
+          "id": "search_trending_item_4",
+          "resourceId": "search_trending_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.6241,
+            "w": 1.0,
+            "h": 0.0847
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.6664
+          },
+          "leadsTo": "page_8"
+        },
+        "search_trending_item_5": {
+          "id": "search_trending_item_5",
+          "resourceId": "search_trending_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.7088,
+            "w": 1.0,
+            "h": 0.062
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.7398
+          },
+          "leadsTo": "page_8"
+        },
+        "search_trending_item_6": {
+          "id": "search_trending_item_6",
+          "resourceId": "search_trending_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.7708,
+            "w": 1.0,
+            "h": 0.062
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.8018
+          },
+          "leadsTo": "page_8"
+        },
+        "search_trending_item_7": {
+          "id": "search_trending_item_7",
+          "resourceId": "search_trending_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.8329,
+            "w": 1.0,
+            "h": 0.062
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.8639
+          },
+          "leadsTo": "page_8"
+        },
+        "search_trending_item_8": {
+          "id": "search_trending_item_8",
+          "resourceId": "search_trending_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.8949,
+            "w": 1.0,
+            "h": 0.062
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.9259
+          },
+          "leadsTo": "self"
+        },
+        "search_trending_item_9": {
+          "id": "search_trending_item_9",
+          "resourceId": "search_trending_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.9569,
+            "w": 1.0,
+            "h": 0.0431
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.9784
+          },
+          "leadsTo": "page_9"
+        }
+      },
+      "discoveryOrder": 1
+    },
+    "page_2": {
+      "name": "page_2",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "post_submit_screen",
+          "box_content",
+          "post_composer",
+          "post_title_field",
+          "post_title_field_hint",
+          "Title"
+        ],
+        "signatureHash": "3effae489c74a818"
+      },
+      "elements": {},
+      "discoveryOrder": 2
+    },
+    "page_3": {
+      "name": "page_3",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "inbox_screen",
+          "box_content",
+          "inbox_tab_group",
+          "selected_tab",
+          "Notifications"
+        ],
+        "signatureHash": "5c9317e874fc84bc"
+      },
+      "elements": {
+        "notification_row": {
+          "id": "notification_row",
+          "resourceId": "notification_row",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.1606,
+            "w": 1.0,
+            "h": 0.1449
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.233
+          },
+          "leadsTo": null
+        },
+        "notification_row_2": {
+          "id": "notification_row_2",
+          "resourceId": "notification_row",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.3056,
+            "w": 1.0,
+            "h": 0.1162
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.3637
+          },
+          "leadsTo": "page_10"
+        },
+        "notification_row_3": {
+          "id": "notification_row_3",
+          "resourceId": "notification_row",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.4218,
+            "w": 1.0,
+            "h": 0.1449
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.4943
+          },
+          "leadsTo": "page_11"
+        },
+        "notification_row_4": {
+          "id": "notification_row_4",
+          "resourceId": "notification_row",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.5667,
+            "w": 1.0,
+            "h": 0.1449
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.6391
+          },
+          "leadsTo": "page_11"
+        },
+        "notification_row_5": {
+          "id": "notification_row_5",
+          "resourceId": "notification_row",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.7116,
+            "w": 1.0,
+            "h": 0.1449
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.7841
+          },
+          "leadsTo": "page_11"
+        },
+        "notification_row_6": {
+          "id": "notification_row_6",
+          "resourceId": "notification_row",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.8565,
+            "w": 1.0,
+            "h": 0.0245
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.8688
+          },
+          "leadsTo": "page_11"
+        },
+        "bottom_nav_button": {
+          "id": "bottom_nav_button",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.125,
+            "y": 0.9113
+          },
+          "leadsTo": "page_0"
+        },
+        "bottom_nav_button_2": {
+          "id": "bottom_nav_button_2",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.25,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.375,
+            "y": 0.9113
+          },
+          "leadsTo": "page_2"
+        },
+        "bottom_nav_button_3": {
+          "id": "bottom_nav_button_3",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.75,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.875,
+            "y": 0.9113
+          },
+          "leadsTo": null
+        }
+      },
+      "discoveryOrder": 3
+    },
+    "page_4": {
+      "name": "page_4",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "profile_banner_box",
+          "profile_avatar_picture",
+          "user_image",
+          "profile_name",
+          "Consistent-Beyond386"
+        ],
+        "signatureHash": "1bf6836f27a9a5b6"
+      },
+      "elements": {
+        "profile_avatar_picture": {
+          "id": "profile_avatar_picture",
+          "resourceId": "profile_avatar_picture",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0389,
+            "y": 0.1208,
+            "w": 0.2139,
+            "h": 0.1069
+          },
+          "center": {
+            "x": 0.1459,
+            "y": 0.1743
+          },
+          "leadsTo": null
+        },
+        "profile_followers": {
+          "id": "profile_followers",
+          "resourceId": "profile_followers",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.4389,
+            "y": 0.2921,
+            "w": 0.2102,
+            "h": 0.0356
+          },
+          "center": {
+            "x": 0.544,
+            "y": 0.3099
+          },
+          "leadsTo": null
+        },
+        "profile_highlights_contributions": {
+          "id": "profile_highlights_contributions",
+          "resourceId": "profile_highlights_contributions",
+          "text": "",
+          "contentDescription": "105 Contributions",
+          "bounds": {
+            "x": 0.2139,
+            "y": 0.3824,
+            "w": 0.2565,
+            "h": 0.0602
+          },
+          "center": {
+            "x": 0.3422,
+            "y": 0.4125
+          },
+          "leadsTo": null
+        },
+        "profile_highlights_active_communities": {
+          "id": "profile_highlights_active_communities",
+          "resourceId": "profile_highlights_active_communities",
+          "text": "",
+          "contentDescription": "Active in 29 communities",
+          "bounds": {
+            "x": 0.7685,
+            "y": 0.3824,
+            "w": 0.2204,
+            "h": 0.0602
+          },
+          "center": {
+            "x": 0.8787,
+            "y": 0.4125
+          },
+          "leadsTo": null
+        },
+        "profile_tab": {
+          "id": "profile_tab",
+          "resourceId": "profile_tab",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.3333,
+            "y": 0.4593,
+            "w": 0.3333,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.4884
+          },
+          "leadsTo": null
+        },
+        "profile_tab_2": {
+          "id": "profile_tab_2",
+          "resourceId": "profile_tab",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.6667,
+            "y": 0.4593,
+            "w": 0.3333,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.8333,
+            "y": 0.4884
+          },
+          "leadsTo": null
+        },
+        "bottom_nav_button": {
+          "id": "bottom_nav_button",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.125,
+            "y": 0.9113
+          },
+          "leadsTo": null
+        },
+        "bottom_nav_button_2": {
+          "id": "bottom_nav_button_2",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.25,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.375,
+            "y": 0.9113
+          },
+          "leadsTo": null
+        },
+        "bottom_nav_button_3": {
+          "id": "bottom_nav_button_3",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.5,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.625,
+            "y": 0.9113
+          },
+          "leadsTo": null
+        }
+      },
+      "discoveryOrder": 4
+    },
+    "page_5": {
+      "name": "page_5",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "search_bar",
+          "search_bar_top_app_bar",
+          "search_bar_press_back_button",
+          "search_bar_field",
+          "Erika Kirk Podcast Controversy"
+        ],
+        "signatureHash": "eac0e88be2b9511d"
+      },
+      "elements": {
+        "search_bar_field": {
+          "id": "search_bar_field",
+          "resourceId": "search_bar_field",
+          "text": "Erika Kirk Podcast Controversy",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1361,
+            "y": 0.0352,
+            "w": 0.825,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.5486,
+            "y": 0.0644
+          },
+          "leadsTo": null
+        },
+        "tab_unit": {
+          "id": "tab_unit",
+          "resourceId": "tab_unit",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1685,
+            "y": 0.1014,
+            "w": 0.1898,
+            "h": 0.0519
+          },
+          "center": {
+            "x": 0.2634,
+            "y": 0.1274
+          },
+          "leadsTo": null
+        },
+        "tab_unit_2": {
+          "id": "tab_unit_2",
+          "resourceId": "tab_unit",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.3583,
+            "y": 0.1014,
+            "w": 0.338,
+            "h": 0.0519
+          },
+          "center": {
+            "x": 0.5273,
+            "y": 0.1274
+          },
+          "leadsTo": null
+        },
+        "tab_unit_3": {
+          "id": "tab_unit_3",
+          "resourceId": "tab_unit",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.6963,
+            "y": 0.1014,
+            "w": 0.2917,
+            "h": 0.0519
+          },
+          "center": {
+            "x": 0.8422,
+            "y": 0.1274
+          },
+          "leadsTo": null
+        },
+        "search_list_header_item": {
+          "id": "search_list_header_item",
+          "resourceId": "search_list_header_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0389,
+            "y": 0.5806,
+            "w": 0.9222,
+            "h": 0.0579
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.6096
+          },
+          "leadsTo": null
+        },
+        "d_[real]_erika_kirk,_p": {
+          "id": "d_[real]_erika_kirk,_p",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "[Real] Erika Kirk, Posted in r/ToiletPaperUSA 10 h",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.6384,
+            "w": 1.0,
+            "h": 0.1579
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.7173
+          },
+          "leadsTo": null
+        },
+        "d_what\u2019s_up_with_the_c": {
+          "id": "d_what\u2019s_up_with_the_c",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "What\u2019s up with the Candace Owens and Erika Kirk be",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.7977,
+            "w": 1.0,
+            "h": 0.181
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.8882
+          },
+          "leadsTo": null
+        },
+        "d_[real]_erika_kirk:_\u201c": {
+          "id": "d_[real]_erika_kirk:_\u201c",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "[Real] Erika Kirk: \u201cWhile we may have big problems",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.9801,
+            "w": 1.0,
+            "h": 0.0199
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.99
+          },
+          "leadsTo": null
+        }
+      },
+      "discoveryOrder": 5
+    },
+    "page_6": {
+      "name": "page_6",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "search_bar",
+          "search_bar_top_app_bar",
+          "search_bar_press_back_button",
+          "search_bar_field",
+          "Gaza Aid Flotilla Intercepted"
+        ],
+        "signatureHash": "978ace8050de417d"
+      },
+      "elements": {
+        "search_bar_field": {
+          "id": "search_bar_field",
+          "resourceId": "search_bar_field",
+          "text": "Gaza Aid Flotilla Intercepted",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1361,
+            "y": 0.0352,
+            "w": 0.825,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.5486,
+            "y": 0.0644
+          },
+          "leadsTo": null
+        },
+        "tab_unit": {
+          "id": "tab_unit",
+          "resourceId": "tab_unit",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.2287,
+            "y": 0.1014,
+            "w": 0.338,
+            "h": 0.0519
+          },
+          "center": {
+            "x": 0.3977,
+            "y": 0.1274
+          },
+          "leadsTo": null
+        },
+        "tab_unit_2": {
+          "id": "tab_unit_2",
+          "resourceId": "tab_unit",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.5667,
+            "y": 0.1014,
+            "w": 0.2917,
+            "h": 0.0519
+          },
+          "center": {
+            "x": 0.7126,
+            "y": 0.1274
+          },
+          "leadsTo": null
+        },
+        "tab_unit_3": {
+          "id": "tab_unit_3",
+          "resourceId": "tab_unit",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.8583,
+            "y": 0.1014,
+            "w": 0.1417,
+            "h": 0.0519
+          },
+          "center": {
+            "x": 0.9291,
+            "y": 0.1274
+          },
+          "leadsTo": null
+        },
+        "d_israel_releases_all_": {
+          "id": "d_israel_releases_all_",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "Israel releases all but two activists in Greece af",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.2051,
+            "w": 1.0,
+            "h": 0.2097
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.31
+          },
+          "leadsTo": null
+        },
+        "d_israel_intercepts_ga": {
+          "id": "d_israel_intercepts_ga",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "Israel intercepts Gaza flotilla near Crete and det",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.4162,
+            "w": 1.0,
+            "h": 0.181
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.5067
+          },
+          "leadsTo": null
+        },
+        "d_israeli_forces_are_i": {
+          "id": "d_israeli_forces_are_i",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "Israeli forces are intercepting the Global Sumud F",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.5986,
+            "w": 1.0,
+            "h": 0.2384
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.7178
+          },
+          "leadsTo": null
+        },
+        "d_israeli_forces_inter": {
+          "id": "d_israeli_forces_inter",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "Israeli forces intercept Global Sumud Flotilla in ",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.8384,
+            "w": 1.0,
+            "h": 0.1616
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.9192
+          },
+          "leadsTo": null
+        }
+      },
+      "discoveryOrder": 6
+    },
+    "page_7": {
+      "name": "page_7",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "search_bar",
+          "search_bar_top_app_bar",
+          "search_bar_press_back_button",
+          "search_bar_field",
+          "Melania Trump Epstein Statement"
+        ],
+        "signatureHash": "175966c5744a6c78"
+      },
+      "elements": {
+        "search_bar_field": {
+          "id": "search_bar_field",
+          "resourceId": "search_bar_field",
+          "text": "Melania Trump Epstein Statement",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1361,
+            "y": 0.0352,
+            "w": 0.825,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.5486,
+            "y": 0.0644
+          },
+          "leadsTo": null
+        },
+        "tab_unit": {
+          "id": "tab_unit",
+          "resourceId": "tab_unit",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1685,
+            "y": 0.1014,
+            "w": 0.1898,
+            "h": 0.0519
+          },
+          "center": {
+            "x": 0.2634,
+            "y": 0.1274
+          },
+          "leadsTo": null
+        },
+        "tab_unit_2": {
+          "id": "tab_unit_2",
+          "resourceId": "tab_unit",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.3583,
+            "y": 0.1014,
+            "w": 0.338,
+            "h": 0.0519
+          },
+          "center": {
+            "x": 0.5273,
+            "y": 0.1274
+          },
+          "leadsTo": null
+        },
+        "tab_unit_3": {
+          "id": "tab_unit_3",
+          "resourceId": "tab_unit",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.6963,
+            "y": 0.1014,
+            "w": 0.2917,
+            "h": 0.0519
+          },
+          "center": {
+            "x": 0.8422,
+            "y": 0.1274
+          },
+          "leadsTo": null
+        },
+        "search_list_header_item": {
+          "id": "search_list_header_item",
+          "resourceId": "search_list_header_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0389,
+            "y": 0.5806,
+            "w": 0.9222,
+            "h": 0.0579
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.6096
+          },
+          "leadsTo": null
+        },
+        "d_\"i_have_never_had_an": {
+          "id": "d_\"i_have_never_had_an",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "\"I have never had any knowledge of Epstein abuse o",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.6384,
+            "w": 1.0,
+            "h": 0.3245
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.8006
+          },
+          "leadsTo": null
+        },
+        "d_mar-a-lago_party_in_": {
+          "id": "d_mar-a-lago_party_in_",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "Mar-a-lago party in 2000 with Epstein, Madame Max,",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.9644,
+            "w": 1.0,
+            "h": 0.0356
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.9822
+          },
+          "leadsTo": null
+        }
+      },
+      "discoveryOrder": 7
+    },
+    "page_8": {
+      "name": "page_8",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "top_app_bar",
+          "back_button",
+          "search_field",
+          "y",
+          "trailing_ask_button"
+        ],
+        "signatureHash": "29b33afb325e81fb"
+      },
+      "elements": {
+        "search_field": {
+          "id": "search_field",
+          "resourceId": "search_field",
+          "text": "y",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1361,
+            "y": 0.0352,
+            "w": 0.825,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.5486,
+            "y": 0.0644
+          },
+          "leadsTo": null
+        },
+        "search_query_autocomplete_list_item": {
+          "id": "search_query_autocomplete_list_item",
+          "resourceId": "search_query_autocomplete_list_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.0995,
+            "w": 1.0,
+            "h": 0.0579
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.1285
+          },
+          "leadsTo": null
+        },
+        "search_query_autocomplete_list_item_2": {
+          "id": "search_query_autocomplete_list_item_2",
+          "resourceId": "search_query_autocomplete_list_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.1574,
+            "w": 1.0,
+            "h": 0.0579
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.1864
+          },
+          "leadsTo": null
+        },
+        "search_query_autocomplete_list_item_3": {
+          "id": "search_query_autocomplete_list_item_3",
+          "resourceId": "search_query_autocomplete_list_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.2153,
+            "w": 1.0,
+            "h": 0.0579
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.2442
+          },
+          "leadsTo": null
+        },
+        "search_query_autocomplete_list_item_4": {
+          "id": "search_query_autocomplete_list_item_4",
+          "resourceId": "search_query_autocomplete_list_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.2731,
+            "w": 1.0,
+            "h": 0.0579
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.302
+          },
+          "leadsTo": null
+        },
+        "search_query_autocomplete_list_item_5": {
+          "id": "search_query_autocomplete_list_item_5",
+          "resourceId": "search_query_autocomplete_list_item",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.331,
+            "w": 1.0,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.5,
+            "y": 0.3602
+          },
+          "leadsTo": null
+        }
+      },
+      "discoveryOrder": 8
+    },
+    "page_9": {
+      "name": "page_9",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "net.oneplus.launcher:id/launcher_scrim_view",
+          "net.oneplus.launcher:id/workspace",
+          "com.google.android.googlequicksearchbox:id/googleapp_search_widget_background",
+          "com.google.android.googlequicksearchbox:id/googleapp_search_widget_doodle",
+          "com.google.android.googlequicksearchbox:id/googleapp_search_widget_voice_btn",
+          "com.google.android.googlequicksearchbox:id/googleapp_search_widget_lens_btn",
+          "net.oneplus.widget:id/widget_layout",
+          "net.oneplus.widget:id/date_text",
+          "FRI, MAY 1"
+        ],
+        "signatureHash": "12573fd819cd5f1e"
+      },
+      "elements": {
+        "googleapp_search_widget_background": {
+          "id": "googleapp_search_widget_background",
+          "resourceId": "com.google.android.googlequicksearchbox:id/googleapp_search_widget_background",
+          "text": "",
+          "contentDescription": "Google search",
+          "bounds": {
+            "x": 0.05,
+            "y": 0.094,
+            "w": 0.9009,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.5005,
+            "y": 0.1231
+          },
+          "leadsTo": null
+        },
+        "googleapp_search_widget_voice_btn": {
+          "id": "googleapp_search_widget_voice_btn",
+          "resourceId": "com.google.android.googlequicksearchbox:id/googleapp_search_widget_voice_btn",
+          "text": "",
+          "contentDescription": "Voice search",
+          "bounds": {
+            "x": 0.7176,
+            "y": 0.094,
+            "w": 0.1167,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.776,
+            "y": 0.1231
+          },
+          "leadsTo": null
+        },
+        "googleapp_search_widget_lens_btn": {
+          "id": "googleapp_search_widget_lens_btn",
+          "resourceId": "com.google.android.googlequicksearchbox:id/googleapp_search_widget_lens_btn",
+          "text": "",
+          "contentDescription": "Camera search",
+          "bounds": {
+            "x": 0.8343,
+            "y": 0.094,
+            "w": 0.1167,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.8927,
+            "y": 0.1231
+          },
+          "leadsTo": null
+        },
+        "d_play_store,_has_1_no": {
+          "id": "d_play_store,_has_1_no",
+          "resourceId": "",
+          "text": "Play Store",
+          "contentDescription": "Play Store, has 1 notification",
+          "bounds": {
+            "x": 0.7824,
+            "y": 0.6324,
+            "w": 0.187,
+            "h": 0.1454
+          },
+          "center": {
+            "x": 0.8759,
+            "y": 0.7051
+          },
+          "leadsTo": null
+        }
+      },
+      "discoveryOrder": 9
+    },
+    "page_10": {
+      "name": "page_10",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "box_content",
+          "com.reddit.frontpage:id/fragment_pager",
+          "post_detail_scaffold",
+          "post_detail_scrollable",
+          "post_detail_lazy_column"
+        ],
+        "signatureHash": "d613d8867c081696"
+      },
+      "elements": {
+        "d_community_status_is_": {
+          "id": "d_community_status_is_",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "Community Status is the News emoji",
+          "bounds": {
+            "x": 0.2046,
+            "y": 0.0981,
+            "w": 0.1167,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.263,
+            "y": 0.1273
+          },
+          "leadsTo": null
+        },
+        "user_avatar_header": {
+          "id": "user_avatar_header",
+          "resourceId": "user_avatar_header",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0194,
+            "y": 0.6509,
+            "w": 0.1167,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.0777,
+            "y": 0.6801
+          },
+          "leadsTo": null
+        },
+        "comment_author": {
+          "id": "comment_author",
+          "resourceId": "comment_author",
+          "text": "VariationDry",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1269,
+            "y": 0.6514,
+            "w": 0.1852,
+            "h": 0.0532
+          },
+          "center": {
+            "x": 0.2195,
+            "y": 0.678
+          },
+          "leadsTo": null
+        },
+        "user_avatar_header_2": {
+          "id": "user_avatar_header_2",
+          "resourceId": "user_avatar_header",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0611,
+            "y": 0.8009,
+            "w": 0.1167,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.1195,
+            "y": 0.83
+          },
+          "leadsTo": null
+        },
+        "comment_author_2": {
+          "id": "comment_author_2",
+          "resourceId": "comment_author",
+          "text": "VariationDry",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1685,
+            "y": 0.8014,
+            "w": 0.1852,
+            "h": 0.0532
+          },
+          "center": {
+            "x": 0.2611,
+            "y": 0.828
+          },
+          "leadsTo": null
+        },
+        "user_avatar_header_3": {
+          "id": "user_avatar_header_3",
+          "resourceId": "user_avatar_header",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.1019,
+            "y": 0.9509,
+            "w": 0.1167,
+            "h": 0.0491
+          },
+          "center": {
+            "x": 0.1603,
+            "y": 0.9754
+          },
+          "leadsTo": null
+        },
+        "comment_author_3": {
+          "id": "comment_author_3",
+          "resourceId": "comment_author",
+          "text": "majora9109",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.2093,
+            "y": 0.9514,
+            "w": 0.1796,
+            "h": 0.0486
+          },
+          "center": {
+            "x": 0.2991,
+            "y": 0.9757
+          },
+          "leadsTo": null
+        },
+        "add_comment_button": {
+          "id": "add_comment_button",
+          "resourceId": "add_comment_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0194,
+            "y": 0.8801,
+            "w": 0.8444,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.4416,
+            "y": 0.9093
+          },
+          "leadsTo": null
+        },
+        "d_next_comment": {
+          "id": "d_next_comment",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "Next comment",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.8722,
+            "w": 0.1074,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.0537,
+            "y": 0.9013
+          },
+          "leadsTo": null
+        },
+        "avatar": {
+          "id": "avatar",
+          "resourceId": "avatar",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.8731,
+            "y": 0.0352,
+            "w": 0.1167,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.9315,
+            "y": 0.0644
+          },
+          "leadsTo": null
+        }
+      },
+      "discoveryOrder": 10
+    },
+    "page_11": {
+      "name": "page_11",
+      "detection": {
+        "method": "ui_tree_signature",
+        "anchors": [
+          "com.reddit.frontpage:id/drawer_layout",
+          "com.reddit.frontpage:id/frame_container",
+          "com.reddit.frontpage:id/main_activity_navhost",
+          "box_content",
+          "AutoModerator notification",
+          "u/automoderator",
+          "2mo",
+          "Notification"
+        ],
+        "signatureHash": "43bbec3493027b0f"
+      },
+      "elements": {
+        "d_announcement_actions": {
+          "id": "d_announcement_actions",
+          "resourceId": "",
+          "text": "",
+          "contentDescription": "Announcement actions menu",
+          "bounds": {
+            "x": 0.8787,
+            "y": 0.1519,
+            "w": 0.1167,
+            "h": 0.0583
+          },
+          "center": {
+            "x": 0.9371,
+            "y": 0.1811
+          },
+          "leadsTo": null
+        },
+        "bottom_nav_button": {
+          "id": "bottom_nav_button",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.0,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.125,
+            "y": 0.9113
+          },
+          "leadsTo": null
+        },
+        "bottom_nav_button_2": {
+          "id": "bottom_nav_button_2",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.25,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.375,
+            "y": 0.9113
+          },
+          "leadsTo": null
+        },
+        "bottom_nav_button_3": {
+          "id": "bottom_nav_button_3",
+          "resourceId": "bottom_nav_button",
+          "text": "",
+          "contentDescription": "",
+          "bounds": {
+            "x": 0.75,
+            "y": 0.881,
+            "w": 0.25,
+            "h": 0.0606
+          },
+          "center": {
+            "x": 0.875,
+            "y": 0.9113
+          },
+          "leadsTo": null
+        }
+      },
+      "discoveryOrder": 11
+    }
+  },
+  "createdAt": "2026-05-01T14:01:51Z",
+  "updatedAt": "2026-05-01T14:01:51Z",
+  "pageCount": 12,
+  "transitionCount": 22
+}

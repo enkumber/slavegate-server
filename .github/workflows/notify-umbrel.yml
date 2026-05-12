@@ -1,0 +1,25 @@
+name: Notify Umbrel App Store
+
+on:
+  workflow_run:
+    workflows: ["Build & Push Docker Image"]
+    types: [completed]
+    branches: [master]
+
+jobs:
+  notify:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Umbrel app update
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.PAT_UMBREL }}
+          repository: enkumber/slavegate
+          event-type: server-updated
+          client-payload: |
+            {
+              "version": "patch",
+              "commit_sha": "${{ github.event.workflow_run.head_sha }}",
+              "message": "${{ github.event.workflow_run.display_title }}"
+            }
