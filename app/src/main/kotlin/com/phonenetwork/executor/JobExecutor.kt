@@ -177,6 +177,8 @@ class JobExecutor(
                     // Skill system
                     "skill_tap"      -> Triple("completed", executeSkillTap(params), null)
                     "a11y_find_tap"  -> Triple("completed", executeA11yFindTap(params), null)
+                    // Workflow system — executes workflow JSON locally, consults server for decisions
+                    "workflow_execute" -> Triple("completed", executeWorkflow(params), null)
                     else             -> Triple("failed", null, "Unknown job type: $type")
                 }
             } ?: Triple("failed", null, "Execution timeout (${jobTimeoutMs}ms)")
@@ -213,16 +215,27 @@ class JobExecutor(
     // ─── Job handlers ─────────────────────────────────────────────────────────
 
     private suspend fun executeTap(params: JSONObject) {
-        // Jitter applied server-side — coordinates are final
-        automation.tap(params.getInt("x"), params.getInt("y"))
+        // Supports both pixel coords (int) and normalized (0.0-1.0)
+        val rawX = params.getDouble("x")
+        val rawY = params.getDouble("y")
+        val (screenW, screenH) = ScreenMetrics.getRealDimensions(context)
+        val x = if (rawX > 0.0 && rawX <= 1.0) (rawX * screenW).toInt() else rawX.toInt()
+        val y = if (rawY > 0.0 && rawY <= 1.0) (rawY * screenH).toInt() else rawY.toInt()
+        Log.i(TAG, "tap: raw($rawX, $rawY) → pixel($x, $y) screen=${screenW}x${screenH}")
+        automation.tap(x, y)
     }
 
     private suspend fun executeSwipe(params: JSONObject) {
-        automation.swipe(
-            startX = params.getInt("startX"), startY = params.getInt("startY"),
-            endX = params.getInt("endX"), endY = params.getInt("endY"),
-            durationMs = params.getLong("durationMs")
-        )
+        val (screenW, screenH) = ScreenMetrics.getRealDimensions(context)
+        val startX = resolveCoord(params.getDouble("startX"), screenW)
+        val startY = resolveCoord(params.getDouble("startY"), screenH)
+        val endX = resolveCoord(params.getDouble("endX"), screenW)
+        val endY = resolveCoord(params.getDouble("endY"), screenH)
+        automation.swipe(startX, startY, endX, endY, params.getLong("durationMs"))
+    }
+
+    private fun resolveCoord(raw: Double, screenDim: Int): Int {
+        return if (raw > 0.0 && raw <= 1.0) (raw * screenDim).toInt() else raw.toInt()
     }
 
     private suspend fun executeTypeText(params: JSONObject) =
@@ -946,6 +959,174 @@ class JobExecutor(
             // Always recycle nodes to prevent memory leaks
             try { foundNode?.recycle() } catch (_: Exception) {}
             try { rootNode.recycle() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Execute a workflow JSON locally.
+     * Phone executes steps, calls server (/workflow/decide) when decisions are needed.
+     * 
+     * Params:
+     *   - workflow: JSON object with name, steps[]
+     */
+    private suspend fun executeWorkflow(params: JSONObject): JSONObject = withContext(Dispatchers.IO) {
+        val workflow = params.optJSONObject("workflow")
+            ?: throw IllegalStateException("Missing 'workflow' in params")
+        
+        val workflowName = workflow.optString("name", "unknown")
+        val steps = workflow.optJSONArray("steps") 
+            ?: throw IllegalStateException("Missing 'steps' in workflow")
+        
+        Log.i(TAG, "[workflow] Starting workflow: $workflowName with ${steps.length()} steps")
+        
+        val completedSteps = mutableSetOf<String>()
+        val results = JSONObject()
+        
+        // Helper: check if step dependencies are met
+        fun canExecute(step: JSONObject): Boolean {
+            val requires = step.optJSONArray("requires") ?: return true
+            for (i in 0 until requires.length()) {
+                if (!completedSteps.contains(requires.getString(i))) return false
+            }
+            return true
+        }
+        
+        // Helper: wait
+        suspend fun waitMs(ms: Long) {
+            delay(ms)
+        }
+        
+        // Helper: call server for decision
+        suspend fun askServer(stepId: String, check: String, context: JSONObject): JSONObject {
+            Log.i(TAG, "[workflow] Asking server for decision: $stepId ($check)")
+            val body = JSONObject().apply {
+                put("workflowName", workflowName)
+                put("stepName", stepId)
+                put("context", context)
+            }
+            
+            // Make HTTP request to server
+            val url = java.net.URL("http://localhost:3000/api/workflow/decide")
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("X-Api-Key", "24018503cf6bd0ae1e5b1f829a5f66cf23fc2160aea90dff3b91427419cec746")
+            conn.doOutput = true
+            conn.outputStream.write(body.toString().toByteArray())
+            
+            val response = conn.inputStream.bufferedReader().readText()
+            return JSONObject(response)
+        }
+        
+        // Execute steps in order (simple sequential for now)
+        for (i in 0 until steps.length()) {
+            val step = steps.getJSONObject(i)
+            val stepId = step.optString("id", "step_$i")
+            val stepType = step.optString("type")
+            
+            Log.i(TAG, "[workflow] Executing step $stepId ($stepType)")
+            
+            when (stepType) {
+                "screen_wake" -> {
+                    executeScreenWake()
+                    completedSteps.add(stepId)
+                    results.put(stepId, JSONObject().put("status", "ok"))
+                }
+                "unlock" -> {
+                    val unlockResult = executeUnlock(step.optJSONObject("params") ?: JSONObject())
+                    completedSteps.add(stepId)
+                    results.put(stepId, unlockResult)
+                }
+                "open_app" -> {
+                    val pkg = step.optString("package")
+                    if (pkg.isNotEmpty()) {
+                        automation.openApp(pkg)
+                    }
+                    completedSteps.add(stepId)
+                    results.put(stepId, JSONObject().put("status", "ok"))
+                }
+                "wait" -> {
+                    // Support both {ms: N} and {duration: {min, max, distribution}} formats
+                    val waitMs = if (step.has("duration")) {
+                        val dur = step.getJSONObject("duration")
+                        val min = dur.optLong("min", 500)
+                        val max = dur.optLong("max", 1000)
+                        min + ((max - min) * Math.random()).toLong()
+                    } else {
+                        step.optLong("ms", 1000)
+                    }
+                    waitMs(waitMs)
+                    completedSteps.add(stepId)
+                    results.put(stepId, JSONObject().put("status", "ok"))
+                }
+                "cascade_tap", "tap" -> {
+                    val target = step.optString("target")
+                    if (target.isNotEmpty()) {
+                        // Try OCR to find and tap
+                        val ocrResult = executeOcrFindTap(JSONObject().apply {
+                            put("searchText", target)
+                            put("partialMatch", true)
+                        })
+                        if (ocrResult.optBoolean("found", false)) {
+                            val tapped = ocrResult.optBoolean("tapped", false)
+                            if (!tapped) {
+                                val pixelX = ocrResult.optInt("pixelX")
+                                val pixelY = ocrResult.optInt("pixelY")
+                                automation.tap(pixelX, pixelY)
+                            }
+                            results.put(stepId, ocrResult)
+                        } else {
+                            results.put(stepId, JSONObject().put("status", "failed").put("error", "Element not found: $target"))
+                        }
+                    }
+                    completedSteps.add(stepId)
+                }
+                "decide" -> {
+                    // Get current screen state and ask server
+                    val fgResult = executeGetForegroundApp()
+                    val screenState = JSONObject().apply {
+                        val uiTree = automation.uiTreeDump(null)
+                        put("uiTree", uiTree)
+                        put("packageName", fgResult.optString("packageName"))
+                    }
+                    val check = step.optString("check", "")
+                    val decision = askServer(stepId, check, screenState)
+                    val action = decision.optString("action", "continue")
+                    
+                    Log.i(TAG, "[workflow] Server decision: $action")
+                    results.put(stepId, decision)
+                    
+                    if (action == "done" || action == "stop") {
+                        Log.i(TAG, "[workflow] Workflow completed: $action")
+                        break
+                    } else if (action == "retry_step") {
+                        // Set a flag to retry from specific step
+                        val retryStepId = decision.optString("nextStep")
+                        Log.i(TAG, "[workflow] Need to retry step: $retryStepId")
+                        // Mark steps to retry
+                        completedSteps.remove(retryStepId)
+                    }
+                    completedSteps.add(stepId)
+                }
+                else -> {
+                    Log.w(TAG, "[workflow] Unknown step type: $stepType")
+                    results.put(stepId, JSONObject().put("status", "skipped").put("error", "Unknown type: $stepType"))
+                    completedSteps.add(stepId)
+                }
+            }
+            
+            // Apply delay_after if specified
+            val delayAfter = step.optLong("delay_after", 0)
+            if (delayAfter > 0) {
+                waitMs(delayAfter)
+            }
+        }
+        
+        Log.i(TAG, "[workflow] Workflow completed: $workflowName")
+        return@withContext JSONObject().apply {
+            put("workflowName", workflowName)
+            put("completedSteps", completedSteps.size)
+            put("results", results)
         }
     }
 

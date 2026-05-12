@@ -22,6 +22,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -93,6 +94,15 @@ class AgentForegroundService : Service() {
 
         enableAccessibilityServiceViaRoot()
         pendingA11y?.let { onAccessibilityServiceConnected(it) }
+
+        // Retry accessibility enablement after delay (system may not pick up secure settings immediately)
+        serviceScope.launch {
+            delay(3000)
+            if (pendingA11y == null) {
+                Log.w(TAG, "A11y not connected after 3s — retrying enablement")
+                enableAccessibilityServiceViaRoot()
+            }
+        }
 
         // Configure DirectWs auto-discovery
         Log.i(TAG, "Configuring DirectWs auto-discovery")
@@ -167,24 +177,55 @@ class AgentForegroundService : Service() {
             val current = Settings.Secure.getString(
                 contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
             ) ?: ""
+            Log.i(TAG, "A11y: current services='$current', target='$component'")
             if (component in current) {
                 Log.i(TAG, "A11y service already enabled")
                 return
             }
-            val newList = if (current.isEmpty()) component else "$current:$component"
-            val proc = Runtime.getRuntime().exec(arrayOf(
-                "su", "-c",
-                "settings put secure enabled_accessibility_services \"$newList\" " +
-                "&& settings put secure accessibility_enabled 1"
-            ))
-            val exitCode = proc.waitFor()
-            if (exitCode == 0) {
-                Log.i(TAG, "A11y service enabled via root")
+            // Clean approach: use separate su commands to avoid shell quoting issues
+            // First, build the new list (keep existing non-conflicting services)
+            val parts = current.split(":").filter { it.isNotEmpty() }.toMutableList()
+            // Remove old package references (com.phonenetwork.debug or com.phonenetwork)
+            val oldPrefixes = listOf("com.phonenetwork.debug/", "com.phonenetwork/")
+            parts.removeAll { part -> oldPrefixes.any { prefix -> part.startsWith(prefix) } }
+            parts.add(component)
+            val newList = parts.joinToString(":")
+            Log.i(TAG, "A11y: setting services='$newList'")
+
+            // Use separate commands to avoid quoting issues with su -c
+            val cmd1 = "settings put secure enabled_accessibility_services $newList"
+            val cmd2 = "settings put secure accessibility_enabled 1"
+            runRootCommand(cmd1)
+            runRootCommand(cmd2)
+
+            // Verify it was set
+            Thread.sleep(500)
+            val verify = Settings.Secure.getString(
+                contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ) ?: ""
+            if (component in verify) {
+                Log.i(TAG, "A11y: VERIFIED service enabled")
             } else {
-                Log.w(TAG, "su command exited with code $exitCode")
+                Log.w(TAG, "A11y: VERIFICATION FAILED — got='$verify'")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to enable a11y via root: ${e.message}")
+        }
+    }
+
+    private fun runRootCommand(cmd: String): Int {
+        return try {
+            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+            val exitCode = proc.waitFor()
+            val stdout = proc.inputStream.bufferedReader().readText().trim()
+            val stderr = proc.errorStream.bufferedReader().readText().trim()
+            if (stdout.isNotEmpty()) Log.i(TAG, "root[$cmd] stdout: $stdout")
+            if (stderr.isNotEmpty()) Log.w(TAG, "root[$cmd] stderr: $stderr")
+            Log.i(TAG, "root[$cmd] exit=$exitCode")
+            exitCode
+        } catch (e: Exception) {
+            Log.w(TAG, "root[$cmd] exception: ${e.message}")
+            -1
         }
     }
 

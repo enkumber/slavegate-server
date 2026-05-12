@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.provider.Settings
 import android.util.Log
+import com.phonenetwork.executor.BatchExecutor
 import com.phonenetwork.executor.JobExecutor
 import kotlinx.coroutines.*
 import okhttp3.*
@@ -42,7 +43,63 @@ class DirectWsClient(
     private val onDisconnected: () -> Unit = {},
     private val onOtaUpdate: (version: String, versionCode: Int, apkUrl: String, apkSha256: String, mandatory: Boolean) -> Unit = { _, _, _, _, _ -> },
     private val onTaskResult: (taskType: String, success: Boolean, result: Map<String, Any?>, error: String?) -> Unit = { _, _, _, _ -> },
+    private var batchExecutor: BatchExecutor? = null,
 ) {
+
+    /**
+     * Set the BatchExecutor instance. Called after dependencies are initialized.
+     * Without this, BATCH_START messages are rejected with an error.
+     */
+    fun setBatchExecutor(be: BatchExecutor) {
+        batchExecutor = be
+        Log.i(TAG, "BatchExecutor attached to DirectWsClient")
+    }
+    /**
+     * Stable device ID derived from hardware serial.
+     * Uses root `getprop ro.serialno` → SHA-256 → UUID v5 style.
+     * Falls back to stored prefs, then ANDROID_ID, then random UUID.
+     * This ensures the same physical device always gets the same ID,
+     * even after uninstall/reinstall or package name change.
+     */
+    private fun getStableDeviceId(): String {
+        // 1. Already have a stable ID saved?
+        val stored = prefs.getString(PREF_DEVICE_ID, null)
+        if (!stored.isNullOrBlank()) return stored
+
+        // 2. Try hardware serial via root
+        val serial = try {
+            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", "getprop ro.serialno"))
+            val output = proc.inputStream.bufferedReader().readText().trim()
+            proc.waitFor()
+            output
+        } catch (_: Exception) { "" }
+
+        if (serial.isNotBlank() && serial != "unknown") {
+            // Derive UUID from serial: SHA-256 hash → format as UUID
+            val hash = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(serial.toByteArray())
+            val uuid = java.util.UUID.nameUUIDFromBytes(hash)
+            prefs.edit().putString(PREF_DEVICE_ID, uuid.toString()).apply()
+            Log.i(TAG, "Stable deviceId from serial: ${uuid}")
+            return uuid.toString()
+        }
+
+        // 3. Fallback: ANDROID_ID (less stable but better than random)
+        val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+        if (!androidId.isNullOrBlank()) {
+            val uuid = java.util.UUID.nameUUIDFromBytes(androidId.toByteArray())
+            prefs.edit().putString(PREF_DEVICE_ID, uuid.toString()).apply()
+            Log.i(TAG, "Stable deviceId from ANDROID_ID: ${uuid}")
+            return uuid.toString()
+        }
+
+        // 4. Last resort: random (will change on reinstall)
+        val uuid = java.util.UUID.randomUUID().toString()
+        prefs.edit().putString(PREF_DEVICE_ID, uuid).apply()
+        Log.w(TAG, "Stable deviceId fallback to random: $uuid")
+        return uuid
+    }
+
     companion object {
         private const val TAG = "DirectWsClient"
         private const val PREFS = "phone_network_direct"
@@ -122,7 +179,8 @@ class DirectWsClient(
                 lastPongAt = System.currentTimeMillis()
 
                 // AUTH — send deviceId+key+deviceInfo for enrollment
-                val deviceId = prefs.getString(PREF_DEVICE_ID, null) ?: ""
+                // Stable device ID: derive from hardware serial (root) so it survives reinstall
+                val deviceId = getStableDeviceId()
                 val fingerprint = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
                 val agentVersion = getAgentVersion()
                 val manufacturer = android.os.Build.MANUFACTURER
@@ -216,6 +274,11 @@ class DirectWsClient(
                 executeJob(webSocket, jobId, jobType, params)
             }
 
+            "BATCH_START" -> {
+                Log.i(TAG, "BATCH_START received: batchId=${msg.optString("batchId")}")
+                executeBatch(webSocket, msg)
+            }
+
             "PING" -> sendRaw(webSocket, JSONObject().put("type", "PONG"))
 
             "PONG" -> {
@@ -280,6 +343,61 @@ class DirectWsClient(
                     put("output", JSONObject.NULL)
                     put("error", e.message ?: "Unknown error")
                     put("durationMs", System.currentTimeMillis() - startMs)
+                })
+            }
+        }
+    }
+
+    // ─── Batch execution (Fast-Path) ──────────────────────────────────────────
+
+    /**
+     * Execute a BATCH_START message via BatchExecutor.
+     *
+     * Flow:
+     *   1. Receive BATCH_START from server
+     *   2. Delegate to BatchExecutor.executeBatch()
+     *   3. BatchExecutor runs all steps locally (zero server contact)
+     *   4. Send BATCH_RESULT back via WebSocket
+     *
+     * Falls back to error result if BatchExecutor is not initialized.
+     */
+    private fun executeBatch(webSocket: WebSocket, batchMsg: JSONObject) {
+        val be = batchExecutor
+        if (be == null) {
+            Log.e(TAG, "BATCH_START received but BatchExecutor not initialized — sending error")
+            sendRaw(webSocket, JSONObject().apply {
+                put("type", "BATCH_RESULT")
+                put("batchId", batchMsg.optString("batchId"))
+                put("workflowId", batchMsg.optString("workflowId"))
+                put("status", "failed")
+                put("results", org.json.JSONArray())
+                put("executedAt", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+                    .format(java.util.Date()))
+                put("totalDurationMs", 0)
+                put("error", "BatchExecutor not initialized on device")
+            })
+            return
+        }
+
+        scope.launch {
+            try {
+                be.executeBatch(batchMsg) { resultJson ->
+                    sendRaw(webSocket, resultJson)
+                    Log.i(TAG, "BATCH_RESULT sent: batchId=${resultJson.optString("batchId")} " +
+                            "status=${resultJson.optString("status")}")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Batch execution failed: ${e.message}")
+                sendRaw(webSocket, JSONObject().apply {
+                    put("type", "BATCH_RESULT")
+                    put("batchId", batchMsg.optString("batchId"))
+                    put("workflowId", batchMsg.optString("workflowId"))
+                    put("status", "failed")
+                    put("results", org.json.JSONArray())
+                    put("executedAt", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+                        .format(java.util.Date()))
+                    put("totalDurationMs", 0)
+                    put("error", e.message ?: "Unknown batch error")
                 })
             }
         }

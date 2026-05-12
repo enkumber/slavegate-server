@@ -45,7 +45,7 @@ class OtaInstaller(private val context: Context) {
     companion object {
         private const val TAG          = "PhoneNet/OTA"
         private const val DOWNLOAD_DIR = "phone_network_ota"
-        private const val TIMEOUT_MS   = 60_000        // 60s download timeout
+        private const val TIMEOUT_MS   = 120_000       // 120s download timeout (GitHub can be slow on mobile)
         private const val CHANNEL_ID   = "ota_debug"
         private const val CHANNEL_NAME = "OTA Debug"
         
@@ -61,6 +61,8 @@ class OtaInstaller(private val context: Context) {
             val channel = NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_HIGH)
             notificationManager.createNotificationChannel(channel)
         }
+        // Reset stuck OTA flag on startup (crash during OTA can leave it true)
+        isOtaInProgress.set(false)
     }
 
     /**
@@ -126,9 +128,9 @@ class OtaInstaller(private val context: Context) {
             return@withContext
         }
 
-        // Validate URL scheme — HTTP not allowed
-        require(apkUrl.startsWith("https://")) {
-            "OTA URL must use HTTPS: $apkUrl"
+        // Validate URL scheme — allow HTTP for local/trusted networks
+        if (!apkUrl.startsWith("https://") && !apkUrl.startsWith("http://")) {
+            throw IllegalArgumentException("OTA URL must use HTTP or HTTPS: $apkUrl")
         }
 
         val outDir = File(context.cacheDir, DOWNLOAD_DIR).apply { mkdirs() }
@@ -289,6 +291,17 @@ class OtaInstaller(private val context: Context) {
         val result = runRootCommand("pm install -r ${apkFile.absolutePath}")
         if (!result.success || result.output.contains("INSTALL_FAILED", ignoreCase = true)) {
             throw RuntimeException("pm install failed: ${result.output}")
+        }
+        // Force-start the app after install (MY_PACKAGE_REPLACED broadcast may not fire with pm install)
+        try {
+            Thread.sleep(1000)
+            runRootCommand("am start -n com.phonenetwork.debug/com.phonenetwork.service.BootReceiver")
+            runRootCommand("am start -n com.phonenetwork/com.phonenetwork.service.BootReceiver")
+            // Also try starting the foreground service directly
+            runRootCommand("am startservice com.phonenetwork.debug/com.phonenetwork.service.AgentForegroundService")
+            runRootCommand("am startservice com.phonenetwork/com.phonenetwork.service.AgentForegroundService")
+        } catch (e: Exception) {
+            Log.w(TAG, "Auto-start after install failed: ${e.message}")
         }
     }
 
