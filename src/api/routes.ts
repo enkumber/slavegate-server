@@ -878,7 +878,8 @@ router.post("/ota/push", requireAuth, async (req, res) => {
     : onlineDevices;
   
   let sentTo = 0;
-  const baseUrl = process.env.BASE_URL || `http://${process.env.HOST || 'localhost'}:${process.env.PORT || 21211}`;
+  // Force correct external URL for OTA — Docker internal port (21211) is not accessible to devices
+  const baseUrl = 'http://enkzoned.go.ro:3000';
   for (const device of targets) {
     try {
       directWsServer.sendToDevice(device.deviceId, {
