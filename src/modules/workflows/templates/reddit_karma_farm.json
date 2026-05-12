@@ -1,12 +1,40 @@
 {
   "id": "reddit_karma_farm",
-  "name": "Reddit Karma Farm",
+  "name": "Reddit Karma Farm v2",
   "platform": "reddit",
-  "description": "Navighează pe r/AskReddit, găsește postări cu potențial, generează comentarii dramatice/helpful/funny pentru a crește karma. Comentariu per run.",
-  "version": "1.0.0",
-  "defaultVerificationStrategy": "local_with_screenshot",
+  "description": "Navighează pe r/AskReddit cu coordonate fixe calibrate. VLM doar: 1) gasit r/AskReddit in search, 2) analiza postare, 3) generare comentariu. Un comentariu per run.",
+  "version": "2.0.0",
+  "defaultVerificationStrategy": "local_only",
   "dataRetentionDays": 30,
+
+  "_layout": {
+    "_note": "Coordonate normalizate (0.0-1.0 = procent din ecran). Functioneaza pe orice device. Recalibreaza daca se schimba layout-ul Reddit.",
+    "search_bar":       { "x": 0.50, "y": 0.079, "note": "Search bar - top center (~170px/2160)" },
+    "search_clear":     { "x": 0.917, "y": 0.079, "note": "X button din search bar (~990px/1080)" },
+    "askreddit_result": { "x": 0.50, "y": 0.162, "note": "Primul rezultat search — r/AskReddit (~350px/2160)" },
+    "sort_new":         { "x": 0.722, "y": 0.130, "note": "Tab 'New' din sort (~780px/1080, ~280px/2160)" },
+    "feed_post_center": { "x": 0.50, "y": 0.370, "note": "Centrul primei postari din feed (~800px/2160)" },
+    "add_comment":      { "x": 0.50, "y": 0.949, "note": "'Add a comment' field - bottom (~2050px/2160)" },
+    "reply_button":     { "x": 0.833, "y": 0.079, "note": "Reply/Post button - top right (~900px/1080)" }
+  },
+
   "steps": [
+    {
+      "type": "action",
+      "id": "init_vars",
+      "action": "set_variable",
+      "params": {
+        "variables": {
+          "scroll_count": 0,
+          "max_scrolls": 10,
+          "comment_posted": false,
+          "_post_analysis": "",
+          "_generated_comment": "",
+          "_post_title": ""
+        }
+      }
+    },
+
     {
       "type": "action",
       "id": "wake_screen",
@@ -17,17 +45,12 @@
       "timeoutMs": 5000
     },
     {
-      "type": "wait",
-      "id": "wait_screen_on",
-      "duration": {
-        "min": 500,
-        "max": 1000,
-        "distribution": "uniform"
-      }
+      "type": "wait", "id": "w1", "duration": { "min": 500, "max": 1000, "distribution": "uniform" }
     },
+
     {
       "type": "action",
-      "id": "unlock_device",
+      "id": "unlock",
       "action": "unlock",
       "params": {},
       "verification": "local_only",
@@ -35,117 +58,92 @@
       "timeoutMs": 10000
     },
     {
-      "type": "wait",
-      "id": "wait_unlock",
-      "duration": {
-        "min": 500,
-        "max": 1500,
-        "distribution": "uniform"
-      }
+      "type": "wait", "id": "w2", "duration": { "min": 800, "max": 1500, "distribution": "uniform" }
     },
+
     {
       "type": "action",
       "id": "open_reddit",
       "action": "open_app",
-      "params": {
-        "packageName": "com.reddit.frontpage"
-      },
+      "params": { "packageName": "com.reddit.frontpage" },
       "verification": "local_only",
       "retries": 2,
-      "timeoutMs": 15000,
-      "expectedScreen": "home_feed",
-      "screenConfidenceThreshold": 0.70,
-      "screenMismatchPolicy": {
-        "maxRetries": 3,
-        "delayMs": 2000,
-        "action": "retry_step"
-      }
+      "timeoutMs": 15000
     },
     {
-      "type": "wait",
-      "id": "wait_feed_load",
-      "duration": {
-        "min": 2000,
-        "max": 3000,
-        "distribution": "uniform"
-      }
+      "type": "wait", "id": "w3", "duration": { "min": 2500, "max": 4000, "distribution": "uniform" }
     },
+
     {
       "type": "action",
-      "id": "navigate_to_askreddit",
+      "id": "tap_search_bar",
       "action": "tap",
-      "target": "top.search",
+      "params": { "x": 0.50, "y": 0.079 },
       "verification": "local_only",
-      "retries": 2
+      "retries": 1,
+      "timeoutMs": 5000
     },
     {
-      "type": "wait",
-      "id": "wait_search_open",
-      "duration": {
-        "min": 800,
-        "max": 1200,
-        "distribution": "uniform"
-      }
+      "type": "wait", "id": "w4", "duration": { "min": 600, "max": 1000, "distribution": "uniform" }
     },
+
+    {
+      "type": "action",
+      "id": "clear_search",
+      "action": "tap",
+      "params": { "x": 0.917, "y": 0.079 },
+      "verification": "local_only",
+      "retries": 1
+    },
+    {
+      "type": "wait", "id": "w5", "duration": { "min": 300, "max": 500, "distribution": "uniform" }
+    },
+
     {
       "type": "action",
       "id": "type_askreddit",
       "action": "type_text",
-      "params": {
-        "text": "AskReddit"
-      },
+      "params": { "text": "AskReddit" },
       "verification": "local_only",
       "timeoutMs": 10000
     },
     {
-      "type": "wait",
-      "id": "wait_search_results",
-      "duration": {
-        "min": 1500,
-        "max": 2500,
-        "distribution": "uniform"
-      }
+      "type": "wait", "id": "w6", "duration": { "min": 1000, "max": 1500, "distribution": "uniform" }
     },
+
     {
       "type": "action",
       "id": "tap_askreddit_result",
       "action": "tap",
-      "target": "search.result",
-      "params": {
-        "textMatch": "r/AskReddit"
-      },
-      "verification": "local_with_screenshot",
-      "retries": 2,
-      "expectedScreen": "subreddit",
-      "screenConfidenceThreshold": 0.65
+      "params": { "x": 0.50, "y": 0.162 },
+      "verification": "local_only",
+      "retries": 1,
+      "timeoutMs": 5000,
+      "_note": "Primul rezultat in search — r/AskReddit e mereu primul cand scrii corect"
     },
     {
-      "type": "wait",
-      "id": "wait_subreddit_load",
-      "duration": {
-        "min": 1500,
-        "max": 2500,
-        "distribution": "uniform"
-      }
+      "type": "wait", "id": "w7", "duration": { "min": 2000, "max": 3000, "distribution": "uniform" }
     },
+
     {
       "type": "action",
-      "id": "init_variables",
-      "action": "set_variable",
-      "params": {
-        "variables": {
-          "scroll_count": 0,
-          "max_scrolls": 8,
-          "comment_posted": false
-        }
-      }
+      "id": "tap_sort_new",
+      "action": "tap",
+      "params": { "x": 0.722, "y": 0.130 },
+      "verification": "local_only",
+      "retries": 1,
+      "timeoutMs": 5000
     },
     {
+      "type": "wait", "id": "w8", "duration": { "min": 1500, "max": 2500, "distribution": "uniform" }
+    },
+
+    {
       "type": "action",
-      "id": "find_and_comment_loop",
+      "id": "main_loop",
       "action": "run_loop",
       "params": {
-        "maxIterations": 8,
+        "maxIterations": 10,
         "exitConditions": [
           "comment_posted == true",
           "scroll_count >= max_scrolls"
@@ -153,203 +151,163 @@
         "steps": [
           {
             "type": "wait",
-            "id": "read_pause",
-            "duration": {
-              "min": 2500,
-              "max": 5000,
-              "distribution": "lognormal",
-              "mean": 3500
-            }
+            "id": "reading_pause",
+            "duration": { "min": 2000, "max": 4000, "distribution": "lognormal", "mean": 3000 }
           },
+
           {
             "type": "action",
             "id": "analyze_post",
-            "action": "vlm_analyze_post_for_comment",
+            "action": "vlm_analyze_post_for_outreach",
             "params": {
-              "target_variable": "post_analysis",
+              "target_variable": "_post_analysis",
               "platform": "reddit",
               "subreddit": "AskReddit",
-              "criteria": "Post should be a question that invites personal stories, dramatic experiences, or helpful advice. Skip meta posts, reposts, or posts with >500 comments already."
-            }
+              "criteria": "Răspunde JSON: {\"good_post\": true/false, \"post_title\": \"...\", \"reason\": \"...\", \"post_description\": \"descriere 50-80 cuvinte\"}. good_post=true DOAR dacă: 1) E o întrebare care invită povești personale (nu meta/politică/NSFW) 2) Are <100 comentarii 3) Are <500 upvotes 4) Are potențial pentru un comentariu interesant. Dacă e ad/promoted, good_post=false."
+            },
+            "_note": "VLM #2 — analizeaza postarea vizibila"
           },
+
           {
             "type": "action",
-            "id": "branch_on_good_post",
+            "id": "decide_post",
             "action": "branch_on_decision",
             "params": {
-              "condition": "_good_post_found == true",
+              "condition": "_post_analysis.good_post == true",
               "if_true_steps": [
                 {
                   "type": "action",
-                  "id": "tap_post",
-                  "action": "tap",
-                  "target": "post.card",
-                  "verification": "local_with_screenshot",
-                  "retries": 2,
-                  "expectedScreen": "post_detail",
-                  "screenConfidenceThreshold": 0.65,
-                  "screenMismatchPolicy": {
-                    "maxRetries": 2,
-                    "delayMs": 1000,
-                    "action": "continue_with_warning"
-                  }
-                },
-                {
-                  "type": "wait",
-                  "id": "wait_post_load",
-                  "duration": {
-                    "min": 1500,
-                    "max": 2500,
-                    "distribution": "uniform"
-                  }
-                },
-                {
-                  "type": "action",
-                  "id": "scroll_to_comment_area",
-                  "action": "scroll",
-                  "params": {
-                    "direction": "up",
-                    "distanceRatio": 0.3
-                  },
-                  "verification": "local_only"
-                },
-                {
-                  "type": "wait",
-                  "id": "wait_scroll_settle",
-                  "duration": {
-                    "min": 800,
-                    "max": 1200,
-                    "distribution": "uniform"
-                  }
-                },
-                {
-                  "type": "action",
-                  "id": "read_existing_comments",
-                  "action": "vlm_read_comments",
-                  "params": {
-                    "target_variable": "_existing_comments_summary",
-                    "max_comments": 5
-                  }
-                },
-                {
-                  "type": "action",
-                  "id": "generate_comment",
-                  "action": "vlm_generate_comment",
-                  "params": {
-                    "post_title_var": "_post_title",
-                    "existing_comments_var": "_existing_comments_summary",
-                    "target_variable": "_generated_comment",
-                    "platform": "reddit",
-                    "subreddit": "AskReddit",
-                    "max_chars": 500,
-                    "tone": "Mix of these styles (pick the one that fits the post best): 1) DRAMATIC personal story with plot twist 2) genuinely HELPFUL advice from experience 3) FUNNY unexpected take. Write naturally like a real Reddit user — casual, no emojis unless ironic, short paragraphs. Never sound like AI. Match the vibe of the post.",
-                    "language": "english"
-                  }
-                },
-                {
-                  "type": "wait",
-                  "id": "pause_before_comment",
-                  "duration": {
-                    "min": 1000,
-                    "max": 2000,
-                    "distribution": "uniform"
-                  }
-                },
-                {
-                  "type": "action",
-                  "id": "tap_add_comment",
-                  "action": "tap",
-                  "target": "post.add_comment",
-                  "verification": "local_only",
-                  "retries": 3
-                },
-                {
-                  "type": "wait",
-                  "id": "wait_compose_open",
-                  "duration": {
-                    "min": 800,
-                    "max": 1500,
-                    "distribution": "uniform"
-                  }
-                },
-                {
-                  "type": "action",
-                  "id": "type_comment",
-                  "action": "type_text",
-                  "params": {
-                    "textFromVariable": "_generated_comment"
-                  },
-                  "verification": "local_only",
-                  "timeoutMs": 20000
-                },
-                {
-                  "type": "wait",
-                  "id": "pause_after_typing",
-                  "duration": {
-                    "min": 800,
-                    "max": 1500,
-                    "distribution": "uniform"
-                  }
-                },
-                {
-                  "type": "action",
-                  "id": "tap_post_button",
-                  "action": "tap",
-                  "target": "compose.post_button",
-                  "verification": "local_with_screenshot",
-                  "retries": 2
-                },
-                {
-                  "type": "wait",
-                  "id": "wait_comment_posted",
-                  "duration": {
-                    "min": 2000,
-                    "max": 3000,
-                    "distribution": "uniform"
-                  }
-                },
-                {
-                  "type": "action",
-                  "id": "mark_comment_posted",
+                  "id": "save_title",
                   "action": "set_variable",
                   "params": {
-                    "variables": {
-                      "comment_posted": true
-                    }
+                    "variables": { "_post_title": "{{_post_analysis.post_title}}" }
                   }
                 },
+
                 {
                   "type": "action",
-                  "id": "log_success",
-                  "action": "append_to_list",
+                  "id": "gen_comment",
+                  "action": "vlm_generate_comment",
                   "params": {
-                    "list": "comments_posted",
-                    "item_from_vars": {
-                      "post_title": "_post_title",
-                      "comment": "_generated_comment",
-                      "subreddit": "AskReddit"
-                    }
+                    "post_description_var": "_post_analysis.post_description",
+                    "target_variable": "_generated_comment",
+                    "account_context": "Reddit user pe AskReddit",
+                    "max_chars": 400,
+                    "tone": "Natural, casual, ca un user real. Fără emoji. Fără 'As an AI'. Poate fi: poveste personală, sfat din experiență, observație funny. Scrie ca și cum ai vorbi cu prietenii.",
+                    "language": "english"
+                  },
+                  "_note": "VLM #3 — genereaza comentariul"
+                },
+
+                {
+                  "type": "action",
+                  "id": "check_comment",
+                  "action": "branch_on_decision",
+                  "params": {
+                    "condition": "_generated_comment != '' && _generated_comment != null",
+                    "if_true_steps": [
+                      {
+                        "type": "action",
+                        "id": "open_post",
+                        "action": "tap",
+                        "params": { "x": 0.50, "y": 0.370 },
+                        "verification": "local_only",
+                        "retries": 1,
+                        "timeoutMs": 10000,
+                        "_note": "Tap pe postarea din feed — coordonata calibrata pe centrul postarii vizibile"
+                      },
+                      {
+                        "type": "wait", "id": "wp1", "duration": { "min": 2000, "max": 3000, "distribution": "uniform" }
+                      },
+
+                      {
+                        "type": "action",
+                        "id": "scroll_to_comment_input",
+                        "action": "scroll",
+                        "params": { "direction": "up", "distancePx": 400, "durationMs": 300 },
+                        "verification": "local_only"
+                      },
+                      {
+                        "type": "wait", "id": "wp2", "duration": { "min": 500, "max": 800, "distribution": "uniform" }
+                      },
+
+                      {
+                        "type": "action",
+                        "id": "tap_comment_field",
+                        "action": "tap",
+                        "params": { "x": 0.50, "y": 0.949 },
+                        "verification": "local_only",
+                        "retries": 2,
+                        "timeoutMs": 5000,
+                        "_note": "'Add a comment' — coordonata calibrata pe bottom area"
+                      },
+                      {
+                        "type": "wait", "id": "wp3", "duration": { "min": 800, "max": 1500, "distribution": "uniform" }
+                      },
+
+                      {
+                        "type": "action",
+                        "id": "type_comment",
+                        "action": "type_text",
+                        "params": { "textFromVariable": "_generated_comment" },
+                        "verification": "local_only",
+                        "timeoutMs": 30000
+                      },
+                      {
+                        "type": "wait", "id": "wp4", "duration": { "min": 1000, "max": 2000, "distribution": "uniform" }
+                      },
+
+                      {
+                        "type": "action",
+                        "id": "tap_reply",
+                        "action": "tap",
+                        "params": { "x": 0.833, "y": 0.079 },
+                        "verification": "local_only",
+                        "retries": 2,
+                        "timeoutMs": 5000,
+                        "_note": "Reply/Post button — top right in composer, coordonata calibrata"
+                      },
+                      {
+                        "type": "wait", "id": "wp5", "duration": { "min": 2000, "max": 3500, "distribution": "uniform" }
+                      },
+
+                      {
+                        "type": "action",
+                        "id": "mark_done",
+                        "action": "set_variable",
+                        "params": { "variables": { "comment_posted": true } }
+                      },
+                      {
+                        "type": "action",
+                        "id": "log_result",
+                        "action": "append_to_list",
+                        "params": {
+                          "list": "comments_posted",
+                          "item_from_vars": {
+                            "post_title": "_post_title",
+                            "comment": "_generated_comment",
+                            "subreddit": "AskReddit"
+                          }
+                        }
+                      }
+                    ],
+                    "if_false_steps": []
                   }
                 }
               ],
               "if_false_steps": [
                 {
                   "type": "action",
-                  "id": "scroll_feed",
+                  "id": "scroll_next",
                   "action": "scroll",
-                  "params": {
-                    "direction": "up",
-                    "distanceRatio": 0.6
-                  },
+                  "params": { "direction": "up", "distancePx": 800, "durationMs": 400 },
                   "verification": "local_only"
                 },
                 {
                   "type": "action",
-                  "id": "increment_scroll",
+                  "id": "inc_scroll",
                   "action": "increment",
-                  "params": {
-                    "variable": "scroll_count"
-                  }
+                  "params": { "variable": "scroll_count" }
                 }
               ]
             }
@@ -357,36 +315,21 @@
         ]
       }
     },
+
     {
       "type": "checkpoint",
-      "id": "pre_close_checkpoint",
-      "reason": "Comment cycle complete - save state"
+      "id": "done",
+      "reason": "Comment cycle complete"
     },
     {
-      "type": "wait",
-      "id": "final_pause",
-      "duration": {
-        "min": 1000,
-        "max": 2000,
-        "distribution": "uniform"
-      }
+      "type": "wait", "id": "w_final", "duration": { "min": 1000, "max": 2000, "distribution": "uniform" }
     },
     {
       "type": "action",
       "id": "go_home",
-      "action": "tap",
-      "target": "nav.home",
-      "verification": "local_only",
-      "retries": 1
-    },
-    {
-      "type": "wait",
-      "id": "wait_home",
-      "duration": {
-        "min": 500,
-        "max": 1000,
-        "distribution": "uniform"
-      }
+      "action": "press_home",
+      "params": {},
+      "verification": "local_only"
     }
   ]
 }
