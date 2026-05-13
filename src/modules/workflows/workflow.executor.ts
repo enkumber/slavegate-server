@@ -261,6 +261,7 @@ async function executeSteps(
 
   // ── Compile steps into batch segments ────────────────────────────────────
   const segments = compileBatchSegments(steps, startIndex);
+  console.log(`[workflow] ${workflowId} compiled ${steps.length} steps into ${segments.length} segments (starting at ${startIndex})`);
 
   for (const segment of segments) {
     // ── Cancellation / pause check ─────────────────────────────────────────
@@ -338,6 +339,10 @@ async function executeStep(
   stepIndex:  number,
   job?: import("bullmq").Job
 ): Promise<void> {
+  const stepId = (step as { id?: string }).id ?? step.type;
+  const stepAction = (step as ActionStep).action ?? '';
+  console.log(`[workflow] ${workflowId} step ${stepIndex} executing: type=${step.type}${stepAction ? ' action='+stepAction : ''}${stepId !== step.type ? ' id='+stepId : ''}`);
+
   switch (step.type) {
 
     case "action": {
@@ -902,8 +907,12 @@ export function compileBatchSegments(steps: WorkflowStep[], startIndex = 0): Bat
     } else if (batchRun.length === 1) {
       // Single batchable step → execute individually (overhead not worth a round-trip)
       segments.push({ steps: batchRun, isBatched: false, startIndex: startIndex + batchStartIndex });
+    } else {
+      // Non-batchable action step (screen_wake, unlock, screenshot, etc.) → singleton, execute individually
+      // MUST increment i to avoid infinite loop!
+      segments.push({ steps: [slice[i]], isBatched: false, startIndex: startIndex + i });
+      i++;
     }
-    // batchRun.length === 0 → already consumed by the while loop (non-batchable action)
     // which is handled at the top of the next iteration
   }
 

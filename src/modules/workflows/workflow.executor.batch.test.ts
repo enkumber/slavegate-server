@@ -136,11 +136,11 @@ describe("compileBatchSegments", () => {
 
   it("cascade tap (target without coords) → NOT batched", () => {
     const steps = [
-      makeAction(1, "tap", { target: "post.like" }), // cascade tap
-      makeAction(2, "tap", { target: "post.share" }),
+      { id: "1", type: "action" as const, action: "tap", params: {}, target: "post.like" },
+      { id: "2", type: "action" as const, action: "tap", params: {}, target: "post.share" },
     ];
     const segs = compileBatchSegments(steps);
-    // Both are cascade taps (target present, no coords) → neither is batchable
+    // Both are cascade taps (target present at root, no coords) → neither is batchable
     // → singleton non-batched segments
     expect(segs).toHaveLength(2);
     expect(segs[0].isBatched).toBe(false);
@@ -230,11 +230,18 @@ describe("compileBatchSegments", () => {
 
   it("startIndex offsets segment startIndex correctly", () => {
     // Simulate steps starting at index 5 in the full workflow
+    // Must have enough steps for slice(startIndex) to produce content
     const steps = [
-      makeAction(1, "tap", {}, 0.5, 0.5),
-      makeAction(2, "tap", {}, 0.6, 0.6),
+      makeWait(0, 100),                // 0: skip
+      makeWait(1, 100),                // 1: skip
+      makeWait(2, 100),                // 2: skip
+      makeWait(3, 100),                // 3: skip
+      makeWait(4, 100),                // 4: skip
+      makeAction(5, "tap", {}, 0.5, 0.5), // 5: included
+      makeAction(6, "tap", {}, 0.6, 0.6), // 6: included
     ];
     const segs = compileBatchSegments(steps, 5);
+    // Steps 0-4 are sliced away. Steps 5-6 are consecutive batchable → 1 batch
     expect(segs).toHaveLength(1);
     expect(segs[0].startIndex).toBe(5);
   });
@@ -274,6 +281,51 @@ describe("compileBatchSegments", () => {
     expect(segs).toHaveLength(5);
     segs.forEach(s => expect(s.isBatched).toBe(false));
   });
+
+  // ─── CRITICAL REGRESSION TEST ──────────────────────────────────────────────
+  // Bug: compileBatchSegments had an infinite loop when a step was an action
+  // that was neither a skill action nor batchable (e.g., screen_wake, unlock).
+  // This caused complete server freeze — event loop blocked by synchronous while loop.
+  it("non-batchable, non-skill action (screen_wake, unlock) → singleton, no infinite loop", () => {
+    // These actions are in neither BATCHABLE_ACTIONS nor skill actions
+    const steps = [
+      makeAction(1, "set_variable"),  // skill action → singleton
+      makeAction(2, "screen_wake"),   // NOT batchable, NOT skill → was infinite loop!
+      makeAction(3, "unlock"),        // NOT batchable, NOT skill → was infinite loop!
+      makeAction(4, "tap", {}, 0.5, 0.5), // batchable
+      makeAction(5, "screenshot"),    // NOT batchable, NOT skill → was infinite loop!
+    ];
+
+    // This call must complete (not hang) — that's the real test
+    const segs = compileBatchSegments(steps);
+
+    expect(segs).toHaveLength(5);
+    expect(segs[0].isBatched).toBe(false); // set_variable → singleton
+    expect(segs[0].steps).toHaveLength(1);
+    expect(segs[1].isBatched).toBe(false); // screen_wake → singleton
+    expect(segs[1].steps).toHaveLength(1);
+    expect(segs[2].isBatched).toBe(false); // unlock → singleton
+    expect(segs[2].steps).toHaveLength(1);
+    expect(segs[3].isBatched).toBe(false); // tap (single) → singleton
+    expect(segs[3].steps).toHaveLength(1);
+    expect(segs[4].isBatched).toBe(false); // screenshot → singleton
+    expect(segs[4].steps).toHaveLength(1);
+  });
+
+  it("non-batchable action followed by batchable run → correct segmentation", () => {
+    const steps = [
+      makeAction(1, "screen_wake"),   // non-batchable
+      makeAction(2, "tap", {}, 0.5, 0.5), // batchable
+      makeAction(3, "tap", {}, 0.6, 0.6), // batchable
+      makeAction(4, "unlock"),        // non-batchable
+    ];
+    const segs = compileBatchSegments(steps);
+    expect(segs).toHaveLength(3);
+    expect(segs[0].isBatched).toBe(false); // screen_wake singleton
+    expect(segs[1].isBatched).toBe(true);  // [tap, tap] batch
+    expect(segs[1].steps).toHaveLength(2);
+    expect(segs[2].isBatched).toBe(false); // unlock singleton
+  });
 });
 
 // ─── Integration: batch segmentation for realistic workflows ─────────────────
@@ -294,18 +346,15 @@ describe("compileBatchSegments — realistic workflows", () => {
 
     const segs = compileBatchSegments(steps);
 
-    // open_app → singleton (control flow)
-    // wait → singleton
-    // [tap, type, tap, tap] → batched (4 consecutive batchable)
-    // press_back → singleton
-    expect(segs).toHaveLength(5);
+    // open_app → singleton (only 1 consecutive batchable before wait)
+    // wait → singleton (non-action)
+    // [tap, type, tap, tap, press_back] → batched (5 consecutive batchable)
+    expect(segs).toHaveLength(3);
     expect(segs[0].isBatched).toBe(false);
     expect(segs[0].steps).toHaveLength(1); // open_app
     expect(segs[1].isBatched).toBe(false); // wait
     expect(segs[2].isBatched).toBe(true);
-    expect(segs[2].steps).toHaveLength(4); // tap + type + tap + tap
-    expect(segs[3].isBatched).toBe(false); // press_back
-    expect(segs[4].isBatched).toBe(false); // empty wait tail
+    expect(segs[2].steps).toHaveLength(5); // tap + type + tap + tap + press_back
   });
 
   it("loop with batchable body → separate segment for loop", () => {
