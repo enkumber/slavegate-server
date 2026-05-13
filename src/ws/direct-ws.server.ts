@@ -530,6 +530,18 @@ export class DirectWsServer {
       });
     }
 
+    // ── Resolve workflow executor's pending promise (critical for blocking workflows) ──
+    const { resolveJobResult } = require("../modules/workflows/workflow.executor");
+    const resolved = resolveJobResult(jobId, {
+      status:     Boolean(msg.success) ? "completed" : "failed",
+      output:     msg.output,
+      error:      msg.error as string | undefined,
+      durationMs: (msg.durationMs as number | undefined) ?? 0,
+    });
+    if (resolved) {
+      console.log(`[direct-ws] JOB_RESULT resolved for workflow executor: jobId=${jobId.slice(0,8)}`);
+    }
+
     // Forward to dispatcherService for DB update + metrics
     dispatcherService.handleJobResult({
       jobId,
