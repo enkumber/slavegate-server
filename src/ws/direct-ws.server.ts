@@ -23,6 +23,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, Server } from "http";
 import { getDb } from "../db/client";
+import { scalabilityConfig } from "../config/scalability.config";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { devicesService } from "../modules/devices/devices.service";
 import { devicesConnected, deviceOfflineEvents, recordDeviceHealth } from "../modules/observability/metrics";
@@ -31,13 +32,14 @@ import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/mes
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const AUTH_TIMEOUT_MS       = 30_000;   // 30s to send AUTH message
-const PONG_TIMEOUT_MS       = 90_000;   // 90s without PONG = dead connection
-const PING_INTERVAL_MS      = 30_000;   // send PING every 30s
-const OFFLINE_THRESHOLD_MS  = 90_000;   // heartbeat gap before marking offline
-const MAX_MSG_BYTES         = 5 * 1024 * 1024;  // 5MB
-const RATE_LIMIT            = 20;       // msgs/sec per device
+const AUTH_TIMEOUT_MS       = scalabilityConfig.wsAuthTimeout;
+const PONG_TIMEOUT_MS       = scalabilityConfig.wsPongTimeout;
+const PING_INTERVAL_MS      = scalabilityConfig.wsPingInterval;
+const OFFLINE_THRESHOLD_MS  = scalabilityConfig.wsPongTimeout;
+const MAX_MSG_BYTES         = scalabilityConfig.wsMaxMessageSize;
+const RATE_LIMIT            = scalabilityConfig.wsRateLimitPerSecond;
 const RATE_WINDOW_MS        = 1_000;
+const MAX_WS_CONNECTIONS    = scalabilityConfig.maxWsConnections;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -226,6 +228,14 @@ export class DirectWsServer {
   // ─── Connection handler ───────────────────────────────────────────────────
 
   private _onConnection(ws: WebSocket, _req: IncomingMessage): void {
+    // ── Connection limit guard ─────────────────────────────────────────────
+    if (this.connections.size >= MAX_WS_CONNECTIONS) {
+      const remoteIp = (_req.socket.remoteAddress ?? "unknown");
+      console.warn(`[direct-ws] Rejected connection from ${remoteIp}: max connections (${MAX_WS_CONNECTIONS}) reached`);
+      ws.close(4029, "Server at max capacity");
+      return;
+    }
+
     const remoteIp = (_req.socket.remoteAddress ?? "unknown");
     console.log(`[direct-ws] New connection from ${remoteIp}`);
 

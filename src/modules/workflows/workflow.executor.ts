@@ -24,6 +24,7 @@ import { hbeService } from "../hbe/hbe.service";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
 import { sendJobToDevice, isDeviceOnline } from "../../transport/transport";
 import { directWsServer } from "../../ws/direct-ws.server";
+import { scalabilityConfig } from "../../config/scalability.config";
 import { getDb } from "../../db/client";
 import type {
   WorkflowStep,
@@ -48,7 +49,7 @@ import { verifyScreenAfterStep } from "./screen-verifier";
 
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
-export const WORKFLOW_QUEUE = "workflow_execute";
+export const WORKFLOW_QUEUE = scalabilityConfig.workflowQueueName;
 
 // ─── Pending job result registry ─────────────────────────────────────────────
 // Workflow executor suspends at each action step, waiting for JOB_RESULT.
@@ -135,16 +136,16 @@ export function getWorkflowQueue(): Queue {
 
 export function startWorkflowWorker(): Worker {
   const worker = new Worker(
-    WORKFLOW_QUEUE,
+    scalabilityConfig.workflowQueueName,
     async (job) => {
       const { workflowId } = job.data as { workflowId: string };
       await runWorkflow(workflowId, job);
     },
     {
-      connection:  getRedisConnectionOptions(),
-      concurrency: 8,  // Up to 8 workflows running concurrently
-      lockDuration: 120000,     // 2 min lock (default 30s) — prevents stalled detection during long steps
-      stalledInterval: 60000,   // Check stalled every 1 min (default 30s)
+      connection:    getRedisConnectionOptions(),
+      concurrency:   scalabilityConfig.workerConcurrency,
+      lockDuration:  scalabilityConfig.workerLockDuration,
+      stalledInterval: scalabilityConfig.workerStalledInterval,
     }
   );
 
@@ -263,7 +264,11 @@ async function executeSteps(
 
   for (const segment of segments) {
     // ── Cancellation / pause check ─────────────────────────────────────────
-    const current = await workflowService.get(workflowId);
+    const current = await withTimeout(
+      workflowService.get(workflowId),
+      scalabilityConfig.cancelCheckTimeout,
+      `workflowService.get(${workflowId}) timeout during cancel check`
+    );
     if (current?.status === "cancelled") {
       console.log(`[workflow] ${workflowId} cancelled`);
       return;
@@ -285,7 +290,11 @@ async function executeSteps(
         const segIdx = segment.startIndex + segment.steps.indexOf(step);
 
         // Cancellation / pause check per step
-        const cur = await workflowService.get(workflowId);
+        const cur = await withTimeout(
+          workflowService.get(workflowId),
+          scalabilityConfig.cancelCheckTimeout,
+          `workflowService.get(${workflowId}) timeout at step ${segIdx}`
+        );
         if (cur?.status === "cancelled") { return; }
         if (cur?.status === "paused") { throw new Error(`Workflow paused at step ${segIdx}`); }
 
@@ -1177,14 +1186,26 @@ function uuidv4Batch(): string {
 /**
  * Start a new workflow execution.
  * Called from routes.ts POST /workflows.
+ *
+ * Uses a 5s timeout on queue.add() to prevent indefinite blocking
+ * if Redis is slow or unresponsive.
  */
 export async function startWorkflow(workflowId: string): Promise<void> {
   const queue = getWorkflowQueue();
-  await queue.add("execute-workflow", { workflowId }, {
+  const addPromise = queue.add("execute-workflow", { workflowId }, {
     jobId: workflowId,  // Unic per workflow - previne duplicate jobs
     removeOnComplete: true,
     removeOnFail: false  // Keep for debugging
   });
+
+  // Timeout — don't block the caller if Redis is slow
+  const result = await Promise.race([
+    addPromise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`queue.add() timeout for ${workflowId}`)), scalabilityConfig.enqueueTimeout)
+    ),
+  ]);
+
   console.log(`[workflow] ${workflowId} enqueued`);
 }
 
@@ -1279,4 +1300,18 @@ async function simulateError(errorType: string | undefined, _deviceId: string): 
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Wrap a promise with a timeout. Rejects with the given message if the
+ * promise doesn't settle within `ms` milliseconds.
+ * Used to prevent DB/Redis operations from hanging indefinitely.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(message)), ms)
+    ),
+  ]);
 }

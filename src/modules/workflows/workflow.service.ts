@@ -102,6 +102,60 @@ export class WorkflowService {
     };
   }
 
+  /**
+   * Count workflows by status. Used for concurrency guard.
+   */
+  async countByStatus(status: WorkflowStatus): Promise<number> {
+    const db = getDb();
+    const result = await db.query(
+      "SELECT COUNT(*) FROM workflows WHERE status = $1",
+      [status]
+    );
+    return parseInt(result.rows[0]?.count ?? "0", 10);
+  }
+
+  /**
+   * Count active (running or queued) workflows for a specific device.
+   * Used to enforce per-device concurrency limit (max 1 workflow per device).
+   */
+  async countActiveByDevice(deviceId: string): Promise<number> {
+    const db = getDb();
+    const result = await db.query(
+      `SELECT COUNT(*) FROM workflows
+       WHERE device_id = $1 AND status IN ('queued', 'running')`,
+      [deviceId]
+    );
+    return parseInt(result.rows[0]?.count ?? "0", 10);
+  }
+
+  /**
+   * Get count of workflows in all active states.
+   * Returns a breakdown for monitoring/dashboard.
+   */
+  async getActiveCounts(): Promise<{
+    queued: number;
+    running: number;
+    paused: number;
+    total: number;
+  }> {
+    const db = getDb();
+    const result = await db.query(
+      `SELECT status, COUNT(*) as count FROM workflows
+       WHERE status IN ('queued', 'running', 'paused')
+       GROUP BY status`
+    );
+    const counts = { queued: 0, running: 0, paused: 0, total: 0 };
+    for (const row of result.rows) {
+      const status = row.status as string;
+      const count = parseInt(row.count as string, 10);
+      if (status === 'queued') counts.queued = count;
+      else if (status === 'running') counts.running = count;
+      else if (status === 'paused') counts.paused = count;
+    }
+    counts.total = counts.queued + counts.running + counts.paused;
+    return counts;
+  }
+
   async cancel(id: string): Promise<boolean> {
     const db = getDb();
     const result = await db.query(
@@ -118,9 +172,9 @@ export class WorkflowService {
   /**
    * Atomically update checkpoint + step index.
    *
-   * Implements "write → fsync → rename" principle as:
-   * BEGIN → UPDATE (with current_step guard) → COMMIT
-   * If another process updated the checkpoint concurrently, rowCount = 0 → error.
+   * Uses pool.query() instead of db.connect() to avoid holding dedicated connections.
+   * The UPDATE with WHERE guard provides atomicity without explicit BEGIN/COMMIT.
+   * If the pool is exhausted, connectionTimeoutMillis (5s) prevents hanging.
    *
    * @param expectedStep  Current step index — prevents overwrite from stale worker
    */
@@ -131,10 +185,8 @@ export class WorkflowService {
     expectedStep: number
   ): Promise<boolean> {
     const db = getDb();
-    const client = await db.connect();
     try {
-      await client.query("BEGIN");
-      const result = await client.query(
+      const result = await db.query(
         `UPDATE workflows
          SET checkpoint = $1, current_step = $2, status = 'running'
          WHERE id = $3
@@ -142,17 +194,10 @@ export class WorkflowService {
            AND status NOT IN ('cancelled', 'completed', 'failed')`,
         [JSON.stringify(newCheckpoint), newStep, workflowId, expectedStep]
       );
-      if ((result.rowCount ?? 0) === 0) {
-        await client.query("ROLLBACK");
-        return false;  // Concurrent update or wrong expectedStep
-      }
-      await client.query("COMMIT");
-      return true;
+      return (result.rowCount ?? 0) > 0;
     } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
+      console.error(`[workflow] saveCheckpoint failed for ${workflowId}: ${(err as Error).message}`);
+      return false;
     }
   }
 

@@ -26,6 +26,7 @@ import { registry, refreshAccountMetrics, killSwitchActive as killSwitchGauge } 
 import { canaryService } from "../modules/canary/canary.service";
 import { alerting, AlertType } from "../modules/observability/alerts";
 import { getDb } from "../db/client";
+import { scalabilityConfig } from "../config/scalability.config";
 import { processSkillUpdateJobs, checkAndRollback } from "../modules/skill-updater";
 import { runNightlyPipeline } from "../modules/nautilus/pipeline";
 import type {
@@ -35,6 +36,23 @@ import type {
 import type { WorkflowCheckpoint } from "../modules/workflows/types";
 
 const router = Router();
+
+// ─── Global request timeout (hard deadline) ────────────────────────────────────
+// Prevents hanging requests from exhausting server resources.
+// Any handler that takes too long will get a 504 response.
+
+function requestTimeout(req: Request, res: Response, next: NextFunction): void {
+  const timer = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(504).json({ ok: false, error: "Request timeout" });
+    }
+  }, scalabilityConfig.requestTimeout);
+  res.on("finish", () => clearTimeout(timer));
+  res.on("close", () => clearTimeout(timer));
+  next();
+}
+
+router.use(requestTimeout);
 
 // ─── Rate limiting (simple in-process sliding window) ─────────────────────────
 
@@ -48,7 +66,7 @@ function rateLimit(req: Request, res: Response, next: NextFunction): void {
     requestCounts.set(key, { count: 1, resetAt: now + 60_000 });
     return next();
   }
-  if (++entry.count > 200) {
+  if (++entry.count > scalabilityConfig.rateLimitPerMinute) {
     res.status(429).json({ ok: false, error: "Rate limit exceeded" });
     return;
   }
@@ -400,6 +418,29 @@ router.post("/workflows", requireAuth, async (req, res) => {
   const template = await workflowService.getTemplate(templateId);
   if (!template) return res.status(404).json({ ok: false, error: `Template ${templateId} not found` });
 
+  // ── Per-device concurrency guard ──────────────────────────────────────────
+  // Each device can only have 1 active workflow at a time.
+  // This prevents conflicting operations on the same phone.
+  const activeForDevice = await workflowService.countActiveByDevice(deviceId);
+  if (activeForDevice >= scalabilityConfig.maxWorkflowsPerDevice) {
+    return res.status(409).json({
+      ok: false,
+      error: `Device already has ${activeForDevice} active workflow(s). Max: ${scalabilityConfig.maxWorkflowsPerDevice} per device.`,
+      code: "DEVICE_BUSY",
+    });
+  }
+
+  // ── Global concurrency guard ─────────────────────────────────────────────
+  // Soft limit on total concurrent workflows to prevent resource exhaustion.
+  const globalRunning = await workflowService.countByStatus('running');
+  if (globalRunning >= scalabilityConfig.maxGlobalConcurrentWorkflows) {
+    return res.status(429).json({
+      ok: false,
+      error: `Server at capacity: ${globalRunning}/${scalabilityConfig.maxGlobalConcurrentWorkflows} concurrent workflows. Retry later.`,
+      code: "SERVER_BUSY",
+    });
+  }
+
   // Init HBE session params
   const accountAgeDays    = (variables?.["accountAgeDays"] as number) ?? 30;
   const simulatedTimezone = (variables?.["timezone"] as string) ?? "Europe/Bucharest";
@@ -422,7 +463,11 @@ router.post("/workflows", requireAuth, async (req, res) => {
     checkpoint,
   });
 
-  await startWorkflow(wf.id);
+  // Fire-and-forget: don't block the HTTP response on Redis queue.add().
+  // If enqueue fails, the workflow stays in 'queued' status and can be retried.
+  startWorkflow(wf.id).catch(err => {
+    console.error(`[workflow] Failed to enqueue ${wf.id}: ${err.message}`);
+  });
   res.status(202).json({ ok: true, data: { workflowId: wf.id, status: "queued" } });
 });
 
@@ -1315,6 +1360,48 @@ router.get("/debug/connections", requireAuth, (_req, res) => {
     online: true,
   }));
   res.json({ ok: true, data: { count: list.length, connections: list } });
+});
+
+// ─── Scalability & Health ─────────────────────────────────────────────────────
+
+router.get("/scalability/status", requireAuth, async (_req, res) => {
+  try {
+    const { getPoolStats } = await import("../db/client");
+    const poolStats = getPoolStats();
+    const wfCounts = await workflowService.getActiveCounts();
+    const wsConnections = directWsServer.getConnectionCount();
+    const wsOnline = directWsServer.getConnectedDeviceIds().length;
+
+    res.json({
+      ok: true,
+      data: {
+        config: {
+          maxWorkflowsPerDevice: scalabilityConfig.maxWorkflowsPerDevice,
+          maxGlobalConcurrentWorkflows: scalabilityConfig.maxGlobalConcurrentWorkflows,
+          workerConcurrency: scalabilityConfig.workerConcurrency,
+          dbPoolMax: scalabilityConfig.dbPoolMax,
+          maxWsConnections: scalabilityConfig.maxWsConnections,
+        },
+        current: {
+          workflows: wfCounts,
+          dbPool: poolStats,
+          webSocket: {
+            totalConnections: wsConnections,
+            onlineDevices: wsOnline,
+            maxConnections: scalabilityConfig.maxWsConnections,
+            utilization: `${Math.round((wsConnections / scalabilityConfig.maxWsConnections) * 100)}%`,
+          },
+        },
+        capacity: {
+          workflowsAvailable: Math.max(0, scalabilityConfig.maxGlobalConcurrentWorkflows - wfCounts.running),
+          dbPoolAvailable: poolStats.maxCount - poolStats.totalCount,
+          wsSlotsAvailable: scalabilityConfig.maxWsConnections - wsConnections,
+        },
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
 });
 
 export default router;
