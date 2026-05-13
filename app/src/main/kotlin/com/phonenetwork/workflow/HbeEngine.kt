@@ -178,17 +178,17 @@ class HbeEngine(
      * Resolve a DurationSpec (from wait step) with HBE timing.
      */
     fun resolveDuration(duration: DurationSpec): Long {
-        val m = sessionMultiplier
+        val m = sessionMultiplier.toDouble()
         val baseMean = duration.mean ?: ((duration.min + duration.max) / 2.0)
         val adjustedMean = baseMean * m
 
-        val value = when (duration.distribution) {
+        val value: Double = when (duration.distribution) {
             "lognormal" -> logNormalSample(adjustedMean, 0.4)
             "normal" -> {
                 val stddev = (duration.max - duration.min) / 6.0
                 normalSample(adjustedMean, stddev)
             }
-            else -> randomBetween(duration.min * m, duration.max * m).toDouble()
+            else -> randomBetween((duration.min * m).toLong(), (duration.max * m).toLong()).toDouble()
         }
 
         return value.toLong().coerceIn(duration.min, duration.max)

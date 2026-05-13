@@ -9,7 +9,6 @@ import com.phonenetwork.executor.JobExecutor
 import com.phonenetwork.utils.ScreenMetrics
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -383,7 +382,8 @@ class WorkflowEngine(
             val key = keys.next()
             variables[key] = varsObj.get(key)
         }
-        Log.d(TAG, "Set variables: ${variables.keys().toList().takeLast(3)}")
+        // Log.d(TAG, "Set variables: ${variables.keys().toList().takeLast(3)}")
+        Log.d(TAG, "Set variables done")
     }
 
     private fun handleIncrement(step: WorkflowStep.Action) {
