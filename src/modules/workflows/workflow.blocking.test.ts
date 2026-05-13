@@ -182,16 +182,16 @@ describe("POST /workflows — non-blocking startWorkflow", () => {
       "utf8"
     );
 
-    // Find the section between create and res.status(202)
-    const workflowSection = source.substring(
-      source.indexOf("router.post(\"/workflows\""),
-      source.indexOf("res.status(202).json({ ok: true, data: { workflowId: wf.id")
-    );
+    // Find the POST /workflows handler section (from handler start to next route)
+    const handlerStart = source.indexOf('router.post("/workflows"');
+    // Find end: the next router.post after our handler
+    const nextRoute = source.indexOf('router.post("/workflows/:id/cancel"');
+    const workflowSection = source.substring(handlerStart, nextRoute > handlerStart ? nextRoute : undefined);
 
-    // Should NOT have "await startWorkflow"
+    // Should NOT have "await startWorkflow" (fire-and-forget in legacy path)
     expect(workflowSection).not.toMatch(/await\s+startWorkflow\(/);
 
-    // Should have fire-and-forget with .catch
+    // Legacy path should have fire-and-forget with .catch
     expect(workflowSection).toContain("startWorkflow(wf.id).catch");
   });
 });

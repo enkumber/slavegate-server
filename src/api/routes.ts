@@ -446,6 +446,44 @@ router.post("/workflows", requireAuth, async (req, res) => {
   const simulatedTimezone = (variables?.["timezone"] as string) ?? "Europe/Bucharest";
   const hbeSession        = hbeService.initSession(accountAgeDays, simulatedTimezone);
 
+  // ── Agent version routing (ADR-001 Phase 4) ─────────────────────────────
+  // Devices with agent >= 4.0 support edge execution (WORKFLOW_START).
+  // Older devices use legacy server-side execution (BullMQ queue + step-by-step).
+  if (directWsServer.supportsEdgeExecution(deviceId)) {
+    // Edge execution: push template directly to device
+    const sent = directWsServer.sendWorkflowStart(
+      deviceId,
+      template as unknown as Record<string, unknown>,
+      variables,
+    );
+
+    if (sent) {
+      // Create a lightweight DB record for monitoring
+      const wf = await workflowService.create({
+        templateId,
+        deviceId,
+        accountId,
+        totalSteps: template.steps.length,
+        hbeParams: hbeSession as unknown as Record<string, unknown>,
+        checkpoint: {
+          stepIndex: 0,
+          loopStack: [],
+          variables: variables ?? {},
+          hbeParams: hbeSession as unknown as Record<string, unknown>,
+          checkpointAt: new Date().toISOString(),
+        },
+      });
+
+      console.log(`[workflow] ${wf.id} dispatched to device (edge execution, agent=${directWsServer.getAgentVersion(deviceId)})`);
+      res.status(202).json({ ok: true, data: { workflowId: wf.id, status: "running", mode: "edge" } });
+      return;
+    }
+    // If send fails, fall through to legacy execution
+    console.warn(`[workflow] Edge dispatch failed for ${deviceId} — falling back to server execution`);
+  }
+
+  // ── Legacy server-side execution ──────────────────────────────────────────
+
   const checkpoint: WorkflowCheckpoint = {
     stepIndex:    0,
     loopStack:    [],
@@ -1358,6 +1396,8 @@ router.get("/debug/connections", requireAuth, (_req, res) => {
   const list = onlineDevices.map((id) => ({
     deviceId: id.slice(0, 8),
     online: true,
+    agentVersion: directWsServer.getAgentVersion(id),
+    edgeCapable: directWsServer.supportsEdgeExecution(id),
   }));
   res.json({ ok: true, data: { count: list.length, connections: list } });
 });
@@ -1371,6 +1411,11 @@ router.get("/scalability/status", requireAuth, async (_req, res) => {
     const wfCounts = await workflowService.getActiveCounts();
     const wsConnections = directWsServer.getConnectionCount();
     const wsOnline = directWsServer.getConnectedDeviceIds().length;
+
+    // Edge execution stats (ADR-001)
+    const edgeDevices = directWsServer.getConnectedDeviceIds()
+      .filter(id => directWsServer.supportsEdgeExecution(id)).length;
+    const legacyDevices = wsOnline - edgeDevices;
 
     res.json({
       ok: true,
@@ -1391,12 +1436,122 @@ router.get("/scalability/status", requireAuth, async (_req, res) => {
             maxConnections: scalabilityConfig.maxWsConnections,
             utilization: `${Math.round((wsConnections / scalabilityConfig.maxWsConnections) * 100)}%`,
           },
+          edgeExecution: {
+            capableDevices: edgeDevices,
+            legacyDevices,
+            activeMode: edgeDevices > 0 ? "edge" : "legacy",
+          },
         },
         capacity: {
           workflowsAvailable: Math.max(0, scalabilityConfig.maxGlobalConcurrentWorkflows - wfCounts.running),
           dbPoolAvailable: poolStats.maxCount - poolStats.totalCount,
           wsSlotsAvailable: scalabilityConfig.maxWsConnections - wsConnections,
         },
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ─── Edge Workflow: Push template to device (ADR-001) ────────────────────────
+
+router.post("/edge/push-template", requireAuth, async (req, res) => {
+  const { deviceId, templateId, variables } = req.body as {
+    deviceId?: string;
+    templateId?: string;
+    variables?: Record<string, unknown>;
+  };
+
+  if (!deviceId || !templateId) {
+    res.status(400).json({ ok: false, error: "Missing deviceId or templateId" });
+    return;
+  }
+
+  // Check device is online
+  if (!directWsServer.isDeviceOnline(deviceId)) {
+    res.status(409).json({ ok: false, error: "Device offline" });
+    return;
+  }
+
+  try {
+    // Load template from DB
+    const template = await workflowService.getTemplate(templateId);
+    if (!template) {
+      res.status(404).json({ ok: false, error: `Template ${templateId} not found` });
+      return;
+    }
+
+    // Push to device via WebSocket
+    const sent = directWsServer.sendWorkflowStart(deviceId, template as unknown as Record<string, unknown>, variables);
+    if (!sent) {
+      res.status(503).json({ ok: false, error: "Failed to send template to device" });
+      return;
+    }
+
+    console.log(`[api] Edge template push: device=${deviceId.slice(0, 8)} template=${templateId}`);
+    res.json({ ok: true, data: { deviceId, templateId, sent: true } });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ─── Edge Workflow: List templates for device ─────────────────────────────────
+
+router.get("/edge/templates", requireAuth, async (_req, res) => {
+  try {
+    const templates = await workflowService.listTemplates();
+    res.json({ ok: true, data: templates });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ─── Edge Workflow: Broadcast template to all online devices ───────────────────
+
+router.post("/edge/broadcast-template", requireAuth, async (req, res) => {
+  const { templateId } = req.body as { templateId?: string };
+  if (!templateId) {
+    res.status(400).json({ ok: false, error: "Missing templateId" });
+    return;
+  }
+
+  try {
+    const template = await workflowService.getTemplate(templateId);
+    if (!template) {
+      res.status(404).json({ ok: false, error: `Template ${templateId} not found` });
+      return;
+    }
+
+    const sent = directWsServer.broadcastTemplate(template as unknown as Record<string, unknown>);
+    res.json({ ok: true, data: { templateId, devicesReached: sent } });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+// ─── Edge Workflow: Status overview (ADR-001 Phase 5) ─────────────────────────
+
+router.get("/edge/status", requireAuth, async (_req, res) => {
+  try {
+    const onlineDevices = directWsServer.getConnectedDeviceIds();
+    const edgeDevices = onlineDevices.filter(id => directWsServer.supportsEdgeExecution(id));
+    const legacyDevices = onlineDevices.filter(id => !directWsServer.supportsEdgeExecution(id));
+
+    const deviceInfo = onlineDevices.map(id => ({
+      deviceId: id.slice(0, 8),
+      agentVersion: directWsServer.getAgentVersion(id),
+      edgeCapable: directWsServer.supportsEdgeExecution(id),
+    }));
+
+    res.json({
+      ok: true,
+      data: {
+        totalOnline: onlineDevices.length,
+        edgeCapable: edgeDevices.length,
+        legacyOnly: legacyDevices.length,
+        executionMode: edgeDevices.length > 0 ? "edge" : "legacy",
+        devices: deviceInfo,
       },
     });
   } catch (err) {

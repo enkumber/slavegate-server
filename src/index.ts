@@ -14,6 +14,7 @@ import { createWsGateway, wsGateway } from "./ws";
 import apiRouter from "./api/routes";
 import agencyRouter from "./api/agency-routes";
 import hydraRouter from "./api/hydra-routes";
+import vlmRouter from "./api/vlm-routes";
 import workflowDispatchRoutes from "./api/workflow-dispatch-routes";
 import deviceTokenRouter from "./api/device-tokens.routes";
 import mappingRoutes from "./modules/app-mapping/mapping-routes";
@@ -147,6 +148,7 @@ async function bootstrap(): Promise<void> {
   app.use("/api/mapping", mappingRoutes);
   app.use("/api/config", configRoutes);
   app.use("/api/hydra", hydraRouter);
+  app.use("/api/vlm", vlmRouter);
 
   // ─── APK download endpoints ───────────────────────────────────────────────
   // GET /app → serves latest agent APK for device onboarding (no auth required)

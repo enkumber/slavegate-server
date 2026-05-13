@@ -51,6 +51,7 @@ interface ConnectedDevice {
   lastPongAt:   number;
   msgCount:     number;
   windowStart:  number;
+  agentVersion: string;  // For backward compat routing (ADR-001)
 }
 
 interface PendingJob {
@@ -186,6 +187,41 @@ export class DirectWsServer {
   }
 
   /**
+   * Send WORKFLOW_START to a device for edge execution (ADR-001).
+   * Device will execute the entire workflow locally.
+   */
+  sendWorkflowStart(deviceId: string, template: Record<string, unknown>, variables?: Record<string, unknown>): boolean {
+    const conn = this.connections.get(deviceId);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+
+    this._send(conn.ws, {
+      type: 'WORKFLOW_START',
+      ...template,
+      variables: variables ?? {},
+    });
+    console.log(`[direct-ws] sendWorkflowStart: device=${deviceId.slice(0,8)} template=${(template.id as string)?.slice(0,20)}`);
+    return true;
+  }
+
+  /**
+   * Check if a device supports edge workflow execution (ADR-001).
+   * Devices with agent >= 4.0 support WORKFLOW_START.
+   * Older devices must use legacy server-side execution.
+   */
+  supportsEdgeExecution(deviceId: string): boolean {
+    const conn = this.connections.get(deviceId);
+    if (!conn) return false;
+    return parseAgentVersion(conn.agentVersion) >= parseAgentVersion("4.0.0");
+  }
+
+  /**
+   * Get agent version for a connected device.
+   */
+  getAgentVersion(deviceId: string): string {
+    return this.connections.get(deviceId)?.agentVersion ?? "unknown";
+  }
+
+  /**
    * Returns a Promise that resolves when BATCH_RESULT arrives for this batchId.
    * Rejects after timeoutMs (default: 10 min — batches can be long).
    */
@@ -208,6 +244,27 @@ export class DirectWsServer {
 
   getConnectedDeviceIds(): string[] {
     return Array.from(this.connections.keys()).filter(id => this.isDeviceOnline(id));
+  }
+
+  /**
+   * Broadcast a template update to all online devices (ADR-001 Phase 3).
+   * Uses CONFIG_UPDATE message type — devices cache the template locally.
+   */
+  broadcastTemplate(template: Record<string, unknown>): number {
+    const deviceIds = this.getConnectedDeviceIds();
+    let sent = 0;
+    for (const deviceId of deviceIds) {
+      const conn = this.connections.get(deviceId);
+      if (conn && conn.ws.readyState === WebSocket.OPEN) {
+        this._send(conn.ws, {
+          type: 'CONFIG_UPDATE',
+          template,
+        });
+        sent++;
+      }
+    }
+    console.log(`[direct-ws] Template broadcast: sent to ${sent}/${deviceIds.length} devices (template=${(template.id as string)?.slice(0, 20)})`);
+    return sent;
   }
 
   getConnectionCount(): number {
@@ -292,12 +349,15 @@ export class DirectWsServer {
 
       // ── Route by type ─────────────────────────────────────────────────
       switch (type) {
-        case "JOB_RESULT":   this._handleJobResult(deviceConn, msg);   break;
-        case "BATCH_RESULT": this._handleBatchResult(deviceConn, msg); break;
-        case "HEARTBEAT":    await this._handleHeartbeat(deviceConn, msg); break;
-        case "PING":         this._send(ws, { type: "PONG" });          break;
-        case "PONG":         deviceConn.lastPongAt = Date.now();         break;
-        default:             console.warn(`[direct-ws] Unknown message type: ${type}`); break;
+        case "JOB_RESULT":      this._handleJobResult(deviceConn, msg);   break;
+        case "BATCH_RESULT":    this._handleBatchResult(deviceConn, msg); break;
+        case "HEARTBEAT":       await this._handleHeartbeat(deviceConn, msg); break;
+        case "PING":            this._send(ws, { type: "PONG" });          break;
+        case "PONG":            deviceConn.lastPongAt = Date.now();         break;
+        // ── Edge Workflow Execution (ADR-001) ──
+        case "WORKFLOW_STATUS": this._handleWorkflowStatus(deviceConn, msg); break;
+        case "LLM_REQUEST":    this._handleLlmRequest(deviceConn, ws, msg); break;
+        default:                console.warn(`[direct-ws] Unknown message type: ${type}`); break;
       }
     });
 
@@ -453,6 +513,7 @@ export class DirectWsServer {
         lastPongAt:  now,
         msgCount:    0,
         windowStart: now,
+        agentVersion: deviceInfo?.agentVersion ?? "unknown",
       };
       this.connections.set(finalDeviceId, conn);
       devicesConnected?.set(this.connections.size);
@@ -641,6 +702,107 @@ export class DirectWsServer {
     }
   }
 
+  // ─── Edge Workflow Execution handlers (ADR-001) ──────────────────────────
+
+  /**
+   * Handle WORKFLOW_STATUS from device.
+   * Fire-and-forget: log + update DB. No response needed.
+   */
+  private _handleWorkflowStatus(conn: ConnectedDevice, msg: Record<string, unknown>): void {
+    const workflowId = msg.workflowId as string;
+    const status     = msg.status as string;
+    const step       = msg.currentStep as number;
+    const total      = msg.totalSteps as number;
+    const error      = msg.error as string | undefined;
+    const variables  = msg.variables as Record<string, unknown> | undefined;
+
+    console.log(
+      `[direct-ws] WORKFLOW_STATUS: device=${conn.deviceId.slice(0,8)} ` +
+      `workflow=${workflowId?.slice(0,8)} status=${status} step=${step}/${total}` +
+      (error ? ` error=${error}` : '')
+    );
+
+    // Update DB (fire-and-forget)
+    this._persistWorkflowStatus(conn.deviceId, workflowId, status, step, total, error, variables)
+      .catch(err => console.error(`[direct-ws] Failed to persist workflow status: ${err.message}`));
+  }
+
+  private async _persistWorkflowStatus(
+    deviceId: string,
+    workflowId: string | undefined,
+    status: string,
+    step: number,
+    total: number,
+    error: string | undefined,
+    variables: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    if (!workflowId) return;
+    const { getDb } = require("../db/client");
+    const db = getDb();
+
+    if (status === 'completed') {
+      await db.query(
+        `UPDATE workflows SET status = 'completed', completed_at = NOW(), result = $1 WHERE id = $2`,
+        [JSON.stringify({ step, total, variables }), workflowId]
+      );
+    } else if (status === 'failed') {
+      await db.query(
+        `UPDATE workflows SET status = 'failed', error = $1, completed_at = NOW() WHERE id = $2`,
+        [error || 'Device reported failure', workflowId]
+      );
+    } else {
+      // running / paused — update progress
+      await db.query(
+        `UPDATE workflows SET status = $1, progress = $2 WHERE id = $3`,
+        [status, JSON.stringify({ step, total, error, variables: variables ? JSON.stringify(variables).slice(0, 1000) : null }), workflowId]
+      );
+    }
+  }
+
+  /**
+   * Handle LLM_REQUEST from device.
+   * Forward to VLM endpoint and return LLM_RESULT.
+   */
+  private async _handleLlmRequest(conn: ConnectedDevice, ws: WebSocket, msg: Record<string, unknown>): Promise<void> {
+    const requestId = msg.requestId as string;
+    const prompt    = msg.prompt as string;
+    const model     = msg.model as string || 'gemma4';
+
+    console.log(`[direct-ws] LLM_REQUEST: device=${conn.deviceId.slice(0,8)} model=${model} prompt=${prompt?.slice(0, 80)}...`);
+
+    try {
+      // Forward to local VLM endpoint
+      const vlmPort = process.env.VLM_PORT || '18791';
+      const response = await fetch(`http://localhost:${vlmPort}/api/vlm/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, model }),
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (!response.ok) {
+        throw new Error(`VLM returned ${response.status}`);
+      }
+
+      const result = await response.json() as { text?: string; result?: string };
+      const text = result.text || result.result || '';
+
+      this._send(ws, {
+        type: 'LLM_RESULT',
+        requestId,
+        result: text,
+      });
+    } catch (err) {
+      console.error(`[direct-ws] LLM_REQUEST failed: ${(err as Error).message}`);
+      this._send(ws, {
+        type: 'LLM_RESULT',
+        requestId,
+        result: '',
+        error: (err as Error).message,
+      });
+    }
+  }
+
   // ─── Util ─────────────────────────────────────────────────────────────────
 
   private _send(ws: WebSocket, payload: Record<string, unknown>): void {
@@ -651,3 +813,18 @@ export class DirectWsServer {
 }
 
 export const directWsServer = new DirectWsServer();
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Parse semver-like version string to comparable number.
+ * "4.0.0" → 40000, "3.1.4" → 30104, "unknown" → 0
+ */
+function parseAgentVersion(version: string): number {
+  if (!version || version === "unknown") return 0;
+  const parts = version.replace(/^v/, "").split(".");
+  const major = parseInt(parts[0] || "0", 10);
+  const minor = parseInt(parts[1] || "0", 10);
+  const patch = parseInt(parts[2] || "0", 10);
+  return major * 10000 + minor * 100 + patch;
+}
