@@ -10,6 +10,7 @@ import android.provider.Settings
 import android.util.Log
 import com.phonenetwork.executor.BatchExecutor
 import com.phonenetwork.executor.JobExecutor
+import com.phonenetwork.workflow.WorkflowEngine
 import kotlinx.coroutines.*
 import okhttp3.*
 import org.json.JSONObject
@@ -48,6 +49,7 @@ class DirectWsClient(
     private val onOtaUpdate: (version: String, versionCode: Int, apkUrl: String, apkSha256: String, mandatory: Boolean) -> Unit = { _, _, _, _, _ -> },
     private val onTaskResult: (taskType: String, success: Boolean, result: Map<String, Any?>, error: String?) -> Unit = { _, _, _, _ -> },
     private var batchExecutor: BatchExecutor? = null,
+    private var workflowEngine: WorkflowEngine? = null,
 ) {
 
     /**
@@ -57,6 +59,14 @@ class DirectWsClient(
     fun setBatchExecutor(be: BatchExecutor) {
         batchExecutor = be
         Log.i(TAG, "BatchExecutor attached to DirectWsClient")
+    }
+
+    /**
+     * Set the WorkflowEngine instance for edge execution (ADR-001).
+     */
+    fun setWorkflowEngine(engine: WorkflowEngine) {
+        workflowEngine = engine
+        Log.i(TAG, "WorkflowEngine attached to DirectWsClient")
     }
     /**
      * Stable device ID derived from hardware serial.
@@ -340,6 +350,29 @@ class DirectWsClient(
                 executeJob(webSocket, "", taskType, JSONObject(params))
             }
 
+            // ─── Edge Workflow Execution (ADR-001) ───────────────────────────────
+            "WORKFLOW_START" -> {
+                Log.i(TAG, "WORKFLOW_START received: ${msg.optString("id")}")
+                executeWorkflow(msg)
+            }
+
+            "LLM_RESULT" -> {
+                // LLM response from server — handled by WorkflowEngine's requestLLM callback
+                Log.d(TAG, "LLM_RESULT received: requestId=${msg.optString("requestId")}")
+                handleLlmResult(msg)
+            }
+
+            // ─── Template OTA push (ADR-001 Phase 3) ──────────────────────────────
+            "CONFIG_UPDATE" -> {
+                val template = msg.optJSONObject("template")
+                if (template != null) {
+                    Log.i(TAG, "CONFIG_UPDATE: template push id=${template.optString("id")}")
+                    val store = com.phonenetwork.workflow.TemplateStore(context)
+                    val saved = store.saveTemplate(template)
+                    Log.i(TAG, "Template OTA: ${if (saved) "saved" else "already cached"}")
+                }
+            }
+
             else -> Log.w(TAG, "Unknown message type: $type")
         }
     }
@@ -576,6 +609,64 @@ class DirectWsClient(
                     }
                 }
             }
+        }
+    }
+
+    // ─── Edge Workflow Execution (ADR-001) ──────────────────────────────────
+
+    private fun executeWorkflow(msg: JSONObject) {
+        val engine = workflowEngine
+        if (engine == null) {
+            Log.e(TAG, "WORKFLOW_START received but WorkflowEngine not initialized")
+            sendRaw(ws ?: return, JSONObject().apply {
+                put("type", "WORKFLOW_STATUS")
+                put("workflowId", msg.optString("id"))
+                put("status", "failed")
+                put("error", "WorkflowEngine not initialized on device")
+            })
+            return
+        }
+
+        scope.launch {
+            try {
+                engine.executeWorkflow(msg)
+            } catch (e: Exception) {
+                Log.e(TAG, "Workflow execution failed: ${e.message}")
+            }
+        }
+    }
+
+    // ─── LLM request/response (via WebSocket) ──────────────────────────────────
+
+    private val pendingLlmRequests = mutableMapOf<String, ((String) -> Unit)>()
+
+    fun requestLLMViaWs(requestId: String, prompt: String, screenshot: String?, model: String) {
+        val currentWs = ws ?: run {
+            Log.w(TAG, "Cannot send LLM_REQUEST — not connected")
+            return
+        }
+        sendRaw(currentWs, JSONObject().apply {
+            put("type", "LLM_REQUEST")
+            put("requestId", requestId)
+            put("prompt", prompt)
+            if (screenshot != null) put("screenshot", screenshot)
+            put("model", model)
+        })
+    }
+
+    private fun handleLlmResult(msg: JSONObject) {
+        val requestId = msg.optString("requestId")
+        val result = msg.optString("result", "")
+        val error = msg.optString("error", null)
+
+        val callback = pendingLlmRequests.remove(requestId)
+        if (callback != null) {
+            if (error != null) {
+                Log.w(TAG, "LLM_RESULT error: $error")
+            }
+            callback(result)
+        } else {
+            Log.w(TAG, "LLM_RESULT for unknown requestId: $requestId")
         }
     }
 
