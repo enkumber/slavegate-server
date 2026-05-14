@@ -28,6 +28,7 @@ import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { devicesService } from "../modules/devices/devices.service";
 import { devicesConnected, deviceOfflineEvents, recordDeviceHealth } from "../modules/observability/metrics";
 import { alerting } from "../modules/observability/alerts";
+import { visionService } from "../modules/vision/vision.service";
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -829,25 +830,17 @@ export class DirectWsServer {
     const requestId = msg.requestId as string;
     const prompt    = msg.prompt as string;
     const model     = msg.model as string || 'gemma4';
+    const screenshot = msg.screenshot as string | undefined;
 
-    console.log(`[direct-ws] LLM_REQUEST: device=${conn.deviceId.slice(0,8)} model=${model} prompt=${prompt?.slice(0, 80)}...`);
+    console.log(`[direct-ws] LLM_REQUEST: device=${conn.deviceId.slice(0,8)} model=${model} hasImage=${!!screenshot} prompt=${prompt?.slice(0, 80)}...`);
 
     try {
-      // Forward to local VLM endpoint
-      const vlmPort = process.env.VLM_PORT || '18791';
-      const response = await fetch(`http://localhost:${vlmPort}/api/vlm/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, model }),
-        signal: AbortSignal.timeout(30_000),
-      });
-
-      if (!response.ok) {
-        throw new Error(`VLM returned ${response.status}`);
-      }
-
-      const result = await response.json() as { text?: string; result?: string };
-      const text = result.text || result.result || '';
+      const image = screenshot || "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
+      const text = await visionService.analyzeCustomPrompt(
+        image,
+        prompt,
+        { maxTokens: screenshot ? 500 : 220, temperature: screenshot ? 0.3 : 0.8, timeoutMs: 30_000 }
+      );
 
       this._send(ws, {
         type: 'LLM_RESULT',
