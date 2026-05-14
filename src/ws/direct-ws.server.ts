@@ -780,10 +780,9 @@ export class DirectWsServer {
              current_step = $1,
              total_steps = COALESCE($2, total_steps),
              checkpoint = $3,
-             completed_at = NOW(),
-             result = $4
-         WHERE id = $5`,
-        [step ?? total, total, JSON.stringify(checkpoint), JSON.stringify({ step, total, variables }), workflowId]
+             completed_at = NOW()
+         WHERE id = $4`,
+        [step ?? total, total, JSON.stringify({ ...checkpoint, result: { step, total, variables } }), workflowId]
       );
     } else if (status === 'failed') {
       await db.query(
@@ -798,22 +797,24 @@ export class DirectWsServer {
         [step, total, JSON.stringify(checkpoint), error || 'Device reported failure', workflowId]
       );
     } else {
-      // running / paused — update progress
+      // running / paused — update only columns present in the canonical workflows schema.
+      // Older Umbrel installs do not have a `progress` column; checkpoint carries progress details.
       await db.query(
         `UPDATE workflows
          SET status = $1,
              current_step = COALESCE($2, current_step),
              total_steps = COALESCE($3, total_steps),
-             checkpoint = $4,
-             progress = $5
-         WHERE id = $6
+             checkpoint = $4
+         WHERE id = $5
            AND status NOT IN ('cancelled', 'completed', 'failed')`,
         [
           status,
           step,
           total,
-          JSON.stringify(checkpoint),
-          JSON.stringify({ step, total, error, variables: variables ? JSON.stringify(variables).slice(0, 1000) : null }),
+          JSON.stringify({
+            ...checkpoint,
+            progress: { step, total, error, variables: variables ? JSON.stringify(variables).slice(0, 1000) : null },
+          }),
           workflowId,
         ]
       );
