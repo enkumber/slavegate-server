@@ -3,7 +3,7 @@
  * VLM provider routing and request handling.
  *
  * Responsibilities:
- * - Load vision_config from DB (provider, model, api_key_ref, endpoint)
+ * - Load server-side vision_vlm model config from DB
  * - Instantiate correct provider adapter
  * - Resolve server-side prompt template (device sends requestType+actionType only)
  * - Call provider, normalize output
@@ -19,6 +19,7 @@ import { AnthropicVisionProvider } from "./providers/anthropic.provider";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.provider";
 import { MiniMaxVisionProvider }    from "./providers/minimax.provider";
 import type { VisionProvider, VisionResult, VerifyResult, VisionOptions } from "./vision-provider.interface";
+import { modelConfigService } from "../model-config/model-config.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -54,10 +55,10 @@ export interface VerifyResponse {
 // ─── Vision config row ────────────────────────────────────────────────────────
 
 interface VisionConfig {
-  provider:     "anthropic" | "openai_compatible" | "minimax";
+  provider:     "anthropic" | "openai_compatible" | "openai" | "minimax";
   model:        string;
   endpoint:     string | null;
-  apiKeyRef:    string;   // Vault reference or direct env var name
+  apiKey:       string;
   maxTokens:    number;
   temperature:  number;
   timeoutMs:    number;
@@ -67,6 +68,7 @@ interface VisionConfig {
 
 export class VisionService {
   private cachedProvider: VisionProvider | null = null;
+  private cachedModel: string = "unknown";
   private configCachedAt: number = 0;
   private readonly CONFIG_TTL_MS = 60_000; // Re-read config every 60s
 
@@ -97,6 +99,7 @@ export class VisionService {
       tokensUsed,
       latencyMs,
       provider:    provider.name,
+      model:       this.cachedModel,
     });
 
     return {
@@ -140,6 +143,7 @@ export class VisionService {
       tokensUsed:  result.tokensUsed,
       latencyMs,
       provider:    provider.name,
+      model:       this.cachedModel,
     });
 
     return {
@@ -161,13 +165,12 @@ export class VisionService {
     }
 
     const config = await this.loadConfig();
-    const apiKey = resolveApiKeyRef(config.apiKeyRef);
 
     let provider: VisionProvider;
     switch (config.provider) {
       case "anthropic":
         provider = new AnthropicVisionProvider({
-          apiKey,
+          apiKey:      config.apiKey,
           model:       config.model,
           endpoint:    config.endpoint ?? undefined,
           maxTokens:   config.maxTokens,
@@ -175,9 +178,10 @@ export class VisionService {
           timeoutMs:   config.timeoutMs,
         });
         break;
+      case "openai":
       case "openai_compatible":
         provider = new OpenAICompatibleProvider({
-          apiKey,
+          apiKey:      config.apiKey,
           model:       config.model,
           endpoint:    config.endpoint ?? undefined,
           maxTokens:   config.maxTokens,
@@ -187,7 +191,7 @@ export class VisionService {
         break;
       case "minimax":
         provider = new MiniMaxVisionProvider({
-          apiKey:     apiKey,
+          apiKey:     config.apiKey,
           model:      config.model,
           endpoint:   config.endpoint ?? "https://api.minimax.io/anthropic/v1",
           maxTokens:  config.maxTokens,
@@ -200,34 +204,29 @@ export class VisionService {
     }
 
     this.cachedProvider = provider;
+    this.cachedModel = config.model;
     this.configCachedAt = now;
     console.log(`[vision] Provider loaded: ${provider.name} model=${config.model}`);
     return provider;
   }
 
   private async loadConfig(): Promise<VisionConfig> {
-    const db = getDb();
-    const row = await db.query(
-      "SELECT * FROM vision_config WHERE id = 'default' LIMIT 1"
-    );
-    if (row.rows.length === 0) {
-      throw new Error("vision_config table has no 'default' row. Run schema migration.");
-    }
-    const r = row.rows[0] as Record<string, unknown>;
+    const r = await modelConfigService.resolve("vision_vlm");
     return {
-      provider:    (r.provider as string) as VisionConfig["provider"],
-      model:       r.model as string,
-      endpoint:    (r.endpoint as string) ?? null,
-      apiKeyRef:   r.api_key_ref as string,
-      maxTokens:   (r.max_tokens as number) ?? 512,
-      temperature: (r.temperature as number) ?? 0.1,
-      timeoutMs:   (r.timeout_ms as number) ?? 15_000,
+      provider:    normalizeVisionProvider(r.provider),
+      model:       r.model,
+      endpoint:    normalizeEndpoint(r.endpoint),
+      apiKey:      r.apiKey,
+      maxTokens:   process.env.VISION_MAX_TOKENS ? Number(process.env.VISION_MAX_TOKENS) : 512,
+      temperature: process.env.VISION_TEMPERATURE ? Number(process.env.VISION_TEMPERATURE) : 0.1,
+      timeoutMs:   process.env.VISION_TIMEOUT_MS ? Number(process.env.VISION_TIMEOUT_MS) : 15_000,
     };
   }
 
-  /** Force provider reload — call after updating vision_config */
+  /** Force provider reload — call after updating model_configs/vision_vlm */
   invalidateCache(): void {
     this.cachedProvider = null;
+    this.cachedModel = "unknown";
     this.configCachedAt = 0;
   }
 
@@ -261,14 +260,15 @@ export class VisionService {
     tokensUsed:  number;
     latencyMs:   number;
     provider:    string;
+    model:       string;
   }): Promise<void> {
     try {
       const db = getDb();
       await db.query(
         `INSERT INTO vlm_usage_log
-           (device_id, workflow_id, job_id, request_type, action_type, tokens_used, latency_ms, provider)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [log.deviceId, log.workflowId, log.jobId, log.requestType, log.actionType, log.tokensUsed, log.latencyMs, log.provider]
+           (device_id, workflow_id, job_id, request_type, provider, model, input_tokens, output_tokens, latency_ms, success)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, TRUE)`,
+        [log.deviceId, log.workflowId, log.jobId, log.requestType, log.provider, log.model, log.tokensUsed, log.latencyMs]
       );
     } catch (err) {
       // Non-fatal — don't let logging failure break vision request
@@ -296,32 +296,18 @@ export class VisionService {
   }
 }
 
-// ─── API key resolution ───────────────────────────────────────────────────────
+// ─── Provider normalization ──────────────────────────────────────────────────
 
-/**
- * Resolve API key from Vault reference or env var.
- * Format:
- *   "vault:path/to/secret"  → Vault lookup (Phase 4: real HashiCorp Vault)
- *   "env:VAR_NAME"          → process.env[VAR_NAME]
- *   Direct string           → used as-is (dev only)
- */
-function resolveApiKeyRef(ref: string): string {
-  if (ref.startsWith("env:")) {
-    const varName = ref.slice(4);
-    const val = process.env[varName];
-    if (!val) throw new Error(`API key env var not set: ${varName}`);
-    return val;
-  }
-  if (ref.startsWith("vault:")) {
-    // Phase 4: HashiCorp Vault lookup
-    // For now: fall through to env var with normalized name
-    const path    = ref.slice(6).replace(/\//g, "_").toUpperCase();
-    const val     = process.env[path];
-    if (!val) throw new Error(`Vault secret not available in dev mode: ${ref}. Set env var: ${path}`);
-    return val;
-  }
-  // Direct value (dev/test only)
-  return ref;
+function normalizeEndpoint(endpoint: string | null): string | null {
+  return endpoint?.replace(/\/+$/, "").replace(/\/chat\/completions$/, "") ?? null;
+}
+
+function normalizeVisionProvider(provider: string): VisionConfig["provider"] {
+  const normalized = provider.toLowerCase();
+  if (normalized === "openai") return "openai";
+  if (normalized === "openai_compatible" || normalized === "openai-compatible") return "openai_compatible";
+  if (normalized === "anthropic" || normalized === "minimax") return normalized;
+  throw new Error(`Unsupported vision_vlm provider: ${provider}. Supported: openai_compatible, openai, anthropic, minimax.`);
 }
 
 export const visionService = new VisionService();

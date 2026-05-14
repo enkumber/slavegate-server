@@ -1,50 +1,62 @@
 /**
- * utils/llm.ts
  * LLM utilities for text generation tasks.
- *
- * Configurable via env vars:
- *   LLM_BASE_URL  — OpenAI-compatible endpoint (default: Qwen on GX10)
- *   LLM_API_KEY   — API key for the endpoint
- *   LLM_MODEL     — Model name (default: Qwen/Qwen3.5-122B-A10B)
+ * Runtime configuration is resolved server-side from model_configs role
+ * `decision_llm`. Secrets are never hardcoded or sent to devices.
  */
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// LLM CLIENT CONFIG
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const LLM_BASE_URL = process.env.LLM_BASE_URL || "http://enkzoned.go.ro:12321/v1/chat/completions";
-const LLM_API_KEY = process.env.LLM_API_KEY || "36fad768f6d47ec7da413f201360bb19689f4f8aa@!0347cecc";
-const LLM_MODEL = process.env.LLM_MODEL || "Qwen/Qwen3.5-122B-A10B";
+import { modelConfigService } from "../modules/model-config/model-config.service";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE LLM FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Simple text completion via OpenClaw Gateway.
+ * Simple text completion via the configured decision_llm provider.
  * Returns the raw text response.
  */
 export async function llmComplete(
   prompt: string,
-  model = "Qwen/Qwen3.5-122B-A10B",
+  model?: string,
   options?: { max_tokens?: number; system?: string }
 ): Promise<string> {
+  const config = await modelConfigService.resolve("decision_llm");
   const maxTokens = options?.max_tokens ?? 2048;
-
   const messages: Array<{ role: string; content: string }> = [];
-  if (options?.system) {
-    messages.push({ role: "system", content: options.system });
-  }
+  if (options?.system) messages.push({ role: "system", content: options.system });
   messages.push({ role: "user", content: prompt });
 
-  const response = await fetch(LLM_BASE_URL, {
+  const provider = config.provider.toLowerCase();
+  const selectedModel = model || config.model;
+
+  if (provider === "anthropic") {
+    const response = await fetch(`${endpointBase(config.endpoint, provider)}/messages`, {
+      method: "POST",
+      headers: {
+        "x-api-key": config.apiKey,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: selectedModel,
+        messages,
+        max_tokens: maxTokens,
+      }),
+    });
+    if (!response.ok) throw new Error(`LLM API error (${response.status}): ${sanitizeProviderError(await response.text())}`);
+    const data = await response.json() as { content?: Array<{ text?: string }> };
+    return data.content?.map((part) => part.text ?? "").join("") ?? "";
+  }
+
+  const url = `${endpointBase(config.endpoint, provider)}/chat/completions`;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (provider === "minimax") headers["x-api-key"] = config.apiKey;
+  else headers.Authorization = `Bearer ${config.apiKey}`;
+
+  const response = await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${LLM_API_KEY}`,
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify({
-      model: model || LLM_MODEL,
+      model: selectedModel,
       messages,
       max_tokens: maxTokens,
     }),
@@ -52,7 +64,7 @@ export async function llmComplete(
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`LLM API error (${response.status}): ${errText}`);
+    throw new Error(`LLM API error (${response.status}): ${sanitizeProviderError(errText)}`);
   }
 
   const data = await response.json() as {
@@ -60,12 +72,23 @@ export async function llmComplete(
     content?: Array<{ text?: string }>;
   };
 
-  // Support both OpenAI-style and Anthropic-style response formats
   return (
     data.choices?.[0]?.message?.content ||
     data.content?.[0]?.text ||
     ""
   );
+}
+
+function sanitizeProviderError(text: string): string {
+  return text
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
+    .replace(/(api[_-]?key|token|authorization|x-api-key)([\"'\s:=]+)([^\"'\s,}]+)/gi, "$1$2[redacted]")
+    .slice(0, 500);
+}
+
+function endpointBase(endpoint: string | null, provider: string): string {
+  const fallback = provider === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1";
+  return (endpoint || fallback).replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
 }
 
 /**
@@ -79,16 +102,10 @@ export async function llmJson<T = unknown>(
 ): Promise<T> {
   const response = await llmComplete(prompt, model, options);
 
-  // Try to extract JSON from response
   let jsonStr = response.trim();
-
-  // Remove markdown code blocks if present
   const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (jsonMatch) {
-    jsonStr = jsonMatch[1].trim();
-  }
+  if (jsonMatch) jsonStr = jsonMatch[1].trim();
 
-  // Extract valid JSON using brace/bracket counting (handles nested structures)
   function extractJson(str: string): string | null {
     const startChars = ['{', '['];
     const endChars = ['}', ']'];
@@ -113,14 +130,11 @@ export async function llmJson<T = unknown>(
   }
 
   const extracted = extractJson(jsonStr);
-  if (extracted) {
-    jsonStr = extracted;
-  }
+  if (extracted) jsonStr = extracted;
 
   try {
     return JSON.parse(jsonStr) as T;
   } catch (err) {
-    // Retry: strip trailing commas (common LLM mistake)
     try {
       const cleaned = jsonStr.replace(/,\s*([}\]])/g, '$1');
       return JSON.parse(cleaned) as T;
@@ -135,10 +149,6 @@ export async function llmJson<T = unknown>(
 // DOMAIN-SPECIFIC GENERATORS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Generate hashtags for a niche/industry.
- * Returns array of hashtags with # prefix.
- */
 export async function generateHashtags(
   interests: string[],
   locations: string[] = [],
@@ -163,17 +173,13 @@ Return ONLY a JSON array of hashtag names WITHOUT the # symbol.
 Example: ["onlyfansmodel", "fanslymodel", "romanianmodel", "boudoirphotography"]`;
 
   try {
-    const hashtags = await llmJson<string[]>(prompt, "Qwen/Qwen3.5-122B-A10B");
-
-    // Validate and normalize
+    const hashtags = await llmJson<string[]>(prompt);
     return hashtags
       .filter((h) => typeof h === "string" && h.length > 0)
       .map((h) => `#${h.replace(/^#/, "").toLowerCase().replace(/\s+/g, "")}`)
       .slice(0, count);
   } catch (err) {
     console.error("[llm] Hashtag generation failed:", (err as Error).message);
-
-    // Fallback: generate basic hashtags from interests
     console.warn("[llm] Using interest-based fallback hashtags");
     return interests
       .slice(0, count)
@@ -181,9 +187,6 @@ Example: ["onlyfansmodel", "fanslymodel", "romanianmodel", "boudoirphotography"]
   }
 }
 
-/**
- * Generate content ideas for a niche.
- */
 export async function generateContentIdeas(
   niche: string,
   contentTypes: string[] = ["photos", "reels"],

@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from "react";
 
-type Section = "fleet" | "agency" | "tokens";
+type Section = "fleet" | "agency" | "tokens" | "models";
 
 export function TopNav() {
   const [active, setActive] = useState<Section>("fleet");
@@ -17,6 +17,8 @@ export function TopNav() {
         setActive("agency");
       } else if (hash === "#/tokens") {
         setActive("tokens");
+      } else if (hash === "#/models") {
+        setActive("models");
       } else {
         setActive("fleet");
       }
@@ -31,6 +33,8 @@ export function TopNav() {
       window.location.hash = "#/";
     } else if (section === "tokens") {
       window.location.hash = "#/tokens";
+    } else if (section === "models") {
+      window.location.hash = "#/models";
     } else {
       window.location.hash = "#/agency/clients";
     }
@@ -80,6 +84,11 @@ export function TopNav() {
           label="🔑 Tokens"
           active={active === "tokens"}
           onClick={() => navigate("tokens")}
+        />
+        <TabButton
+          label="🧠 Models"
+          active={active === "models"}
+          onClick={() => navigate("models")}
         />
       </div>
 

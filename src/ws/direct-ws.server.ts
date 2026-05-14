@@ -29,6 +29,7 @@ import { devicesService } from "../modules/devices/devices.service";
 import { devicesConnected, deviceOfflineEvents, recordDeviceHealth } from "../modules/observability/metrics";
 import { alerting } from "../modules/observability/alerts";
 import { visionService } from "../modules/vision/vision.service";
+import { llmComplete } from "../utils/llm";
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -829,18 +830,18 @@ export class DirectWsServer {
   private async _handleLlmRequest(conn: ConnectedDevice, ws: WebSocket, msg: Record<string, unknown>): Promise<void> {
     const requestId = msg.requestId as string;
     const prompt    = msg.prompt as string;
-    const model     = msg.model as string || 'gemma4';
     const screenshot = msg.screenshot as string | undefined;
 
-    console.log(`[direct-ws] LLM_REQUEST: device=${conn.deviceId.slice(0,8)} model=${model} hasImage=${!!screenshot} prompt=${prompt?.slice(0, 80)}...`);
+    console.log(`[direct-ws] LLM_REQUEST: device=${conn.deviceId.slice(0,8)} role=${screenshot ? 'vision_vlm' : 'decision_llm'} hasImage=${!!screenshot} prompt=${prompt?.slice(0, 80)}...`);
 
     try {
-      const image = screenshot || "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
-      const text = await visionService.analyzeCustomPrompt(
-        image,
-        prompt,
-        { maxTokens: screenshot ? 500 : 220, temperature: screenshot ? 0.3 : 0.8, timeoutMs: 30_000 }
-      );
+      const text = screenshot
+        ? await visionService.analyzeCustomPrompt(
+            screenshot,
+            prompt,
+            { maxTokens: 500, temperature: 0.3, timeoutMs: 30_000 }
+          )
+        : await llmComplete(prompt, undefined, { max_tokens: 220 });
 
       this._send(ws, {
         type: 'LLM_RESULT',

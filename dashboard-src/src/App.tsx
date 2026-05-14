@@ -15,6 +15,7 @@ import { TasksPage } from "./pages/TasksPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TokenManagement } from "./pages/TokenManagement";
+import { ModelConfigPage } from "./pages/ModelConfigPage";
 import { TopNav } from "./components/TopNav";
 import { api } from "./api/client";
 
@@ -61,6 +62,8 @@ export function App() {
     page = <ReportsPage />;
   } else if (route === "#/tokens") {
     page = <TokenManagement />;
+  } else if (route === "#/models") {
+    page = <ModelConfigPage />;
   } else {
     // Default: Fleet
     page = <FleetPage />;

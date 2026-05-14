@@ -22,6 +22,7 @@ import { hbeService } from "../modules/hbe/hbe.service";
 import { accountsService } from "../modules/accounts/accounts.service";
 import { dataPipelineService } from "../modules/data-pipeline/data-pipeline.service";
 import { visionService } from "../modules/vision/vision.service";
+import { modelConfigService, ModelConfigError, type ModelRole } from "../modules/model-config/model-config.service";
 import { registry, refreshAccountMetrics, killSwitchActive as killSwitchGauge } from "../modules/observability/metrics";
 import { canaryService } from "../modules/canary/canary.service";
 import { alerting, AlertType } from "../modules/observability/alerts";
@@ -615,23 +616,132 @@ router.post("/data-pipeline/cleanup", requireAuth, async (_req, res) => {
   res.json({ ok: true, data: { extractedDeleted: extracted.deletedRows, commandLogDeleted: commandLog.deletedRows } });
 });
 
-// ─── Vision config ────────────────────────────────────────────────────────────
+// ─── Server-side model/token config ──────────────────────────────────────────
 
+function handleModelConfigError(res: Response, err: unknown): void {
+  const status = err instanceof ModelConfigError ? err.statusCode : 400;
+  res.status(status).json({ ok: false, error: (err as Error).message, code: err instanceof ModelConfigError ? err.code : "AI_MODEL_CONFIG_ERROR" });
+}
+
+function parseModelRole(role: string): ModelRole {
+  if (role !== "decision_llm" && role !== "vision_vlm") throw new ModelConfigError(`Unsupported model role: ${role}`, 404);
+  return role;
+}
+
+async function listModelConfigsRoute(_req: Request, res: Response): Promise<void> {
+  try {
+    res.json({ ok: true, data: await modelConfigService.list() });
+  } catch (err) {
+    handleModelConfigError(res, err);
+  }
+}
+
+async function getModelConfigRoute(req: Request, res: Response): Promise<void> {
+  try {
+    const config = await modelConfigService.get(parseModelRole(req.params.role));
+    if (!config) {
+      res.status(404).json({ ok: false, error: "Model config not found", code: "AI_MODEL_CONFIG_MISSING" });
+      return;
+    }
+    res.json({ ok: true, data: config });
+  } catch (err) {
+    handleModelConfigError(res, err);
+  }
+}
+
+router.get("/model-configs", requireAuth, listModelConfigsRoute);
+router.get("/server/models", requireAuth, listModelConfigsRoute);
+router.get("/model-configs/:role", requireAuth, getModelConfigRoute);
+router.get("/server/models/:role", requireAuth, getModelConfigRoute);
+
+async function updateModelConfigRoute(req: Request, res: Response): Promise<void> {
+  try {
+    const role = parseModelRole(req.params.role);
+    const config = await modelConfigService.update(role, req.body ?? {});
+    if (role === "vision_vlm") visionService.invalidateCache();
+    res.json({ ok: true, data: config });
+  } catch (err) {
+    handleModelConfigError(res, err);
+  }
+}
+
+router.patch("/model-configs/:role", requireAuth, updateModelConfigRoute);
+router.put("/model-configs/:role", requireAuth, updateModelConfigRoute);
+router.patch("/server/models/:role", requireAuth, updateModelConfigRoute);
+router.put("/server/models/:role", requireAuth, updateModelConfigRoute);
+
+async function updateModelCredentialRoute(req: Request, res: Response): Promise<void> {
+  try {
+    const role = parseModelRole(req.params.role);
+    const config = await modelConfigService.updateCredential(role, req.body ?? {});
+    if (role === "vision_vlm") visionService.invalidateCache();
+    res.json({ ok: true, data: config });
+  } catch (err) {
+    handleModelConfigError(res, err);
+  }
+}
+
+router.post("/model-configs/:role/credential", requireAuth, updateModelCredentialRoute);
+router.post("/server/models/:role/credential", requireAuth, updateModelCredentialRoute);
+
+async function testModelConfigRoute(req: Request, res: Response): Promise<void> {
+  try {
+    const role = parseModelRole(req.params.role);
+    const config = await modelConfigService.test(role);
+    if (role === "vision_vlm") visionService.invalidateCache();
+    res.json({ ok: true, data: config });
+  } catch (err) {
+    handleModelConfigError(res, err);
+  }
+}
+
+router.post("/model-configs/:role/test", requireAuth, testModelConfigRoute);
+router.post("/server/models/:role/test", requireAuth, testModelConfigRoute);
+
+// Backward-compatible vision config endpoints. Responses map the new vision_vlm
+// role to the legacy field names while keeping credentials redacted.
 router.get("/vision/config", requireAuth, async (_req, res) => {
-  const db = getDb();
-  const row = await db.query("SELECT * FROM vision_config WHERE id = 'default'");
-  res.json({ ok: true, data: row.rows[0] ?? null });
+  try {
+    const config = await modelConfigService.get("vision_vlm");
+    if (!config) return res.json({ ok: true, data: null });
+    res.json({
+      ok: true,
+      data: {
+        id: "default",
+        provider: config.provider,
+        model: config.model,
+        endpoint: config.endpoint,
+        api_key_ref: config.hasCredential ? "redacted" : null,
+        apiKeyRef: config.hasCredential ? "redacted" : null,
+        enabled: config.enabled,
+        version: config.version,
+        hasCredential: config.hasCredential,
+        last_test_status: config.lastTestStatus,
+        last_test_message: config.lastTestMessage,
+        last_test_at: config.lastTestAt,
+        updated_at: config.updatedAt,
+      },
+    });
+  } catch (err) {
+    handleModelConfigError(res, err);
+  }
 });
 
 router.patch("/vision/config", requireAuth, async (req, res) => {
-  const db = getDb();
-  const { provider, model, endpoint } = req.body as Record<string, string>;
-  await db.query(
-    `UPDATE vision_config SET provider = COALESCE($1, provider), model = COALESCE($2, model), endpoint = COALESCE($3, endpoint) WHERE id = 'default'`,
-    [provider ?? null, model ?? null, endpoint ?? null]
-  );
-  visionService.invalidateCache();
-  res.json({ ok: true, data: { updated: true } });
+  try {
+    const body = req.body as Record<string, unknown>;
+    const config = await modelConfigService.update("vision_vlm", {
+      provider: body.provider as string | undefined,
+      model: body.model as string | undefined,
+      endpoint: body.endpoint as string | null | undefined,
+      credentialRef: (body.credentialRef ?? body.apiKeyRef) as string | null | undefined,
+      enabled: body.enabled as boolean | undefined,
+    });
+    visionService.invalidateCache();
+    res.json({ ok: true, data: config });
+  } catch (err) {
+    handleModelConfigError(res, err);
+  }
 });
 
 // ─── Metrics (Prometheus scrape) ─────────────────────────────────────────────
