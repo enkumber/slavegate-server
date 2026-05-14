@@ -746,21 +746,59 @@ export class DirectWsServer {
     const { getDb } = require("../db/client");
     const db = getDb();
 
+    const checkpoint = {
+      stepIndex: step,
+      loopStack: [],
+      variables: variables ?? {},
+      checkpointAt: new Date().toISOString(),
+      source: 'edge',
+      totalSteps: total,
+      error: error ?? null,
+    };
+
     if (status === 'completed') {
       await db.query(
-        `UPDATE workflows SET status = 'completed', completed_at = NOW(), result = $1 WHERE id = $2`,
-        [JSON.stringify({ step, total, variables }), workflowId]
+        `UPDATE workflows
+         SET status = 'completed',
+             current_step = $1,
+             total_steps = COALESCE($2, total_steps),
+             checkpoint = $3,
+             completed_at = NOW(),
+             result = $4
+         WHERE id = $5`,
+        [step ?? total, total, JSON.stringify(checkpoint), JSON.stringify({ step, total, variables }), workflowId]
       );
     } else if (status === 'failed') {
       await db.query(
-        `UPDATE workflows SET status = 'failed', error = $1, completed_at = NOW() WHERE id = $2`,
-        [error || 'Device reported failure', workflowId]
+        `UPDATE workflows
+         SET status = 'failed',
+             current_step = COALESCE($1, current_step),
+             total_steps = COALESCE($2, total_steps),
+             checkpoint = $3,
+             error = $4,
+             completed_at = NOW()
+         WHERE id = $5`,
+        [step, total, JSON.stringify(checkpoint), error || 'Device reported failure', workflowId]
       );
     } else {
       // running / paused — update progress
       await db.query(
-        `UPDATE workflows SET status = $1, progress = $2 WHERE id = $3`,
-        [status, JSON.stringify({ step, total, error, variables: variables ? JSON.stringify(variables).slice(0, 1000) : null }), workflowId]
+        `UPDATE workflows
+         SET status = $1,
+             current_step = COALESCE($2, current_step),
+             total_steps = COALESCE($3, total_steps),
+             checkpoint = $4,
+             progress = $5
+         WHERE id = $6
+           AND status NOT IN ('cancelled', 'completed', 'failed')`,
+        [
+          status,
+          step,
+          total,
+          JSON.stringify(checkpoint),
+          JSON.stringify({ step, total, error, variables: variables ? JSON.stringify(variables).slice(0, 1000) : null }),
+          workflowId,
+        ]
       );
     }
   }
