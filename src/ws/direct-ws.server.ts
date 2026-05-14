@@ -190,16 +190,22 @@ export class DirectWsServer {
    * Send WORKFLOW_START to a device for edge execution (ADR-001).
    * Device will execute the entire workflow locally.
    */
-  sendWorkflowStart(deviceId: string, template: Record<string, unknown>, variables?: Record<string, unknown>): boolean {
+  sendWorkflowStart(
+    deviceId: string,
+    template: Record<string, unknown>,
+    variables?: Record<string, unknown>,
+    workflowId?: string,
+  ): boolean {
     const conn = this.connections.get(deviceId);
     if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
 
     this._send(conn.ws, {
       type: 'WORKFLOW_START',
       ...template,
+      ...(workflowId ? { workflowId } : {}),
       variables: variables ?? {},
     });
-    console.log(`[direct-ws] sendWorkflowStart: device=${deviceId.slice(0,8)} template=${(template.id as string)?.slice(0,20)}`);
+    console.log(`[direct-ws] sendWorkflowStart: device=${deviceId.slice(0,8)} template=${(template.id as string)?.slice(0,20)} workflow=${workflowId?.slice(0,8) ?? 'none'}`);
     return true;
   }
 

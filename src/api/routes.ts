@@ -450,34 +450,39 @@ router.post("/workflows", requireAuth, async (req, res) => {
   // Devices with agent >= 4.0 support edge execution (WORKFLOW_START).
   // Older devices use legacy server-side execution (BullMQ queue + step-by-step).
   if (directWsServer.supportsEdgeExecution(deviceId)) {
-    // Edge execution: push template directly to device
+    // Edge execution needs the concrete workflow DB id inside WORKFLOW_START.
+    // Create the monitoring record first, mark it running, then push template.
+    const wf = await workflowService.create({
+      templateId,
+      deviceId,
+      accountId,
+      totalSteps: template.steps.length,
+      hbeParams: hbeSession as unknown as Record<string, unknown>,
+      checkpoint: {
+        stepIndex: 0,
+        loopStack: [],
+        variables: variables ?? {},
+        hbeParams: hbeSession as unknown as Record<string, unknown>,
+        checkpointAt: new Date().toISOString(),
+      },
+    });
+    await workflowService.markRunning(wf.id);
+
+    // Push template directly to device
     const sent = directWsServer.sendWorkflowStart(
       deviceId,
       template as unknown as Record<string, unknown>,
       variables,
+      wf.id,
     );
 
     if (sent) {
-      // Create a lightweight DB record for monitoring
-      const wf = await workflowService.create({
-        templateId,
-        deviceId,
-        accountId,
-        totalSteps: template.steps.length,
-        hbeParams: hbeSession as unknown as Record<string, unknown>,
-        checkpoint: {
-          stepIndex: 0,
-          loopStack: [],
-          variables: variables ?? {},
-          hbeParams: hbeSession as unknown as Record<string, unknown>,
-          checkpointAt: new Date().toISOString(),
-        },
-      });
 
       console.log(`[workflow] ${wf.id} dispatched to device (edge execution, agent=${directWsServer.getAgentVersion(deviceId)})`);
       res.status(202).json({ ok: true, data: { workflowId: wf.id, status: "running", mode: "edge" } });
       return;
     }
+    await workflowService.markFailed(wf.id, "Edge dispatch failed");
     // If send fails, fall through to legacy execution
     console.warn(`[workflow] Edge dispatch failed for ${deviceId} — falling back to server execution`);
   }
