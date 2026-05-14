@@ -200,8 +200,10 @@ export class DirectWsServer {
     if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
 
     this._send(conn.ws, {
-      type: 'WORKFLOW_START',
       ...template,
+      // Keep protocol type LAST so a template field named `type` can never
+      // overwrite WORKFLOW_START and make the Android client ignore the run.
+      type: 'WORKFLOW_START',
       ...(workflowId ? { workflowId } : {}),
       variables: variables ?? {},
     });

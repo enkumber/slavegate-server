@@ -1,6 +1,6 @@
 {
   "name": "phone-network-server",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Phone Network — Control server",
   "main": "dist/phone-network-server/src/index.js",
   "scripts": {
