@@ -515,9 +515,13 @@ router.post("/workflows", requireAuth, async (req, res) => {
 });
 
 router.post("/workflows/:id/cancel", requireAuth, async (req, res) => {
+  const workflow = await workflowService.get(req.params.id);
   const cancelled = await workflowService.cancel(req.params.id);
   if (!cancelled) return res.status(404).json({ ok: false, error: "Not found or not cancellable" });
-  res.json({ ok: true, data: { cancelled: true } });
+  const cancelSent = workflow?.deviceId
+    ? directWsServer.sendWorkflowCancel(workflow.deviceId, req.params.id)
+    : false;
+  res.json({ ok: true, data: { cancelled: true, cancelSent } });
 });
 
 // ─── Workflow templates ───────────────────────────────────────────────────────

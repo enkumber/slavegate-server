@@ -210,6 +210,21 @@ export class DirectWsServer {
   }
 
   /**
+   * Send WORKFLOW_CANCEL to a device for local edge cancellation.
+   */
+  sendWorkflowCancel(deviceId: string, workflowId: string): boolean {
+    const conn = this.connections.get(deviceId);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+
+    this._send(conn.ws, {
+      type: 'WORKFLOW_CANCEL',
+      workflowId,
+    });
+    console.log(`[direct-ws] sendWorkflowCancel: device=${deviceId.slice(0,8)} workflow=${workflowId.slice(0,8)}`);
+    return true;
+  }
+
+  /**
    * Check if a device supports edge workflow execution (ADR-001).
    * Devices with agent >= 4.0 support WORKFLOW_START.
    * Older devices must use legacy server-side execution.
