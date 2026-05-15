@@ -198,11 +198,13 @@ router.get("/apk/download", async (_req, res) => {
   const path = await import("path");
   const apkPath = path.join(process.cwd(), "apk", "phone-network.apk");
   try {
-    await fs.access(apkPath);
+    const stat = await fs.stat(apkPath);
     res.setHeader("Content-Type", "application/vnd.android.package-archive");
+    res.setHeader("Content-Length", String(stat.size));
+    res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Disposition", 'attachment; filename="phone-network.apk"');
     const { createReadStream } = await import("fs");
-    createReadStream(apkPath).pipe(res);
+    createReadStream(apkPath, { highWaterMark: 1024 * 1024 }).pipe(res);
   } catch {
     res.status(404).json({ ok: false, error: "APK not found" });
   }
@@ -1139,10 +1141,20 @@ router.post("/ota/push", requireAuth, async (req, res) => {
     : onlineDevices;
   
   let sentTo = 0;
+  let skippedDuplicate = 0;
+  const debounce = ((globalThis as any).__phoneNetworkOtaPushDebounce ??= new Map<string, number>()) as Map<string, number>;
   // Force correct external URL for OTA — Docker internal port (21211) is not accessible to devices
   const baseUrl = 'http://enkzoned.go.ro:3000';
   for (const device of targets) {
     try {
+      const key = `${device.deviceId}:${versionCode}:${apkSha256}`;
+      const now = Date.now();
+      const last = debounce.get(key) ?? 0;
+      if (now - last < 10 * 60 * 1000) {
+        skippedDuplicate++;
+        continue;
+      }
+      debounce.set(key, now);
       directWsServer.sendToDevice(device.deviceId, {
         type: "OTA_UPDATE",
         version,
@@ -1160,6 +1172,7 @@ router.post("/ota/push", requireAuth, async (req, res) => {
     ok: true,
     data: {
       count: sentTo,
+      skippedDuplicate,
       version,
       versionCode,
       apkSha256,
