@@ -125,7 +125,7 @@ export const agencyApi = {
       if (data?.accountId) formData.append("accountId", data.accountId);
       if (data?.description) formData.append("description", data.description);
 
-      const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:21211/api";
+      const BASE_URL = import.meta.env.VITE_API_URL ?? "/api";
       const token = localStorage.getItem("access_token");
       const res = await fetch(`${BASE_URL}/agency/materials`, {
         method: "POST",
