@@ -3,7 +3,7 @@
  * Typed API client — wraps fetch with auth, error handling, base URL.
  */
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:21211/api";
+const BASE_URL = import.meta.env.VITE_API_URL ?? "/api";
 
 let accessToken: string | null = localStorage.getItem("access_token");
 let refreshToken: string | null = localStorage.getItem("refresh_token");
