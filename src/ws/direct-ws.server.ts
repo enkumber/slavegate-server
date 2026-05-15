@@ -155,6 +155,8 @@ export class DirectWsServer {
       jobId:   payload.jobId,
       jobType: payload.type,
       params:  payload.params,
+      timeoutMs: payload.timeoutMs,
+      requiresRoot: payload.requiresRoot,
     });
     console.log(`[direct-ws] sendJob: device=${deviceId.slice(0,8)} jobId=${payload.jobId?.slice(0,8)} type=${payload.type}`);
     return true;
