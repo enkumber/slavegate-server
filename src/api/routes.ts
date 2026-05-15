@@ -208,6 +208,12 @@ router.get("/apk/download", async (_req, res) => {
   }
 });
 
+// ─── Device-auth routes (no dashboard/API-key auth) ─────────────────────────
+// Devices fetch short-lived model credentials with their DirectWS device key.
+// Keep these before the global dashboard/API-key middleware.
+router.get("/device/model-config", requireDeviceModelConfigAuth, getDeviceModelConfigRoute);
+router.get("/devices/me/model-config", requireDeviceModelConfigAuth, getDeviceModelConfigRoute);
+
 // ─── All routes below require auth ───────────────────────────────────────────
 
 router.use(requireAuth);
@@ -700,8 +706,6 @@ function notifyModelConfigUpdated(): void {
   }
 }
 
-router.get("/device/model-config", requireDeviceModelConfigAuth, getDeviceModelConfigRoute);
-router.get("/devices/me/model-config", requireDeviceModelConfigAuth, getDeviceModelConfigRoute);
 router.get("/model-configs", requireAuth, listModelConfigsRoute);
 router.get("/server/models", requireAuth, listModelConfigsRoute);
 router.get("/model-configs/:role", requireAuth, getModelConfigRoute);
