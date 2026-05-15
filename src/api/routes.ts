@@ -649,6 +649,59 @@ async function getModelConfigRoute(req: Request, res: Response): Promise<void> {
   }
 }
 
+
+function safeEqualString(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
+}
+
+async function requireDeviceModelConfigAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const deviceId = String(req.headers["x-device-id"] ?? req.query.deviceId ?? "").trim();
+  const deviceKey = String(req.headers["x-device-key"] ?? req.headers["x-device-token"] ?? "").trim();
+  if (!deviceId || !deviceKey) {
+    res.status(401).json({ ok: false, error: "Device credentials required" });
+    return;
+  }
+
+  try {
+    const result = await getDb().query(
+      `SELECT id, device_key, status FROM devices WHERE id = $1`,
+      [deviceId]
+    );
+    const row = result.rows[0] as { id: string; device_key: string | null; status: string } | undefined;
+    const approved = row && ["approved", "online", "offline"].includes(row.status);
+    if (!row || !approved || !row.device_key || !safeEqualString(deviceKey, row.device_key)) {
+      res.status(row?.status === "blocked" ? 403 : 401).json({ ok: false, error: "Device not authorized" });
+      return;
+    }
+    (req as any).deviceId = row.id;
+    return next();
+  } catch (err) {
+    console.error("[api] device model-config auth error:", (err as Error).message);
+    res.status(500).json({ ok: false, error: "Device auth failed" });
+  }
+}
+
+async function getDeviceModelConfigRoute(req: Request, res: Response): Promise<void> {
+  try {
+    const bundle = await modelConfigService.getDeviceBundle();
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ ok: true, data: bundle });
+  } catch (err) {
+    handleModelConfigError(res, err);
+  }
+}
+
+function notifyModelConfigUpdated(): void {
+  const version = Date.now();
+  for (const deviceId of directWsServer.getConnectedDeviceIds()) {
+    directWsServer.sendToDevice(deviceId, { type: "MODEL_CONFIG_UPDATED", version });
+  }
+}
+
+router.get("/device/model-config", requireDeviceModelConfigAuth, getDeviceModelConfigRoute);
+router.get("/devices/me/model-config", requireDeviceModelConfigAuth, getDeviceModelConfigRoute);
 router.get("/model-configs", requireAuth, listModelConfigsRoute);
 router.get("/server/models", requireAuth, listModelConfigsRoute);
 router.get("/model-configs/:role", requireAuth, getModelConfigRoute);
@@ -659,6 +712,7 @@ async function updateModelConfigRoute(req: Request, res: Response): Promise<void
     const role = parseModelRole(req.params.role);
     const config = await modelConfigService.update(role, req.body ?? {});
     if (role === "vision_vlm") visionService.invalidateCache();
+    notifyModelConfigUpdated();
     res.json({ ok: true, data: config });
   } catch (err) {
     handleModelConfigError(res, err);
@@ -675,6 +729,7 @@ async function updateModelCredentialRoute(req: Request, res: Response): Promise<
     const role = parseModelRole(req.params.role);
     const config = await modelConfigService.updateCredential(role, req.body ?? {});
     if (role === "vision_vlm") visionService.invalidateCache();
+    notifyModelConfigUpdated();
     res.json({ ok: true, data: config });
   } catch (err) {
     handleModelConfigError(res, err);

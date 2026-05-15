@@ -36,6 +36,22 @@ export interface RedactedModelConfig extends Omit<ModelConfig, "apiKeyEncrypted"
   versionHash: string;
 }
 
+export interface DeviceModelConfigRole {
+  provider: string;
+  endpoint: string | null;
+  model: string;
+  apiKey: string;
+  version: number;
+  versionHash: string;
+}
+
+export interface DeviceModelConfigBundle {
+  deliveryMode: "direct_to_device";
+  ttlSeconds: number;
+  expiresAt: string;
+  roles: Record<ModelRole, DeviceModelConfigRole>;
+}
+
 interface UpdateModelConfigInput {
   provider?: string;
   endpoint?: string | null;
@@ -154,6 +170,27 @@ export class ModelConfigService {
     const apiKey = await this.resolveCredential(config);
     if (!apiKey) throw new ModelConfigError(`Model config for ${role} has no server-side credential. Add a credential via Dashboard → Tokens / Models.`, 503, "AI_CREDENTIAL_MISSING");
     return { ...config, apiKey };
+  }
+
+  async getDeviceBundle(ttlSeconds = deviceConfigTtlSeconds()): Promise<DeviceModelConfigBundle> {
+    const roles = {} as Record<ModelRole, DeviceModelConfigRole>;
+    for (const role of ROLES) {
+      const config = await this.resolve(role);
+      roles[role] = {
+        provider: config.provider,
+        endpoint: endpointBase(config.endpoint, config.provider),
+        model: config.model,
+        apiKey: config.apiKey,
+        version: config.version,
+        versionHash: versionHash(config),
+      };
+    }
+    return {
+      deliveryMode: "direct_to_device",
+      ttlSeconds,
+      expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
+      roles,
+    };
   }
 
   async test(role: ModelRole): Promise<RedactedModelConfig> {
@@ -284,6 +321,12 @@ function assertRole(role: string): asserts role is ModelRole {
 
 function defaultFor(_role: ModelRole): Pick<ModelConfig, "provider" | "endpoint" | "model"> {
   return { provider: "openai_compatible", endpoint: null, model: "" };
+}
+
+function deviceConfigTtlSeconds(): number {
+  const raw = Number(process.env.DEVICE_MODEL_CONFIG_TTL_SECONDS ?? process.env.DEVICE_LLM_CONFIG_TTL_SECONDS ?? 900);
+  if (!Number.isFinite(raw) || raw <= 0) return 900;
+  return Math.max(60, Math.min(Math.floor(raw), 3600));
 }
 
 function normalizeNonEmpty(value: string, field: string): string {
