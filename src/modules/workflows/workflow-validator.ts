@@ -77,6 +77,11 @@ function validateOpenAppPackages(steps: { type: string; package?: string }[]): s
   return errors;
 }
 
+function isBlockedPackage(packageName: string): boolean {
+  const normalized = packageName.toLowerCase();
+  return BLOCKED_PACKAGES.some((blocked) => normalized.includes(blocked));
+}
+
 function validateWaitSteps(steps: { type: string; delay_after?: number }[]): string[] {
   const errors: string[] = [];
   for (const step of steps) {
@@ -252,6 +257,12 @@ function validateGeneratedWorkflowStepInput(
       }
       if (step.params !== undefined && !isRecord(step.params)) {
         errors.push(`${path}.params must be an object when provided`);
+      }
+      if ((step.action === "open_app" || step.action === "close_app") && isRecord(step.params)) {
+        const packageName = step.params.packageName;
+        if (typeof packageName === "string" && isBlockedPackage(packageName)) {
+          errors.push(`${path}.params.packageName is blocked for generated workflows: ${packageName}`);
+        }
       }
       if (step.retries !== undefined && (typeof step.retries !== "number" || step.retries < 0)) {
         errors.push(`${path}.retries must be a non-negative number when provided`);

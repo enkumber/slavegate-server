@@ -626,6 +626,7 @@ async function executeActionStep(
       facebook: "com.facebook.katana",
       twitter: "com.twitter.android",
       youtube: "com.google.android.youtube",
+      reddit: "com.reddit.frontpage",
     };
     const resolved = packageMap[platform.toLowerCase()] || (checkpoint.variables?.packageName as string | undefined);
     if (!resolved) {

@@ -171,6 +171,19 @@ describe("startWorkflow — timeout protection", () => {
   });
 });
 
+describe("workflow executor package resolution", () => {
+  it("can resolve reddit packageName for generated open_app/close_app actions", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const source = fs.readFileSync(
+      path.join(__dirname, "workflow.executor.ts"),
+      "utf8"
+    );
+
+    expect(source).toContain('reddit: "com.reddit.frontpage"');
+  });
+});
+
 // ─── POST /workflows — fire-and-forget startWorkflow ──────────────────────
 
 describe("POST /workflows — non-blocking startWorkflow", () => {
@@ -237,6 +250,29 @@ describe("Generated workflow contract validation", () => {
     expect(result.errors).toContain("workflow.steps[1] wait step must define duration or condition");
     expect(result.errors).toContain("workflow.steps[2].count.min must be <= workflow.steps[2].count.max");
     expect(result.errors).toContain("workflow.steps[2].steps must be a non-empty step array for loop steps");
+  });
+
+  it("rejects generated workflows that try to open blocked Android packages", async () => {
+    const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+
+    const result = validateGeneratedWorkflowTemplate({
+      id: "blocked_package_workflow",
+      name: "Blocked package workflow",
+      platform: "reddit",
+      description: "Should not be allowed to open device settings.",
+      version: "1.0.0",
+      steps: [
+        {
+          type: "action",
+          id: "open_settings",
+          action: "open_app",
+          params: { packageName: "com.android.settings" },
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain("workflow.steps[0].params.packageName is blocked for generated workflows: com.android.settings");
   });
 });
 
@@ -305,6 +341,7 @@ describe("Generated workflow validator module", () => {
     expect(source).toContain(".action must be a non-empty string for action steps");
     expect(source).toContain("wait step must define duration or condition");
     expect(source).toContain(".type must be one of: ${GENERATED_WORKFLOW_STEP_TYPES.join");
+    expect(source).toContain("isBlockedPackage");
     expect(source).toContain('"action",');
     expect(source).toContain('"checkpoint",');
   });
