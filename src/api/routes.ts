@@ -16,9 +16,13 @@ import { authService } from "../modules/auth/auth.service";
 import { directWsServer } from "../ws/direct-ws.server";
 
 import { sendJobToDevice, isDeviceOnline } from "../transport/transport";
+import { loadMap } from "../modules/app-mapping/recorder.service";
 import { workflowService } from "../modules/workflows/workflow.service";
 import { startWorkflow } from "../modules/workflows/workflow.executor";
-import { buildGeneratedWorkflowPrompt } from "../modules/workflows/generated-workflow-prompt";
+import {
+  buildGeneratedWorkflowAppMapHints,
+  buildGeneratedWorkflowPrompt,
+} from "../modules/workflows/generated-workflow-prompt";
 import {
   getGeneratedWorkflowContract,
   validateGeneratedWorkflowTemplate,
@@ -545,28 +549,34 @@ router.get("/workflows/generated/schema", requireAuth, async (_req, res) => {
 });
 
 router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
-  const { platform, packageName, goal, clientContext, availableScreens, appMapHints } = req.body as {
+  const { platform, packageName, appId, goal, clientContext, availableScreens, appMapHints } = req.body as {
     platform?: string;
     packageName?: string;
+    appId?: string;
     goal?: string;
     clientContext?: string;
     availableScreens?: string[];
     appMapHints?: string[];
   };
-  if (!platform || !packageName || !goal) {
-    return res.status(400).json({ ok: false, error: "platform, packageName and goal required" });
+  const resolvedPackageName = packageName ?? appId;
+  if (!platform || !resolvedPackageName || !goal) {
+    return res.status(400).json({ ok: false, error: "platform, packageName/appId and goal required" });
   }
+
+  const appMap = appId ? await loadMap(appId) : null;
+  const resolvedAppMapHints = appMapHints ?? (appMap ? buildGeneratedWorkflowAppMapHints(appMap) : undefined);
 
   res.json({
     ok: true,
     data: {
+      appMapLoaded: !!appMap,
       prompt: buildGeneratedWorkflowPrompt({
         platform,
-        packageName,
+        packageName: resolvedPackageName,
         goal,
         clientContext,
         availableScreens,
-        appMapHints,
+        appMapHints: resolvedAppMapHints,
       }),
     },
   });

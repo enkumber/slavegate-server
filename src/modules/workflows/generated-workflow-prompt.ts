@@ -6,6 +6,7 @@
  */
 
 import { getGeneratedWorkflowContract } from "./workflow-validator";
+import type { AppMap } from "../app-mapping/schema";
 
 export interface BuildGeneratedWorkflowPromptInput {
   platform: string;
@@ -14,6 +15,34 @@ export interface BuildGeneratedWorkflowPromptInput {
   clientContext?: string;
   availableScreens?: string[];
   appMapHints?: string[];
+}
+
+export function buildGeneratedWorkflowAppMapHints(appMap: AppMap, maxPages = 8, maxElementsPerPage = 6): string[] {
+  const hints: string[] = [
+    `App map ${appMap.appName} (${appMap.appId}) version ${appMap.version}: ${appMap.pageCount} pages, ${appMap.transitionCount} transitions`,
+  ];
+
+  const pages = Object.entries(appMap.pages)
+    .sort(([, a], [, b]) => a.discoveryOrder - b.discoveryOrder)
+    .slice(0, maxPages);
+
+  for (const [pageId, page] of pages) {
+    const anchors = page.detection.anchors.slice(0, 6).join(", ") || "no anchors";
+    hints.push(`${pageId}: ${page.name}; signature=${page.detection.signatureHash}; anchors=${anchors}`);
+
+    const elements = Object.entries(page.elements).slice(0, maxElementsPerPage);
+    for (const [elementId, element] of elements) {
+      const target = element.leadsTo ? ` -> ${element.leadsTo}` : "";
+      const label = element.text || element.contentDescription || element.resourceId || "unlabeled";
+      hints.push(`  ${elementId}: ${element.type}; label=${label}; center=${element.bounds.x + element.bounds.w / 2},${element.bounds.y + element.bounds.h / 2}${target}`);
+    }
+  }
+
+  if (Object.keys(appMap.pages).length > maxPages) {
+    hints.push(`... ${Object.keys(appMap.pages).length - maxPages} more app-map pages omitted`);
+  }
+
+  return hints;
 }
 
 function renderList(items: string[] | undefined, fallback: string): string {
