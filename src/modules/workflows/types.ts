@@ -192,8 +192,23 @@ export interface WorkflowCheckpoint {
   variables:    Record<string, unknown>;
   /** HBE session params (mood, drift) — stable for entire session */
   hbeParams:    Record<string, unknown>;
+  /** Runtime cost counters for proving deterministic vs AI-assisted execution */
+  executionStats?: WorkflowExecutionStats;
   /** Timestamp of last checkpoint */
   checkpointAt: string;  // ISO 8601
+}
+
+export interface WorkflowExecutionStats {
+  compileLlmCalls: number;
+  recoveryLlmCalls: number;
+  creativeLlmCalls: number;
+  runtimeLlmCalls: number;
+  vlmCalls: number;
+  deterministicSteps: number;
+  batchedSteps: number;
+  failedSteps: number;
+  retriedSteps: number;
+  mode?: "edge" | "server";
 }
 
 export type WorkflowStatus =

@@ -35,6 +35,7 @@ import type {
   ConditionStep,
   LoopStep,
   VerificationStrategy,
+  WorkflowExecutionStats,
 } from "./types";
 import { PHASE2_UNSUPPORTED_STRATEGIES } from "./types";
 import { normal, logNormal, uniform, clamp } from "../hbe/distributions";
@@ -50,6 +51,26 @@ import { verifyScreenAfterStep } from "./screen-verifier";
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
 export const WORKFLOW_QUEUE = scalabilityConfig.workflowQueueName;
+
+function defaultExecutionStats(mode: "edge" | "server" = "server"): WorkflowExecutionStats {
+  return {
+    compileLlmCalls: 0,
+    recoveryLlmCalls: 0,
+    creativeLlmCalls: 0,
+    runtimeLlmCalls: 0,
+    vlmCalls: 0,
+    deterministicSteps: 0,
+    batchedSteps: 0,
+    failedSteps: 0,
+    retriedSteps: 0,
+    mode,
+  };
+}
+
+function executionStats(checkpoint: WorkflowCheckpoint): WorkflowExecutionStats {
+  checkpoint.executionStats ??= defaultExecutionStats("server");
+  return checkpoint.executionStats;
+}
 
 // ─── Pending job result registry ─────────────────────────────────────────────
 // Workflow executor suspends at each action step, waiting for JOB_RESULT.
@@ -299,7 +320,21 @@ async function executeSteps(
         if (cur?.status === "cancelled") { return; }
         if (cur?.status === "paused") { throw new Error(`Workflow paused at step ${segIdx}`); }
 
-        await executeStep(workflowId, deviceId, template, step, checkpoint, segIdx, job);
+        try {
+          await executeStep(workflowId, deviceId, template, step, checkpoint, segIdx, job);
+          executionStats(checkpoint).deterministicSteps++;
+        } catch (err) {
+          executionStats(checkpoint).failedSteps++;
+          if (!isNested) {
+            await workflowService.saveCheckpoint(
+              workflowId,
+              { ...checkpoint, checkpointAt: new Date().toISOString() },
+              segIdx,
+              segIdx,
+            );
+          }
+          throw err;
+        }
 
         // Extend BullMQ lock after each step
         if (job) {
@@ -1028,6 +1063,9 @@ async function executeBatchSegment(
   if (status === "completed") {
     // All steps succeeded → checkpoint after last step
     const lastStepIndex = stepIndex + segment.steps.length;
+    const stats = executionStats(checkpoint);
+    stats.deterministicSteps += results.length;
+    stats.batchedSteps += results.length;
 
     if (!isNested) {
       const saved = await workflowService.saveCheckpoint(
@@ -1056,6 +1094,13 @@ async function executeBatchSegment(
   if (status === "partial_failure") {
     // Some steps failed, but continueOnError=true on device → we got partial results
     // Log failures and continue to next segment
+    const successfulSteps = results.filter(r => r.status === "success").length;
+    const failedSteps = results.length - successfulSteps;
+    const stats = executionStats(checkpoint);
+    stats.deterministicSteps += successfulSteps;
+    stats.batchedSteps += successfulSteps;
+    stats.failedSteps += failedSteps;
+
     for (const r of results) {
       if (r.status === "failed") {
         console.warn(`[workflow] ${workflowId} batch step ${r.id} failed: ${r.error}`);
@@ -1093,6 +1138,7 @@ async function executeBatchSegment(
   // status === "failed" or "timeout": abort the workflow
   // Save batch state for retry (resume from failed step on next attempt)
   const failedGlobalIndex = stepIndex + (failedStepIdx >= 0 ? failedStepIdx : 0);
+  executionStats(checkpoint).failedSteps++;
 
   if (!isNested) {
     const saved = await workflowService.saveCheckpoint(

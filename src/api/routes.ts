@@ -472,6 +472,18 @@ router.post("/workflows", requireAuth, async (req, res) => {
         loopStack: [],
         variables: variables ?? {},
         hbeParams: hbeSession as unknown as Record<string, unknown>,
+        executionStats: {
+          compileLlmCalls: 0,
+          recoveryLlmCalls: 0,
+          creativeLlmCalls: 0,
+          runtimeLlmCalls: 0,
+          vlmCalls: 0,
+          deterministicSteps: 0,
+          batchedSteps: 0,
+          failedSteps: 0,
+          retriedSteps: 0,
+          mode: "edge",
+        },
         checkpointAt: new Date().toISOString(),
       },
     });
@@ -503,6 +515,18 @@ router.post("/workflows", requireAuth, async (req, res) => {
     loopStack:    [],
     variables:    variables ?? {},
     hbeParams:    hbeSession as unknown as Record<string, unknown>,
+    executionStats: {
+      compileLlmCalls: 0,
+      recoveryLlmCalls: 0,
+      creativeLlmCalls: 0,
+      runtimeLlmCalls: 0,
+      vlmCalls: 0,
+      deterministicSteps: 0,
+      batchedSteps: 0,
+      failedSteps: 0,
+      retriedSteps: 0,
+      mode: "server",
+    },
     checkpointAt: new Date().toISOString(),
   };
 

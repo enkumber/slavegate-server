@@ -13,6 +13,7 @@
 import { getDb } from "../../db/client";
 import type {
   WorkflowCheckpoint,
+  WorkflowExecutionStats,
   WorkflowStatus,
   WorkflowTemplate,
 } from "./types";
@@ -28,6 +29,7 @@ export interface WorkflowRecord {
   currentStep: number;
   totalSteps:  number | null;
   checkpoint:  WorkflowCheckpoint;
+  executionStats: WorkflowExecutionStats | null;
   hbeParams:   Record<string, unknown>;
   startedAt:   string | null;
   completedAt: string | null;
@@ -291,6 +293,7 @@ function rowToWorkflow(row: Record<string, unknown>): WorkflowRecord {
     currentStep: row.current_step as number,
     totalSteps:  (row.total_steps as number) ?? null,
     checkpoint:  row.checkpoint as WorkflowCheckpoint,
+    executionStats: ((row.checkpoint as WorkflowCheckpoint)?.executionStats ?? null) as WorkflowExecutionStats | null,
     hbeParams:   row.hbe_params as Record<string, unknown>,
     startedAt:   row.started_at ? (row.started_at as Date).toISOString() : null,
     completedAt: row.completed_at ? (row.completed_at as Date).toISOString() : null,
