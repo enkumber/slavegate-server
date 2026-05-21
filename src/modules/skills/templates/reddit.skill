@@ -177,6 +177,328 @@ screens:
     description: "Setări"
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# DETECTION RULES
+# Cascade-based screen identification (L1: UI Tree, L2: OCR, L3: VLM)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+detection_rules:
+
+  # ─── CRITICAL SCREENS (priority 250 — checked first, immediate return) ────────
+
+  REDDIT_RATE_LIMITED:
+    priority: 250
+    critical: true
+    ui_tree:
+      anyOf:
+        - text_contains: "you are doing that too much"
+        - text_contains: "try again in"
+        - text_contains: "rate limit"
+        - text_contains: "too many requests"
+    ocr:
+      anyOf:
+        - "you are doing that too much"
+        - "try again in"
+        - "rate limit"
+    nav_bar:
+      visible: false
+
+  REDDIT_BANNED:
+    priority: 250
+    critical: true
+    ui_tree:
+      anyOf:
+        - text_contains: "you have been banned"
+        - text_contains: "suspended"
+        - text_contains: "account has been"
+    ocr:
+      anyOf:
+        - "you have been banned"
+        - "suspended"
+        - "account has been"
+    nav_bar:
+      visible: false
+
+  REDDIT_LOGIN:
+    priority: 250
+    critical: true
+    ui_tree:
+      anyOf:
+        - resourceId: "login_container"
+        - resourceId: "username_input"
+        - resourceId: "password_input"
+        - text: "Log in"
+        - text: "Sign Up"
+    ocr:
+      anyOf:
+        - "Log in"
+        - "Sign Up"
+        - "Continue with Google"
+    nav_bar:
+      visible: false
+
+  # ─── OVERLAY STATES (priority 200 — affects other screens) ───────────────────
+
+  KEYBOARD_OPEN:
+    priority: 200
+    overlay: true
+    ui_tree:
+      anyOf:
+        - className: "android.inputmethodservice.InputMethodService"
+        - resourceId_contains: "keyboard"
+        - resourceId_contains: "ime"
+    nav_bar:
+      visible: false
+
+  CONFIRMATION_DIALOG:
+    priority: 200
+    overlay: true
+    ui_tree:
+      anyOf:
+        - text: "Delete"
+        - text: "Remove"
+        - text: "Cancel"
+        - text: "Discard"
+    nav_bar:
+      visible: false
+
+  # ─── PRIMARY SCREENS ─────────────────────────────────────────────────────────
+
+  REDDIT_HOME_FEED:
+    priority: 100
+    ui_tree:
+      required:
+        - resourceId: "com.reddit.frontpage:id/drawer_layout"
+        - resourceId: "com.reddit.frontpage:id/frame_container"
+      anyOf:
+        - resourceId: "home_screen_surface"
+        - resourceId: "feed_lazy_column"
+        - resourceId: "home_revamp_m1_app_bar"
+        - resourceId_contains: "post_unit"
+      exclude:
+        - resourceId: "post_detail_scaffold"
+        - resourceId: "search_results_container"
+        - resourceId: "subreddit_header"
+    ocr:
+      anyOf:
+        - "For you"
+        - "Following"
+        - "Popular"
+      exclude:
+        - "Search Reddit"
+        - "r/"
+    nav_bar:
+      visible: true
+      selected_tab: home
+
+  REDDIT_SUBREDDIT:
+    priority: 95
+    ui_tree:
+      required:
+        - resourceId: "com.reddit.frontpage:id/drawer_layout"
+      anyOf:
+        - resourceId: "subreddit_header"
+        - resourceId: "community_header"
+        - resourceId: "subreddit_toolbar"
+        - text_starts_with: "r/"
+      exclude:
+        - resourceId: "post_detail_scaffold"
+    ocr:
+      anyOf:
+        - "Join"
+        - "Joined"
+        - "Hot"
+        - "New"
+        - "Top"
+      required_pattern: "^r/[A-Za-z0-9_]+"
+    nav_bar:
+      visible: true
+      selected_tab: null
+
+  REDDIT_POST_DETAIL:
+    priority: 90
+    ui_tree:
+      required:
+        - resourceId: "com.reddit.frontpage:id/drawer_layout"
+      anyOf:
+        - resourceId: "post_detail_scaffold"
+        - resourceId: "post_detail_scrollable"
+        - resourceId: "post_detail_lazy_column"
+        - resourceId: "comments_list"
+        - resourceId_contains: "comment_tree"
+      exclude:
+        - resourceId: "home_screen_surface"
+        - resourceId: "search_results_container"
+    ocr:
+      anyOf:
+        - "Add a comment"
+        - "Join the conversation"
+        - "Reply"
+    nav_bar:
+      visible: true
+      selected_tab: null
+
+  REDDIT_COMMENTS:
+    priority: 85
+    ui_tree:
+      required:
+        - resourceId: "com.reddit.frontpage:id/drawer_layout"
+      anyOf:
+        - resourceId: "comments_list"
+        - resourceId: "comment_layout"
+        - resourceId: "layout_comment_thread_edittext"
+    ocr:
+      anyOf:
+        - "Add a comment"
+        - "Join the conversation"
+    nav_bar:
+      visible: false
+
+  REDDIT_COMMENT_COMPOSE:
+    priority: 84
+    ui_tree:
+      anyOf:
+        - resourceId: "reply_text"
+        - resourceId: "reply_target_text"
+        - resourceId: "keyboard_header"
+    ocr:
+      anyOf:
+        - "Add comment"
+        - "Your comment"
+        - "Reply"
+    nav_bar:
+      visible: false
+
+  REDDIT_SEARCH:
+    priority: 80
+    ui_tree:
+      required:
+        - resourceId: "com.reddit.frontpage:id/drawer_layout"
+      anyOf:
+        - resourceId: "search_results_container"
+        - resourceId: "search_input"
+        - resourceId: "main_top_app_bar_search"
+        - resourceId: "search_bar"
+        - resourceId: "search_bar_field"
+      exclude:
+        - resourceId: "post_detail_scaffold"
+        - resourceId: "home_screen_surface"
+    ocr:
+      anyOf:
+        - "Find anything"
+        - "Search Reddit"
+        - "Trending today"
+    nav_bar:
+      visible: true
+      selected_tab: search
+
+  REDDIT_SEARCH_RESULTS:
+    priority: 79
+    ui_tree:
+      required:
+        - resourceId: "com.reddit.frontpage:id/drawer_layout"
+      anyOf:
+        - resourceId: "search_bar_field"
+        - resourceId: "tab_unit"
+        - text_contains: "Posted in r/"
+      exclude:
+        - resourceId: "home_screen_surface"
+    nav_bar:
+      visible: true
+      selected_tab: search
+
+  REDDIT_PROFILE_OWN:
+    priority: 75
+    ui_tree:
+      required:
+        - resourceId: "com.reddit.frontpage:id/drawer_layout"
+      anyOf:
+        - resourceId: "profile_header"
+        - resourceId: "user_profile_container"
+        - resourceId: "profile_banner_box"
+        - resourceId: "profile_avatar_picture"
+    ocr:
+      anyOf:
+        - "Edit"
+        - "Your profile"
+    nav_bar:
+      visible: true
+      selected_tab: profile
+
+  REDDIT_PROFILE_OTHER:
+    priority: 74
+    ui_tree:
+      required:
+        - resourceId: "com.reddit.frontpage:id/drawer_layout"
+      anyOf:
+        - resourceId: "profile_header"
+        - resourceId: "user_profile_container"
+        - text_pattern: "^u/"
+      exclude:
+        - text: "Edit"
+        - text: "Your profile"
+    ocr:
+      anyOf:
+        - "Follow"
+        - "Following"
+        - "Chat"
+    nav_bar:
+      visible: true
+      selected_tab: null
+
+  REDDIT_INBOX:
+    priority: 70
+    ui_tree:
+      required:
+        - resourceId: "com.reddit.frontpage:id/drawer_layout"
+      anyOf:
+        - resourceId: "inbox_container"
+        - resourceId: "notification_list"
+        - resourceId: "inbox_screen"
+        - resourceId: "inbox_tab_group"
+    ocr:
+      anyOf:
+        - "Notifications"
+        - "Messages"
+        - "Mark all as read"
+    nav_bar:
+      visible: true
+      selected_tab: null
+
+  REDDIT_CREATE_POST:
+    priority: 65
+    ui_tree:
+      required:
+        - resourceId: "com.reddit.frontpage:id/drawer_layout"
+      anyOf:
+        - resourceId: "post_submit_screen"
+        - resourceId: "post_composer"
+        - resourceId: "post_title_field"
+      exclude:
+        - resourceId: "home_screen_surface"
+    ocr:
+      anyOf:
+        - "Title"
+        - "Post"
+        - "Community"
+    nav_bar:
+      visible: false
+
+  REDDIT_SETTINGS:
+    priority: 50
+    ui_tree:
+      anyOf:
+        - resourceId: "settings_list"
+        - resourceId: "settings_container"
+    ocr:
+      anyOf:
+        - "Settings"
+        - "Account settings"
+        - "Preferences"
+    nav_bar:
+      visible: true
+      selected_tab: null
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # UI ELEMENTS - RESOURCE IDs FROM APK
 # ═══════════════════════════════════════════════════════════════════════════════
 

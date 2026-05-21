@@ -161,7 +161,7 @@ Return JSON:
 // ─── Screen Classification Templates (for Screen Detection Cascade L3) ─────────
 
 const SCREEN_CLASSIFICATION_TEMPLATES: Record<string, string> = {
-  default: `You are a mobile UI classifier for social media automation.
+  instagram: `You are a mobile UI classifier for Instagram.
 
 Analyze this screenshot and identify the current screen.
 
@@ -193,6 +193,87 @@ Rules:
 - PROFILE_OTHER: profile with "Follow" / "Following" / "Message" buttons
 - ACTION_BLOCKED: "Action Blocked" or "Try Again Later" dialog visible
 - LOGIN_REQUIRED: login form or "Log in" button visible
+- KEYBOARD_OPEN: software keyboard visible at bottom of screen`,
+
+  reddit: `You are a mobile UI classifier for Reddit.
+
+Analyze this screenshot and identify the current screen.
+
+Reply with EXACTLY this JSON format (no other text, no markdown):
+{
+  "screen": "<SCREEN_ID>",
+  "confidence": <0.0-1.0>,
+  "navBar": { "visible": <true/false>, "selectedTab": "<tab_name_or_null>" },
+  "overlays": ["<OVERLAY_ID>", ...]
+}
+
+Valid SCREEN_IDs:
+REDDIT_HOME_FEED, REDDIT_SUBREDDIT, REDDIT_POST_DETAIL, REDDIT_COMMENTS,
+REDDIT_COMMENT_COMPOSE, REDDIT_SEARCH, REDDIT_SEARCH_RESULTS,
+REDDIT_PROFILE_OWN, REDDIT_PROFILE_OTHER, REDDIT_INBOX, REDDIT_SETTINGS,
+REDDIT_CREATE_POST, REDDIT_RATE_LIMITED, REDDIT_BANNED, REDDIT_LOGIN, UNKNOWN
+
+Valid OVERLAY_IDs (include only if actually visible):
+KEYBOARD_OPEN, CONFIRMATION_DIALOG, ACTION_SHEET
+
+Valid selectedTab values: home, communities, create, chat, inbox, null
+
+Rules:
+- REDDIT_HOME_FEED: "For you" or "Following" feed with posts, bottom nav visible with Home selected
+- REDDIT_SUBREDDIT: subreddit page with "r/Name" header, Join/Joined button, Hot/New/Top tabs
+- REDDIT_POST_DETAIL: single post expanded with comments, "Add a comment" or "Join the conversation" visible
+- REDDIT_COMMENTS: comments section open, comment tree visible
+- REDDIT_COMMENT_COMPOSE: text input active for writing a comment/reply
+- REDDIT_SEARCH: search bar with "Search Reddit" placeholder, trending topics visible
+- REDDIT_SEARCH_RESULTS: search results with tabs (Posts, Comments, Communities, People)
+- REDDIT_PROFILE_OWN: own profile with "Edit" button, karma count visible
+- REDDIT_PROFILE_OTHER: other user profile with "Follow" or "Chat" button
+- REDDIT_INBOX: notifications/messages list
+- REDDIT_CREATE_POST: post composer with Title field and Community selector
+- REDDIT_RATE_LIMITED: "you are doing that too much" or "try again in" message
+- REDDIT_BANNED: "you have been banned" or "suspended" message
+- REDDIT_LOGIN: login form with username/password fields or "Log in" button
+- KEYBOARD_OPEN: software keyboard visible at bottom`,
+
+  default: `You are a mobile UI classifier for social media automation.
+
+Analyze this screenshot and identify the current screen.
+
+Reply with EXACTLY this JSON format (no other text, no markdown):
+{
+  "screen": "<SCREEN_ID>",
+  "confidence": <0.0-1.0>,
+  "navBar": { "visible": <true/false>, "selectedTab": "<tab_name_or_null>" },
+  "overlays": ["<OVERLAY_ID>", ...]
+}
+
+Valid SCREEN_IDs:
+HOME_FEED, SEARCH_EXPLORE, SEARCH_RESULTS, REELS_TAB, REELS_FULLSCREEN,
+CREATE_POST, PROFILE_OWN, PROFILE_OTHER, NOTIFICATIONS, DM_INBOX, DM_CONVERSATION,
+HASHTAG_FEED, POST_DETAIL, COMMENTS_OPEN, STORY_VIEWER, STORY_CAMERA,
+FOLLOWERS_LIST, FOLLOWING_LIST, SETTINGS,
+REDDIT_HOME_FEED, REDDIT_SUBREDDIT, REDDIT_POST_DETAIL, REDDIT_COMMENTS,
+REDDIT_COMMENT_COMPOSE, REDDIT_SEARCH, REDDIT_SEARCH_RESULTS,
+REDDIT_PROFILE_OWN, REDDIT_PROFILE_OTHER, REDDIT_INBOX, REDDIT_SETTINGS,
+REDDIT_CREATE_POST, REDDIT_RATE_LIMITED, REDDIT_BANNED, REDDIT_LOGIN,
+UNKNOWN
+
+Valid OVERLAY_IDs (include only if actually visible):
+KEYBOARD_OPEN, ACTION_SHEET, CONFIRMATION_DIALOG, SUGGESTIONS_POPUP,
+LOGIN_REQUIRED, ACTION_BLOCKED
+
+Valid selectedTab values: home, search, create, reels, profile, communities, chat, inbox, null
+
+Rules:
+- HOME_FEED / REDDIT_HOME_FEED: vertical feed with posts, home tab highlighted
+- REELS_FULLSCREEN: fullscreen video, nav bar hidden
+- PROFILE_OWN / REDDIT_PROFILE_OWN: own profile with edit button
+- PROFILE_OTHER / REDDIT_PROFILE_OTHER: profile with follow/message buttons
+- REDDIT_SUBREDDIT: subreddit page with "r/" prefix in title
+- REDDIT_POST_DETAIL: single post with comments section
+- REDDIT_RATE_LIMITED: rate limit warning message
+- ACTION_BLOCKED: "Action Blocked" or "Try Again Later" dialog visible
+- LOGIN_REQUIRED / REDDIT_LOGIN: login form visible
 - KEYBOARD_OPEN: software keyboard visible at bottom of screen`,
 };
 
