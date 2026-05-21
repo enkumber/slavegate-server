@@ -18,6 +18,7 @@ import { directWsServer } from "../ws/direct-ws.server";
 import { sendJobToDevice, isDeviceOnline } from "../transport/transport";
 import { workflowService } from "../modules/workflows/workflow.service";
 import { startWorkflow } from "../modules/workflows/workflow.executor";
+import { buildGeneratedWorkflowPrompt } from "../modules/workflows/generated-workflow-prompt";
 import {
   getGeneratedWorkflowContract,
   validateGeneratedWorkflowTemplate,
@@ -541,6 +542,34 @@ router.post("/workflows", requireAuth, async (req, res) => {
 
 router.get("/workflows/generated/schema", requireAuth, async (_req, res) => {
   res.json({ ok: true, data: getGeneratedWorkflowContract() });
+});
+
+router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
+  const { platform, packageName, goal, clientContext, availableScreens, appMapHints } = req.body as {
+    platform?: string;
+    packageName?: string;
+    goal?: string;
+    clientContext?: string;
+    availableScreens?: string[];
+    appMapHints?: string[];
+  };
+  if (!platform || !packageName || !goal) {
+    return res.status(400).json({ ok: false, error: "platform, packageName and goal required" });
+  }
+
+  res.json({
+    ok: true,
+    data: {
+      prompt: buildGeneratedWorkflowPrompt({
+        platform,
+        packageName,
+        goal,
+        clientContext,
+        availableScreens,
+        appMapHints,
+      }),
+    },
+  });
 });
 
 router.post("/workflows/generated/validate", requireAuth, async (req, res) => {
