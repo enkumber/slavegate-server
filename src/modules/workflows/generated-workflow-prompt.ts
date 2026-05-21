@@ -36,7 +36,10 @@ export function buildGeneratedWorkflowAppMapHints(appMap: AppMap, maxPages = 8, 
     for (const [elementId, element] of elements) {
       const target = element.leadsTo ? ` -> ${element.leadsTo}` : "";
       const label = element.text || element.contentDescription || element.resourceId || "unlabeled";
-      hints.push(`  ${elementId}: ${element.type}; label=${label}; center=${element.bounds.x + element.bounds.w / 2},${element.bounds.y + element.bounds.h / 2}${target}`);
+      const center = element.bounds
+        ? `; center=${element.bounds.x + element.bounds.w / 2},${element.bounds.y + element.bounds.h / 2}`
+        : "";
+      hints.push(`  ${elementId}: ${element.type}; label=${label}${center}${target}`);
     }
   }
 

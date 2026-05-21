@@ -90,6 +90,42 @@ describe("buildGeneratedWorkflowPrompt", () => {
     expect(hints.join("\n")).toContain("-> page_1");
   });
 
+  it("summarizes legacy app-map elements without bounds", () => {
+    const hints = buildGeneratedWorkflowAppMapHints({
+      appId: "com.reddit.frontpage",
+      appName: "Reddit",
+      version: "3.0.0",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      pageCount: 1,
+      transitionCount: 0,
+      pages: {
+        page_0: {
+          name: "home",
+          discoveryOrder: 0,
+          detection: {
+            method: "ui_tree_signature",
+            anchors: ["home_screen_surface"],
+            signatureHash: "abc123",
+          },
+          elements: {
+            legacy_search: {
+              type: "button",
+              resourceId: "main_top_app_bar_search",
+              text: "",
+              contentDescription: "Search",
+              clickable: true,
+              leadsTo: null,
+            } as any,
+          },
+        },
+      },
+    });
+
+    expect(hints.join("\n")).toContain("legacy_search: button; label=Search");
+    expect(hints.join("\n")).not.toContain("center=NaN");
+  });
+
   it("resolves platform screens when the caller does not provide a screen list", () => {
     const redditScreens = resolveGeneratedWorkflowScreens("reddit");
     expect(redditScreens).toContain("REDDIT_HOME_FEED");
