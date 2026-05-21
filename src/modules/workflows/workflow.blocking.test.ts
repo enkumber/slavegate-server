@@ -182,9 +182,9 @@ describe("POST /workflows — non-blocking startWorkflow", () => {
       "utf8"
     );
 
-    // Find the POST /workflows handler section (from handler start to next route)
-    const handlerStart = source.indexOf('router.post("/workflows"');
-    // Find end: the next router.post after our handler
+    // The route delegates execution to dispatchWorkflowTemplate(), which also
+    // backs dynamically generated workflows.
+    const handlerStart = source.indexOf("async function dispatchWorkflowTemplate");
     const nextRoute = source.indexOf('router.post("/workflows/:id/cancel"');
     const workflowSection = source.substring(handlerStart, nextRoute > handlerStart ? nextRoute : undefined);
 

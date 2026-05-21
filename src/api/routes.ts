@@ -34,7 +34,7 @@ import type {
   DispatchJobRequest,
   UpdateDeviceRequest,
 } from "../../shared/protocol/api-types";
-import type { WorkflowCheckpoint } from "../modules/workflows/types";
+import type { WorkflowCheckpoint, WorkflowTemplate } from "../modules/workflows/types";
 
 const router = Router();
 
@@ -414,6 +414,116 @@ router.get("/workflows/:id", requireAuth, async (req, res) => {
   res.json({ ok: true, data: wf });
 });
 
+function createWorkflowCheckpoint(
+  variables: Record<string, unknown> | undefined,
+  hbeSession: Record<string, unknown>,
+  mode: "edge" | "server"
+): WorkflowCheckpoint {
+  return {
+    stepIndex: 0,
+    loopStack: [],
+    variables: variables ?? {},
+    hbeParams: hbeSession,
+    executionStats: {
+      compileLlmCalls: 0,
+      recoveryLlmCalls: 0,
+      creativeLlmCalls: 0,
+      runtimeLlmCalls: 0,
+      vlmCalls: 0,
+      deterministicSteps: 0,
+      batchedSteps: 0,
+      failedSteps: 0,
+      retriedSteps: 0,
+      mode,
+    },
+    checkpointAt: new Date().toISOString(),
+  };
+}
+
+function validateWorkflowTemplateInput(template: unknown): WorkflowTemplate | null {
+  if (!template || typeof template !== "object") return null;
+  const candidate = template as Partial<WorkflowTemplate>;
+  if (!candidate.id || typeof candidate.id !== "string") return null;
+  if (!candidate.name || typeof candidate.name !== "string") return null;
+  if (!candidate.platform || typeof candidate.platform !== "string") return null;
+  if (!candidate.version || typeof candidate.version !== "string") return null;
+  if (!Array.isArray(candidate.steps) || candidate.steps.length === 0) return null;
+  return candidate as WorkflowTemplate;
+}
+
+async function dispatchWorkflowTemplate(input: {
+  templateId: string;
+  template: WorkflowTemplate;
+  deviceId: string;
+  accountId?: string;
+  variables?: Record<string, unknown>;
+}): Promise<{ workflowId: string; status: "queued" | "running"; mode: "edge" | "server"; templateId: string }> {
+  const { templateId, template, deviceId, accountId, variables } = input;
+
+  const activeForDevice = await workflowService.countActiveByDevice(deviceId);
+  if (activeForDevice >= scalabilityConfig.maxWorkflowsPerDevice) {
+    const err = new Error(`Device already has ${activeForDevice} active workflow(s). Max: ${scalabilityConfig.maxWorkflowsPerDevice} per device.`);
+    (err as Error & { status?: number; code?: string }).status = 409;
+    (err as Error & { status?: number; code?: string }).code = "DEVICE_BUSY";
+    throw err;
+  }
+
+  const globalRunning = await workflowService.countByStatus("running");
+  if (globalRunning >= scalabilityConfig.maxGlobalConcurrentWorkflows) {
+    const err = new Error(`Server at capacity: ${globalRunning}/${scalabilityConfig.maxGlobalConcurrentWorkflows} concurrent workflows. Retry later.`);
+    (err as Error & { status?: number; code?: string }).status = 429;
+    (err as Error & { status?: number; code?: string }).code = "SERVER_BUSY";
+    throw err;
+  }
+
+  const accountAgeDays = (variables?.["accountAgeDays"] as number) ?? 30;
+  const simulatedTimezone = (variables?.["timezone"] as string) ?? "Europe/Bucharest";
+  const hbeSession = hbeService.initSession(accountAgeDays, simulatedTimezone) as unknown as Record<string, unknown>;
+
+  if (directWsServer.supportsEdgeExecution(deviceId)) {
+    const wf = await workflowService.create({
+      templateId,
+      deviceId,
+      accountId,
+      totalSteps: template.steps.length,
+      hbeParams: hbeSession,
+      checkpoint: createWorkflowCheckpoint(variables, hbeSession, "edge"),
+    });
+    await workflowService.markRunning(wf.id);
+
+    const sent = directWsServer.sendWorkflowStart(
+      deviceId,
+      template as unknown as Record<string, unknown>,
+      variables,
+      wf.id,
+    );
+
+    if (sent) {
+      console.log(`[workflow] ${wf.id} dispatched to device (edge execution, agent=${directWsServer.getAgentVersion(deviceId)})`);
+      return { workflowId: wf.id, status: "running", mode: "edge", templateId };
+    }
+
+    await workflowService.markFailed(wf.id, "Edge dispatch failed");
+    console.warn(`[workflow] Edge dispatch failed for ${deviceId} — falling back to server execution`);
+  }
+
+  const checkpoint = createWorkflowCheckpoint(variables, hbeSession, "server");
+  const wf = await workflowService.create({
+    templateId,
+    deviceId,
+    accountId,
+    totalSteps: template.steps.length,
+    hbeParams: hbeSession,
+    checkpoint,
+  });
+
+  startWorkflow(wf.id).catch(err => {
+    console.error(`[workflow] Failed to enqueue ${wf.id}: ${err.message}`);
+  });
+
+  return { workflowId: wf.id, status: "queued", mode: "server", templateId };
+}
+
 router.post("/workflows", requireAuth, async (req, res) => {
   const { templateId, deviceId, accountId, variables } = req.body as {
     templateId: string;
@@ -427,124 +537,49 @@ router.post("/workflows", requireAuth, async (req, res) => {
   const template = await workflowService.getTemplate(templateId);
   if (!template) return res.status(404).json({ ok: false, error: `Template ${templateId} not found` });
 
-  // ── Per-device concurrency guard ──────────────────────────────────────────
-  // Each device can only have 1 active workflow at a time.
-  // This prevents conflicting operations on the same phone.
-  const activeForDevice = await workflowService.countActiveByDevice(deviceId);
-  if (activeForDevice >= scalabilityConfig.maxWorkflowsPerDevice) {
-    return res.status(409).json({
-      ok: false,
-      error: `Device already has ${activeForDevice} active workflow(s). Max: ${scalabilityConfig.maxWorkflowsPerDevice} per device.`,
-      code: "DEVICE_BUSY",
-    });
+  try {
+    const data = await dispatchWorkflowTemplate({ templateId, template, deviceId, accountId, variables });
+    res.status(202).json({ ok: true, data });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string };
+    res.status(typed.status ?? 500).json({ ok: false, error: typed.message, code: typed.code });
+  }
+});
+
+router.post("/workflows/generated", requireAuth, async (req, res) => {
+  const { workflow, deviceId, accountId, variables } = req.body as {
+    workflow?: unknown;
+    deviceId?: string;
+    accountId?: string;
+    variables?: Record<string, unknown>;
+  };
+  if (!deviceId || !workflow) {
+    return res.status(400).json({ ok: false, error: "deviceId and workflow required" });
   }
 
-  // ── Global concurrency guard ─────────────────────────────────────────────
-  // Soft limit on total concurrent workflows to prevent resource exhaustion.
-  const globalRunning = await workflowService.countByStatus('running');
-  if (globalRunning >= scalabilityConfig.maxGlobalConcurrentWorkflows) {
-    return res.status(429).json({
-      ok: false,
-      error: `Server at capacity: ${globalRunning}/${scalabilityConfig.maxGlobalConcurrentWorkflows} concurrent workflows. Retry later.`,
-      code: "SERVER_BUSY",
-    });
+  const template = validateWorkflowTemplateInput(workflow);
+  if (!template) {
+    return res.status(400).json({ ok: false, error: "workflow must be a full WorkflowTemplate with id, name, platform, version and steps" });
   }
 
-  // Init HBE session params
-  const accountAgeDays    = (variables?.["accountAgeDays"] as number) ?? 30;
-  const simulatedTimezone = (variables?.["timezone"] as string) ?? "Europe/Bucharest";
-  const hbeSession        = hbeService.initSession(accountAgeDays, simulatedTimezone);
-
-  // ── Agent version routing (ADR-001 Phase 4) ─────────────────────────────
-  // Devices with agent >= 4.0 support edge execution (WORKFLOW_START).
-  // Older devices use legacy server-side execution (BullMQ queue + step-by-step).
-  if (directWsServer.supportsEdgeExecution(deviceId)) {
-    // Edge execution needs the concrete workflow DB id inside WORKFLOW_START.
-    // Create the monitoring record first, mark it running, then push template.
-    const wf = await workflowService.create({
-      templateId,
+  try {
+    await workflowService.saveTemplate(template);
+    const data = await dispatchWorkflowTemplate({
+      templateId: template.id,
+      template,
       deviceId,
       accountId,
-      totalSteps: template.steps.length,
-      hbeParams: hbeSession as unknown as Record<string, unknown>,
-      checkpoint: {
-        stepIndex: 0,
-        loopStack: [],
-        variables: variables ?? {},
-        hbeParams: hbeSession as unknown as Record<string, unknown>,
-        executionStats: {
-          compileLlmCalls: 0,
-          recoveryLlmCalls: 0,
-          creativeLlmCalls: 0,
-          runtimeLlmCalls: 0,
-          vlmCalls: 0,
-          deterministicSteps: 0,
-          batchedSteps: 0,
-          failedSteps: 0,
-          retriedSteps: 0,
-          mode: "edge",
-        },
-        checkpointAt: new Date().toISOString(),
+      variables: {
+        ...(variables ?? {}),
+        generatedWorkflow: true,
+        generatedWorkflowId: template.id,
       },
     });
-    await workflowService.markRunning(wf.id);
-
-    // Push template directly to device
-    const sent = directWsServer.sendWorkflowStart(
-      deviceId,
-      template as unknown as Record<string, unknown>,
-      variables,
-      wf.id,
-    );
-
-    if (sent) {
-
-      console.log(`[workflow] ${wf.id} dispatched to device (edge execution, agent=${directWsServer.getAgentVersion(deviceId)})`);
-      res.status(202).json({ ok: true, data: { workflowId: wf.id, status: "running", mode: "edge" } });
-      return;
-    }
-    await workflowService.markFailed(wf.id, "Edge dispatch failed");
-    // If send fails, fall through to legacy execution
-    console.warn(`[workflow] Edge dispatch failed for ${deviceId} — falling back to server execution`);
+    res.status(202).json({ ok: true, data: { ...data, generated: true } });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string };
+    res.status(typed.status ?? 500).json({ ok: false, error: typed.message, code: typed.code });
   }
-
-  // ── Legacy server-side execution ──────────────────────────────────────────
-
-  const checkpoint: WorkflowCheckpoint = {
-    stepIndex:    0,
-    loopStack:    [],
-    variables:    variables ?? {},
-    hbeParams:    hbeSession as unknown as Record<string, unknown>,
-    executionStats: {
-      compileLlmCalls: 0,
-      recoveryLlmCalls: 0,
-      creativeLlmCalls: 0,
-      runtimeLlmCalls: 0,
-      vlmCalls: 0,
-      deterministicSteps: 0,
-      batchedSteps: 0,
-      failedSteps: 0,
-      retriedSteps: 0,
-      mode: "server",
-    },
-    checkpointAt: new Date().toISOString(),
-  };
-
-  const wf = await workflowService.create({
-    templateId,
-    deviceId,
-    accountId,
-    totalSteps:  template.steps.length,
-    hbeParams:   hbeSession as unknown as Record<string, unknown>,
-    checkpoint,
-  });
-
-  // Fire-and-forget: don't block the HTTP response on Redis queue.add().
-  // If enqueue fails, the workflow stays in 'queued' status and can be retried.
-  startWorkflow(wf.id).catch(err => {
-    console.error(`[workflow] Failed to enqueue ${wf.id}: ${err.message}`);
-  });
-  res.status(202).json({ ok: true, data: { workflowId: wf.id, status: "queued" } });
 });
 
 router.post("/workflows/:id/cancel", requireAuth, async (req, res) => {
