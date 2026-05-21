@@ -196,6 +196,35 @@ describe("POST /workflows — non-blocking startWorkflow", () => {
   });
 });
 
+// ─── POST /workflows/generated — dry-run validation path ──────────────────
+
+describe("POST /workflows/generated — dry-run validation", () => {
+  it("supports dryRun without requiring a deviceId or dispatching", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const source = fs.readFileSync(
+      path.join(__dirname, "..", "..", "api", "routes.ts"),
+      "utf8"
+    );
+
+    const routeStart = source.indexOf('router.post("/workflows/generated"');
+    const routeEnd = source.indexOf('router.post("/workflows/:id/cancel"', routeStart);
+    const routeBody = source.substring(routeStart, routeEnd);
+
+    expect(routeBody).toContain("dryRun");
+    expect(routeBody).toContain("deviceId required unless dryRun is true");
+    expect(routeBody).toContain("persisted");
+    expect(routeBody).toContain("stepCount");
+
+    const dryRunBranch = routeBody.substring(
+      routeBody.indexOf("if (dryRun)"),
+      routeBody.indexOf("await workflowService.saveTemplate(template);", routeBody.indexOf("if (dryRun)"))
+    );
+    expect(dryRunBranch).not.toContain("dispatchWorkflowTemplate");
+    expect(dryRunBranch).not.toContain("startWorkflow");
+  });
+});
+
 // ─── DB Pool — sized for 100 devices ──────────────────────────────────────
 
 describe("DB Pool configuration", () => {

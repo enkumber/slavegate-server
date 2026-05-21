@@ -547,14 +547,19 @@ router.post("/workflows", requireAuth, async (req, res) => {
 });
 
 router.post("/workflows/generated", requireAuth, async (req, res) => {
-  const { workflow, deviceId, accountId, variables } = req.body as {
+  const { workflow, deviceId, accountId, variables, dryRun, persist } = req.body as {
     workflow?: unknown;
     deviceId?: string;
     accountId?: string;
     variables?: Record<string, unknown>;
+    dryRun?: boolean;
+    persist?: boolean;
   };
-  if (!deviceId || !workflow) {
-    return res.status(400).json({ ok: false, error: "deviceId and workflow required" });
+  if (!workflow) {
+    return res.status(400).json({ ok: false, error: "workflow required" });
+  }
+  if (!dryRun && !deviceId) {
+    return res.status(400).json({ ok: false, error: "deviceId required unless dryRun is true" });
   }
 
   const template = validateWorkflowTemplateInput(workflow);
@@ -563,11 +568,30 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
   }
 
   try {
+    if (dryRun) {
+      const shouldPersist = persist === true;
+      if (shouldPersist) {
+        await workflowService.saveTemplate(template);
+      }
+      return res.status(200).json({
+        ok: true,
+        data: {
+          generated: true,
+          dryRun: true,
+          persisted: shouldPersist,
+          templateId: template.id,
+          platform: template.platform,
+          version: template.version,
+          stepCount: template.steps.length,
+        },
+      });
+    }
+
     await workflowService.saveTemplate(template);
     const data = await dispatchWorkflowTemplate({
       templateId: template.id,
       template,
-      deviceId,
+      deviceId: deviceId!,
       accountId,
       variables: {
         ...(variables ?? {}),
