@@ -213,6 +213,8 @@ describe("POST /workflows/generated — dry-run validation", () => {
 
     expect(routeBody).toContain("dryRun");
     expect(routeBody).toContain("deviceId required unless dryRun is true");
+    expect(routeBody).toContain("workflow failed validation");
+    expect(routeBody).toContain("errors: validation.errors");
     expect(routeBody).toContain("persisted");
     expect(routeBody).toContain("stepCount");
 
@@ -222,6 +224,21 @@ describe("POST /workflows/generated — dry-run validation", () => {
     );
     expect(dryRunBranch).not.toContain("dispatchWorkflowTemplate");
     expect(dryRunBranch).not.toContain("startWorkflow");
+  });
+
+  it("validates generated workflow steps before persistence or dispatch", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const source = fs.readFileSync(
+      path.join(__dirname, "..", "..", "api", "routes.ts"),
+      "utf8"
+    );
+
+    expect(source).toContain("function validateWorkflowStepInput");
+    expect(source).toContain("workflow.steps[${index}]");
+    expect(source).toContain(".action must be a non-empty string for action steps");
+    expect(source).toContain("wait step must define duration or condition");
+    expect(source).toContain(".type must be one of: action, wait, condition, loop, checkpoint");
   });
 });
 

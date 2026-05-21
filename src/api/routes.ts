@@ -440,15 +440,104 @@ function createWorkflowCheckpoint(
   };
 }
 
-function validateWorkflowTemplateInput(template: unknown): WorkflowTemplate | null {
-  if (!template || typeof template !== "object") return null;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateWorkflowStepInput(step: unknown, path: string, errors: string[], seenIds: Set<string>): void {
+  if (!isRecord(step)) {
+    errors.push(`${path} must be an object`);
+    return;
+  }
+
+  const id = step.id;
+  if (id !== undefined) {
+    if (typeof id !== "string" || id.length === 0) {
+      errors.push(`${path}.id must be a non-empty string when provided`);
+    } else if (seenIds.has(id)) {
+      errors.push(`${path}.id duplicates step id "${id}"`);
+    } else {
+      seenIds.add(id);
+    }
+  }
+
+  switch (step.type) {
+    case "action":
+      if (typeof step.action !== "string" || step.action.length === 0) {
+        errors.push(`${path}.action must be a non-empty string for action steps`);
+      }
+      if (step.params !== undefined && !isRecord(step.params)) {
+        errors.push(`${path}.params must be an object when provided`);
+      }
+      break;
+    case "wait":
+      if (step.duration === undefined && step.condition === undefined) {
+        errors.push(`${path} wait step must define duration or condition`);
+      }
+      if (step.duration !== undefined && !isRecord(step.duration)) {
+        errors.push(`${path}.duration must be an object when provided`);
+      }
+      break;
+    case "condition":
+      if (typeof step.check !== "string" || step.check.length === 0) {
+        errors.push(`${path}.check must be a non-empty string for condition steps`);
+      }
+      if (!Array.isArray(step.if_true) || step.if_true.length === 0) {
+        errors.push(`${path}.if_true must be a non-empty step array`);
+      } else {
+        step.if_true.forEach((child, index) => validateWorkflowStepInput(child, `${path}.if_true[${index}]`, errors, seenIds));
+      }
+      if (step.if_false !== undefined) {
+        if (!Array.isArray(step.if_false)) {
+          errors.push(`${path}.if_false must be a step array when provided`);
+        } else {
+          step.if_false.forEach((child, index) => validateWorkflowStepInput(child, `${path}.if_false[${index}]`, errors, seenIds));
+        }
+      }
+      break;
+    case "loop":
+      if (!isRecord(step.count)) {
+        errors.push(`${path}.count must be an object for loop steps`);
+      }
+      if (!Array.isArray(step.steps) || step.steps.length === 0) {
+        errors.push(`${path}.steps must be a non-empty step array for loop steps`);
+      } else {
+        step.steps.forEach((child, index) => validateWorkflowStepInput(child, `${path}.steps[${index}]`, errors, seenIds));
+      }
+      break;
+    case "checkpoint":
+      if (typeof step.id !== "string" || step.id.length === 0) {
+        errors.push(`${path}.id is required for checkpoint steps`);
+      }
+      break;
+    default:
+      errors.push(`${path}.type must be one of: action, wait, condition, loop, checkpoint`);
+  }
+}
+
+function validateWorkflowTemplateInput(template: unknown): { template?: WorkflowTemplate; errors: string[] } {
+  const errors: string[] = [];
+  if (!isRecord(template)) {
+    return { errors: ["workflow must be an object"] };
+  }
   const candidate = template as Partial<WorkflowTemplate>;
-  if (!candidate.id || typeof candidate.id !== "string") return null;
-  if (!candidate.name || typeof candidate.name !== "string") return null;
-  if (!candidate.platform || typeof candidate.platform !== "string") return null;
-  if (!candidate.version || typeof candidate.version !== "string") return null;
-  if (!Array.isArray(candidate.steps) || candidate.steps.length === 0) return null;
-  return candidate as WorkflowTemplate;
+  if (!candidate.id || typeof candidate.id !== "string") errors.push("workflow.id must be a non-empty string");
+  if (!candidate.name || typeof candidate.name !== "string") errors.push("workflow.name must be a non-empty string");
+  if (!candidate.platform || typeof candidate.platform !== "string") errors.push("workflow.platform must be a non-empty string");
+  if (!candidate.version || typeof candidate.version !== "string") errors.push("workflow.version must be a non-empty string");
+  if (candidate.defaultVerificationStrategy !== undefined && typeof candidate.defaultVerificationStrategy !== "string") {
+    errors.push("workflow.defaultVerificationStrategy must be a string when provided");
+  }
+  if (candidate.dataRetentionDays !== undefined && typeof candidate.dataRetentionDays !== "number") {
+    errors.push("workflow.dataRetentionDays must be a number when provided");
+  }
+  if (!Array.isArray(candidate.steps) || candidate.steps.length === 0) {
+    errors.push("workflow.steps must be a non-empty array");
+  } else {
+    const seenIds = new Set<string>();
+    candidate.steps.forEach((step, index) => validateWorkflowStepInput(step, `workflow.steps[${index}]`, errors, seenIds));
+  }
+  return errors.length > 0 ? { errors } : { template: candidate as WorkflowTemplate, errors: [] };
 }
 
 async function dispatchWorkflowTemplate(input: {
@@ -562,10 +651,15 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
     return res.status(400).json({ ok: false, error: "deviceId required unless dryRun is true" });
   }
 
-  const template = validateWorkflowTemplateInput(workflow);
-  if (!template) {
-    return res.status(400).json({ ok: false, error: "workflow must be a full WorkflowTemplate with id, name, platform, version and steps" });
+  const validation = validateWorkflowTemplateInput(workflow);
+  if (!validation.template) {
+    return res.status(400).json({
+      ok: false,
+      error: "workflow failed validation",
+      errors: validation.errors,
+    });
   }
+  const template = validation.template;
 
   try {
     if (dryRun) {
