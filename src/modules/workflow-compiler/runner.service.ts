@@ -35,6 +35,8 @@ export interface RunCompiledRequest {
   workflow: CompiledWorkflow;
   /** Resume from this step index (for recovery) */
   startStepIndex?: number;
+  /** LLM calls already spent compiling this workflow for the current request. */
+  compileLlmCalls?: number;
 }
 
 export interface StepExecutionResult {
@@ -54,9 +56,22 @@ export interface RunCompiledResult {
   stepsCompleted: number;
   stepsTotal: number;
   recoveryCount: number;
+  counters: WorkflowExecutionCounters;
   results: StepExecutionResult[];
   error?: string;
   totalLatencyMs: number;
+}
+
+export interface WorkflowExecutionCounters {
+  compileLlmCalls: number;
+  recoveryLlmCalls: number;
+  creativeLlmCalls: number;
+  runtimeLlmCalls: number;
+  vlmCalls: number;
+  deterministicSteps: number;
+  batchedSteps: number;
+  failedSteps: number;
+  retriedSteps: number;
 }
 
 export interface RunnerContext {
@@ -306,9 +321,20 @@ export async function runCompiledWorkflow(
   onRecoveryNeeded: (ctx: RunnerContext, stepIndex: number, reason: string) => Promise<boolean>
 ): Promise<RunCompiledResult> {
   const startTime = Date.now();
-  const { deviceId, workflow, startStepIndex = 0 } = req;
+  const { deviceId, workflow, startStepIndex = 0, compileLlmCalls = 0 } = req;
   const results: StepExecutionResult[] = [];
   const MAX_TOTAL_RECOVERY = 10;
+  const counters: WorkflowExecutionCounters = {
+    compileLlmCalls,
+    recoveryLlmCalls: 0,
+    creativeLlmCalls: 0,
+    runtimeLlmCalls: 0,
+    vlmCalls: 0,
+    deterministicSteps: 0,
+    batchedSteps: 0,
+    failedSteps: 0,
+    retriedSteps: 0,
+  };
 
   if (!isDeviceOnline(deviceId)) {
     return {
@@ -318,6 +344,7 @@ export async function runCompiledWorkflow(
       stepsCompleted: 0,
       stepsTotal: workflow.steps.length,
       recoveryCount: 0,
+      counters,
       results: [],
       error: `Device ${deviceId} is offline`,
       totalLatencyMs: Date.now() - startTime,
@@ -341,6 +368,7 @@ export async function runCompiledWorkflow(
   for (let i = startStepIndex; i < workflow.steps.length; i++) {
     const step = workflow.steps[i];
     const stepStart = Date.now();
+    counters.deterministicSteps++;
 
     console.log(`[runner] Step ${i + 1}/${workflow.steps.length}: ${step.action} — "${step.description}"`);
 
@@ -358,8 +386,12 @@ export async function runCompiledWorkflow(
 
           // Attempt recovery
           if (ctx.recoveryCount < MAX_TOTAL_RECOVERY) {
+            counters.recoveryLlmCalls++;
+            counters.runtimeLlmCalls++;
             const recovered = await onRecoveryNeeded(ctx, i, `fingerprint_mismatch:expected=${step.expectedPageHash},actual=${fp.actualHash}`);
+            ctx.recoveryCount++;
             if (!recovered) {
+              counters.failedSteps++;
               results.push({
                 stepIndex: i,
                 stepId: step.id,
@@ -372,8 +404,8 @@ export async function runCompiledWorkflow(
               aborted = true;
               break;
             }
-            ctx.recoveryCount++;
           } else {
+            counters.failedSteps++;
             results.push({
               stepIndex: i,
               stepId: step.id,
@@ -402,6 +434,7 @@ export async function runCompiledWorkflow(
       // Retry logic
       let retried = false;
       for (let retry = 0; retry < step.retries; retry++) {
+        counters.retriedSteps++;
         console.log(`[runner] Retry ${retry + 1}/${step.retries} for step ${i}`);
         await new Promise((r) => setTimeout(r, step.retryDelay));
         const retryResult = await executeStepAction(deviceId, step);
@@ -414,8 +447,12 @@ export async function runCompiledWorkflow(
       if (!retried) {
         // Attempt recovery
         if (ctx.recoveryCount < MAX_TOTAL_RECOVERY) {
+          counters.recoveryLlmCalls++;
+          counters.runtimeLlmCalls++;
           const recovered = await onRecoveryNeeded(ctx, i, `action_failed:${actionResult.error}`);
+          ctx.recoveryCount++;
           if (!recovered) {
+            counters.failedSteps++;
             results.push({
               stepIndex: i,
               stepId: step.id,
@@ -428,8 +465,8 @@ export async function runCompiledWorkflow(
             aborted = true;
             break;
           }
-          ctx.recoveryCount++;
         } else {
+          counters.failedSteps++;
           results.push({
             stepIndex: i,
             stepId: step.id,
@@ -457,10 +494,14 @@ export async function runCompiledWorkflow(
         );
 
         if (ctx.recoveryCount < MAX_TOTAL_RECOVERY) {
+          counters.recoveryLlmCalls++;
+          counters.runtimeLlmCalls++;
           const recovered = await onRecoveryNeeded(ctx, i, `post_action_mismatch:expected=${step.expectedPageHash},actual=${postCheck.actualHash}`);
+          ctx.recoveryCount++;
           if (recovered) {
-            ctx.recoveryCount++;
             postActionVerified = true; // Recovery fixed it
+          } else {
+            counters.failedSteps++;
           }
         }
       }
@@ -490,6 +531,7 @@ export async function runCompiledWorkflow(
 
   await updateWorkflowStatus(workflow.id, finalStatus, ctx.stepsCompleted, ctx.recoveryCount, {
     totalLatencyMs,
+    counters,
     results: results.map((r) => ({
       step: r.stepId,
       ok: r.success,
@@ -513,6 +555,7 @@ export async function runCompiledWorkflow(
     stepsCompleted: ctx.stepsCompleted,
     stepsTotal: workflow.steps.length,
     recoveryCount: ctx.recoveryCount,
+    counters,
     results,
     error: aborted ? "Workflow aborted — see step results" : undefined,
     totalLatencyMs,

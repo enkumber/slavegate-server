@@ -213,6 +213,17 @@ export interface RunCompiledResult {
   ok: boolean;
   jobId?: string;
   status?: string;
+  counters?: {
+    compileLlmCalls: number;
+    recoveryLlmCalls: number;
+    creativeLlmCalls: number;
+    runtimeLlmCalls: number;
+    vlmCalls: number;
+    deterministicSteps: number;
+    batchedSteps: number;
+    failedSteps: number;
+    retriedSteps: number;
+  };
   error?: string;
 }
 

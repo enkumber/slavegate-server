@@ -152,6 +152,7 @@ router.post("/compile-and-run", async (req: Request, res: Response) => {
     {
       deviceId,
       workflow,
+      compileLlmCalls: compileResult.fromCache ? 0 : 1,
     },
     // Recovery callback — delegates to recovery.service
     async (ctx, stepIndex, reason) => {
@@ -167,6 +168,7 @@ router.post("/compile-and-run", async (req: Request, res: Response) => {
     stepsCompleted: runResult.stepsCompleted,
     stepsTotal: runResult.stepsTotal,
     recoveryCount: runResult.recoveryCount,
+    counters: runResult.counters,
     totalLatencyMs: runResult.totalLatencyMs,
     error: runResult.error,
   });
@@ -287,6 +289,7 @@ router.post("/run-compiled", async (req: Request, res: Response) => {
     {
       deviceId,
       workflow,
+      compileLlmCalls: 0,
     },
     async (ctx, stepIndex, reason) => {
       return attemptRecovery(ctx, stepIndex, reason, recoveryModel);
@@ -300,6 +303,7 @@ router.post("/run-compiled", async (req: Request, res: Response) => {
     stepsCompleted: runResult.stepsCompleted,
     stepsTotal: runResult.stepsTotal,
     recoveryCount: runResult.recoveryCount,
+    counters: runResult.counters,
     totalLatencyMs: runResult.totalLatencyMs,
     error: runResult.error,
   });
