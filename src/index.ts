@@ -24,7 +24,6 @@ import { closeRedis } from "./redis/client";
 import { dispatcherService } from "./modules/dispatcher/dispatcher.service";
 import { authService } from "./modules/auth/auth.service";
 import { startWorkflowWorker } from "./modules/workflows/workflow.executor";
-import { workflowService } from "./modules/workflows/workflow.service";
 import { bootstrapParsers } from "./modules/data-pipeline/parser-registry";
 import { lifecycleManager } from "./modules/accounts/lifecycle";
 import { canaryService } from "./modules/canary/canary.service";
@@ -32,11 +31,7 @@ import { runMigrations } from "./db/migrate";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
-import watchContentTemplate from "./modules/workflows/templates/watch_content.json";
-import smartUnfollowTemplate from "./modules/workflows/templates/smart_unfollow.json";
-import outreachCommentTemplate from "./modules/workflows/templates/outreach_comment.json";
 import configRoutes, { seedSystemPrompts } from "./api/config-routes";
-import type { WorkflowTemplate } from "./modules/workflows/types";
 
 const PORT = parseInt(process.env.PORT ?? "21211", 10);
 
@@ -81,11 +76,8 @@ async function bootstrap(): Promise<void> {
   // ─── IMEI auth v2: no token revocation set to restore ───────────────────
   // (authService.restoreRevocationSet removed — tokens eliminated in 005_imei_auth)
 
-  // ─── Seed workflow templates (upsert — safe to run on every start) ───────
-  await workflowService.saveTemplate(watchContentTemplate as WorkflowTemplate);
-  await workflowService.saveTemplate(smartUnfollowTemplate as WorkflowTemplate);
-  await workflowService.saveTemplate(outreachCommentTemplate as WorkflowTemplate);
-  console.log("[server] Workflow templates seeded.");
+  // Workflow templates live in DB and are managed through /api/config/workflows.
+  // Startup must not overwrite campaign/client workflow definitions.
 
   // ─── Seed system prompts (upsert — safe to run on every start) ─────────────
   await seedSystemPrompts();
