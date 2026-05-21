@@ -102,6 +102,7 @@ export function buildGeneratedWorkflowPrompt(input: BuildGeneratedWorkflowPrompt
     "- Use checkpoint steps after important navigation or irreversible actions.",
     "- Include expectedScreen on action steps when a known screen should result.",
     "- Keep runtime LLM calls at zero on the happy path.",
+    "- After validation, cache compiledPlan.cacheKey and reuse the same validated workflow for identical goals/context.",
     "- Do not include client secrets, account passwords, API keys, or private tokens.",
     "- Do not add hardcoded content unless it is present in the client context or goal.",
     "- Prefer dry-run validation before persistence or execution.",

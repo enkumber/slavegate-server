@@ -227,6 +227,10 @@ describe("Generated workflow contract validation", () => {
         dryRun: "POST /api/workflows/generated with { dryRun: true }",
         execute: "POST /api/workflows/generated with { deviceId, workflow }",
       },
+      compiledPlan: {
+        happyPathLlmRequests: 0,
+        recovery: "LLM is reserved for recovery after deterministic execution fails.",
+      },
     });
   });
 

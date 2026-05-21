@@ -23,6 +23,7 @@ describe("buildGeneratedWorkflowPrompt", () => {
     expect(prompt).toContain("packageName: com.reddit.frontpage");
     expect(prompt).toContain("REDDIT_HOME_FEED");
     expect(prompt).toContain("Keep runtime LLM calls at zero on the happy path");
+    expect(prompt).toContain("cache compiledPlan.cacheKey");
     expect(prompt).toContain("Do not include client secrets");
   });
 

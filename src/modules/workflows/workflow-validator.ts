@@ -500,6 +500,12 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       dryRun: "POST /api/workflows/generated with { dryRun: true }",
       execute: "POST /api/workflows/generated with { deviceId, workflow }",
     },
+    compiledPlan: {
+      returnedBy: ["POST /api/workflows/generated/validate", "POST /api/workflows/generated with { dryRun: true }"],
+      cacheKey: "Stable hash of the validated template fields that affect deterministic execution.",
+      happyPathLlmRequests: 0,
+      recovery: "LLM is reserved for recovery after deterministic execution fails.",
+    },
     template: {
       required: ["id", "name", "platform", "description", "version", "steps"],
       optional: ["defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
