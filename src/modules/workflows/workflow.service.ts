@@ -298,14 +298,16 @@ export class WorkflowService {
 
   async saveGeneratedPlanCache(
     template: WorkflowTemplate,
-    compiledPlan: GeneratedWorkflowCompiledPlan
+    compiledPlan: GeneratedWorkflowCompiledPlan,
+    requestKey?: string
   ): Promise<void> {
     const db = getDb();
     await db.query(
       `INSERT INTO generated_workflow_plan_cache
-         (cache_key, template_id, platform, template_version, workflow, compiled_plan)
-       VALUES ($1, $2, $3, $4, $5, $6)
+         (cache_key, request_key, template_id, platform, template_version, workflow, compiled_plan)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (cache_key) DO UPDATE SET
+         request_key      = COALESCE(EXCLUDED.request_key, generated_workflow_plan_cache.request_key),
          template_id      = EXCLUDED.template_id,
          platform         = EXCLUDED.platform,
          template_version = EXCLUDED.template_version,
@@ -314,6 +316,7 @@ export class WorkflowService {
          updated_at       = NOW()`,
       [
         compiledPlan.cacheKey,
+        requestKey ?? null,
         template.id,
         template.platform,
         template.version,
@@ -331,6 +334,24 @@ export class WorkflowService {
        WHERE cache_key = $1
        RETURNING *`,
       [cacheKey]
+    );
+    if (result.rows.length === 0) return null;
+    return rowToGeneratedPlanCache(result.rows[0]);
+  }
+
+  async getGeneratedPlanCacheByRequestKey(requestKey: string): Promise<GeneratedWorkflowPlanCacheRecord | null> {
+    const db = getDb();
+    const result = await db.query(
+      `UPDATE generated_workflow_plan_cache
+       SET hit_count = hit_count + 1, last_used_at = NOW()
+       WHERE cache_key = (
+         SELECT cache_key FROM generated_workflow_plan_cache
+         WHERE request_key = $1
+         ORDER BY updated_at DESC
+         LIMIT 1
+       )
+       RETURNING *`,
+      [requestKey]
     );
     if (result.rows.length === 0) return null;
     return rowToGeneratedPlanCache(result.rows[0]);

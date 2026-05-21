@@ -505,6 +505,7 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
     compiledPlan: {
       returnedBy: ["POST /api/workflows/generated/validate", "POST /api/workflows/generated with { dryRun: true }"],
       cacheKey: "Stable hash of the validated template fields that affect deterministic execution.",
+      requestKey: "Stable hash returned by /prompt before LLM generation; use it to check cache first.",
       happyPathLlmRequests: 0,
       recovery: "LLM is reserved for recovery after deterministic execution fails.",
     },

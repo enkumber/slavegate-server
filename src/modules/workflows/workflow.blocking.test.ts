@@ -232,6 +232,7 @@ describe("Generated workflow contract validation", () => {
       compiledPlan: {
         happyPathLlmRequests: 0,
         recovery: "LLM is reserved for recovery after deterministic execution fails.",
+        requestKey: "Stable hash returned by /prompt before LLM generation; use it to check cache first.",
       },
     });
   });
@@ -335,8 +336,11 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("resolveGeneratedWorkflowScreens");
     expect(source).toContain("appMapLoaded");
     expect(source).toContain("screenCount");
+    expect(source).toContain("requestKey");
+    expect(source).toContain("computeGeneratedWorkflowRequestKey");
     expect(source).toContain("saveGeneratedPlanCache");
     expect(source).toContain("getGeneratedPlanCache");
+    expect(source).toContain("getGeneratedPlanCacheByRequestKey");
     expect(source).toContain("generate_validate_and_cache_workflow");
   });
 });

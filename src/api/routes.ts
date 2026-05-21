@@ -22,6 +22,7 @@ import { startWorkflow } from "../modules/workflows/workflow.executor";
 import {
   buildGeneratedWorkflowAppMapHints,
   buildGeneratedWorkflowPrompt,
+  computeGeneratedWorkflowRequestKey,
   resolveGeneratedWorkflowScreens,
 } from "../modules/workflows/generated-workflow-prompt";
 import {
@@ -569,10 +570,19 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
   const appMap = appId ? await loadMap(appId) : null;
   const resolvedAppMapHints = appMapHints ?? (appMap ? buildGeneratedWorkflowAppMapHints(appMap) : undefined);
   const resolvedScreens = resolveGeneratedWorkflowScreens(platform, availableScreens);
+  const requestKey = computeGeneratedWorkflowRequestKey({
+    platform,
+    packageName: resolvedPackageName,
+    goal,
+    clientContext,
+    availableScreens: resolvedScreens,
+    appMapHints: resolvedAppMapHints,
+  });
 
   res.json({
     ok: true,
     data: {
+      requestKey,
       appMapLoaded: !!appMap,
       screenCount: resolvedScreens.length,
       prompt: buildGeneratedWorkflowPrompt({
@@ -607,22 +617,28 @@ router.post("/workflows/generated/validate", requireAuth, async (req, res) => {
 });
 
 router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) => {
-  const { cacheKey, workflow, persist } = req.body as {
+  const { cacheKey, requestKey, workflow, persist } = req.body as {
     cacheKey?: string;
+    requestKey?: string;
     workflow?: unknown;
     persist?: boolean;
   };
 
-  if (!cacheKey && !workflow) {
-    return res.status(400).json({ ok: false, error: "cacheKey or workflow required" });
+  if (!cacheKey && !requestKey && !workflow) {
+    return res.status(400).json({ ok: false, error: "cacheKey, requestKey or workflow required" });
   }
   if (cacheKey && !/^[a-f0-9]{24}$/.test(cacheKey)) {
     return res.status(400).json({ ok: false, error: "cacheKey must be a 24-character lowercase hex string" });
   }
+  if (requestKey && !/^[a-f0-9]{24}$/.test(requestKey)) {
+    return res.status(400).json({ ok: false, error: "requestKey must be a 24-character lowercase hex string" });
+  }
 
   try {
-    if (cacheKey) {
-      const cached = await workflowService.getGeneratedPlanCache(cacheKey);
+    if (cacheKey || requestKey) {
+      const cached = cacheKey
+        ? await workflowService.getGeneratedPlanCache(cacheKey)
+        : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
       if (cached) {
         return res.json({ ok: true, data: { cacheHit: true, ...cached } });
       }
@@ -633,6 +649,7 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
             cacheHit: false,
             cacheMiss: true,
             cacheKey,
+            requestKey,
             nextAction: "generate_validate_and_cache_workflow",
           },
         });
@@ -653,7 +670,7 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
     const shouldPersist = persist !== false;
     if (shouldPersist) {
       await workflowService.saveTemplate(template);
-      await workflowService.saveGeneratedPlanCache(template, compiledPlan);
+      await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey);
     }
 
     res.status(200).json({
@@ -688,19 +705,23 @@ router.get("/workflows/generated/cache/:cacheKey", requireAuth, async (req, res)
 });
 
 router.post("/workflows/generated", requireAuth, async (req, res) => {
-  const { workflow, deviceId, accountId, variables, dryRun, persist } = req.body as {
+  const { workflow, deviceId, accountId, variables, dryRun, persist, requestKey } = req.body as {
     workflow?: unknown;
     deviceId?: string;
     accountId?: string;
     variables?: Record<string, unknown>;
     dryRun?: boolean;
     persist?: boolean;
+    requestKey?: string;
   };
   if (!workflow) {
     return res.status(400).json({ ok: false, error: "workflow required" });
   }
   if (!dryRun && !deviceId) {
     return res.status(400).json({ ok: false, error: "deviceId required unless dryRun is true" });
+  }
+  if (requestKey && !/^[a-f0-9]{24}$/.test(requestKey)) {
+    return res.status(400).json({ ok: false, error: "requestKey must be a 24-character lowercase hex string" });
   }
 
   const validation = validateGeneratedWorkflowTemplate(workflow);
@@ -719,7 +740,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
       const shouldPersist = persist === true;
       if (shouldPersist) {
         await workflowService.saveTemplate(template);
-        await workflowService.saveGeneratedPlanCache(template, compiledPlan);
+        await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey);
       }
       return res.status(200).json({
         ok: true,
@@ -728,7 +749,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
     }
 
     await workflowService.saveTemplate(template);
-    await workflowService.saveGeneratedPlanCache(template, compiledPlan);
+    await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey);
     const data = await dispatchWorkflowTemplate({
       templateId: template.id,
       template,

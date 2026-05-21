@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildGeneratedWorkflowAppMapHints,
   buildGeneratedWorkflowPrompt,
+  computeGeneratedWorkflowRequestKey,
   resolveGeneratedWorkflowScreens,
 } from "./generated-workflow-prompt";
 
@@ -23,8 +24,31 @@ describe("buildGeneratedWorkflowPrompt", () => {
     expect(prompt).toContain("packageName: com.reddit.frontpage");
     expect(prompt).toContain("REDDIT_HOME_FEED");
     expect(prompt).toContain("Keep runtime LLM calls at zero on the happy path");
+    expect(prompt).toContain("requestKey");
     expect(prompt).toContain("cache compiledPlan.cacheKey");
     expect(prompt).toContain("Do not include client secrets");
+  });
+
+  it("computes a stable request key before LLM generation", () => {
+    const first = computeGeneratedWorkflowRequestKey({
+      platform: "Reddit",
+      packageName: "com.reddit.frontpage",
+      goal: "Open Reddit home and verify the feed is loaded.",
+      clientContext: "Navigation-only",
+      availableScreens: ["REDDIT_RATE_LIMITED", "REDDIT_HOME_FEED"],
+      appMapHints: ["page_0", "page_1"],
+    });
+    const second = computeGeneratedWorkflowRequestKey({
+      platform: "reddit",
+      packageName: "com.reddit.frontpage",
+      goal: "  open   reddit home and verify the feed is loaded. ",
+      clientContext: "navigation-only",
+      availableScreens: ["REDDIT_HOME_FEED", "REDDIT_RATE_LIMITED"],
+      appMapHints: ["page_1", "page_0"],
+    });
+
+    expect(first).toMatch(/^[a-f0-9]{24}$/);
+    expect(second).toBe(first);
   });
 
   it("summarizes app maps into compact prompt hints", () => {

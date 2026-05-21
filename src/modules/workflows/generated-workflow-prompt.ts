@@ -5,6 +5,7 @@
  * Agents use this contract before calling /api/workflows/generated/validate.
  */
 
+import { createHash } from "crypto";
 import { getGeneratedWorkflowContract } from "./workflow-validator";
 import type { AppMap } from "../app-mapping/schema";
 import { ALL_SCREEN_IDS } from "../screen-detection/types";
@@ -63,9 +64,25 @@ export function resolveGeneratedWorkflowScreens(platform: string, provided?: str
   return shared;
 }
 
+export function computeGeneratedWorkflowRequestKey(input: BuildGeneratedWorkflowPromptInput): string {
+  const normalized = {
+    platform: normalizeForRequestKey(input.platform),
+    packageName: normalizeForRequestKey(input.packageName),
+    goal: normalizeForRequestKey(input.goal),
+    clientContext: normalizeForRequestKey(input.clientContext ?? ""),
+    availableScreens: [...(input.availableScreens ?? [])].sort(),
+    appMapHints: [...(input.appMapHints ?? [])].sort(),
+  };
+  return createHash("sha256").update(JSON.stringify(normalized)).digest("hex").slice(0, 24);
+}
+
 function renderList(items: string[] | undefined, fallback: string): string {
   if (!items || items.length === 0) return fallback;
   return items.map((item) => `- ${item}`).join("\n");
+}
+
+function normalizeForRequestKey(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 export function buildGeneratedWorkflowPrompt(input: BuildGeneratedWorkflowPromptInput): string {
@@ -102,6 +119,7 @@ export function buildGeneratedWorkflowPrompt(input: BuildGeneratedWorkflowPrompt
     "- Use checkpoint steps after important navigation or irreversible actions.",
     "- Include expectedScreen on action steps when a known screen should result.",
     "- Keep runtime LLM calls at zero on the happy path.",
+    "- Before calling an LLM for the same goal/context again, call POST /api/workflows/generated/cache/resolve with requestKey.",
     "- After validation, cache compiledPlan.cacheKey and reuse the same validated workflow for identical goals/context.",
     "- Do not include client secrets, account passwords, API keys, or private tokens.",
     "- Do not add hardcoded content unless it is present in the client context or goal.",
