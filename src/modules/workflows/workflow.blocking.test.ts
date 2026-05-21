@@ -227,12 +227,14 @@ describe("Generated workflow contract validation", () => {
         dryRun: "POST /api/workflows/generated with { dryRun: true }",
         resolveCache: "POST /api/workflows/generated/cache/resolve",
         cache: "GET /api/workflows/generated/cache/:cacheKey",
-        execute: "POST /api/workflows/generated with { deviceId, workflow }",
+        execute: "POST /api/workflows/generated with { deviceId, workflow | cacheKey | requestKey }",
       },
       compiledPlan: {
         happyPathLlmRequests: 0,
         recovery: "LLM is reserved for recovery after deterministic execution fails.",
         requestKey: "Stable hash returned by /prompt before LLM generation; use it to check cache first.",
+        cacheFirstPrompt: "POST /api/workflows/generated/prompt returns cached workflow+plan when requestKey is already known.",
+        executeFromCache: "POST /api/workflows/generated can execute cached templates directly by cacheKey or requestKey.",
       },
     });
   });
@@ -338,6 +340,8 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("screenCount");
     expect(source).toContain("requestKey");
     expect(source).toContain("computeGeneratedWorkflowRequestKey");
+    expect(source).toContain("reuse_cached_workflow");
+    expect(source).toContain("workflow, cacheKey or requestKey required");
     expect(source).toContain("saveGeneratedPlanCache");
     expect(source).toContain("getGeneratedPlanCache");
     expect(source).toContain("getGeneratedPlanCacheByRequestKey");

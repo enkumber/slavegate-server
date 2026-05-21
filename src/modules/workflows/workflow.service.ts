@@ -49,6 +49,7 @@ export interface CreateWorkflowInput {
 
 export interface GeneratedWorkflowPlanCacheRecord {
   cacheKey: string;
+  requestKey: string | null;
   templateId: string;
   platform: string;
   templateVersion: string;
@@ -384,6 +385,7 @@ export const workflowService = new WorkflowService();
 function rowToGeneratedPlanCache(row: Record<string, unknown>): GeneratedWorkflowPlanCacheRecord {
   return {
     cacheKey: row.cache_key as string,
+    requestKey: (row.request_key as string) ?? null,
     templateId: row.template_id as string,
     platform: row.platform as string,
     templateVersion: row.template_version as string,

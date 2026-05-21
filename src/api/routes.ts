@@ -579,10 +579,24 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
     appMapHints: resolvedAppMapHints,
   });
 
+  const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
+  if (cached) {
+    return res.json({
+      ok: true,
+      data: {
+        cacheHit: true,
+        nextAction: "reuse_cached_workflow",
+        ...cached,
+      },
+    });
+  }
+
   res.json({
     ok: true,
     data: {
       requestKey,
+      cacheHit: false,
+      nextAction: "generate_validate_and_cache_workflow",
       appMapLoaded: !!appMap,
       screenCount: resolvedScreens.length,
       prompt: buildGeneratedWorkflowPrompt({
@@ -705,8 +719,9 @@ router.get("/workflows/generated/cache/:cacheKey", requireAuth, async (req, res)
 });
 
 router.post("/workflows/generated", requireAuth, async (req, res) => {
-  const { workflow, deviceId, accountId, variables, dryRun, persist, requestKey } = req.body as {
+  const { workflow, cacheKey, deviceId, accountId, variables, dryRun, persist, requestKey } = req.body as {
     workflow?: unknown;
+    cacheKey?: string;
     deviceId?: string;
     accountId?: string;
     variables?: Record<string, unknown>;
@@ -714,17 +729,38 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
     persist?: boolean;
     requestKey?: string;
   };
-  if (!workflow) {
-    return res.status(400).json({ ok: false, error: "workflow required" });
+  if (!workflow && !cacheKey && !requestKey) {
+    return res.status(400).json({ ok: false, error: "workflow, cacheKey or requestKey required" });
   }
   if (!dryRun && !deviceId) {
     return res.status(400).json({ ok: false, error: "deviceId required unless dryRun is true" });
+  }
+  if (cacheKey && !/^[a-f0-9]{24}$/.test(cacheKey)) {
+    return res.status(400).json({ ok: false, error: "cacheKey must be a 24-character lowercase hex string" });
   }
   if (requestKey && !/^[a-f0-9]{24}$/.test(requestKey)) {
     return res.status(400).json({ ok: false, error: "requestKey must be a 24-character lowercase hex string" });
   }
 
-  const validation = validateGeneratedWorkflowTemplate(workflow);
+  let resolvedWorkflow = workflow;
+  let cacheHit = false;
+  if (!resolvedWorkflow && (cacheKey || requestKey)) {
+    const cached = cacheKey
+      ? await workflowService.getGeneratedPlanCache(cacheKey)
+      : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
+    if (!cached) {
+      return res.status(404).json({
+        ok: false,
+        error: "generated workflow plan cache miss",
+        cacheKey,
+        requestKey,
+      });
+    }
+    resolvedWorkflow = cached.workflow;
+    cacheHit = true;
+  }
+
+  const validation = validateGeneratedWorkflowTemplate(resolvedWorkflow);
   if (!validation.template) {
     return res.status(400).json({
       ok: false,
@@ -744,7 +780,10 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
       }
       return res.status(200).json({
         ok: true,
-        data: summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist }),
+        data: {
+          cacheHit,
+          ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist }),
+        },
       });
     }
 
@@ -761,7 +800,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         generatedWorkflowId: template.id,
       },
     });
-    res.status(202).json({ ok: true, data: { ...data, generated: true } });
+    res.status(202).json({ ok: true, data: { ...data, generated: true, cacheHit } });
   } catch (err) {
     const typed = err as Error & { status?: number; code?: string };
     res.status(typed.status ?? 500).json({ ok: false, error: typed.message, code: typed.code });

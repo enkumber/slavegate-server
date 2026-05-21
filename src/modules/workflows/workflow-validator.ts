@@ -6,6 +6,7 @@
 import { z } from "zod";
 import { createHash } from "crypto";
 import type { WorkflowStep, WorkflowTemplate } from "./types";
+import { ALL_SCREEN_IDS } from "../screen-detection/types";
 
 // ── Allowed step types ──────────────────────────────────────────────────────
 const ALLOWED_STEP_TYPES = [
@@ -201,8 +202,6 @@ const GENERATED_WORKFLOW_STEP_TYPES = [
 const GENERATED_WORKFLOW_VERIFICATION_STRATEGIES = [
   "local_only",
   "local_with_screenshot",
-  "full_cascade",
-  "vlm_required",
 ] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -258,6 +257,26 @@ function validateGeneratedWorkflowStepInput(
       }
       if (step.params !== undefined && !isRecord(step.params)) {
         errors.push(`${path}.params must be an object when provided`);
+      }
+      if (step.x !== undefined && typeof step.x !== "number") {
+        errors.push(`${path}.x must be a number when provided`);
+      }
+      if (step.y !== undefined && typeof step.y !== "number") {
+        errors.push(`${path}.y must be a number when provided`);
+      }
+      if (
+        step.verification !== undefined &&
+        (typeof step.verification !== "string" || !GENERATED_WORKFLOW_VERIFICATION_STRATEGIES.includes(step.verification as typeof GENERATED_WORKFLOW_VERIFICATION_STRATEGIES[number]))
+      ) {
+        errors.push(`${path}.verification must be one of: ${GENERATED_WORKFLOW_VERIFICATION_STRATEGIES.join(", ")}`);
+      }
+      if (step.expectedScreen !== undefined) {
+        const screens = Array.isArray(step.expectedScreen) ? step.expectedScreen : [step.expectedScreen];
+        for (const screen of screens) {
+          if (typeof screen !== "string" || !ALL_SCREEN_IDS.includes(screen as typeof ALL_SCREEN_IDS[number])) {
+            errors.push(`${path}.expectedScreen contains unknown screen: ${String(screen)}`);
+          }
+        }
       }
       if ((step.action === "open_app" || step.action === "close_app") && isRecord(step.params)) {
         const packageName = step.params.packageName;
@@ -500,12 +519,14 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       dryRun: "POST /api/workflows/generated with { dryRun: true }",
       resolveCache: "POST /api/workflows/generated/cache/resolve",
       cache: "GET /api/workflows/generated/cache/:cacheKey",
-      execute: "POST /api/workflows/generated with { deviceId, workflow }",
+      execute: "POST /api/workflows/generated with { deviceId, workflow | cacheKey | requestKey }",
     },
     compiledPlan: {
       returnedBy: ["POST /api/workflows/generated/validate", "POST /api/workflows/generated with { dryRun: true }"],
       cacheKey: "Stable hash of the validated template fields that affect deterministic execution.",
       requestKey: "Stable hash returned by /prompt before LLM generation; use it to check cache first.",
+      cacheFirstPrompt: "POST /api/workflows/generated/prompt returns cached workflow+plan when requestKey is already known.",
+      executeFromCache: "POST /api/workflows/generated can execute cached templates directly by cacheKey or requestKey.",
       happyPathLlmRequests: 0,
       recovery: "LLM is reserved for recovery after deterministic execution fails.",
     },
