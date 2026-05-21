@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildGeneratedWorkflowAppMapHints,
   buildGeneratedWorkflowPrompt,
+  resolveGeneratedWorkflowScreens,
 } from "./generated-workflow-prompt";
 
 describe("buildGeneratedWorkflowPrompt", () => {
@@ -62,5 +63,20 @@ describe("buildGeneratedWorkflowPrompt", () => {
     expect(hints).toContain("page_0: home; signature=abc123; anchors=home_screen_surface, feed_lazy_column");
     expect(hints.join("\n")).toContain("main_top_app_bar_search");
     expect(hints.join("\n")).toContain("-> page_1");
+  });
+
+  it("resolves platform screens when the caller does not provide a screen list", () => {
+    const redditScreens = resolveGeneratedWorkflowScreens("reddit");
+    expect(redditScreens).toContain("REDDIT_HOME_FEED");
+    expect(redditScreens).toContain("REDDIT_RATE_LIMITED");
+    expect(redditScreens).toContain("ACTION_BLOCKED");
+    expect(redditScreens).not.toContain("HOME_FEED");
+
+    const instagramScreens = resolveGeneratedWorkflowScreens("instagram");
+    expect(instagramScreens).toContain("HOME_FEED");
+    expect(instagramScreens).toContain("ACTION_BLOCKED");
+    expect(instagramScreens).not.toContain("REDDIT_HOME_FEED");
+
+    expect(resolveGeneratedWorkflowScreens("reddit", ["CUSTOM_SCREEN"])).toEqual(["CUSTOM_SCREEN"]);
   });
 });

@@ -7,6 +7,7 @@
 
 import { getGeneratedWorkflowContract } from "./workflow-validator";
 import type { AppMap } from "../app-mapping/schema";
+import { ALL_SCREEN_IDS } from "../screen-detection/types";
 
 export interface BuildGeneratedWorkflowPromptInput {
   platform: string;
@@ -43,6 +44,23 @@ export function buildGeneratedWorkflowAppMapHints(appMap: AppMap, maxPages = 8, 
   }
 
   return hints;
+}
+
+export function resolveGeneratedWorkflowScreens(platform: string, provided?: string[]): string[] {
+  if (provided && provided.length > 0) return provided;
+
+  const normalized = platform.toLowerCase();
+  const shared = ["KEYBOARD_OPEN", "ACTION_SHEET", "CONFIRMATION_DIALOG", "SUGGESTIONS_POPUP", "LOGIN_REQUIRED", "ACTION_BLOCKED", "UNKNOWN"];
+
+  if (normalized === "reddit") {
+    return ALL_SCREEN_IDS.filter((screen) => screen.startsWith("REDDIT_") || shared.includes(screen));
+  }
+
+  if (normalized === "instagram") {
+    return ALL_SCREEN_IDS.filter((screen) => !screen.startsWith("REDDIT_"));
+  }
+
+  return shared;
 }
 
 function renderList(items: string[] | undefined, fallback: string): string {

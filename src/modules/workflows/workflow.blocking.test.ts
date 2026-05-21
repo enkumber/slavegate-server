@@ -285,7 +285,9 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("getGeneratedWorkflowContract");
     expect(source).toContain("buildGeneratedWorkflowPrompt");
     expect(source).toContain("buildGeneratedWorkflowAppMapHints");
+    expect(source).toContain("resolveGeneratedWorkflowScreens");
     expect(source).toContain("appMapLoaded");
+    expect(source).toContain("screenCount");
   });
 });
 

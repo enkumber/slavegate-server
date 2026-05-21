@@ -22,6 +22,7 @@ import { startWorkflow } from "../modules/workflows/workflow.executor";
 import {
   buildGeneratedWorkflowAppMapHints,
   buildGeneratedWorkflowPrompt,
+  resolveGeneratedWorkflowScreens,
 } from "../modules/workflows/generated-workflow-prompt";
 import {
   getGeneratedWorkflowContract,
@@ -565,17 +566,19 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
 
   const appMap = appId ? await loadMap(appId) : null;
   const resolvedAppMapHints = appMapHints ?? (appMap ? buildGeneratedWorkflowAppMapHints(appMap) : undefined);
+  const resolvedScreens = resolveGeneratedWorkflowScreens(platform, availableScreens);
 
   res.json({
     ok: true,
     data: {
       appMapLoaded: !!appMap,
+      screenCount: resolvedScreens.length,
       prompt: buildGeneratedWorkflowPrompt({
         platform,
         packageName: resolvedPackageName,
         goal,
         clientContext,
-        availableScreens,
+        availableScreens: resolvedScreens,
         appMapHints: resolvedAppMapHints,
       }),
     },
