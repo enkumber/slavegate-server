@@ -553,62 +553,67 @@ router.get("/workflows/generated/schema", requireAuth, async (_req, res) => {
 });
 
 router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
-  const { platform, packageName, appId, goal, clientContext, availableScreens, appMapHints } = req.body as {
-    platform?: string;
-    packageName?: string;
-    appId?: string;
-    goal?: string;
-    clientContext?: string;
-    availableScreens?: string[];
-    appMapHints?: string[];
-  };
-  const resolvedPackageName = packageName ?? appId;
-  if (!platform || !resolvedPackageName || !goal) {
-    return res.status(400).json({ ok: false, error: "platform, packageName/appId and goal required" });
-  }
+  try {
+    const { platform, packageName, appId, goal, clientContext, availableScreens, appMapHints } = req.body as {
+      platform?: string;
+      packageName?: string;
+      appId?: string;
+      goal?: string;
+      clientContext?: string;
+      availableScreens?: string[];
+      appMapHints?: string[];
+    };
+    const resolvedPackageName = packageName ?? appId;
+    if (!platform || !resolvedPackageName || !goal) {
+      return res.status(400).json({ ok: false, error: "platform, packageName/appId and goal required" });
+    }
 
-  const appMap = appId ? await loadMap(appId) : null;
-  const resolvedAppMapHints = appMapHints ?? (appMap ? buildGeneratedWorkflowAppMapHints(appMap) : undefined);
-  const resolvedScreens = resolveGeneratedWorkflowScreens(platform, availableScreens);
-  const requestKey = computeGeneratedWorkflowRequestKey({
-    platform,
-    packageName: resolvedPackageName,
-    goal,
-    clientContext,
-    availableScreens: resolvedScreens,
-    appMapHints: resolvedAppMapHints,
-  });
+    const appMap = appId ? await loadMap(appId) : null;
+    const resolvedAppMapHints = appMapHints ?? (appMap ? buildGeneratedWorkflowAppMapHints(appMap) : undefined);
+    const resolvedScreens = resolveGeneratedWorkflowScreens(platform, availableScreens);
+    const requestKey = computeGeneratedWorkflowRequestKey({
+      platform,
+      packageName: resolvedPackageName,
+      goal,
+      clientContext,
+      availableScreens: resolvedScreens,
+      appMapHints: resolvedAppMapHints,
+    });
 
-  const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
-  if (cached) {
-    return res.json({
+    const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
+    if (cached) {
+      return res.json({
+        ok: true,
+        data: {
+          cacheHit: true,
+          nextAction: "reuse_cached_workflow",
+          ...cached,
+        },
+      });
+    }
+
+    res.json({
       ok: true,
       data: {
-        cacheHit: true,
-        nextAction: "reuse_cached_workflow",
-        ...cached,
+        requestKey,
+        cacheHit: false,
+        nextAction: "generate_validate_and_cache_workflow",
+        appMapLoaded: !!appMap,
+        screenCount: resolvedScreens.length,
+        prompt: buildGeneratedWorkflowPrompt({
+          platform,
+          packageName: resolvedPackageName,
+          goal,
+          clientContext,
+          availableScreens: resolvedScreens,
+          appMapHints: resolvedAppMapHints,
+        }),
       },
     });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string };
+    res.status(typed.status ?? 500).json({ ok: false, error: typed.message, code: typed.code });
   }
-
-  res.json({
-    ok: true,
-    data: {
-      requestKey,
-      cacheHit: false,
-      nextAction: "generate_validate_and_cache_workflow",
-      appMapLoaded: !!appMap,
-      screenCount: resolvedScreens.length,
-      prompt: buildGeneratedWorkflowPrompt({
-        platform,
-        packageName: resolvedPackageName,
-        goal,
-        clientContext,
-        availableScreens: resolvedScreens,
-        appMapHints: resolvedAppMapHints,
-      }),
-    },
-  });
 });
 
 router.post("/workflows/generated/validate", requireAuth, async (req, res) => {
@@ -744,34 +749,34 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
 
   let resolvedWorkflow = workflow;
   let cacheHit = false;
-  if (!resolvedWorkflow && (cacheKey || requestKey)) {
-    const cached = cacheKey
-      ? await workflowService.getGeneratedPlanCache(cacheKey)
-      : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
-    if (!cached) {
-      return res.status(404).json({
+  try {
+    if (!resolvedWorkflow && (cacheKey || requestKey)) {
+      const cached = cacheKey
+        ? await workflowService.getGeneratedPlanCache(cacheKey)
+        : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
+      if (!cached) {
+        return res.status(404).json({
+          ok: false,
+          error: "generated workflow plan cache miss",
+          cacheKey,
+          requestKey,
+        });
+      }
+      resolvedWorkflow = cached.workflow;
+      cacheHit = true;
+    }
+
+    const validation = validateGeneratedWorkflowTemplate(resolvedWorkflow);
+    if (!validation.template) {
+      return res.status(400).json({
         ok: false,
-        error: "generated workflow plan cache miss",
-        cacheKey,
-        requestKey,
+        error: "workflow failed validation",
+        errors: validation.errors,
       });
     }
-    resolvedWorkflow = cached.workflow;
-    cacheHit = true;
-  }
+    const template = validation.template;
+    const compiledPlan = compileGeneratedWorkflowTemplate(template);
 
-  const validation = validateGeneratedWorkflowTemplate(resolvedWorkflow);
-  if (!validation.template) {
-    return res.status(400).json({
-      ok: false,
-      error: "workflow failed validation",
-      errors: validation.errors,
-    });
-  }
-  const template = validation.template;
-  const compiledPlan = compileGeneratedWorkflowTemplate(template);
-
-  try {
     if (dryRun) {
       const shouldPersist = persist === true;
       if (shouldPersist) {
