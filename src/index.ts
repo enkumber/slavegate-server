@@ -35,7 +35,6 @@ import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.serv
 import watchContentTemplate from "./modules/workflows/templates/watch_content.json";
 import smartUnfollowTemplate from "./modules/workflows/templates/smart_unfollow.json";
 import outreachCommentTemplate from "./modules/workflows/templates/outreach_comment.json";
-import redditKarmaFarmTemplate from "./modules/workflows/templates/reddit_karma_farm.json";
 import configRoutes, { seedSystemPrompts } from "./api/config-routes";
 import type { WorkflowTemplate } from "./modules/workflows/types";
 
@@ -86,7 +85,6 @@ async function bootstrap(): Promise<void> {
   await workflowService.saveTemplate(watchContentTemplate as WorkflowTemplate);
   await workflowService.saveTemplate(smartUnfollowTemplate as WorkflowTemplate);
   await workflowService.saveTemplate(outreachCommentTemplate as WorkflowTemplate);
-  await workflowService.saveTemplate(redditKarmaFarmTemplate as WorkflowTemplate);
   console.log("[server] Workflow templates seeded.");
 
   // ─── Seed system prompts (upsert — safe to run on every start) ─────────────
