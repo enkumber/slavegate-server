@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  compileGeneratedWorkflowTemplate,
   summarizeGeneratedWorkflowTemplate,
   validateGeneratedWorkflowTemplate,
 } from "./workflow-validator";
@@ -54,7 +55,7 @@ describe("agent-generated workflow canary", () => {
     const result = validateGeneratedWorkflowTemplate(workflow);
     expect(result.template).toBeDefined();
 
-    expect(summarizeGeneratedWorkflowTemplate(result.template!, { dryRun: true, persisted: false })).toEqual({
+    expect(summarizeGeneratedWorkflowTemplate(result.template!, { dryRun: true, persisted: false })).toMatchObject({
       generated: true,
       dryRun: true,
       persisted: false,
@@ -62,7 +63,40 @@ describe("agent-generated workflow canary", () => {
       platform: "reddit",
       version: "1.0.0",
       stepCount: 3,
+      compiledPlan: {
+        planVersion: "generated-workflow-plan/v1",
+        templateId: "agent_generated_reddit_home_smoke_v1",
+        platform: "reddit",
+        stepCount: 3,
+        actionCount: 1,
+        checkpointCount: 1,
+        llmBudget: {
+          happyPathRequests: 0,
+          recoveryRequests: "only_on_failure",
+        },
+      },
     });
+  });
+
+  it("compiles the generated workflow into a deterministic reusable plan", () => {
+    const workflow = redditHomeSmokeWorkflow();
+    const first = compileGeneratedWorkflowTemplate(workflow);
+    const second = compileGeneratedWorkflowTemplate(redditHomeSmokeWorkflow());
+
+    expect(first.cacheKey).toMatch(/^[a-f0-9]{24}$/);
+    expect(second.cacheKey).toBe(first.cacheKey);
+    expect(first.steps.map((step) => step.path)).toEqual([
+      "workflow.steps[0]",
+      "workflow.steps[1]",
+      "workflow.steps[2]",
+    ]);
+    expect(first.steps[0]).toMatchObject({
+      type: "action",
+      id: "open_reddit",
+      action: "open_app",
+      verification: "local_with_screenshot",
+    });
+    expect(first.llmBudget.happyPathRequests).toBe(0);
   });
 
   it("is accepted by the dry-run route without dispatch hooks", async () => {

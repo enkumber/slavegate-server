@@ -4,6 +4,7 @@
  */
 
 import { z } from "zod";
+import { createHash } from "crypto";
 import type { WorkflowStep, WorkflowTemplate } from "./types";
 
 // ── Allowed step types ──────────────────────────────────────────────────────
@@ -332,6 +333,31 @@ export interface GeneratedWorkflowTemplateValidationResult {
   template?: WorkflowTemplate;
 }
 
+export interface GeneratedWorkflowCompiledStep {
+  path: string;
+  type: WorkflowStep["type"];
+  id?: string;
+  action?: string;
+  verification?: string;
+}
+
+export interface GeneratedWorkflowCompiledPlan {
+  planVersion: "generated-workflow-plan/v1";
+  cacheKey: string;
+  templateId: string;
+  platform: string;
+  templateVersion: string;
+  stepCount: number;
+  actionCount: number;
+  checkpointCount: number;
+  maxDepth: number;
+  llmBudget: {
+    happyPathRequests: 0;
+    recoveryRequests: "only_on_failure";
+  };
+  steps: GeneratedWorkflowCompiledStep[];
+}
+
 export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedWorkflowTemplateValidationResult {
   const errors: string[] = [];
   if (!isRecord(template)) {
@@ -379,7 +405,85 @@ export function summarizeGeneratedWorkflowTemplate(
     platform: template.platform,
     version: template.version,
     stepCount: template.steps.length,
+    compiledPlan: compileGeneratedWorkflowTemplate(template),
   };
+}
+
+export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): GeneratedWorkflowCompiledPlan {
+  const steps: GeneratedWorkflowCompiledStep[] = [];
+  let actionCount = 0;
+  let checkpointCount = 0;
+  let maxDepth = 0;
+
+  const visit = (stepList: WorkflowStep[], prefix: string, depth: number): void => {
+    maxDepth = Math.max(maxDepth, depth);
+    stepList.forEach((step, index) => {
+      const path = `${prefix}[${index}]`;
+      const compiledStep: GeneratedWorkflowCompiledStep = {
+        path,
+        type: step.type,
+        id: "id" in step ? step.id : undefined,
+      };
+
+      if (step.type === "action") {
+        actionCount++;
+        compiledStep.action = step.action;
+        compiledStep.verification = step.verification ?? template.defaultVerificationStrategy;
+      } else if (step.type === "checkpoint") {
+        checkpointCount++;
+      }
+
+      steps.push(compiledStep);
+
+      if (step.type === "condition") {
+        visit(step.if_true, `${path}.if_true`, depth + 1);
+        if (step.if_false) visit(step.if_false, `${path}.if_false`, depth + 1);
+      } else if (step.type === "loop") {
+        visit(step.steps, `${path}.steps`, depth + 1);
+      }
+    });
+  };
+
+  visit(template.steps, "workflow.steps", 1);
+
+  const cacheSource = stableStringify({
+    id: template.id,
+    platform: template.platform,
+    version: template.version,
+    defaultVerificationStrategy: template.defaultVerificationStrategy,
+    steps: template.steps,
+  });
+  const cacheKey = createHash("sha256").update(cacheSource).digest("hex").slice(0, 24);
+
+  return {
+    planVersion: "generated-workflow-plan/v1",
+    cacheKey,
+    templateId: template.id,
+    platform: template.platform,
+    templateVersion: template.version,
+    stepCount: steps.length,
+    actionCount,
+    checkpointCount,
+    maxDepth,
+    llmBudget: {
+      happyPathRequests: 0,
+      recoveryRequests: "only_on_failure",
+    },
+    steps,
+  };
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    const entries = Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 export function getGeneratedWorkflowContract(): Record<string, unknown> {

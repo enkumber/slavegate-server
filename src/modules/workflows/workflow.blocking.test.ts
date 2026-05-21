@@ -218,6 +218,7 @@ describe("Generated workflow contract validation", () => {
     expect(typeof validator.validateGeneratedWorkflowTemplate).toBe("function");
     expect(typeof validator.getGeneratedWorkflowContract).toBe("function");
     expect(typeof validator.summarizeGeneratedWorkflowTemplate).toBe("function");
+    expect(typeof validator.compileGeneratedWorkflowTemplate).toBe("function");
 
     const contract = validator.getGeneratedWorkflowContract();
     expect(contract).toMatchObject({
@@ -344,6 +345,9 @@ describe("Generated workflow validator module", () => {
     expect(source).toContain("wait step must define duration or condition");
     expect(source).toContain(".type must be one of: ${GENERATED_WORKFLOW_STEP_TYPES.join");
     expect(source).toContain("isBlockedPackage");
+    expect(source).toContain("compileGeneratedWorkflowTemplate");
+    expect(source).toContain("happyPathRequests: 0");
+    expect(source).toContain("generated-workflow-plan/v1");
     expect(source).toContain('"action",');
     expect(source).toContain('"checkpoint",');
   });
