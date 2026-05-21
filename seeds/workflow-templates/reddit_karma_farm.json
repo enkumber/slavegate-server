@@ -2,8 +2,8 @@
   "id": "reddit_karma_farm",
   "name": "Reddit Karma Farm v2",
   "platform": "reddit",
-  "description": "Navighează pe r/AskReddit cu coordonate fixe calibrate. VLM doar: 1) gasit r/AskReddit in search, 2) analiza postare, 3) generare comentariu. Un comentariu per run.",
-  "version": "2.0.1",
+  "description": "Navighează pe r/AskReddit cu coordonate fixe calibrate. VLM doar: 1) gasit r/AskReddit in search, 2) analiza postare, 3) generare comentariu. Un comentariu per run. Screen Detection Cascade verifică ecranele critice după navigare/compose.",
+  "version": "2.0.2",
   "defaultVerificationStrategy": "local_only",
   "dataRetentionDays": 30,
   "_layout": {
@@ -105,7 +105,20 @@
       },
       "verification": "local_only",
       "retries": 2,
-      "timeoutMs": 15000
+      "timeoutMs": 15000,
+      "expectedScreen": [
+        "REDDIT_HOME_FEED",
+        "REDDIT_SUBREDDIT",
+        "REDDIT_SEARCH",
+        "REDDIT_POST_DETAIL"
+      ],
+      "screenConfidenceThreshold": 0.65,
+      "screenMismatchPolicy": {
+        "action": "continue_with_warning",
+        "delayMs": 1000,
+        "maxRetries": 1
+      },
+      "_screen_detection_note": "Reddit may restore the last screen; warn instead of hard-failing on launch."
     },
     {
       "type": "wait",
@@ -126,7 +139,18 @@
       },
       "verification": "local_only",
       "retries": 1,
-      "timeoutMs": 5000
+      "timeoutMs": 5000,
+      "expectedScreen": [
+        "REDDIT_SEARCH",
+        "REDDIT_SEARCH_RESULTS",
+        "KEYBOARD_OPEN"
+      ],
+      "screenConfidenceThreshold": 0.65,
+      "screenMismatchPolicy": {
+        "action": "retry_step",
+        "delayMs": 1000,
+        "maxRetries": 2
+      }
     },
     {
       "type": "wait",
@@ -165,7 +189,18 @@
         "text": "AskReddit"
       },
       "verification": "local_only",
-      "timeoutMs": 10000
+      "timeoutMs": 10000,
+      "expectedScreen": [
+        "REDDIT_SEARCH",
+        "REDDIT_SEARCH_RESULTS",
+        "KEYBOARD_OPEN"
+      ],
+      "screenConfidenceThreshold": 0.65,
+      "screenMismatchPolicy": {
+        "action": "continue_with_warning",
+        "delayMs": 1000,
+        "maxRetries": 1
+      }
     },
     {
       "type": "wait",
@@ -187,7 +222,17 @@
       "verification": "local_only",
       "retries": 1,
       "timeoutMs": 5000,
-      "_note": "Primul rezultat in search — r/AskReddit e mereu primul cand scrii corect"
+      "_note": "Primul rezultat in search — r/AskReddit e mereu primul cand scrii corect",
+      "expectedScreen": [
+        "REDDIT_SUBREDDIT",
+        "REDDIT_HOME_FEED"
+      ],
+      "screenConfidenceThreshold": 0.7,
+      "screenMismatchPolicy": {
+        "action": "retry_step",
+        "delayMs": 1000,
+        "maxRetries": 2
+      }
     },
     {
       "type": "wait",
@@ -208,7 +253,14 @@
       },
       "verification": "local_only",
       "retries": 1,
-      "timeoutMs": 5000
+      "timeoutMs": 5000,
+      "expectedScreen": "REDDIT_SUBREDDIT",
+      "screenConfidenceThreshold": 0.7,
+      "screenMismatchPolicy": {
+        "action": "continue_with_warning",
+        "delayMs": 1000,
+        "maxRetries": 1
+      }
     },
     {
       "type": "wait",
@@ -301,7 +353,17 @@
                         "verification": "local_only",
                         "retries": 1,
                         "timeoutMs": 10000,
-                        "_note": "Tap pe postarea din feed — coordonata calibrata pe centrul postarii vizibile"
+                        "_note": "Tap pe postarea din feed — coordonata calibrata pe centrul postarii vizibile",
+                        "expectedScreen": [
+                          "REDDIT_POST_DETAIL",
+                          "REDDIT_COMMENTS"
+                        ],
+                        "screenConfidenceThreshold": 0.7,
+                        "screenMismatchPolicy": {
+                          "action": "retry_step",
+                          "delayMs": 1000,
+                          "maxRetries": 2
+                        }
                       },
                       {
                         "type": "wait",
@@ -343,7 +405,18 @@
                         "verification": "local_only",
                         "retries": 2,
                         "timeoutMs": 5000,
-                        "_note": "'Add a comment' — coordonata calibrata pe bottom area"
+                        "_note": "'Add a comment' — coordonata calibrata pe bottom area",
+                        "expectedScreen": [
+                          "REDDIT_COMMENT_COMPOSE",
+                          "KEYBOARD_OPEN",
+                          "REDDIT_COMMENTS"
+                        ],
+                        "screenConfidenceThreshold": 0.65,
+                        "screenMismatchPolicy": {
+                          "action": "retry_step",
+                          "delayMs": 1000,
+                          "maxRetries": 2
+                        }
                       },
                       {
                         "type": "wait",
@@ -362,7 +435,17 @@
                           "textFromVariable": "_generated_comment"
                         },
                         "verification": "local_only",
-                        "timeoutMs": 30000
+                        "timeoutMs": 30000,
+                        "expectedScreen": [
+                          "REDDIT_COMMENT_COMPOSE",
+                          "KEYBOARD_OPEN"
+                        ],
+                        "screenConfidenceThreshold": 0.65,
+                        "screenMismatchPolicy": {
+                          "action": "continue_with_warning",
+                          "delayMs": 1000,
+                          "maxRetries": 1
+                        }
                       },
                       {
                         "type": "wait",
@@ -384,7 +467,18 @@
                         "verification": "local_only",
                         "retries": 2,
                         "timeoutMs": 5000,
-                        "_note": "Reply/Post button — top right in composer, coordonata calibrata"
+                        "_note": "Reply/Post button — top right in composer, coordonata calibrata",
+                        "expectedScreen": [
+                          "REDDIT_POST_DETAIL",
+                          "REDDIT_COMMENTS",
+                          "REDDIT_SUBREDDIT"
+                        ],
+                        "screenConfidenceThreshold": 0.65,
+                        "screenMismatchPolicy": {
+                          "action": "continue_with_warning",
+                          "delayMs": 1000,
+                          "maxRetries": 1
+                        }
                       },
                       {
                         "type": "wait",
