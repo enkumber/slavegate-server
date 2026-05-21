@@ -1,0 +1,58 @@
+import { describe, expect, it } from "vitest";
+import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
+import type { WorkflowTemplate } from "./types";
+
+function redditHomeSmokeWorkflow(): WorkflowTemplate {
+  return {
+    id: "agent_generated_reddit_home_smoke_v1",
+    name: "Agent generated Reddit home smoke",
+    platform: "reddit",
+    description: "Validation-only canary for an agent-generated Reddit navigation workflow.",
+    version: "1.0.0",
+    defaultVerificationStrategy: "local_with_screenshot",
+    dataRetentionDays: 1,
+    steps: [
+      {
+        type: "action",
+        id: "open_reddit",
+        action: "open_app",
+        params: { packageName: "com.reddit.frontpage" },
+        expectedScreen: "REDDIT_HOME_FEED",
+        timeoutMs: 15000,
+      },
+      {
+        type: "wait",
+        id: "wait_for_reddit_home",
+        condition: "app_launched",
+        timeoutMs: 10000,
+      },
+      {
+        type: "checkpoint",
+        id: "reddit_home_loaded",
+        reason: "Home feed reached or app launch validated",
+      },
+    ],
+  };
+}
+
+describe("agent-generated workflow canary", () => {
+  it("accepts a Reddit home smoke workflow shaped like agent output", () => {
+    const workflow = redditHomeSmokeWorkflow();
+
+    const result = validateGeneratedWorkflowTemplate(workflow);
+
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.template?.id).toBe("agent_generated_reddit_home_smoke_v1");
+  });
+
+  it("keeps the canary validation-only and non-mutating", () => {
+    const workflow = redditHomeSmokeWorkflow();
+    const serialized = JSON.stringify(workflow);
+
+    expect(serialized).not.toContain("comment");
+    expect(serialized).not.toContain("upvote");
+    expect(serialized).not.toContain("downvote");
+    expect(serialized).not.toContain("post_button");
+  });
+});
