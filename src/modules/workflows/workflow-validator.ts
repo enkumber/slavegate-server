@@ -4,6 +4,7 @@
  */
 
 import { z } from "zod";
+import type { WorkflowStep, WorkflowTemplate } from "./types";
 
 // ── Allowed step types ──────────────────────────────────────────────────────
 const ALLOWED_STEP_TYPES = [
@@ -179,4 +180,233 @@ export function validateWorkflowDispatch(body: unknown, bodySizeBytes: number): 
   ];
 
   return errors.length > 0 ? { ok: false, errors } : { ok: true, data: parsed.data };
+}
+
+// ── Generated workflow template contract ────────────────────────────────────
+
+const GENERATED_WORKFLOW_STEP_TYPES = [
+  "action",
+  "wait",
+  "condition",
+  "loop",
+  "checkpoint",
+] as const;
+
+const GENERATED_WORKFLOW_VERIFICATION_STRATEGIES = [
+  "local_only",
+  "local_with_screenshot",
+  "full_cascade",
+  "vlm_required",
+] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateRangeObject(
+  value: unknown,
+  path: string,
+  errors: string[],
+  distributions: readonly string[]
+): void {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object`);
+    return;
+  }
+  if (typeof value.min !== "number") errors.push(`${path}.min must be a number`);
+  if (typeof value.max !== "number") errors.push(`${path}.max must be a number`);
+  if (typeof value.min === "number" && typeof value.max === "number" && value.min > value.max) {
+    errors.push(`${path}.min must be <= ${path}.max`);
+  }
+  if (typeof value.distribution !== "string" || !distributions.includes(value.distribution)) {
+    errors.push(`${path}.distribution must be one of: ${distributions.join(", ")}`);
+  }
+}
+
+function validateGeneratedWorkflowStepInput(
+  step: unknown,
+  path: string,
+  errors: string[],
+  seenIds: Set<string>
+): void {
+  if (!isRecord(step)) {
+    errors.push(`${path} must be an object`);
+    return;
+  }
+
+  const id = step.id;
+  if (id !== undefined) {
+    if (typeof id !== "string" || id.length === 0) {
+      errors.push(`${path}.id must be a non-empty string when provided`);
+    } else if (seenIds.has(id)) {
+      errors.push(`${path}.id duplicates step id "${id}"`);
+    } else {
+      seenIds.add(id);
+    }
+  }
+
+  switch (step.type) {
+    case "action":
+      if (typeof step.action !== "string" || step.action.length === 0) {
+        errors.push(`${path}.action must be a non-empty string for action steps`);
+      }
+      if (step.params !== undefined && !isRecord(step.params)) {
+        errors.push(`${path}.params must be an object when provided`);
+      }
+      if (step.retries !== undefined && (typeof step.retries !== "number" || step.retries < 0)) {
+        errors.push(`${path}.retries must be a non-negative number when provided`);
+      }
+      if (step.timeoutMs !== undefined && (typeof step.timeoutMs !== "number" || step.timeoutMs < 1)) {
+        errors.push(`${path}.timeoutMs must be a positive number when provided`);
+      }
+      break;
+    case "wait":
+      if (step.duration === undefined && step.condition === undefined) {
+        errors.push(`${path} wait step must define duration or condition`);
+      }
+      if (step.duration !== undefined) {
+        validateRangeObject(step.duration, `${path}.duration`, errors, ["uniform", "lognormal", "normal"]);
+      }
+      if (step.condition !== undefined && typeof step.condition !== "string") {
+        errors.push(`${path}.condition must be a string when provided`);
+      }
+      break;
+    case "condition":
+      if (typeof step.check !== "string" || step.check.length === 0) {
+        errors.push(`${path}.check must be a non-empty string for condition steps`);
+      }
+      if (step.probability !== undefined && (typeof step.probability !== "number" || step.probability < 0 || step.probability > 1)) {
+        errors.push(`${path}.probability must be a number between 0 and 1 when provided`);
+      }
+      if (!Array.isArray(step.if_true) || step.if_true.length === 0) {
+        errors.push(`${path}.if_true must be a non-empty step array`);
+      } else {
+        step.if_true.forEach((child, index) =>
+          validateGeneratedWorkflowStepInput(child, `${path}.if_true[${index}]`, errors, seenIds)
+        );
+      }
+      if (step.if_false !== undefined) {
+        if (!Array.isArray(step.if_false)) {
+          errors.push(`${path}.if_false must be a step array when provided`);
+        } else {
+          step.if_false.forEach((child, index) =>
+            validateGeneratedWorkflowStepInput(child, `${path}.if_false[${index}]`, errors, seenIds)
+          );
+        }
+      }
+      break;
+    case "loop":
+      validateRangeObject(step.count, `${path}.count`, errors, ["uniform", "normal"]);
+      if (!Array.isArray(step.steps) || step.steps.length === 0) {
+        errors.push(`${path}.steps must be a non-empty step array for loop steps`);
+      } else {
+        step.steps.forEach((child, index) =>
+          validateGeneratedWorkflowStepInput(child, `${path}.steps[${index}]`, errors, seenIds)
+        );
+      }
+      break;
+    case "checkpoint":
+      if (typeof step.id !== "string" || step.id.length === 0) {
+        errors.push(`${path}.id is required for checkpoint steps`);
+      }
+      break;
+    default:
+      errors.push(`${path}.type must be one of: ${GENERATED_WORKFLOW_STEP_TYPES.join(", ")}`);
+  }
+}
+
+export interface GeneratedWorkflowTemplateValidationResult {
+  ok: boolean;
+  errors: string[];
+  template?: WorkflowTemplate;
+}
+
+export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedWorkflowTemplateValidationResult {
+  const errors: string[] = [];
+  if (!isRecord(template)) {
+    return { ok: false, errors: ["workflow must be an object"] };
+  }
+
+  const candidate = template as Partial<WorkflowTemplate>;
+  if (!candidate.id || typeof candidate.id !== "string") errors.push("workflow.id must be a non-empty string");
+  if (!candidate.name || typeof candidate.name !== "string") errors.push("workflow.name must be a non-empty string");
+  if (!candidate.platform || typeof candidate.platform !== "string") errors.push("workflow.platform must be a non-empty string");
+  if (!candidate.description || typeof candidate.description !== "string") errors.push("workflow.description must be a non-empty string");
+  if (!candidate.version || typeof candidate.version !== "string") errors.push("workflow.version must be a non-empty string");
+  if (
+    candidate.defaultVerificationStrategy !== undefined &&
+    !GENERATED_WORKFLOW_VERIFICATION_STRATEGIES.includes(candidate.defaultVerificationStrategy as typeof GENERATED_WORKFLOW_VERIFICATION_STRATEGIES[number])
+  ) {
+    errors.push(`workflow.defaultVerificationStrategy must be one of: ${GENERATED_WORKFLOW_VERIFICATION_STRATEGIES.join(", ")}`);
+  }
+  if (candidate.dataRetentionDays !== undefined && (typeof candidate.dataRetentionDays !== "number" || candidate.dataRetentionDays < 0)) {
+    errors.push("workflow.dataRetentionDays must be a non-negative number when provided");
+  }
+  if (!Array.isArray(candidate.steps) || candidate.steps.length === 0) {
+    errors.push("workflow.steps must be a non-empty array");
+  } else {
+    const seenIds = new Set<string>();
+    candidate.steps.forEach((step, index) =>
+      validateGeneratedWorkflowStepInput(step, `workflow.steps[${index}]`, errors, seenIds)
+    );
+  }
+
+  return errors.length > 0
+    ? { ok: false, errors }
+    : { ok: true, errors: [], template: candidate as WorkflowTemplate };
+}
+
+export function getGeneratedWorkflowContract(): Record<string, unknown> {
+  const exampleSteps: WorkflowStep[] = [
+    { type: "action", id: "open_reddit", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+    { type: "wait", id: "wait_home", condition: "app_launched", timeoutMs: 10000 },
+    { type: "checkpoint", id: "home_loaded", reason: "App reached expected starting screen" },
+  ];
+
+  return {
+    sourceOfTruth: "Agents generate workflow templates dynamically; server validates, optionally persists, then dispatches.",
+    endpoints: {
+      validate: "POST /api/workflows/generated/validate",
+      dryRun: "POST /api/workflows/generated with { dryRun: true }",
+      execute: "POST /api/workflows/generated with { deviceId, workflow }",
+    },
+    template: {
+      required: ["id", "name", "platform", "description", "version", "steps"],
+      optional: ["defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
+      defaultVerificationStrategy: GENERATED_WORKFLOW_VERIFICATION_STRATEGIES,
+      stepTypes: GENERATED_WORKFLOW_STEP_TYPES,
+    },
+    steps: {
+      action: {
+        required: ["type", "action"],
+        optional: ["id", "target", "x", "y", "params", "verification", "retries", "timeoutMs", "expectedScreen"],
+      },
+      wait: {
+        required: ["type", "duration or condition"],
+        optional: ["id", "element", "timeoutMs"],
+      },
+      condition: {
+        required: ["type", "check", "if_true"],
+        optional: ["id", "probability", "if_false"],
+      },
+      loop: {
+        required: ["type", "count", "steps"],
+        optional: ["id", "breakOn"],
+      },
+      checkpoint: {
+        required: ["type", "id"],
+        optional: ["reason"],
+      },
+    },
+    example: {
+      id: "agent_generated_reddit_open_home_v1",
+      name: "Agent generated Reddit open home",
+      platform: "reddit",
+      description: "Minimal generated workflow contract example.",
+      version: "1.0.0",
+      defaultVerificationStrategy: "local_with_screenshot",
+      dataRetentionDays: 7,
+      steps: exampleSteps,
+    },
+  };
 }

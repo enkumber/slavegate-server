@@ -196,6 +196,50 @@ describe("POST /workflows — non-blocking startWorkflow", () => {
   });
 });
 
+// ─── Generated workflow contract endpoints ─────────────────────────────────
+
+describe("Generated workflow contract validation", () => {
+  it("exports reusable generated workflow validation and schema helpers", async () => {
+    const validator = await import("./workflow-validator");
+
+    expect(typeof validator.validateGeneratedWorkflowTemplate).toBe("function");
+    expect(typeof validator.getGeneratedWorkflowContract).toBe("function");
+
+    const contract = validator.getGeneratedWorkflowContract();
+    expect(contract).toMatchObject({
+      endpoints: {
+        validate: "POST /api/workflows/generated/validate",
+        dryRun: "POST /api/workflows/generated with { dryRun: true }",
+        execute: "POST /api/workflows/generated with { deviceId, workflow }",
+      },
+    });
+  });
+
+  it("rejects malformed generated workflows with path-specific errors", async () => {
+    const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+
+    const result = validateGeneratedWorkflowTemplate({
+      id: "bad_workflow",
+      name: "Bad workflow",
+      platform: "reddit",
+      description: "Broken on purpose",
+      version: "1.0.0",
+      steps: [
+        { type: "action", id: "same" },
+        { type: "wait", id: "same" },
+        { type: "loop", id: "loop", count: { min: 3, max: 1, distribution: "uniform" }, steps: [] },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain("workflow.steps[0].action must be a non-empty string for action steps");
+    expect(result.errors).toContain('workflow.steps[1].id duplicates step id "same"');
+    expect(result.errors).toContain("workflow.steps[1] wait step must define duration or condition");
+    expect(result.errors).toContain("workflow.steps[2].count.min must be <= workflow.steps[2].count.max");
+    expect(result.errors).toContain("workflow.steps[2].steps must be a non-empty step array for loop steps");
+  });
+});
+
 // ─── POST /workflows/generated — dry-run validation path ──────────────────
 
 describe("POST /workflows/generated — dry-run validation", () => {
@@ -234,11 +278,29 @@ describe("POST /workflows/generated — dry-run validation", () => {
       "utf8"
     );
 
-    expect(source).toContain("function validateWorkflowStepInput");
+    expect(source).toContain("validateGeneratedWorkflowTemplate");
+    expect(source).toContain('router.get("/workflows/generated/schema"');
+    expect(source).toContain('router.post("/workflows/generated/validate"');
+    expect(source).toContain("getGeneratedWorkflowContract");
+  });
+});
+
+describe("Generated workflow validator module", () => {
+  it("validates generated workflow steps before persistence or dispatch", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const source = fs.readFileSync(
+      path.join(__dirname, "workflow-validator.ts"),
+      "utf8"
+    );
+
+    expect(source).toContain("function validateGeneratedWorkflowStepInput");
     expect(source).toContain("workflow.steps[${index}]");
     expect(source).toContain(".action must be a non-empty string for action steps");
     expect(source).toContain("wait step must define duration or condition");
-    expect(source).toContain(".type must be one of: action, wait, condition, loop, checkpoint");
+    expect(source).toContain(".type must be one of: ${GENERATED_WORKFLOW_STEP_TYPES.join");
+    expect(source).toContain('"action",');
+    expect(source).toContain('"checkpoint",');
   });
 });
 
