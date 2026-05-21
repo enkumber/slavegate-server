@@ -498,6 +498,7 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
     endpoints: {
       validate: "POST /api/workflows/generated/validate",
       dryRun: "POST /api/workflows/generated with { dryRun: true }",
+      resolveCache: "POST /api/workflows/generated/cache/resolve",
       cache: "GET /api/workflows/generated/cache/:cacheKey",
       execute: "POST /api/workflows/generated with { deviceId, workflow }",
     },

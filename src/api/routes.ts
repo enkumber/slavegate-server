@@ -606,6 +606,71 @@ router.post("/workflows/generated/validate", requireAuth, async (req, res) => {
   });
 });
 
+router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) => {
+  const { cacheKey, workflow, persist } = req.body as {
+    cacheKey?: string;
+    workflow?: unknown;
+    persist?: boolean;
+  };
+
+  if (!cacheKey && !workflow) {
+    return res.status(400).json({ ok: false, error: "cacheKey or workflow required" });
+  }
+  if (cacheKey && !/^[a-f0-9]{24}$/.test(cacheKey)) {
+    return res.status(400).json({ ok: false, error: "cacheKey must be a 24-character lowercase hex string" });
+  }
+
+  try {
+    if (cacheKey) {
+      const cached = await workflowService.getGeneratedPlanCache(cacheKey);
+      if (cached) {
+        return res.json({ ok: true, data: { cacheHit: true, ...cached } });
+      }
+      if (!workflow) {
+        return res.status(200).json({
+          ok: true,
+          data: {
+            cacheHit: false,
+            cacheMiss: true,
+            cacheKey,
+            nextAction: "generate_validate_and_cache_workflow",
+          },
+        });
+      }
+    }
+
+    const validation = validateGeneratedWorkflowTemplate(workflow);
+    if (!validation.template) {
+      return res.status(400).json({
+        ok: false,
+        error: "workflow failed validation",
+        errors: validation.errors,
+      });
+    }
+
+    const template = validation.template;
+    const compiledPlan = compileGeneratedWorkflowTemplate(template);
+    const shouldPersist = persist !== false;
+    if (shouldPersist) {
+      await workflowService.saveTemplate(template);
+      await workflowService.saveGeneratedPlanCache(template, compiledPlan);
+    }
+
+    res.status(200).json({
+      ok: true,
+      data: {
+        cacheHit: false,
+        cacheMiss: !!cacheKey,
+        persisted: shouldPersist,
+        ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist }),
+      },
+    });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string };
+    res.status(typed.status ?? 500).json({ ok: false, error: typed.message, code: typed.code });
+  }
+});
+
 router.get("/workflows/generated/cache/:cacheKey", requireAuth, async (req, res) => {
   const { cacheKey } = req.params;
   if (!/^[a-f0-9]{24}$/.test(cacheKey)) {
