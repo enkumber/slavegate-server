@@ -225,6 +225,7 @@ describe("Generated workflow contract validation", () => {
       endpoints: {
         validate: "POST /api/workflows/generated/validate",
         dryRun: "POST /api/workflows/generated with { dryRun: true }",
+        cache: "GET /api/workflows/generated/cache/:cacheKey",
         execute: "POST /api/workflows/generated with { deviceId, workflow }",
       },
       compiledPlan: {
@@ -325,12 +326,15 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain('router.get("/workflows/generated/schema"');
     expect(source).toContain('router.post("/workflows/generated/prompt"');
     expect(source).toContain('router.post("/workflows/generated/validate"');
+    expect(source).toContain('router.get("/workflows/generated/cache/:cacheKey"');
     expect(source).toContain("getGeneratedWorkflowContract");
     expect(source).toContain("buildGeneratedWorkflowPrompt");
     expect(source).toContain("buildGeneratedWorkflowAppMapHints");
     expect(source).toContain("resolveGeneratedWorkflowScreens");
     expect(source).toContain("appMapLoaded");
     expect(source).toContain("screenCount");
+    expect(source).toContain("saveGeneratedPlanCache");
+    expect(source).toContain("getGeneratedPlanCache");
   });
 });
 

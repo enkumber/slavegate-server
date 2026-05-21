@@ -17,6 +17,7 @@ import type {
   WorkflowStatus,
   WorkflowTemplate,
 } from "./types";
+import type { GeneratedWorkflowCompiledPlan } from "./workflow-validator";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,19 @@ export interface CreateWorkflowInput {
   totalSteps?:  number;
   hbeParams:    Record<string, unknown>;
   checkpoint:   WorkflowCheckpoint;
+}
+
+export interface GeneratedWorkflowPlanCacheRecord {
+  cacheKey: string;
+  templateId: string;
+  platform: string;
+  templateVersion: string;
+  workflow: WorkflowTemplate;
+  compiledPlan: GeneratedWorkflowCompiledPlan;
+  hitCount: number;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt: string | null;
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -279,6 +293,48 @@ export class WorkflowService {
     );
     return rows.rows.map(r => r.definition as WorkflowTemplate);
   }
+
+  // ─── Generated workflow plan cache ───────────────────────────────────────
+
+  async saveGeneratedPlanCache(
+    template: WorkflowTemplate,
+    compiledPlan: GeneratedWorkflowCompiledPlan
+  ): Promise<void> {
+    const db = getDb();
+    await db.query(
+      `INSERT INTO generated_workflow_plan_cache
+         (cache_key, template_id, platform, template_version, workflow, compiled_plan)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (cache_key) DO UPDATE SET
+         template_id      = EXCLUDED.template_id,
+         platform         = EXCLUDED.platform,
+         template_version = EXCLUDED.template_version,
+         workflow         = EXCLUDED.workflow,
+         compiled_plan    = EXCLUDED.compiled_plan,
+         updated_at       = NOW()`,
+      [
+        compiledPlan.cacheKey,
+        template.id,
+        template.platform,
+        template.version,
+        JSON.stringify(template),
+        JSON.stringify(compiledPlan),
+      ]
+    );
+  }
+
+  async getGeneratedPlanCache(cacheKey: string): Promise<GeneratedWorkflowPlanCacheRecord | null> {
+    const db = getDb();
+    const result = await db.query(
+      `UPDATE generated_workflow_plan_cache
+       SET hit_count = hit_count + 1, last_used_at = NOW()
+       WHERE cache_key = $1
+       RETURNING *`,
+      [cacheKey]
+    );
+    if (result.rows.length === 0) return null;
+    return rowToGeneratedPlanCache(result.rows[0]);
+  }
 }
 
 // ─── Row mapper ───────────────────────────────────────────────────────────────
@@ -303,3 +359,18 @@ function rowToWorkflow(row: Record<string, unknown>): WorkflowRecord {
 }
 
 export const workflowService = new WorkflowService();
+
+function rowToGeneratedPlanCache(row: Record<string, unknown>): GeneratedWorkflowPlanCacheRecord {
+  return {
+    cacheKey: row.cache_key as string,
+    templateId: row.template_id as string,
+    platform: row.platform as string,
+    templateVersion: row.template_version as string,
+    workflow: row.workflow as WorkflowTemplate,
+    compiledPlan: row.compiled_plan as GeneratedWorkflowCompiledPlan,
+    hitCount: row.hit_count as number,
+    createdAt: row.created_at ? (row.created_at as Date).toISOString() : "",
+    updatedAt: row.updated_at ? (row.updated_at as Date).toISOString() : "",
+    lastUsedAt: row.last_used_at ? (row.last_used_at as Date).toISOString() : null,
+  };
+}

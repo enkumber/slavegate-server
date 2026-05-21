@@ -25,6 +25,7 @@ import {
   resolveGeneratedWorkflowScreens,
 } from "../modules/workflows/generated-workflow-prompt";
 import {
+  compileGeneratedWorkflowTemplate,
   getGeneratedWorkflowContract,
   summarizeGeneratedWorkflowTemplate,
   validateGeneratedWorkflowTemplate,
@@ -605,6 +606,22 @@ router.post("/workflows/generated/validate", requireAuth, async (req, res) => {
   });
 });
 
+router.get("/workflows/generated/cache/:cacheKey", requireAuth, async (req, res) => {
+  const { cacheKey } = req.params;
+  if (!/^[a-f0-9]{24}$/.test(cacheKey)) {
+    return res.status(400).json({ ok: false, error: "cacheKey must be a 24-character lowercase hex string" });
+  }
+
+  try {
+    const cached = await workflowService.getGeneratedPlanCache(cacheKey);
+    if (!cached) return res.status(404).json({ ok: false, error: "generated workflow plan cache miss" });
+    res.json({ ok: true, data: cached });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string };
+    res.status(typed.status ?? 500).json({ ok: false, error: typed.message, code: typed.code });
+  }
+});
+
 router.post("/workflows/generated", requireAuth, async (req, res) => {
   const { workflow, deviceId, accountId, variables, dryRun, persist } = req.body as {
     workflow?: unknown;
@@ -630,12 +647,14 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
     });
   }
   const template = validation.template;
+  const compiledPlan = compileGeneratedWorkflowTemplate(template);
 
   try {
     if (dryRun) {
       const shouldPersist = persist === true;
       if (shouldPersist) {
         await workflowService.saveTemplate(template);
+        await workflowService.saveGeneratedPlanCache(template, compiledPlan);
       }
       return res.status(200).json({
         ok: true,
@@ -644,6 +663,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
     }
 
     await workflowService.saveTemplate(template);
+    await workflowService.saveGeneratedPlanCache(template, compiledPlan);
     const data = await dispatchWorkflowTemplate({
       templateId: template.id,
       template,
