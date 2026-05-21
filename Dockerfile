@@ -24,7 +24,9 @@ FROM node:22-alpine AS runtime
 
 WORKDIR /app
 
+ARG VCS_REF=unknown
 ENV NODE_ENV=production
+ENV BUILD_COMMIT=$VCS_REF
 
 # Install runtime system dependencies
 RUN apk add --no-cache \

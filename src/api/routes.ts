@@ -1473,7 +1473,15 @@ router.post("/ota/push", requireAuth, async (req, res) => {
 // ─── Health check (no auth) ─────────────────────────────────────────────────────────
 
 router.get("/health", (_req, res) => {
-  res.json({ ok: true, data: { status: "healthy", ts: new Date().toISOString() } });
+  res.json({
+    ok: true,
+    data: {
+      status: "healthy",
+      ts: new Date().toISOString(),
+      appVersion: process.env.PHONE_NETWORK_APP_VERSION ?? null,
+      buildCommit: process.env.BUILD_COMMIT ?? process.env.GIT_SHA ?? null,
+    },
+  });
 });
 
 // ─── Skill Updater (cron trigger) ─────────────────────────────────────────────
