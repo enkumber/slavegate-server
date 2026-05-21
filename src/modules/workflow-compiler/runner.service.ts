@@ -19,6 +19,8 @@
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../../db/client";
 import { sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
+import { directWsServer } from "../../ws/direct-ws.server";
+import type { BATCH_RESULT, BatchStep } from "../../protocol/batch-types";
 import { computePageSignature, isSamePage } from "../app-mapping/page-fingerprint";
 import type { UiTreeNode } from "../app-mapping/schema";
 
@@ -90,6 +92,7 @@ export interface RunnerContext {
 
 const STEP_TIMEOUT_MS = 30_000;
 const DEFAULT_WAIT_AFTER_ACTION_MS = 800;
+const MIN_COMPILED_BATCH_SIZE = 2;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // UI TREE CAPTURE
@@ -307,6 +310,129 @@ async function verifyPostAction(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// COMPILED FAST-PATH BATCHING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function compiledStepToBatchStep(step: CompiledStep, id: number): BatchStep | null {
+  if (step.action === "wait") {
+    const durationMs = (step.params?.durationMs as number)
+      || (step.params?.duration as number)
+      || 1000;
+    return {
+      id,
+      type: "wait",
+      action: "wait",
+      target: null,
+      params: { durationMs },
+    };
+  }
+
+  if (step.action === "tap") {
+    const coords = step.target?.coords;
+    if (!coords) return null;
+    return {
+      id,
+      type: "action",
+      action: "tap",
+      target: null,
+      params: { x: coords.x, y: coords.y },
+    };
+  }
+
+  if (step.action === "type") {
+    const text = (step.params?.text as string) || "";
+    return {
+      id,
+      type: "action",
+      action: "type",
+      target: null,
+      params: { text },
+    };
+  }
+
+  if (step.action === "swipe") {
+    return {
+      id,
+      type: "action",
+      action: "swipe",
+      target: null,
+      params: { ...(step.params ?? {}) },
+    };
+  }
+
+  if (step.action === "open_app") {
+    const packageName = (step.params?.packageName as string) || step.target?.text || "";
+    if (!packageName) return null;
+    return {
+      id,
+      type: "action",
+      action: "open_app",
+      target: null,
+      params: { packageName },
+    };
+  }
+
+  return null;
+}
+
+function collectCompiledBatch(workflow: CompiledWorkflow, startIndex: number): {
+  steps: CompiledStep[];
+  batchSteps: BatchStep[];
+} {
+  const steps: CompiledStep[] = [];
+  const batchSteps: BatchStep[] = [];
+
+  for (let i = startIndex; i < workflow.steps.length; i++) {
+    const converted = compiledStepToBatchStep(workflow.steps[i], steps.length + 1);
+    if (!converted) break;
+    steps.push(workflow.steps[i]);
+    batchSteps.push(converted);
+  }
+
+  if (batchSteps.length < MIN_COMPILED_BATCH_SIZE) {
+    return { steps: [], batchSteps: [] };
+  }
+  return { steps, batchSteps };
+}
+
+async function executeCompiledBatch(
+  deviceId: string,
+  workflowId: string,
+  stepIndex: number,
+  steps: BatchStep[]
+): Promise<BATCH_RESULT> {
+  const batchId = uuidv4();
+  const timeoutMs = STEP_TIMEOUT_MS;
+  const batchTimeoutMs = timeoutMs * steps.length * 2;
+  const batchPayload = {
+    type: "BATCH_START",
+    batchId,
+    workflowId,
+    stepIndex,
+    steps,
+    options: {
+      continueOnError: false,
+      timeoutMs,
+      batchTimeoutMs,
+    },
+  };
+
+  if (!directWsServer.sendBatch(deviceId, batchPayload)) {
+    throw new Error(`Device ${deviceId} offline — cannot send compiled batch ${batchId}`);
+  }
+
+  const result = await directWsServer.waitForBatchResult(batchId, batchTimeoutMs + 30_000);
+  return {
+    type: "BATCH_RESULT",
+    batchId: result.batchId,
+    workflowId: result.workflowId,
+    status: result.status as BATCH_RESULT["status"],
+    results: result.results as BATCH_RESULT["results"],
+    executedAt: result.executedAt,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // MAIN: runCompiledWorkflow
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -365,7 +491,72 @@ export async function runCompiledWorkflow(
 
   let aborted = false;
 
-  for (let i = startStepIndex; i < workflow.steps.length; i++) {
+  let i = startStepIndex;
+  while (i < workflow.steps.length) {
+    const batch = collectCompiledBatch(workflow, i);
+    if (batch.batchSteps.length >= MIN_COMPILED_BATCH_SIZE) {
+      const batchStart = Date.now();
+      console.log(`[runner] Fast-path batch from step ${i}: ${batch.batchSteps.length} deterministic steps`);
+      try {
+        const batchResult = await executeCompiledBatch(deviceId, workflow.id, i, batch.batchSteps);
+        const firstFailed = batchResult.results.findIndex(
+          (r) => r.status === "failed" || r.status === "timeout"
+        );
+        const successfulCount = firstFailed >= 0 ? firstFailed : batch.steps.length;
+        let verifiedSuccessfulCount = successfulCount;
+        let batchCompleted = batchResult.status === "completed";
+
+        if (batchCompleted && successfulCount > 0) {
+          const lastStepIndex = i + successfulCount - 1;
+          const lastStep = batch.steps[successfulCount - 1];
+          if (lastStep.expectedPageHash && lastStep.action !== "wait") {
+            const postCheck = await verifyPostAction(deviceId, workflow.id, lastStep, lastStepIndex);
+            if (!postCheck.verified) {
+              batchCompleted = false;
+              verifiedSuccessfulCount = Math.max(0, successfulCount - 1);
+              console.warn(
+                `[runner] Batch final fingerprint mismatch at step ${lastStepIndex}; ` +
+                `falling back to single-step recovery from that step`
+              );
+            }
+          }
+        }
+
+        for (let j = 0; j < verifiedSuccessfulCount; j++) {
+          const batchedStep = batch.steps[j];
+          results.push({
+            stepIndex: i + j,
+            stepId: batchedStep.id,
+            success: true,
+            fingerprintMatch: true,
+            postActionVerified: true,
+            latencyMs: batchResult.results[j]?.durationMs ?? 0,
+          });
+        }
+
+        counters.deterministicSteps += verifiedSuccessfulCount;
+        counters.batchedSteps += verifiedSuccessfulCount;
+        ctx.stepsCompleted = i + verifiedSuccessfulCount;
+
+        if (batchCompleted) {
+          await updateWorkflowStatus(workflow.id, "running", ctx.stepsCompleted, ctx.recoveryCount);
+          console.log(`[runner] Batch completed ${verifiedSuccessfulCount} steps (${Date.now() - batchStart}ms)`);
+          i += verifiedSuccessfulCount;
+          continue;
+        }
+
+        counters.failedSteps++;
+        const localFailedStep = firstFailed >= 0 ? firstFailed + 1 : verifiedSuccessfulCount + 1;
+        console.warn(
+          `[runner] Batch stopped at local step ${localFailedStep}/${batch.steps.length}; ` +
+          `falling back to single-step recovery from global step ${i + verifiedSuccessfulCount}`
+        );
+        i += verifiedSuccessfulCount;
+      } catch (err) {
+        console.warn(`[runner] Batch fast-path failed at step ${i}: ${(err as Error).message}; falling back to single-step execution`);
+      }
+    }
+
     const step = workflow.steps[i];
     const stepStart = Date.now();
     counters.deterministicSteps++;
@@ -523,6 +714,7 @@ export async function runCompiledWorkflow(
     await updateWorkflowStatus(workflow.id, "running", ctx.stepsCompleted, ctx.recoveryCount);
 
     console.log(`[runner] Step ${i + 1} completed (${Date.now() - stepStart}ms)`);
+    i++;
   }
 
   // ─── Finalize ─────────────────────────────────────────────────────────────
