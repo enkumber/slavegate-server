@@ -2,8 +2,7 @@
  * vision/vision-provider.interface.ts
  * VLM provider adapter interface — swap providers via config, zero code change.
  *
- * Current providers:
- *   - AnthropicVisionProvider (Claude Sonnet/Opus — cloud)
+ * Current provider:
  *   - OpenAICompatibleProvider (OpenAI cloud OR local Qwen3-VL via vLLM/Ollama)
  *
  * Swap: change vision_config row in DB — service auto-routes to correct adapter.

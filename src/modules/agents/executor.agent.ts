@@ -1,6 +1,6 @@
 /**
  * agents/executor.agent.ts
- * Per-step execution — cascade first, LLM fallback (Sonnet).
+ * Per-step execution — cascade first, LLM fallback.
  *
  * INTEGRATION: Uses existing cascade from skill.cascade.ts
  * Flow:

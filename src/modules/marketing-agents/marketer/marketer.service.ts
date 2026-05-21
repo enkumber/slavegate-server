@@ -35,8 +35,8 @@ import { researchService } from '../../research/research.service';
 // CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const ASSESS_MODEL = 'claude-3-5-haiku-20241022';
-const STRATEGY_MODEL = 'claude-sonnet-4-20250514';
+const ASSESS_MODEL = 'openai-codex/gpt-5.5';
+const STRATEGY_MODEL = 'openai-codex/gpt-5.5';
 const DISCOVERY_TIMEOUT_MS = 5 * 60_000;  // 5 minutes
 
 // ═══════════════════════════════════════════════════════════════════════════════

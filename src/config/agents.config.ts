@@ -5,19 +5,19 @@
 
 export const agentConfig = {
   planner: {
-    model: process.env.AGENT_PLANNER_MODEL || "anthropic/claude-opus-4-5",
+    model: process.env.AGENT_PLANNER_MODEL || "openai-codex/gpt-5.5",
     temperature: 0.3,
     maxTokens: 2000,
   },
   executor: {
-    model: process.env.AGENT_EXECUTOR_MODEL || "anthropic/claude-sonnet-4-6",
+    model: process.env.AGENT_EXECUTOR_MODEL || "openai-codex/gpt-5.5",
     temperature: 0.1,
     maxTokens: 1000,
     /** Speculative multi-action lookahead (UFO paper: -51% LLM calls). 1 = disabled. */
     lookahead: parseInt(process.env.AGENT_EXECUTOR_LOOKAHEAD || "3", 10),
   },
   verifier: {
-    model: process.env.AGENT_VERIFIER_MODEL || "anthropic/claude-sonnet-4-6",
+    model: process.env.AGENT_VERIFIER_MODEL || "openai-codex/gpt-5.5",
     temperature: 0.1,
     maxTokens: 500,
   },

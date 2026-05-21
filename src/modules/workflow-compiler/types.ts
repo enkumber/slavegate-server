@@ -136,7 +136,7 @@ export interface CompileOptions {
   maxTotalRecoveryAttempts?: number;
   /** LLM model for recovery (default: from config) */
   recoveryModel?: string;
-  /** LLM model for compilation (default: claude-3-5-haiku) */
+  /** LLM model for compilation (default: openai-codex/gpt-5.5) */
   model?: string;
   /** If true, compile only — don't execute */
   dryRun?: boolean;

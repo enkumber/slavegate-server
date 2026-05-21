@@ -135,7 +135,7 @@ function validateCompiledWorkflow(
     startPage: raw.startPage as string,
     maxRecoveryAttempts: 3,
     maxTotalRecoveryAttempts: 10,
-    recoveryModel: "claude-3-5-haiku-20241022",
+    recoveryModel: "openai-codex/gpt-5.5",
   };
 
   return { valid: true, errors: [], workflow };
@@ -154,7 +154,7 @@ export const MAX_INSTRUCTION_LENGTH = 2000;
 export async function compileInstruction(req: CompileRequest): Promise<CompileResult> {
   const { appId, instruction, options = {} } = req;
   const sanitizedInstruction = instruction.trim().slice(0, MAX_INSTRUCTION_LENGTH);
-  const model = options.model ?? "claude-3-5-haiku-20241022";
+  const model = options.model ?? "openai-codex/gpt-5.5";
   const db = getDb();
 
   if (!sanitizedInstruction) {
@@ -237,7 +237,7 @@ export async function compileInstruction(req: CompileRequest): Promise<CompileRe
   const workflow = validation.workflow;
   workflow.source = sanitizedInstruction;
   workflow.maxRecoveryAttempts = options.maxRecoveryAttempts ?? 3;
-  workflow.recoveryModel = options.recoveryModel ?? "claude-3-5-haiku-20241022";
+  workflow.recoveryModel = options.recoveryModel ?? "openai-codex/gpt-5.5";
 
   // 6. Save to DB
   let workflowId: string;

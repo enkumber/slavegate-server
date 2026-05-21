@@ -146,7 +146,7 @@ router.post("/compile-and-run", async (req: Request, res: Response) => {
   // ── Execute ───────────────────────────────────────────────────────────────
   resetRecoveryCounts(workflow.id);
 
-  const recoveryModel = workflow.recoveryModel || "claude-3-5-haiku-20241022";
+  const recoveryModel = workflow.recoveryModel || "openai-codex/gpt-5.5";
 
   const runResult: RunCompiledResult = await runCompiledWorkflow(
     {
@@ -281,7 +281,7 @@ router.post("/run-compiled", async (req: Request, res: Response) => {
   // ── Execute ───────────────────────────────────────────────────────────────
   resetRecoveryCounts(workflow.id);
 
-  const recoveryModel = workflow.recoveryModel || "claude-3-5-haiku-20241022";
+  const recoveryModel = workflow.recoveryModel || "openai-codex/gpt-5.5";
 
   const runResult: RunCompiledResult = await runCompiledWorkflow(
     {

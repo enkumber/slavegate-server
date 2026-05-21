@@ -1,6 +1,6 @@
 /**
  * screen-detection/detectors/vlm.detector.ts
- * L3 detector: Screen identification via Vision Language Model (Claude/GPT-4V).
+ * L3 detector: Screen identification via Vision Language Model (GPT-5.5/VLM).
  * Story: US-SCREEN-CASCADE
  *
  * Calls visionService.handleVisionRequest() with a screen_classification requestType.

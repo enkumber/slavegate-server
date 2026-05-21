@@ -7,8 +7,6 @@
  *   - Centralized auth (gateway manages API keys)
  *   - Model access (gateway token has full model access, direct oat01 token doesn't)
  *   - Unified billing/monitoring through OpenClaw
- *
- * Fallback: direct Anthropic Messages API if gateway is unavailable.
  */
 
 import type { LlmCompletionRequest, LlmCompletionResponse, LlmContent } from "./types";
@@ -18,15 +16,11 @@ import type { LlmCompletionRequest, LlmCompletionResponse, LlmContent } from "./
 const GATEWAY_ENDPOINT = process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18790";
 const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "";
 
-// Fallback: direct Anthropic API
-const ANTHROPIC_ENDPOINT = process.env.ANTHROPIC_ENDPOINT || "https://api.anthropic.com/v1";
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
-
-// Local Ollama (disabled for now - using Anthropic)
+// Local Ollama is optional for explicitly enabled local vision/planning routes.
 const OLLAMA_ENDPOINT = process.env.OLLAMA_ENDPOINT || "http://192.168.50.185:11434";
 const OLLAMA_VISION_MODEL = process.env.OLLAMA_VISION_MODEL || "llava:34b";
 const OLLAMA_PLANNING_MODEL = process.env.OLLAMA_PLANNING_MODEL || "qwen3:14b";
-const USE_LOCAL_VISION = process.env.USE_LOCAL_VISION === "true"; // default: false (use Anthropic)
+const USE_LOCAL_VISION = process.env.USE_LOCAL_VISION === "true"; // default: false
 const USE_LOCAL_PLANNING = process.env.USE_LOCAL_PLANNING === "true"; // default: false
 
 const REQUEST_TIMEOUT_MS = 120_000; // 2min — large screenshots (400KB+) can take longer via gateway
@@ -35,29 +29,21 @@ const MAX_RETRIES = 2;
 export class LlmClient {
   private readonly gatewayUrl: string;
   private readonly gatewayToken: string;
-  private readonly anthropicUrl: string;
-  private readonly anthropicKey: string;
-  private useGateway: boolean;
 
   constructor() {
     this.gatewayUrl = GATEWAY_ENDPOINT;
     this.gatewayToken = GATEWAY_TOKEN;
-    this.anthropicUrl = ANTHROPIC_ENDPOINT;
-    this.anthropicKey = ANTHROPIC_API_KEY;
 
-    // Prefer gateway if token is available
-    this.useGateway = !!this.gatewayToken;
-
-    if (!this.gatewayToken && !this.anthropicKey) {
-      console.warn("[llm-client] No OPENCLAW_GATEWAY_TOKEN or ANTHROPIC_API_KEY set — agent LLM calls will fail");
+    if (!this.gatewayToken) {
+      console.warn("[llm-client] No OPENCLAW_GATEWAY_TOKEN set — agent LLM calls will fail");
     }
 
-    console.log(`[llm-client] Mode: ${this.useGateway ? "gateway" : "direct-anthropic"}`);
+    console.log("[llm-client] Mode: gateway");
   }
 
   async complete(req: LlmCompletionRequest): Promise<LlmCompletionResponse> {
     // Route ONLY simple vision requests to Ollama (not planning which needs JSON)
-    // Planning prompts mention "JSON" or "steps" — those need structured output from Anthropic
+    // Planning prompts mention "JSON" or "steps" and need structured output.
     const hasImages = req.userContent.some(c => c.type === "image");
     const needsStructuredOutput = req.systemPrompt?.toLowerCase().includes("json") || 
                                    req.systemPrompt?.toLowerCase().includes("steps") ||
@@ -80,18 +66,7 @@ export class LlmClient {
       return await this.completeViaOllamaPlanning(req);
     }
 
-    if (this.useGateway) {
-      try {
-        return await this.completeViaGateway(req);
-      } catch (err) {
-        console.warn(`[llm-client] Gateway failed: ${(err as Error).message}, trying direct Anthropic`);
-        if (this.anthropicKey) {
-          return await this.completeViaAnthropic(req);
-        }
-        throw err;
-      }
-    }
-    return await this.completeViaAnthropic(req);
+    return await this.completeViaGateway(req);
   }
 
   // ─── Gateway path (OpenAI-compatible) ─────────────────────────────────────
@@ -129,9 +104,7 @@ export class LlmClient {
     }
     messages.push({ role: "user", content: userContent });
 
-    // Model name: OpenClaw gateway expects "openclaw" (routes to configured model)
-    // NOT "anthropic/model-name" — gateway handles model selection internally
-    const model = "openclaw";
+    const model = req.model || "openai-codex/gpt-5.5";
 
     const body = {
       model,
@@ -165,68 +138,6 @@ export class LlmClient {
       inputTokens: data.usage?.prompt_tokens ?? 0,
       outputTokens: data.usage?.completion_tokens ?? 0,
       model: data.model ?? req.model,
-    };
-  }
-
-  // ─── Direct Anthropic path (fallback) ─────────────────────────────────────
-
-  private async completeViaAnthropic(req: LlmCompletionRequest): Promise<LlmCompletionResponse> {
-    // Strip "anthropic/" prefix for direct API — gateway uses "anthropic/model" but Anthropic API expects just "model"
-    const anthropicModel = req.model.startsWith("anthropic/")
-      ? req.model.replace("anthropic/", "")
-      : req.model;
-
-    const content = req.userContent.map((c) => {
-      if (c.type === "text") {
-        return { type: "text" as const, text: c.text };
-      }
-      return {
-        type: "image" as const,
-        source: {
-          type: "base64" as const,
-          media_type: (c.mediaType || "image/jpeg") as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-          data: c.base64,
-        },
-      };
-    });
-
-    const body = {
-      model: anthropicModel,
-      max_tokens: req.maxTokens,
-      temperature: req.temperature,
-      system: req.systemPrompt,
-      messages: [{ role: "user", content }],
-    };
-
-    const resp = await this.fetchWithRetry(
-      `${this.anthropicUrl}/messages`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": this.anthropicKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify(body),
-      },
-    );
-
-    const data = await resp.json() as {
-      content: Array<{ type: string; text?: string }>;
-      usage: { input_tokens: number; output_tokens: number };
-      model: string;
-    };
-
-    const text = data.content
-      .filter((c: { type: string; text?: string }) => c.type === "text" && c.text)
-      .map((c: { type: string; text?: string }) => c.text!)
-      .join("");
-
-    return {
-      text,
-      inputTokens: data.usage?.input_tokens ?? 0,
-      outputTokens: data.usage?.output_tokens ?? 0,
-      model: data.model,
     };
   }
 

@@ -1,10 +1,10 @@
 /**
  * agents/planner.agent.ts
- * Task decomposition — Claude Opus, one call per task.
+ * Task decomposition — one call per task.
  * 
  * Two-step process when screenshot provided:
  * 1. Ollama LLaVA describes the screen (vision) → text description
- * 2. Anthropic plans based on text description (no image) → JSON steps
+ * 2. Gateway model plans based on text description (no image) → JSON steps
  */
 
 import { getLlmClient } from "./llm-client";
@@ -62,7 +62,7 @@ export class PlannerAgent {
       console.log(`[planner] Screen description: ${screenDescription.slice(0, 150)}...`);
     }
 
-    // Step 2: Plan with Anthropic (text only, no image)
+    // Step 2: Plan with gateway model (text only, no image)
     const userContent: LlmContent[] = [];
     let userPrompt = buildPlannerUserPrompt(input.task, input.appContext, !!input.currentScreenshot);
     

@@ -25,32 +25,12 @@ export async function llmComplete(
   if (options?.system) messages.push({ role: "system", content: options.system });
   messages.push({ role: "user", content: prompt });
 
-  const provider = config.provider.toLowerCase();
+  const provider = normalizeOpenAIProvider(config.provider);
   const selectedModel = model || config.model;
-
-  if (provider === "anthropic") {
-    const response = await fetch(`${endpointBase(config.endpoint, provider)}/messages`, {
-      method: "POST",
-      headers: {
-        "x-api-key": config.apiKey,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: selectedModel,
-        messages,
-        max_tokens: maxTokens,
-      }),
-    });
-    if (!response.ok) throw new Error(`LLM API error (${response.status}): ${sanitizeProviderError(await response.text())}`);
-    const data = await response.json() as { content?: Array<{ text?: string }> };
-    return data.content?.map((part) => part.text ?? "").join("") ?? "";
-  }
 
   const url = `${endpointBase(config.endpoint, provider)}/chat/completions`;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (provider === "minimax") headers["x-api-key"] = config.apiKey;
-  else headers.Authorization = `Bearer ${config.apiKey}`;
+  headers.Authorization = `Bearer ${config.apiKey}`;
 
   const response = await fetch(url, {
     method: "POST",
@@ -87,8 +67,16 @@ function sanitizeProviderError(text: string): string {
 }
 
 function endpointBase(endpoint: string | null, provider: string): string {
-  const fallback = provider === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1";
+  const fallback = "https://api.openai.com/v1";
   return (endpoint || fallback).replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
+}
+
+function normalizeOpenAIProvider(provider: string): string {
+  const normalized = provider.toLowerCase();
+  if (normalized === "openai" || normalized === "openai_compatible" || normalized === "openai-compatible") {
+    return normalized;
+  }
+  throw new Error(`Unsupported LLM provider: ${provider}. Supported: openai, openai_compatible.`);
 }
 
 /**

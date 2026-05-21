@@ -15,9 +15,7 @@
 
 import { getDb } from "../../db/client";
 import { resolvePrompt, type RequestType } from "./templates/prompt-templates";
-import { AnthropicVisionProvider } from "./providers/anthropic.provider";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.provider";
-import { MiniMaxVisionProvider }    from "./providers/minimax.provider";
 import type { VisionProvider, VisionResult, VerifyResult, VisionOptions } from "./vision-provider.interface";
 import { modelConfigService } from "../model-config/model-config.service";
 
@@ -55,7 +53,7 @@ export interface VerifyResponse {
 // ─── Vision config row ────────────────────────────────────────────────────────
 
 interface VisionConfig {
-  provider:     "anthropic" | "openai_compatible" | "openai" | "minimax";
+  provider:     "openai_compatible" | "openai";
   model:        string;
   endpoint:     string | null;
   apiKey:       string;
@@ -166,42 +164,14 @@ export class VisionService {
 
     const config = await this.loadConfig();
 
-    let provider: VisionProvider;
-    switch (config.provider) {
-      case "anthropic":
-        provider = new AnthropicVisionProvider({
-          apiKey:      config.apiKey,
-          model:       config.model,
-          endpoint:    config.endpoint ?? undefined,
-          maxTokens:   config.maxTokens,
-          temperature: config.temperature,
-          timeoutMs:   config.timeoutMs,
-        });
-        break;
-      case "openai":
-      case "openai_compatible":
-        provider = new OpenAICompatibleProvider({
-          apiKey:      config.apiKey,
-          model:       config.model,
-          endpoint:    config.endpoint ?? undefined,
-          maxTokens:   config.maxTokens,
-          temperature: config.temperature,
-          timeoutMs:   config.timeoutMs,
-        });
-        break;
-      case "minimax":
-        provider = new MiniMaxVisionProvider({
-          apiKey:     config.apiKey,
-          model:      config.model,
-          endpoint:   config.endpoint ?? "https://api.minimax.io/anthropic/v1",
-          maxTokens:  config.maxTokens,
-          temperature: config.temperature,
-          timeoutMs:  config.timeoutMs,
-        });
-        break;
-      default:
-        throw new Error(`Unknown vision provider: ${config.provider}`);
-    }
+    const provider = new OpenAICompatibleProvider({
+      apiKey:      config.apiKey,
+      model:       config.model,
+      endpoint:    config.endpoint ?? undefined,
+      maxTokens:   config.maxTokens,
+      temperature: config.temperature,
+      timeoutMs:   config.timeoutMs,
+    });
 
     this.cachedProvider = provider;
     this.cachedModel = config.model;
@@ -280,7 +250,6 @@ export class VisionService {
 
   /**
    * Estimate tokens if provider doesn't return usage info.
-   * Anthropic returns usage in response; OpenAI-compatible also does.
    * This is a fallback for providers that don't.
    */
   private async estimateTokens(
@@ -306,8 +275,7 @@ function normalizeVisionProvider(provider: string): VisionConfig["provider"] {
   const normalized = provider.toLowerCase();
   if (normalized === "openai") return "openai";
   if (normalized === "openai_compatible" || normalized === "openai-compatible") return "openai_compatible";
-  if (normalized === "anthropic" || normalized === "minimax") return normalized;
-  throw new Error(`Unsupported vision_vlm provider: ${provider}. Supported: openai_compatible, openai, anthropic, minimax.`);
+  throw new Error(`Unsupported vision_vlm provider: ${provider}. Supported: openai_compatible, openai.`);
 }
 
 export const visionService = new VisionService();

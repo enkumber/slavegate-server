@@ -86,7 +86,7 @@ function makeWorkflow(overrides: Partial<CompiledWorkflow> = {}): CompiledWorkfl
     startPage: "page_home",
     maxRecoveryAttempts: 3,
     maxTotalRecoveryAttempts: 10,
-    recoveryModel: "claude-3-5-haiku",
+    recoveryModel: "openai-codex/gpt-5.5",
     ...overrides,
   };
 }

@@ -73,7 +73,7 @@ export interface RecoveryHistoryEntry {
 
 const MAX_RECOVERY_PER_STEP = 3;
 const MAX_RECOVERY_PER_WORKFLOW = 10;
-const DEFAULT_RECOVERY_MODEL = "claude-3-5-haiku-20241022";
+const DEFAULT_RECOVERY_MODEL = "openai-codex/gpt-5.5";
 
 // Track per-step recovery counts with TTL (auto-expire after 30 min)
 const RECOVERY_TTL_MS = 30 * 60 * 1000; // 30 minutes

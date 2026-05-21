@@ -429,37 +429,19 @@ function sanitizeProviderError(text: string): string {
 }
 
 function endpointBase(endpoint: string | null, provider: string): string {
-  const fallback = provider === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1";
+  const fallback = "https://api.openai.com/v1";
   return (endpoint || fallback).replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
 }
 
 async function testProvider(config: ResolvedModelConfig): Promise<void> {
   const provider = config.provider.toLowerCase();
-  if (!["anthropic", "openai", "openai_compatible", "minimax"].includes(provider)) {
+  if (!["openai", "openai_compatible"].includes(provider)) {
     throw new ModelConfigError(`Unsupported provider for ${config.role}: ${config.provider}`, 400, "AI_PROVIDER_UNSUPPORTED");
   }
-  if (provider === "anthropic") {
-    const res = await fetch(`${endpointBase(config.endpoint, provider)}/messages`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": config.apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({ model: config.model, max_tokens: 8, messages: [{ role: "user", content: "ping" }] }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) throw new Error(`Provider test failed (${res.status}): ${sanitizeProviderError(await res.text())}`);
-    return;
-  }
-
-  const path = provider === "minimax" ? "/messages" : "/chat/completions";
+  const path = "/chat/completions";
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (provider === "minimax") headers["x-api-key"] = config.apiKey;
-  else headers.Authorization = `Bearer ${config.apiKey}`;
-  const body = provider === "minimax"
-    ? { model: config.model, max_tokens: 8, messages: [{ role: "user", content: [{ type: "text", text: "ping" }] }] }
-    : { model: config.model, max_tokens: 8, messages: [{ role: "user", content: "ping" }] };
+  headers.Authorization = `Bearer ${config.apiKey}`;
+  const body = { model: config.model, max_tokens: 8, messages: [{ role: "user", content: "ping" }] };
   const res = await fetch(`${endpointBase(config.endpoint, provider)}${path}`, {
     method: "POST",
     headers,

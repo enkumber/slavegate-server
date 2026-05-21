@@ -1,6 +1,6 @@
 /**
  * agents/verifier.agent.ts
- * Post-action verification — Claude Sonnet, one call per step.
+ * Post-action verification — gateway model, one call per step.
  */
 
 import { getLlmClient } from "./llm-client";
