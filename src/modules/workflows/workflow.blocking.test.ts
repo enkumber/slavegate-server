@@ -217,6 +217,7 @@ describe("Generated workflow contract validation", () => {
 
     expect(typeof validator.validateGeneratedWorkflowTemplate).toBe("function");
     expect(typeof validator.getGeneratedWorkflowContract).toBe("function");
+    expect(typeof validator.summarizeGeneratedWorkflowTemplate).toBe("function");
 
     const contract = validator.getGeneratedWorkflowContract();
     expect(contract).toMatchObject({
@@ -296,7 +297,7 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(routeBody).toContain("workflow failed validation");
     expect(routeBody).toContain("errors: validation.errors");
     expect(routeBody).toContain("persisted");
-    expect(routeBody).toContain("stepCount");
+    expect(routeBody).toContain("summarizeGeneratedWorkflowTemplate");
 
     const dryRunBranch = routeBody.substring(
       routeBody.indexOf("if (dryRun)"),
@@ -315,6 +316,7 @@ describe("POST /workflows/generated — dry-run validation", () => {
     );
 
     expect(source).toContain("validateGeneratedWorkflowTemplate");
+    expect(source).toContain("summarizeGeneratedWorkflowTemplate");
     expect(source).toContain('router.get("/workflows/generated/schema"');
     expect(source).toContain('router.post("/workflows/generated/prompt"');
     expect(source).toContain('router.post("/workflows/generated/validate"');

@@ -367,6 +367,21 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
     : { ok: true, errors: [], template: candidate as WorkflowTemplate };
 }
 
+export function summarizeGeneratedWorkflowTemplate(
+  template: WorkflowTemplate,
+  options?: { dryRun?: boolean; persisted?: boolean }
+): Record<string, unknown> {
+  return {
+    generated: true,
+    ...(options?.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
+    ...(options?.persisted !== undefined ? { persisted: options.persisted } : {}),
+    templateId: template.id,
+    platform: template.platform,
+    version: template.version,
+    stepCount: template.steps.length,
+  };
+}
+
 export function getGeneratedWorkflowContract(): Record<string, unknown> {
   const exampleSteps: WorkflowStep[] = [
     { type: "action", id: "open_reddit", action: "open_app", params: { packageName: "com.reddit.frontpage" } },

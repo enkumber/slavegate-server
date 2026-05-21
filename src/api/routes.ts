@@ -26,6 +26,7 @@ import {
 } from "../modules/workflows/generated-workflow-prompt";
 import {
   getGeneratedWorkflowContract,
+  summarizeGeneratedWorkflowTemplate,
   validateGeneratedWorkflowTemplate,
 } from "../modules/workflows/workflow-validator";
 import { hbeService } from "../modules/hbe/hbe.service";
@@ -599,10 +600,7 @@ router.post("/workflows/generated/validate", requireAuth, async (req, res) => {
     ok: true,
     data: {
       valid: true,
-      templateId: template.id,
-      platform: template.platform,
-      version: template.version,
-      stepCount: template.steps.length,
+      ...summarizeGeneratedWorkflowTemplate(template),
     },
   });
 });
@@ -641,15 +639,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
       }
       return res.status(200).json({
         ok: true,
-        data: {
-          generated: true,
-          dryRun: true,
-          persisted: shouldPersist,
-          templateId: template.id,
-          platform: template.platform,
-          version: template.version,
-          stepCount: template.steps.length,
-        },
+        data: summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist }),
       });
     }
 
