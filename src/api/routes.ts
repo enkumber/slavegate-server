@@ -30,6 +30,7 @@ import {
   getGeneratedWorkflowContract,
   summarizeGeneratedWorkflowTemplate,
   validateGeneratedWorkflowTemplate,
+  type GeneratedWorkflowCompiledPlan,
 } from "../modules/workflows/workflow-validator";
 import { hbeService } from "../modules/hbe/hbe.service";
 import { accountsService } from "../modules/accounts/accounts.service";
@@ -57,6 +58,10 @@ import type {
 import type { WorkflowCheckpoint, WorkflowTemplate } from "../modules/workflows/types";
 
 const router = Router();
+
+function generatedWorkflowCacheResult(cacheKey?: string, requestKey?: string): "cache_hit" | "canonical_hit" {
+  return requestKey && !cacheKey ? "canonical_hit" : "cache_hit";
+}
 
 // ─── Global request timeout (hard deadline) ────────────────────────────────────
 // Prevents hanging requests from exhausting server resources.
@@ -612,7 +617,7 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
 
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
     if (cached) {
-      generatedWorkflowCacheLookups?.labels("prompt", "hit").inc();
+      generatedWorkflowCacheLookups?.labels("prompt", "canonical_hit").inc();
       return res.json({
         ok: true,
         data: {
@@ -696,7 +701,7 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
         ? await workflowService.getGeneratedPlanCache(cacheKey)
         : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
       if (cached) {
-        generatedWorkflowCacheLookups?.labels("resolve", "hit").inc();
+        generatedWorkflowCacheLookups?.labels("resolve", generatedWorkflowCacheResult(cacheKey, requestKey)).inc();
         return res.json({
           ok: true,
           data: {
@@ -738,7 +743,11 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
     const shouldPersist = persist !== false;
     if (shouldPersist) {
       await workflowService.saveTemplate(template);
-      await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey);
+      await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+        source: "generated_workflow_resolve",
+        persisted: true,
+      });
+      generatedWorkflowCacheLookups?.labels("resolve", "compiled_new").inc();
     }
 
     res.status(200).json({
@@ -752,7 +761,7 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
         requestKey: requestKey ?? null,
         nextAction: shouldPersist ? "reuse_cached_workflow" : "validate_or_persist_before_execution",
         persisted: shouldPersist,
-        ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist }),
+        ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist, compiledPlan }),
       },
     });
   } catch (err) {
@@ -791,6 +800,13 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
   if (!workflow && !cacheKey && !requestKey) {
     return res.status(400).json({ ok: false, error: "workflow, cacheKey or requestKey required" });
   }
+  if (workflow && (cacheKey || requestKey)) {
+    return res.status(400).json({
+      ok: false,
+      error: "workflow payload is not allowed with cacheKey or requestKey execution",
+      code: "WORKFLOW_PAYLOAD_NOT_ALLOWED_FOR_CANONICAL_EXECUTION",
+    });
+  }
   if (!dryRun && !deviceId) {
     return res.status(400).json({ ok: false, error: "deviceId required unless dryRun is true" });
   }
@@ -801,15 +817,14 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
     return res.status(400).json({ ok: false, error: "requestKey must be a 24-character lowercase hex string" });
   }
 
-  let resolvedWorkflow = workflow;
   let cacheHit = false;
   let resolvedCache: GeneratedWorkflowPlanCacheRecord | null = null;
   try {
-    if (!resolvedWorkflow && (cacheKey || requestKey)) {
+    if (cacheKey || requestKey) {
       const cached = cacheKey
         ? await workflowService.getGeneratedPlanCache(cacheKey)
         : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
-      if (!cached) {
+      if (!cached && !workflow) {
         generatedWorkflowCacheLookups?.labels("execute", "miss").inc();
         return res.status(404).json({
           ok: false,
@@ -818,45 +833,69 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
           requestKey,
         });
       }
-      resolvedWorkflow = cached.workflow;
-      resolvedCache = cached;
-      cacheHit = true;
-      generatedWorkflowCacheLookups?.labels("execute", "hit").inc();
+      if (cached) {
+        resolvedCache = cached;
+        cacheHit = true;
+        generatedWorkflowCacheLookups?.labels("execute", generatedWorkflowCacheResult(cacheKey, requestKey)).inc();
+      } else {
+        generatedWorkflowCacheLookups?.labels("execute", "miss").inc();
+      }
     }
 
-    const validation = validateGeneratedWorkflowTemplate(resolvedWorkflow);
-    if (!validation.template) {
-      return res.status(400).json({
-        ok: false,
-        error: "workflow failed validation",
-        errors: validation.errors,
-      });
+    let template: WorkflowTemplate;
+    let compiledPlan: GeneratedWorkflowCompiledPlan;
+    if (resolvedCache) {
+      template = resolvedCache.workflow;
+      compiledPlan = resolvedCache.compiledPlan;
+    } else {
+      const validation = validateGeneratedWorkflowTemplate(workflow);
+      if (!validation.template) {
+        return res.status(400).json({
+          ok: false,
+          error: "workflow failed validation",
+          errors: validation.errors,
+        });
+      }
+      template = validation.template;
+      compiledPlan = compileGeneratedWorkflowTemplate(template);
     }
-    const template = validation.template;
-    const compiledPlan = compileGeneratedWorkflowTemplate(template);
 
     if (dryRun) {
       const shouldPersist = persist === true;
-      if (shouldPersist) {
+      if (shouldPersist && !resolvedCache) {
         await workflowService.saveTemplate(template);
-        await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey);
+        await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+          source: "generated_workflow_execute_dry_run",
+          persisted: true,
+        });
+        generatedWorkflowCacheLookups?.labels("execute", "compiled_new").inc();
       }
       return res.status(200).json({
         ok: true,
         data: {
           cacheHit,
+          canonicalHit: cacheHit,
           canExecuteFromCache: cacheHit || shouldPersist,
           cacheKey: resolvedCache?.cacheKey ?? compiledPlan.cacheKey,
           requestKey: resolvedCache?.requestKey ?? requestKey ?? null,
-          ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist }),
+          canonicalWorkflowId: resolvedCache?.canonicalWorkflowId ?? template.id,
+          canonicalWorkflowVersion: resolvedCache?.canonicalWorkflowVersion ?? template.version,
+          compiledPlanHash: resolvedCache?.compiledPlanHash ?? null,
+          ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist, compiledPlan }),
         },
       });
     }
 
     const dispatchDeviceId = dryRun ? undefined : resolveDeviceIdForDispatch(deviceId!);
 
-    await workflowService.saveTemplate(template);
-    await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey);
+    if (!resolvedCache) {
+      await workflowService.saveTemplate(template);
+      await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+        source: "generated_workflow_execute",
+        persisted: true,
+      });
+      generatedWorkflowCacheLookups?.labels("execute", "compiled_new").inc();
+    }
     const data = await dispatchWorkflowTemplate({
       templateId: template.id,
       template,
@@ -879,9 +918,13 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         ...data,
         generated: true,
         cacheHit,
+        canonicalHit: cacheHit,
         canExecuteFromCache: true,
         cacheKey: resolvedCache?.cacheKey ?? compiledPlan.cacheKey,
         requestKey: resolvedCache?.requestKey ?? requestKey ?? null,
+        canonicalWorkflowId: resolvedCache?.canonicalWorkflowId ?? template.id,
+        canonicalWorkflowVersion: resolvedCache?.canonicalWorkflowVersion ?? template.version,
+        compiledPlanHash: resolvedCache?.compiledPlanHash ?? null,
         compiledPlan,
       },
     });

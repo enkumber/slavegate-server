@@ -133,7 +133,7 @@ function validateCompiledWorkflow(
     })),
     appMapVersion: appMap.version,
     startPage: raw.startPage as string,
-    maxRecoveryAttempts: 3,
+    maxRecoveryAttempts: 1,
     maxTotalRecoveryAttempts: 10,
     recoveryModel: "openai-codex/gpt-5.5",
   };
@@ -236,7 +236,7 @@ export async function compileInstruction(req: CompileRequest): Promise<CompileRe
 
   const workflow = validation.workflow;
   workflow.source = sanitizedInstruction;
-  workflow.maxRecoveryAttempts = options.maxRecoveryAttempts ?? 3;
+  workflow.maxRecoveryAttempts = options.maxRecoveryAttempts ?? 1;
   workflow.recoveryModel = options.recoveryModel ?? "openai-codex/gpt-5.5";
 
   // 6. Save to DB

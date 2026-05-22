@@ -133,6 +133,10 @@ function cacheRecord() {
     cacheKey: compiledPlan.cacheKey,
     requestKey: "c02c59dfbe512562f8c65c97",
     templateId: workflow.id,
+    canonicalWorkflowId: workflow.id,
+    canonicalWorkflowVersion: workflow.version,
+    compiledPlanHash: "hash-test",
+    sourceMetadata: { source: "test" },
     platform: workflow.platform,
     templateVersion: workflow.version,
     workflow,
@@ -215,9 +219,13 @@ describe("generated workflow cache-only execution route", () => {
     expect(response.json.data).toMatchObject({
       generated: true,
       cacheHit: true,
+      canonicalHit: true,
       canExecuteFromCache: true,
       cacheKey: cached.cacheKey,
       requestKey: cached.requestKey,
+      canonicalWorkflowId: cached.canonicalWorkflowId,
+      canonicalWorkflowVersion: cached.canonicalWorkflowVersion,
+      compiledPlanHash: cached.compiledPlanHash,
       compiledPlan: {
         llmBudget: {
           happyPathRequests: 0,
@@ -253,6 +261,7 @@ describe("generated workflow cache-only execution route", () => {
     expect(response.json.data).toMatchObject({
       generated: true,
       cacheHit: true,
+      canonicalHit: true,
       canExecuteFromCache: true,
       cacheKey: cached.cacheKey,
       requestKey: cached.requestKey,
@@ -271,6 +280,24 @@ describe("generated workflow cache-only execution route", () => {
     );
     expect(mocks.metrics.executionLabels).toHaveBeenCalledWith("reddit", "true", "request_key");
     expect(mocks.metrics.llmAvoidedLabels).toHaveBeenCalledWith("reddit", "cache_hit");
+  });
+
+  it("rejects workflow payloads in canonical cache execution mode", async () => {
+    const cached = cacheRecord();
+
+    const response = await postGeneratedWorkflow({
+      requestKey: cached.requestKey,
+      workflow: cached.workflow,
+      deviceId: "11111111-1111-4111-8111-111111111111",
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.json).toMatchObject({
+      ok: false,
+      code: "WORKFLOW_PAYLOAD_NOT_ALLOWED_FOR_CANONICAL_EXECUTION",
+    });
+    expect(mocks.workflowService.getGeneratedPlanCacheByRequestKey).not.toHaveBeenCalled();
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
   });
 
   it("rejects ambiguous short device id prefixes before database writes", async () => {

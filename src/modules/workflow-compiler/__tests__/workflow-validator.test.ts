@@ -84,7 +84,7 @@ function makeWorkflow(overrides: Partial<CompiledWorkflow> = {}): CompiledWorkfl
     steps: [makeStep()],
     appMapVersion: "1.0.0",
     startPage: "page_home",
-    maxRecoveryAttempts: 3,
+    maxRecoveryAttempts: 1,
     maxTotalRecoveryAttempts: 10,
     recoveryModel: "openai-codex/gpt-5.5",
     ...overrides,

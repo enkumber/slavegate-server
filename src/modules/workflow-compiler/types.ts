@@ -32,7 +32,7 @@ export interface CompiledWorkflow {
   /** Expected starting page ID (from app map) */
   startPage: string;
 
-  /** Max recovery attempts per step (default: 3) */
+  /** Max recovery attempts per step (default: 1) */
   maxRecoveryAttempts: number;
   /** Max total recovery attempts per workflow (default: 10) */
   maxTotalRecoveryAttempts: number;
@@ -130,7 +130,7 @@ export interface CompileRequest {
 }
 
 export interface CompileOptions {
-  /** Max recovery attempts per step (default: 3) */
+  /** Max recovery attempts per step (default: 1) */
   maxRecoveryAttempts?: number;
   /** Max total recovery attempts per workflow (default: 10) */
   maxTotalRecoveryAttempts?: number;

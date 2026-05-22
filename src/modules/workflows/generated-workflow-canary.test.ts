@@ -110,7 +110,7 @@ describe("agent-generated workflow canary", () => {
     const routeEnd = source.indexOf('router.post("/workflows/:id/cancel"', routeStart);
     const routeBody = source.substring(routeStart, routeEnd);
 
-    expect(routeBody).toContain("summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist })");
+    expect(routeBody).toContain("summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist, compiledPlan })");
     const dryRunBranch = routeBody.substring(
       routeBody.indexOf("if (dryRun)"),
       routeBody.indexOf("await workflowService.saveTemplate(template);", routeBody.indexOf("if (dryRun)"))

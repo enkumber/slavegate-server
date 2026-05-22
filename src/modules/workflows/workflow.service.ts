@@ -17,7 +17,10 @@ import type {
   WorkflowStatus,
   WorkflowTemplate,
 } from "./types";
-import type { GeneratedWorkflowCompiledPlan } from "./workflow-validator";
+import {
+  computeGeneratedWorkflowCompiledPlanHash,
+  type GeneratedWorkflowCompiledPlan,
+} from "./workflow-validator";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -50,6 +53,10 @@ export interface CreateWorkflowInput {
 export interface GeneratedWorkflowPlanCacheRecord {
   cacheKey: string;
   requestKey: string | null;
+  canonicalWorkflowId: string;
+  canonicalWorkflowVersion: string;
+  compiledPlanHash: string;
+  sourceMetadata: Record<string, unknown>;
   templateId: string;
   platform: string;
   templateVersion: string;
@@ -300,15 +307,29 @@ export class WorkflowService {
   async saveGeneratedPlanCache(
     template: WorkflowTemplate,
     compiledPlan: GeneratedWorkflowCompiledPlan,
-    requestKey?: string
+    requestKey?: string,
+    sourceMetadata: Record<string, unknown> = {}
   ): Promise<void> {
     const db = getDb();
+    const compiledPlanHash = computeGeneratedWorkflowCompiledPlanHash(compiledPlan);
+    if (requestKey) {
+      const existing = await db.query(
+        "SELECT cache_key FROM generated_workflow_plan_cache WHERE request_key = $1 LIMIT 1",
+        [requestKey]
+      );
+      if (existing.rows.length > 0) return;
+    }
     await db.query(
       `INSERT INTO generated_workflow_plan_cache
-         (cache_key, request_key, template_id, platform, template_version, workflow, compiled_plan)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (cache_key, request_key, canonical_workflow_id, canonical_workflow_version, compiled_plan_hash,
+          source_metadata, template_id, platform, template_version, workflow, compiled_plan)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (cache_key) DO UPDATE SET
          request_key      = COALESCE(EXCLUDED.request_key, generated_workflow_plan_cache.request_key),
+         canonical_workflow_id = EXCLUDED.canonical_workflow_id,
+         canonical_workflow_version = EXCLUDED.canonical_workflow_version,
+         compiled_plan_hash = EXCLUDED.compiled_plan_hash,
+         source_metadata = generated_workflow_plan_cache.source_metadata || EXCLUDED.source_metadata,
          template_id      = EXCLUDED.template_id,
          platform         = EXCLUDED.platform,
          template_version = EXCLUDED.template_version,
@@ -318,6 +339,10 @@ export class WorkflowService {
       [
         compiledPlan.cacheKey,
         requestKey ?? null,
+        template.id,
+        template.version,
+        compiledPlanHash,
+        JSON.stringify(sourceMetadata),
         template.id,
         template.platform,
         template.version,
@@ -386,6 +411,10 @@ function rowToGeneratedPlanCache(row: Record<string, unknown>): GeneratedWorkflo
   return {
     cacheKey: row.cache_key as string,
     requestKey: (row.request_key as string) ?? null,
+    canonicalWorkflowId: (row.canonical_workflow_id as string) ?? (row.template_id as string),
+    canonicalWorkflowVersion: (row.canonical_workflow_version as string) ?? (row.template_version as string),
+    compiledPlanHash: (row.compiled_plan_hash as string) ?? (row.cache_key as string),
+    sourceMetadata: (row.source_metadata as Record<string, unknown>) ?? {},
     templateId: row.template_id as string,
     platform: row.platform as string,
     templateVersion: row.template_version as string,

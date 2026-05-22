@@ -66,7 +66,7 @@ function makeWorkflow(overrides: Partial<CompiledWorkflow> = {}): CompiledWorkfl
     steps: [makeStep()],
     appMapVersion: "1.0.0",
     startPage: "page_home",
-    maxRecoveryAttempts: 3,
+    maxRecoveryAttempts: 1,
     maxTotalRecoveryAttempts: 10,
     recoveryModel: "test-model",
     ...overrides,
@@ -110,22 +110,16 @@ describe("attemptRecovery", () => {
   // ── Max attempts per step ────────────────────────────────────────────────
 
   describe("max attempts per step", () => {
-    it("should return false after MAX_RECOVERY_PER_STEP (3) attempts on the same step", async () => {
+    it("should return false after MAX_RECOVERY_PER_STEP (1) attempt on the same step", async () => {
       const ctx = makeRunnerContext({ recoveryCount: 0 });
 
-      // First 3 attempts should succeed (returns true for retry_step)
+      // First attempt should succeed (returns true for retry_step)
       const r1 = await attemptRecovery(ctx, 0, "mismatch");
       expect(r1).toBe(true);
 
+      // 2nd attempt should be blocked
       const r2 = await attemptRecovery(ctx, 0, "mismatch");
-      expect(r2).toBe(true);
-
-      const r3 = await attemptRecovery(ctx, 0, "mismatch");
-      expect(r3).toBe(true);
-
-      // 4th attempt should be blocked
-      const r4 = await attemptRecovery(ctx, 0, "mismatch");
-      expect(r4).toBe(false);
+      expect(r2).toBe(false);
     });
 
     it("should track step recovery counts independently per step index", async () => {
@@ -135,8 +129,6 @@ describe("attemptRecovery", () => {
       const ctx = makeRunnerContext({ recoveryCount: 0, workflow });
 
       // Exhaust step 0
-      await attemptRecovery(ctx, 0, "mismatch");
-      await attemptRecovery(ctx, 0, "mismatch");
       await attemptRecovery(ctx, 0, "mismatch");
 
       // Step 0 should be blocked
@@ -292,8 +284,6 @@ describe("attemptRecovery", () => {
       const ctx = makeRunnerContext();
 
       // Exhaust step 0
-      await attemptRecovery(ctx, 0, "mismatch");
-      await attemptRecovery(ctx, 0, "mismatch");
       await attemptRecovery(ctx, 0, "mismatch");
 
       // Step 0 blocked

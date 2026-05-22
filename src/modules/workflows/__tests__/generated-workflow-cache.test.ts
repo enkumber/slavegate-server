@@ -4,6 +4,7 @@ import { WorkflowService } from "../workflow.service";
 import type { WorkflowTemplate } from "../types";
 import {
   compileGeneratedWorkflowTemplate,
+  computeGeneratedWorkflowCompiledPlanHash,
   summarizeGeneratedWorkflowTemplate,
   validateGeneratedWorkflowTemplate,
 } from "../workflow-validator";
@@ -45,6 +46,10 @@ function cacheRow(overrides: Record<string, unknown> = {}) {
   return {
     cache_key: compiledPlan.cacheKey,
     request_key: "c02c59dfbe512562f8c65c97",
+    canonical_workflow_id: workflow.id,
+    canonical_workflow_version: workflow.version,
+    compiled_plan_hash: computeGeneratedWorkflowCompiledPlanHash(compiledPlan),
+    source_metadata: { source: "test" },
     template_id: workflow.id,
     platform: workflow.platform,
     template_version: workflow.version,
@@ -77,20 +82,38 @@ describe("generated workflow plan cache service", () => {
 
     await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97");
 
-    expect(query).toHaveBeenCalledTimes(1);
-    const [sql, values] = query.mock.calls[0];
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0][0]).toContain("SELECT cache_key FROM generated_workflow_plan_cache WHERE request_key = $1");
+    const [sql, values] = query.mock.calls[1];
     expect(sql).toContain("INSERT INTO generated_workflow_plan_cache");
     expect(sql).toContain("ON CONFLICT (cache_key) DO UPDATE");
     expect(sql).toContain("request_key      = COALESCE(EXCLUDED.request_key");
-    expect(values).toEqual([
-      compiledPlan.cacheKey,
-      "c02c59dfbe512562f8c65c97",
-      workflow.id,
-      "reddit",
-      "1.0.0",
-      JSON.stringify(workflow),
-      JSON.stringify(compiledPlan),
-    ]);
+    expect(sql).toContain("canonical_workflow_id");
+    expect(sql).toContain("compiled_plan_hash");
+    expect(values[0]).toBe(compiledPlan.cacheKey);
+    expect(values[1]).toBe("c02c59dfbe512562f8c65c97");
+    expect(values[2]).toBe(workflow.id);
+    expect(values[3]).toBe(workflow.version);
+    expect(values[4]).toBe(computeGeneratedWorkflowCompiledPlanHash(compiledPlan));
+    expect(values[5]).toBe(JSON.stringify({}));
+    expect(values[6]).toBe(workflow.id);
+    expect(values[7]).toBe("reddit");
+    expect(values[8]).toBe("1.0.0");
+    expect(values[9]).toBe(JSON.stringify(workflow));
+    expect(values[10]).toBe(JSON.stringify(compiledPlan));
+  });
+
+  it("reuses an existing canonical requestKey without inserting a duplicate", async () => {
+    const service = new WorkflowService();
+    const workflow = redditHomeWorkflow();
+    const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ cache_key: compiledPlan.cacheKey }] });
+    vi.mocked(getDb).mockReturnValue({ query } as any);
+
+    await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97");
+
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0][0]).toContain("WHERE request_key = $1");
   });
 
   it("returns a concrete cache miss without fabricating a workflow", async () => {
@@ -118,6 +141,10 @@ describe("generated workflow plan cache service", () => {
     expect(result).toMatchObject({
       cacheKey: row.cache_key,
       requestKey: row.request_key,
+      canonicalWorkflowId: "agent_generated_reddit_home_smoke_v1",
+      canonicalWorkflowVersion: "1.0.0",
+      compiledPlanHash: row.compiled_plan_hash,
+      sourceMetadata: { source: "test" },
       templateId: "agent_generated_reddit_home_smoke_v1",
       platform: "reddit",
       templateVersion: "1.0.0",
@@ -138,6 +165,26 @@ describe("generated workflow plan cache service", () => {
     expect(result?.createdAt).toBe("2026-05-21T18:00:00.000Z");
     expect(result?.lastUsedAt).toBe("2026-05-21T18:20:00.000Z");
     expect(query.mock.calls[0][0]).toContain("RETURNING *");
+  });
+
+  it("computes a stable compiled plan hash independent of object key order", () => {
+    const plan = compileGeneratedWorkflowTemplate(redditHomeWorkflow());
+    const reordered = {
+      steps: plan.steps,
+      llmBudget: plan.llmBudget,
+      maxDepth: plan.maxDepth,
+      checkpointCount: plan.checkpointCount,
+      actionCount: plan.actionCount,
+      stepCount: plan.stepCount,
+      templateVersion: plan.templateVersion,
+      platform: plan.platform,
+      templateId: plan.templateId,
+      cacheKey: plan.cacheKey,
+      planVersion: plan.planVersion,
+    };
+
+    expect(computeGeneratedWorkflowCompiledPlanHash(plan)).toMatch(/^[a-f0-9]{64}$/);
+    expect(computeGeneratedWorkflowCompiledPlanHash(reordered)).toBe(computeGeneratedWorkflowCompiledPlanHash(plan));
   });
 
   it("resolves requestKey hits through the latest cached cacheKey", async () => {

@@ -406,6 +406,22 @@ export interface GeneratedWorkflowCompiledPlan {
   steps: GeneratedWorkflowCompiledStep[];
 }
 
+export function computeGeneratedWorkflowCompiledPlanHash(plan: GeneratedWorkflowCompiledPlan): string {
+  return createHash("sha256").update(stableStringify({
+    planVersion: plan.planVersion,
+    cacheKey: plan.cacheKey,
+    templateId: plan.templateId,
+    platform: plan.platform,
+    templateVersion: plan.templateVersion,
+    stepCount: plan.stepCount,
+    actionCount: plan.actionCount,
+    checkpointCount: plan.checkpointCount,
+    maxDepth: plan.maxDepth,
+    llmBudget: plan.llmBudget,
+    steps: plan.steps,
+  })).digest("hex");
+}
+
 export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedWorkflowTemplateValidationResult {
   const errors: string[] = [];
   if (!isRecord(template)) {
@@ -452,7 +468,7 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
 
 export function summarizeGeneratedWorkflowTemplate(
   template: WorkflowTemplate,
-  options?: { dryRun?: boolean; persisted?: boolean }
+  options?: { dryRun?: boolean; persisted?: boolean; compiledPlan?: GeneratedWorkflowCompiledPlan }
 ): Record<string, unknown> {
   return {
     generated: true,
@@ -462,7 +478,7 @@ export function summarizeGeneratedWorkflowTemplate(
     platform: template.platform,
     version: template.version,
     stepCount: template.steps.length,
-    compiledPlan: compileGeneratedWorkflowTemplate(template),
+    compiledPlan: options?.compiledPlan ?? compileGeneratedWorkflowTemplate(template),
   };
 }
 

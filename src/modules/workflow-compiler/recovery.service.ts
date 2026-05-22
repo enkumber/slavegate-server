@@ -71,7 +71,7 @@ export interface RecoveryHistoryEntry {
 // LIMITS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const MAX_RECOVERY_PER_STEP = 3;
+const MAX_RECOVERY_PER_STEP = 1;
 const MAX_RECOVERY_PER_WORKFLOW = 10;
 const DEFAULT_RECOVERY_MODEL = "openai-codex/gpt-5.5";
 

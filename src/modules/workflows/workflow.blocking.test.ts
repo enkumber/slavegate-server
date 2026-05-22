@@ -443,9 +443,8 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("generatedWorkflowCacheLookups");
     expect(source).toContain("generatedWorkflowExecutions");
     expect(source).toContain("generatedWorkflowLlmAvoided");
-    expect(source).toContain('"prompt", "hit"');
-    expect(source).toContain('"resolve", "hit"');
-    expect(source).toContain('"execute", "hit"');
+    expect(source).toContain('"prompt", "canonical_hit"');
+    expect(source).toContain("generatedWorkflowCacheResult(cacheKey, requestKey)");
     expect(source).toContain("compiledPlan.llmBudget.happyPathRequests === 0");
   });
 
