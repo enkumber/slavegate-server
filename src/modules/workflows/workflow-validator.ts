@@ -527,6 +527,7 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       requestKey: "Stable hash returned by /prompt before LLM generation; use it to check cache first.",
       cacheFirstPrompt: "POST /api/workflows/generated/prompt returns cached workflow+plan when requestKey is already known.",
       executeFromCache: "POST /api/workflows/generated can execute cached templates directly by cacheKey or requestKey.",
+      canExecuteFromCache: "Boolean response hint; true means a later call can use cacheKey/requestKey without regenerating the workflow.",
       happyPathLlmRequests: 0,
       recovery: "LLM is reserved for recovery after deterministic execution fails.",
     },

@@ -351,6 +351,9 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("requestedRequestKey");
     expect(source).toContain("resolvedCache?.cacheKey");
     expect(source).toContain("resolvedCache?.requestKey");
+    expect(source).toContain("canExecuteFromCache");
+    expect(source).toContain("canExecuteFromCache: true");
+    expect(source).toContain("canExecuteFromCache: false");
   });
 });
 
@@ -371,6 +374,7 @@ describe("Generated workflow validator module", () => {
     expect(source).toContain("isBlockedPackage");
     expect(source).toContain("compileGeneratedWorkflowTemplate");
     expect(source).toContain("happyPathRequests: 0");
+    expect(source).toContain("canExecuteFromCache");
     expect(source).toContain("generated-workflow-plan/v1");
     expect(source).toContain('"action",');
     expect(source).toContain('"checkpoint",');

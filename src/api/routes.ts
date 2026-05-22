@@ -665,6 +665,7 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
           data: {
             cacheHit: true,
             cacheMiss: false,
+            canExecuteFromCache: true,
             nextAction: "reuse_cached_workflow",
             ...cached,
           },
@@ -676,6 +677,7 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
           data: {
             cacheHit: false,
             cacheMiss: true,
+            canExecuteFromCache: false,
             cacheKey,
             requestKey,
             nextAction: "generate_validate_and_cache_workflow",
@@ -706,6 +708,7 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
       data: {
         cacheHit: false,
         cacheMiss: hadCacheLookup,
+        canExecuteFromCache: shouldPersist,
         requestedCacheKey: cacheKey ?? null,
         requestedRequestKey: requestKey ?? null,
         requestKey: requestKey ?? null,
@@ -802,6 +805,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         ok: true,
         data: {
           cacheHit,
+          canExecuteFromCache: cacheHit || shouldPersist,
           cacheKey: resolvedCache?.cacheKey ?? compiledPlan.cacheKey,
           requestKey: resolvedCache?.requestKey ?? requestKey ?? null,
           ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist }),
@@ -828,6 +832,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         ...data,
         generated: true,
         cacheHit,
+        canExecuteFromCache: true,
         cacheKey: resolvedCache?.cacheKey ?? compiledPlan.cacheKey,
         requestKey: resolvedCache?.requestKey ?? requestKey ?? null,
         compiledPlan,
