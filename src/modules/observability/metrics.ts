@@ -58,6 +58,7 @@ export const workflowCompleted  = makeCounter({ name: "phone_network_workflow_co
 export const workflowFailed     = makeCounter({ name: "phone_network_workflow_failed_total",    help: "Workflows failed",                      labelNames: ["template", "reason"] });
 export const workflowDuration   = makeHistogram({ name: "phone_network_workflow_duration_seconds", help: "Workflow execution duration", labelNames: ["template"], buckets: [30, 60, 120, 300, 600, 1800] });
 export const generatedWorkflowCacheLookups = makeCounter({ name: "phone_network_generated_workflow_cache_lookup_total", help: "Generated workflow cache lookups by endpoint and result", labelNames: ["endpoint", "result"] });
+export const generatedWorkflowExecutions = makeCounter({ name: "phone_network_generated_workflow_executions_total", help: "Generated workflow executions accepted by source and cache state", labelNames: ["platform", "cache_hit", "source"] });
 export const generatedWorkflowLlmAvoided = makeCounter({ name: "phone_network_generated_workflow_llm_avoided_total", help: "Estimated LLM requests avoided by generated workflow cache-first execution", labelNames: ["source"] });
 
 // ─── Jobs ─────────────────────────────────────────────────────────────────────

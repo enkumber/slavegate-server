@@ -38,6 +38,7 @@ import { visionService } from "../modules/vision/vision.service";
 import { modelConfigService, ModelConfigError, type ModelRole } from "../modules/model-config/model-config.service";
 import {
   generatedWorkflowCacheLookups,
+  generatedWorkflowExecutions,
   generatedWorkflowLlmAvoided,
   registry,
   refreshAccountMetrics,
@@ -589,7 +590,6 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
     if (cached) {
       generatedWorkflowCacheLookups?.labels("prompt", "hit").inc();
-      generatedWorkflowLlmAvoided?.labels("prompt_cache_hit").inc();
       return res.json({
         ok: true,
         data: {
@@ -674,7 +674,6 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
         : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
       if (cached) {
         generatedWorkflowCacheLookups?.labels("resolve", "hit").inc();
-        generatedWorkflowLlmAvoided?.labels("resolve_cache_hit").inc();
         return res.json({
           ok: true,
           data: {
@@ -800,7 +799,6 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
       resolvedCache = cached;
       cacheHit = true;
       generatedWorkflowCacheLookups?.labels("execute", "hit").inc();
-      generatedWorkflowLlmAvoided?.labels("execute_cache_hit").inc();
     }
 
     const validation = validateGeneratedWorkflowTemplate(resolvedWorkflow);
@@ -845,6 +843,11 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         generatedWorkflowId: template.id,
       },
     });
+    const executionSource = cacheKey ? "cache_key" : requestKey ? "request_key" : "workflow";
+    generatedWorkflowExecutions?.labels(template.platform, String(cacheHit), executionSource).inc();
+    if (cacheHit && compiledPlan.llmBudget.happyPathRequests === 0) {
+      generatedWorkflowLlmAvoided?.labels(executionSource).inc();
+    }
     res.status(202).json({
       ok: true,
       data: {
