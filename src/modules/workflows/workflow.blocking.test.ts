@@ -376,7 +376,7 @@ describe("Generated workflow contract validation", () => {
       intent: "reddit_account_health_scan",
       safetyClass: "read_only",
       outputSchema: {
-        required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "screenState", "error"],
+        required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "error"],
         properties: {
           loggedIn: { type: "string" },
           homeFeedVisible: { type: "string" },
@@ -385,7 +385,6 @@ describe("Generated workflow contract validation", () => {
           loginWallDetected: { type: "string" },
           accountSwitcherVisible: { type: "string" },
           observedUsername: { type: "string" },
-          screenState: { type: "string" },
           error: { type: "string" },
         },
       },
@@ -411,7 +410,7 @@ describe("Generated workflow contract validation", () => {
       safetyClass: "read_only",
       allowedRecoveryRequests: ["refresh_screen_state"],
       outputSchema: {
-        required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "screenState", "error"],
+        required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "error"],
       },
     });
     expect(compiled.llmBudget.happyPathRequests).toBe(0);
@@ -465,7 +464,7 @@ describe("Generated workflow contract validation", () => {
       intent: "reddit_account_health_scan",
       safetyClass: "read_only",
       outputSchema: {
-        required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "screenState", "error"],
+        required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "error"],
         properties: {
           loggedIn: { type: "string" },
           homeFeedVisible: { type: "string" },
@@ -474,7 +473,6 @@ describe("Generated workflow contract validation", () => {
           loginWallDetected: { type: "string" },
           accountSwitcherVisible: { type: "string" },
           observedUsername: { type: "string" },
-          screenState: { type: "string" },
           error: { type: "string" },
         },
       },

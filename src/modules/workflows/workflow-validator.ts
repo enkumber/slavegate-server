@@ -251,7 +251,6 @@ const REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT = [
   "loginWallDetected",
   "accountSwitcherVisible",
   "observedUsername",
-  "screenState",
   "error",
 ] as const;
 
@@ -374,12 +373,9 @@ function validateRedditAccountHealthIntent(candidate: Partial<WorkflowTemplate>,
       errors.push(`workflow.outputSchema.properties.${key} is required`);
     } else if ((key === "error" || key === "observedUsername") && property.type !== "string" && property.type !== "null") {
       errors.push(`workflow.outputSchema.properties.${key}.type must be string or null`);
-    } else if (key === "screenState" && property.type !== "string") {
-      errors.push("workflow.outputSchema.properties.screenState.type must be string");
     } else if (
       key !== "error" &&
       key !== "observedUsername" &&
-      key !== "screenState" &&
       property.type !== "boolean" &&
       property.type !== "string"
     ) {
@@ -840,7 +836,6 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
           loginWallDetected: { type: "string" },
           accountSwitcherVisible: { type: "string" },
           observedUsername: { type: "string" },
-          screenState: { type: "string" },
           error: { type: "string" },
         },
       },

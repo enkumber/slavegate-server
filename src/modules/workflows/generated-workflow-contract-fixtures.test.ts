@@ -22,7 +22,6 @@ const readOnlyMarketingScanWorkflow = {
       "loginWallDetected",
       "accountSwitcherVisible",
       "observedUsername",
-      "screenState",
       "error",
     ],
     properties: {
@@ -33,7 +32,6 @@ const readOnlyMarketingScanWorkflow = {
       loginWallDetected: { type: "string" },
       accountSwitcherVisible: { type: "string" },
       observedUsername: { type: "string" },
-      screenState: { type: "string" },
       error: { type: "string" },
     },
   },
@@ -75,7 +73,6 @@ const readOnlyMarketingScanWorkflow = {
           loginWallDetected: "unknown",
           accountSwitcherVisible: "unknown",
           observedUsername: "",
-          screenState: "unknown",
           error: "",
         },
       },
