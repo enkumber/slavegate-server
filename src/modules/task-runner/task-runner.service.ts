@@ -23,6 +23,7 @@ import {
   generatedWorkflowTaskRunnerDispatches,
 } from "../observability/metrics";
 import { dispatchGeneratedWorkflowTemplate } from "../workflows/generated-workflow-execution.service";
+import type { GeneratedWorkflowControlPlaneContext } from "../workflows/generated-workflow-execution.service";
 import {
   workflowService,
   type GeneratedWorkflowPlanCacheRecord,
@@ -64,6 +65,7 @@ interface TaskRunnerResult extends TaskResult {
     canonicalWorkflowVersion?: string;
     compiledPlanHash?: string;
     llmBudget?: GeneratedWorkflowPlanCacheRecord["compiledPlan"]["llmBudget"];
+    controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
     failureCode?: string;
   };
 }
@@ -292,18 +294,19 @@ async function executeTask(task: TaskRow): Promise<void> {
     console.log(`[task-runner] Executing task ${taskId.slice(0, 8)} (${task.routine}) on device ${deviceId.slice(0, 8)}`);
     
     // Get account platform
-    const accountResult = await db.query<{ platform: string }>(
-      "SELECT platform FROM accounts WHERE id = $1",
+    const accountResult = await db.query<{ platform: string; client_id: string | null }>(
+      "SELECT platform, client_id FROM accounts WHERE id = $1",
       [task.account_id]
     );
     const platform = accountResult.rows[0]?.platform || "instagram";
+    const accountClientId = accountResult.rows[0]?.client_id ?? null;
     
     // Route by task type
     let result: TaskRunnerResult;
     
     switch (task.routine) {
       case "generated_workflow":
-        result = await executeGeneratedWorkflowTask(task, platform);
+        result = await executeGeneratedWorkflowTask(task, platform, accountClientId);
         break;
       case "engage_session":
         result = await executeEngageSession(task, platform);
@@ -510,13 +513,19 @@ async function executePost(task: TaskRow, platform: string): Promise<TaskResult>
  * generated_workflow: Dispatch a cached generated workflow by canonical requestKey or cacheKey.
  * The task payload is a pointer only; workflow bodies are rejected to keep execution deterministic.
  */
-async function executeGeneratedWorkflowTask(task: TaskRow, _platform: string): Promise<TaskRunnerResult> {
+async function executeGeneratedWorkflowTask(
+  task: TaskRow,
+  platform: string,
+  accountClientId?: string | null,
+): Promise<TaskRunnerResult> {
   const startedAt = Date.now();
   const routine = GENERATED_WORKFLOW_ROUTINE;
   const params = (task.params ?? {}) as {
     cacheKey?: unknown;
     requestKey?: unknown;
     deviceId?: unknown;
+    clientId?: unknown;
+    campaignId?: unknown;
     workflow?: unknown;
     variables?: unknown;
   };
@@ -533,6 +542,8 @@ async function executeGeneratedWorkflowTask(task: TaskRow, _platform: string): P
   const cacheKey = typeof params.cacheKey === "string" ? params.cacheKey : undefined;
   const requestKey = typeof params.requestKey === "string" ? params.requestKey : undefined;
   const taskParamDeviceId = typeof params.deviceId === "string" ? params.deviceId : undefined;
+  const clientId = accountClientId ?? (typeof params.clientId === "string" ? params.clientId : undefined);
+  const campaignId = typeof params.campaignId === "string" ? params.campaignId : undefined;
   const source = generatedWorkflowTaskSource(cacheKey, requestKey);
 
   if (!cacheKey && !requestKey) {
@@ -622,12 +633,23 @@ async function executeGeneratedWorkflowTask(task: TaskRow, _platform: string): P
       canonicalWorkflowVersion: cached.canonicalWorkflowVersion,
       compiledPlanHash: cached.compiledPlanHash,
     };
+    const controlPlaneContext: GeneratedWorkflowControlPlaneContext = {
+      source: "task_runner",
+      routine,
+      taskId: task.id,
+      accountId: task.account_id,
+      deviceId: task.device_id,
+      platform,
+      ...(clientId ? { clientId } : {}),
+      ...(campaignId ? { campaignId } : {}),
+    };
     const dispatch = await dispatchGeneratedWorkflowTemplate({
       templateId: cached.workflow.id,
       template: cached.workflow,
       deviceId: task.device_id,
       accountId: task.account_id,
       variables,
+      controlPlaneContext,
       logPrefix: "task-runner",
     });
     generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "accepted").inc();
@@ -651,6 +673,7 @@ async function executeGeneratedWorkflowTask(task: TaskRow, _platform: string): P
         canonicalWorkflowVersion: cached.canonicalWorkflowVersion,
         compiledPlanHash: cached.compiledPlanHash,
         llmBudget: cached.compiledPlan.llmBudget,
+        controlPlaneContext,
       },
     };
   } catch (err) {
@@ -703,11 +726,12 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
   }
   
   // Execute synchronously
-  const accountResult = await db.query<{ platform: string }>(
-    "SELECT platform FROM accounts WHERE id = $1",
+  const accountResult = await db.query<{ platform: string; client_id: string | null }>(
+    "SELECT platform, client_id FROM accounts WHERE id = $1",
     [task.account_id]
   );
   const platform = accountResult.rows[0]?.platform || "instagram";
+  const accountClientId = accountResult.rows[0]?.client_id ?? null;
   
   deviceLocks.set(task.device_id, true);
   
@@ -717,7 +741,7 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
     let taskResult: TaskRunnerResult;
     switch (task.routine) {
       case "generated_workflow":
-        taskResult = await executeGeneratedWorkflowTask(task, platform);
+        taskResult = await executeGeneratedWorkflowTask(task, platform, accountClientId);
         break;
       case "engage_session":
         taskResult = await executeEngageSession(task, platform);

@@ -213,6 +213,9 @@ describe("generated workflow cache-only execution route", () => {
     const response = await postGeneratedWorkflow({
       cacheKey: cached.cacheKey,
       deviceId: "11111111-1111-4111-8111-111111111111",
+      accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      clientId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      campaignId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
     });
 
     expect(response.status, JSON.stringify(response.json)).toBe(202);
@@ -231,6 +234,14 @@ describe("generated workflow cache-only execution route", () => {
           happyPathRequests: 0,
         },
       },
+      controlPlaneContext: {
+        source: "api",
+        accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        clientId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        campaignId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        deviceId: "11111111-1111-4111-8111-111111111111",
+        platform: "reddit",
+      },
     });
     expect(mocks.workflowService.getGeneratedPlanCache).toHaveBeenCalledWith(cached.cacheKey);
     expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalledWith(
@@ -243,7 +254,20 @@ describe("generated workflow cache-only execution route", () => {
       "wf-cache-smoke",
     );
     expect(mocks.workflowService.create).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    }));
+    expect(mocks.workflowService.create).toHaveBeenCalledWith(expect.objectContaining({
       checkpoint: expect.objectContaining({
+        variables: expect.objectContaining({
+          controlPlaneContext: {
+            source: "api",
+            accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            clientId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            campaignId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            deviceId: "11111111-1111-4111-8111-111111111111",
+            platform: "reddit",
+          },
+        }),
         executionStats: expect.objectContaining({
           recoveryLlmCalls: 0,
           runtimeLlmCalls: 0,

@@ -34,6 +34,7 @@ import {
 import {
   dispatchGeneratedWorkflowTemplate,
   resolveGeneratedWorkflowDeviceId,
+  type GeneratedWorkflowControlPlaneContext,
 } from "../modules/workflows/generated-workflow-execution.service";
 import { accountsService } from "../modules/accounts/accounts.service";
 import { dataPipelineService } from "../modules/data-pipeline/data-pipeline.service";
@@ -667,11 +668,13 @@ router.get("/workflows/generated/cache/:cacheKey", requireAuth, async (req, res)
 });
 
 router.post("/workflows/generated", requireAuth, async (req, res) => {
-  const { workflow, cacheKey, deviceId, accountId, variables, dryRun, persist, requestKey } = req.body as {
+  const { workflow, cacheKey, deviceId, accountId, clientId, campaignId, variables, dryRun, persist, requestKey } = req.body as {
     workflow?: unknown;
     cacheKey?: string;
     deviceId?: string;
     accountId?: string;
+    clientId?: string;
+    campaignId?: string;
     variables?: Record<string, unknown>;
     dryRun?: boolean;
     persist?: boolean;
@@ -739,6 +742,14 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
       template = validation.template;
       compiledPlan = compileGeneratedWorkflowTemplate(template);
     }
+    const controlPlaneContext: GeneratedWorkflowControlPlaneContext = {
+      source: "api",
+      accountId,
+      clientId,
+      campaignId,
+      deviceId,
+      platform: template.platform,
+    };
 
     if (dryRun) {
       const shouldPersist = persist === true;
@@ -761,12 +772,14 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
           canonicalWorkflowId: resolvedCache?.canonicalWorkflowId ?? template.id,
           canonicalWorkflowVersion: resolvedCache?.canonicalWorkflowVersion ?? template.version,
           compiledPlanHash: resolvedCache?.compiledPlanHash ?? null,
+          controlPlaneContext,
           ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist, compiledPlan }),
         },
       });
     }
 
     const dispatchDeviceId = dryRun ? undefined : resolveGeneratedWorkflowDeviceId(deviceId!);
+    controlPlaneContext.deviceId = dispatchDeviceId;
 
     if (!resolvedCache) {
       await workflowService.saveTemplate(template);
@@ -786,6 +799,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         generatedWorkflow: true,
         generatedWorkflowId: template.id,
       },
+      controlPlaneContext,
     });
     const executionSource = cacheKey ? "cache_key" : requestKey ? "request_key" : "workflow";
     generatedWorkflowExecutions?.labels(template.platform, String(cacheHit), executionSource).inc();
@@ -805,6 +819,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         canonicalWorkflowId: resolvedCache?.canonicalWorkflowId ?? template.id,
         canonicalWorkflowVersion: resolvedCache?.canonicalWorkflowVersion ?? template.version,
         compiledPlanHash: resolvedCache?.compiledPlanHash ?? null,
+        controlPlaneContext,
         compiledPlan,
       },
     });

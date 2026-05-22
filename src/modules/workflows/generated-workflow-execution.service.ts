@@ -57,15 +57,27 @@ function createGeneratedWorkflowCheckpoint(
   };
 }
 
+export interface GeneratedWorkflowControlPlaneContext {
+  accountId?: string;
+  clientId?: string;
+  campaignId?: string;
+  deviceId?: string;
+  taskId?: string;
+  platform?: string;
+  routine?: string;
+  source: "api" | "task_runner";
+}
+
 export async function dispatchGeneratedWorkflowTemplate(input: {
   templateId: string;
   template: WorkflowTemplate;
   deviceId: string;
   accountId?: string;
   variables?: Record<string, unknown>;
+  controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
   logPrefix?: string;
-}): Promise<{ workflowId: string; status: "queued" | "running"; mode: "edge" | "server"; templateId: string }> {
-  const { templateId, template, deviceId, accountId, variables, logPrefix = "workflow" } = input;
+}): Promise<{ workflowId: string; status: "queued" | "running"; mode: "edge" | "server"; templateId: string; controlPlaneContext?: GeneratedWorkflowControlPlaneContext }> {
+  const { templateId, template, deviceId, accountId, variables, controlPlaneContext, logPrefix = "workflow" } = input;
   const validation = validateGeneratedWorkflowTemplate(template);
   if (!validation.template) {
     const err = new Error(`Generated workflow failed executable validation: ${validation.errors.join("; ")}`);
@@ -94,6 +106,9 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
   const accountAgeDays = (variables?.["accountAgeDays"] as number) ?? 30;
   const simulatedTimezone = (variables?.["timezone"] as string) ?? "Europe/Bucharest";
   const hbeSession = hbeService.initSession(accountAgeDays, simulatedTimezone) as unknown as Record<string, unknown>;
+  const dispatchVariables = controlPlaneContext
+    ? { ...(variables ?? {}), controlPlaneContext }
+    : variables;
 
   if (directWsServer.supportsEdgeExecution(deviceId)) {
     const wf = await workflowService.create({
@@ -102,27 +117,27 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
       accountId,
       totalSteps: template.steps.length,
       hbeParams: hbeSession,
-      checkpoint: createGeneratedWorkflowCheckpoint(variables, hbeSession, "edge"),
+      checkpoint: createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "edge"),
     });
     await workflowService.markRunning(wf.id);
 
     const sent = directWsServer.sendWorkflowStart(
       deviceId,
       template as unknown as Record<string, unknown>,
-      variables,
+      dispatchVariables,
       wf.id,
     );
 
     if (sent) {
       console.log(`[${logPrefix}] ${wf.id} dispatched to device (edge execution, agent=${directWsServer.getAgentVersion(deviceId)})`);
-      return { workflowId: wf.id, status: "running", mode: "edge", templateId };
+      return { workflowId: wf.id, status: "running", mode: "edge", templateId, controlPlaneContext };
     }
 
     await workflowService.markFailed(wf.id, "Edge dispatch failed");
     console.warn(`[${logPrefix}] Edge dispatch failed for ${deviceId} — falling back to server execution`);
   }
 
-  const checkpoint = createGeneratedWorkflowCheckpoint(variables, hbeSession, "server");
+  const checkpoint = createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "server");
   const wf = await workflowService.create({
     templateId,
     deviceId,
@@ -136,5 +151,5 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     console.error(`[${logPrefix}] Failed to enqueue ${wf.id}: ${err.message}`);
   });
 
-  return { workflowId: wf.id, status: "queued", mode: "server", templateId };
+  return { workflowId: wf.id, status: "queued", mode: "server", templateId, controlPlaneContext };
 }

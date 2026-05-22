@@ -371,6 +371,8 @@ export type GeneratedWorkflowExecuteRequest =
       requestKey?: never;
       deviceId?: string;
       accountId?: string;
+      clientId?: string;
+      campaignId?: string;
       variables?: Record<string, unknown>;
       dryRun?: boolean;
       persist?: boolean;
@@ -381,6 +383,8 @@ export type GeneratedWorkflowExecuteRequest =
       workflow?: never;
       deviceId?: string;
       accountId?: string;
+      clientId?: string;
+      campaignId?: string;
       variables?: Record<string, unknown>;
       dryRun?: boolean;
       persist?: boolean;
@@ -391,10 +395,23 @@ export type GeneratedWorkflowExecuteRequest =
       workflow?: never;
       deviceId?: string;
       accountId?: string;
+      clientId?: string;
+      campaignId?: string;
       variables?: Record<string, unknown>;
       dryRun?: boolean;
       persist?: boolean;
     };
+
+export type GeneratedWorkflowControlPlaneContext = {
+  source: "api" | "task_runner";
+  accountId?: string;
+  clientId?: string;
+  campaignId?: string;
+  deviceId?: string;
+  taskId?: string;
+  platform?: string;
+  routine?: string;
+};
 
 export type GeneratedWorkflowDryRunResponse = {
   cacheHit: boolean;
@@ -405,6 +422,7 @@ export type GeneratedWorkflowDryRunResponse = {
   canonicalWorkflowId: string;
   canonicalWorkflowVersion: string;
   compiledPlanHash: string | null;
+  controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
 } & GeneratedWorkflowSummary;
 
 export type GeneratedWorkflowExecuteResponse = {
@@ -421,6 +439,7 @@ export type GeneratedWorkflowExecuteResponse = {
   canonicalWorkflowId: string;
   canonicalWorkflowVersion: string;
   compiledPlanHash: string | null;
+  controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
   compiledPlan: GeneratedWorkflowCompiledPlanSummary;
 };
 

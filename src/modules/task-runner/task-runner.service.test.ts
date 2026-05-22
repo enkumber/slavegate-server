@@ -52,6 +52,8 @@ const TASK_ID = "11111111-1111-4111-8111-111111111111";
 const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
 const DEVICE_ID = "33333333-3333-4333-8333-333333333333";
 const WORKFLOW_ID = "44444444-4444-4444-8444-444444444444";
+const CLIENT_ID = "55555555-5555-4555-8555-555555555555";
+const CAMPAIGN_ID = "66666666-6666-4666-8666-666666666666";
 const REQUEST_KEY = "c02c59dfbe512562f8c65c97";
 const CACHE_KEY = "56d91a7aa0e90314241896a2";
 
@@ -136,7 +138,7 @@ function task(params: Record<string, unknown>, overrides: Partial<TaskRow> = {})
 function mockTaskDb(row: TaskRow, platform = "reddit") {
   mocks.dbQuery
     .mockResolvedValueOnce({ rows: [row] })
-    .mockResolvedValueOnce({ rows: [{ platform }] })
+    .mockResolvedValueOnce({ rows: [{ platform, client_id: CLIENT_ID }] })
     .mockResolvedValueOnce({ rows: [] })
     .mockResolvedValueOnce({ rows: [] });
 }
@@ -156,7 +158,7 @@ describe("task-runner generated_workflow routine", () => {
 
   it("dispatches a cached generated workflow by requestKey and preserves task account/device linkage", async () => {
     const cached = cacheRecord();
-    const row = task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID, variables: { timezone: "UTC" } });
+    const row = task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID, campaignId: CAMPAIGN_ID, variables: { timezone: "UTC" } });
     mockTaskDb(row);
     mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
 
@@ -175,6 +177,16 @@ describe("task-runner generated_workflow routine", () => {
         canonicalWorkflowId: "agent_generated_reddit_home_smoke_v1",
         compiledPlanHash: cached.compiledPlanHash,
         llmBudget: { happyPathRequests: 0 },
+        controlPlaneContext: {
+          source: "task_runner",
+          routine: "generated_workflow",
+          taskId: TASK_ID,
+          accountId: ACCOUNT_ID,
+          clientId: CLIENT_ID,
+          campaignId: CAMPAIGN_ID,
+          deviceId: DEVICE_ID,
+          platform: "reddit",
+        },
       },
     });
     expect(mocks.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(REQUEST_KEY);
@@ -196,6 +208,16 @@ describe("task-runner generated_workflow routine", () => {
         compiledPlanHash: cached.compiledPlanHash,
       }),
       logPrefix: "task-runner",
+      controlPlaneContext: {
+        source: "task_runner",
+        routine: "generated_workflow",
+        taskId: TASK_ID,
+        accountId: ACCOUNT_ID,
+        clientId: CLIENT_ID,
+        campaignId: CAMPAIGN_ID,
+        deviceId: DEVICE_ID,
+        platform: "reddit",
+      },
     }));
     expect(mocks.cacheLookupLabels).toHaveBeenCalledWith("task_runner", "canonical_hit");
     expect(mocks.executionLabels).toHaveBeenCalledWith("reddit", "true", "task_runner_request_key");
