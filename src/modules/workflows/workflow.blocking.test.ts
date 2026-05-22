@@ -190,16 +190,10 @@ describe("POST /workflows — non-blocking startWorkflow", () => {
   it("should NOT await startWorkflow in the route handler", async () => {
     const fs = await import("fs");
     const path = await import("path");
-    const source = fs.readFileSync(
-      path.join(__dirname, "..", "..", "api", "routes.ts"),
+    const workflowSection = fs.readFileSync(
+      path.join(__dirname, "generated-workflow-execution.service.ts"),
       "utf8"
     );
-
-    // The route delegates execution to dispatchWorkflowTemplate(), which also
-    // backs dynamically generated workflows.
-    const handlerStart = source.indexOf("async function dispatchWorkflowTemplate");
-    const nextRoute = source.indexOf('router.post("/workflows/:id/cancel"');
-    const workflowSection = source.substring(handlerStart, nextRoute > handlerStart ? nextRoute : undefined);
 
     // Should NOT have "await startWorkflow" (fire-and-forget in legacy path)
     expect(workflowSection).not.toMatch(/await\s+startWorkflow\(/);
@@ -533,14 +527,9 @@ describe("Per-device concurrency guard", () => {
   it("should check countActiveByDevice before creating workflow", async () => {
     const fs = await import("fs");
     const path = await import("path");
-    const source = fs.readFileSync(
-      path.join(__dirname, "..", "..", "api", "routes.ts"),
+    const workflowSection = fs.readFileSync(
+      path.join(__dirname, "generated-workflow-execution.service.ts"),
       "utf8"
-    );
-
-    const workflowSection = source.substring(
-      source.indexOf("router.post(\"/workflows\""),
-      source.indexOf("res.status(202).json({ ok: true, data: { workflowId: wf.id")
     );
 
     // Should check per-device active workflows
@@ -554,14 +543,9 @@ describe("Per-device concurrency guard", () => {
   it("should check global concurrent limit", async () => {
     const fs = await import("fs");
     const path = await import("path");
-    const source = fs.readFileSync(
-      path.join(__dirname, "..", "..", "api", "routes.ts"),
+    const workflowSection = fs.readFileSync(
+      path.join(__dirname, "generated-workflow-execution.service.ts"),
       "utf8"
-    );
-
-    const workflowSection = source.substring(
-      source.indexOf("router.post(\"/workflows\""),
-      source.indexOf("res.status(202).json({ ok: true, data: { workflowId: wf.id")
     );
 
     expect(workflowSection).toContain("maxGlobalConcurrentWorkflows");

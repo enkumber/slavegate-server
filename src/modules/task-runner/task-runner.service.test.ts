@@ -1,10 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { executeTaskNow } from "./task-runner.service";
 import { getDb } from "../../db/client";
-import { isDeviceOnline } from "../../transport/transport";
 import { agentOrchestrator } from "../agents/orchestrator";
-import { directWsServer } from "../../ws/direct-ws.server";
-import { workflowService } from "../workflows/workflow.service";
 import type { TaskRow } from "./task-runner.service";
 import type { WorkflowTemplate } from "../workflows/types";
 
@@ -12,22 +9,13 @@ const mocks = vi.hoisted(() => ({
   dbQuery: vi.fn(),
   isDeviceOnline: vi.fn(),
   agentExecuteTask: vi.fn(),
-  supportsEdgeExecution: vi.fn(),
-  sendWorkflowStart: vi.fn(),
-  getAgentVersion: vi.fn(),
-  initSession: vi.fn(),
-  startWorkflow: vi.fn(),
+  dispatchGeneratedWorkflowTemplate: vi.fn(),
   cacheLookupLabels: vi.fn(() => ({ inc: vi.fn() })),
   executionLabels: vi.fn(() => ({ inc: vi.fn() })),
   llmAvoidedLabels: vi.fn(() => ({ inc: vi.fn() })),
   taskRunnerDispatchLabels: vi.fn(() => ({ inc: vi.fn() })),
   getGeneratedPlanCache: vi.fn(),
   getGeneratedPlanCacheByRequestKey: vi.fn(),
-  countActiveByDevice: vi.fn(),
-  countByStatus: vi.fn(),
-  createWorkflow: vi.fn(),
-  markRunning: vi.fn(),
-  markFailed: vi.fn(),
 }));
 
 vi.mock("../../db/client", () => ({
@@ -42,20 +30,8 @@ vi.mock("../agents/orchestrator", () => ({
   agentOrchestrator: { executeTask: mocks.agentExecuteTask },
 }));
 
-vi.mock("../../ws/direct-ws.server", () => ({
-  directWsServer: {
-    supportsEdgeExecution: mocks.supportsEdgeExecution,
-    sendWorkflowStart: mocks.sendWorkflowStart,
-    getAgentVersion: mocks.getAgentVersion,
-  },
-}));
-
-vi.mock("../hbe/hbe.service", () => ({
-  hbeService: { initSession: mocks.initSession },
-}));
-
-vi.mock("../workflows/workflow.executor", () => ({
-  startWorkflow: mocks.startWorkflow,
+vi.mock("../workflows/generated-workflow-execution.service", () => ({
+  dispatchGeneratedWorkflowTemplate: mocks.dispatchGeneratedWorkflowTemplate,
 }));
 
 vi.mock("../observability/metrics", () => ({
@@ -69,11 +45,6 @@ vi.mock("../workflows/workflow.service", () => ({
   workflowService: {
     getGeneratedPlanCache: mocks.getGeneratedPlanCache,
     getGeneratedPlanCacheByRequestKey: mocks.getGeneratedPlanCacheByRequestKey,
-    countActiveByDevice: mocks.countActiveByDevice,
-    countByStatus: mocks.countByStatus,
-    create: mocks.createWorkflow,
-    markRunning: mocks.markRunning,
-    markFailed: mocks.markFailed,
   },
 }));
 
@@ -175,12 +146,12 @@ describe("task-runner generated_workflow routine", () => {
     vi.clearAllMocks();
     vi.mocked(getDb).mockReturnValue({ query: mocks.dbQuery } as any);
     mocks.isDeviceOnline.mockReturnValue(true);
-    mocks.supportsEdgeExecution.mockReturnValue(true);
-    mocks.sendWorkflowStart.mockReturnValue(true);
-    mocks.initSession.mockReturnValue({});
-    mocks.countActiveByDevice.mockResolvedValue(0);
-    mocks.countByStatus.mockResolvedValue(0);
-    mocks.createWorkflow.mockResolvedValue({ id: WORKFLOW_ID });
+    mocks.dispatchGeneratedWorkflowTemplate.mockResolvedValue({
+      workflowId: WORKFLOW_ID,
+      status: "running",
+      mode: "edge",
+      templateId: "agent_generated_reddit_home_smoke_v1",
+    });
   });
 
   it("dispatches a cached generated workflow by requestKey and preserves task account/device linkage", async () => {
@@ -209,16 +180,14 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(REQUEST_KEY);
     expect(mocks.getGeneratedPlanCache).not.toHaveBeenCalled();
     expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
-    expect(mocks.createWorkflow).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateId: "agent_generated_reddit_home_smoke_v1",
+      template: cached.workflow,
       deviceId: DEVICE_ID,
       accountId: ACCOUNT_ID,
-      totalSteps: 2,
     }));
-    expect(mocks.sendWorkflowStart).toHaveBeenCalledWith(
-      DEVICE_ID,
-      cached.workflow,
-      expect.objectContaining({
+    expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      variables: expect.objectContaining({
         taskId: TASK_ID,
         generatedWorkflow: true,
         generatedWorkflowId: "agent_generated_reddit_home_smoke_v1",
@@ -226,12 +195,12 @@ describe("task-runner generated_workflow routine", () => {
         generatedWorkflowRequestKey: REQUEST_KEY,
         compiledPlanHash: cached.compiledPlanHash,
       }),
-      WORKFLOW_ID,
-    );
+      logPrefix: "task-runner",
+    }));
     expect(mocks.cacheLookupLabels).toHaveBeenCalledWith("task_runner", "canonical_hit");
     expect(mocks.executionLabels).toHaveBeenCalledWith("reddit", "true", "task_runner_request_key");
     expect(mocks.llmAvoidedLabels).toHaveBeenCalledWith("reddit", "task_runner_cache_hit");
-    expect(mocks.taskRunnerDispatchLabels).toHaveBeenCalledWith("reddit", "request_key", "accepted");
+    expect(mocks.taskRunnerDispatchLabels).toHaveBeenCalledWith("generated_workflow", "request_key", "accepted");
   });
 
   it("dispatches a cached generated workflow by cacheKey", async () => {
@@ -257,7 +226,7 @@ describe("task-runner generated_workflow routine", () => {
       generatedWorkflow: { failureCode: "WORKFLOW_PAYLOAD_NOT_ALLOWED" },
     });
     expect(mocks.getGeneratedPlanCacheByRequestKey).not.toHaveBeenCalled();
-    expect(mocks.sendWorkflowStart).not.toHaveBeenCalled();
+    expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
     expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
   });
 
@@ -272,7 +241,7 @@ describe("task-runner generated_workflow routine", () => {
     });
     expect(mocks.getGeneratedPlanCache).not.toHaveBeenCalled();
     expect(mocks.getGeneratedPlanCacheByRequestKey).not.toHaveBeenCalled();
-    expect(mocks.sendWorkflowStart).not.toHaveBeenCalled();
+    expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
     expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
   });
 
@@ -286,10 +255,9 @@ describe("task-runner generated_workflow routine", () => {
       success: false,
       generatedWorkflow: { failureCode: "GENERATED_WORKFLOW_CACHE_MISS" },
     });
-    expect(mocks.sendWorkflowStart).not.toHaveBeenCalled();
-    expect(mocks.createWorkflow).not.toHaveBeenCalled();
+    expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
     expect(mocks.cacheLookupLabels).toHaveBeenCalledWith("task_runner", "miss");
-    expect(mocks.taskRunnerDispatchLabels).toHaveBeenCalledWith("reddit", "cache_key", "miss");
+    expect(mocks.taskRunnerDispatchLabels).toHaveBeenCalledWith("generated_workflow", "cache_key", "miss");
   });
 
   it("rejects invalid or ambiguous task device ids before cache lookup", async () => {
@@ -302,6 +270,6 @@ describe("task-runner generated_workflow routine", () => {
       generatedWorkflow: { failureCode: "DEVICE_ID_INVALID_OR_AMBIGUOUS" },
     });
     expect(mocks.getGeneratedPlanCacheByRequestKey).not.toHaveBeenCalled();
-    expect(mocks.sendWorkflowStart).not.toHaveBeenCalled();
+    expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
   });
 });
