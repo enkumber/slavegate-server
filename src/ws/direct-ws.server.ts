@@ -781,6 +781,8 @@ export class DirectWsServer {
         batchedSteps: 0,
         failedSteps: status === 'failed' ? 1 : 0,
         retriedSteps: 0,
+        recoveryAttempts: 0,
+        recoveryBudgetExhausted: 0,
         mode: 'edge',
       },
       checkpointAt: new Date().toISOString(),

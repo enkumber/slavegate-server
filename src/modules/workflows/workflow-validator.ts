@@ -221,6 +221,8 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "screen_wake",
   "screenshot",
   "scroll",
+  "detect_current_screen",
+  "set_variable",
   "swipe",
   "ui_tree_dump",
   "unlock",
@@ -244,8 +246,12 @@ const GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS = [
 const REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT = [
   "loggedIn",
   "homeFeedVisible",
+  "searchSurfaceAvailable",
   "challengeDetected",
   "loginWallDetected",
+  "accountSwitcherVisible",
+  "observedUsername",
+  "screenState",
   "error",
 ] as const;
 
@@ -366,10 +372,18 @@ function validateRedditAccountHealthIntent(candidate: Partial<WorkflowTemplate>,
     const property = schema.properties[key];
     if (!property) {
       errors.push(`workflow.outputSchema.properties.${key} is required`);
-    } else if (key === "error" && property.type !== "string" && property.type !== "null") {
-      errors.push("workflow.outputSchema.properties.error.type must be string or null");
-    } else if (key !== "error" && property.type !== "boolean") {
-      errors.push(`workflow.outputSchema.properties.${key}.type must be boolean`);
+    } else if ((key === "error" || key === "observedUsername") && property.type !== "string" && property.type !== "null") {
+      errors.push(`workflow.outputSchema.properties.${key}.type must be string or null`);
+    } else if (key === "screenState" && property.type !== "string") {
+      errors.push("workflow.outputSchema.properties.screenState.type must be string");
+    } else if (
+      key !== "error" &&
+      key !== "observedUsername" &&
+      key !== "screenState" &&
+      property.type !== "boolean" &&
+      property.type !== "string"
+    ) {
+      errors.push(`workflow.outputSchema.properties.${key}.type must be boolean or string`);
     }
   }
 }
@@ -819,10 +833,14 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       outputSchema: {
         required: [...REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT],
         properties: {
-          loggedIn: { type: "boolean" },
-          homeFeedVisible: { type: "boolean" },
-          challengeDetected: { type: "boolean" },
-          loginWallDetected: { type: "boolean" },
+          loggedIn: { type: "string" },
+          homeFeedVisible: { type: "string" },
+          searchSurfaceAvailable: { type: "string" },
+          challengeDetected: { type: "string" },
+          loginWallDetected: { type: "string" },
+          accountSwitcherVisible: { type: "string" },
+          observedUsername: { type: "string" },
+          screenState: { type: "string" },
           error: { type: "string" },
         },
       },

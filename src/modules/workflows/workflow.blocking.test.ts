@@ -299,16 +299,16 @@ describe("Generated workflow contract validation", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors).toContain(
-      "workflow.steps[0].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, swipe, ui_tree_dump, unlock, wait_for_idle"
+      "workflow.steps[0].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, set_variable, swipe, ui_tree_dump, unlock, wait_for_idle"
     );
     expect(result.errors).toContain(
-      "workflow.steps[1].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, swipe, ui_tree_dump, unlock, wait_for_idle"
+      "workflow.steps[1].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, set_variable, swipe, ui_tree_dump, unlock, wait_for_idle"
     );
     expect(result.errors).toContain(
-      "workflow.steps[2].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, swipe, ui_tree_dump, unlock, wait_for_idle"
+      "workflow.steps[2].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, set_variable, swipe, ui_tree_dump, unlock, wait_for_idle"
     );
     expect(result.errors).toContain(
-      "workflow.steps[3].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, swipe, ui_tree_dump, unlock, wait_for_idle"
+      "workflow.steps[3].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, set_variable, swipe, ui_tree_dump, unlock, wait_for_idle"
     );
   });
 
@@ -376,12 +376,16 @@ describe("Generated workflow contract validation", () => {
       intent: "reddit_account_health_scan",
       safetyClass: "read_only",
       outputSchema: {
-        required: ["loggedIn", "homeFeedVisible", "challengeDetected", "loginWallDetected", "error"],
+        required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "screenState", "error"],
         properties: {
-          loggedIn: { type: "boolean" },
-          homeFeedVisible: { type: "boolean" },
-          challengeDetected: { type: "boolean" },
-          loginWallDetected: { type: "boolean" },
+          loggedIn: { type: "string" },
+          homeFeedVisible: { type: "string" },
+          searchSurfaceAvailable: { type: "string" },
+          challengeDetected: { type: "string" },
+          loginWallDetected: { type: "string" },
+          accountSwitcherVisible: { type: "string" },
+          observedUsername: { type: "string" },
+          screenState: { type: "string" },
           error: { type: "string" },
         },
       },
@@ -407,7 +411,7 @@ describe("Generated workflow contract validation", () => {
       safetyClass: "read_only",
       allowedRecoveryRequests: ["refresh_screen_state"],
       outputSchema: {
-        required: ["loggedIn", "homeFeedVisible", "challengeDetected", "loginWallDetected", "error"],
+        required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "screenState", "error"],
       },
     });
     expect(compiled.llmBudget.happyPathRequests).toBe(0);
@@ -461,12 +465,16 @@ describe("Generated workflow contract validation", () => {
       intent: "reddit_account_health_scan",
       safetyClass: "read_only",
       outputSchema: {
-        required: ["loggedIn", "homeFeedVisible", "challengeDetected", "loginWallDetected", "error"],
+        required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "screenState", "error"],
         properties: {
-          loggedIn: { type: "boolean" },
-          homeFeedVisible: { type: "boolean" },
-          challengeDetected: { type: "boolean" },
-          loginWallDetected: { type: "boolean" },
+          loggedIn: { type: "string" },
+          homeFeedVisible: { type: "string" },
+          searchSurfaceAvailable: { type: "string" },
+          challengeDetected: { type: "string" },
+          loginWallDetected: { type: "string" },
+          accountSwitcherVisible: { type: "string" },
+          observedUsername: { type: "string" },
+          screenState: { type: "string" },
           error: { type: "string" },
         },
       },

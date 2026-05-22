@@ -173,6 +173,8 @@ export type GeneratedWorkflowAllowedAction =
   | "screen_wake"
   | "screenshot"
   | "scroll"
+  | "detect_current_screen"
+  | "set_variable"
   | "swipe"
   | "ui_tree_dump"
   | "unlock"
