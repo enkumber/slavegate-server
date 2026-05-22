@@ -28,6 +28,7 @@ import { bootstrapParsers } from "./modules/data-pipeline/parser-registry";
 import { lifecycleManager } from "./modules/accounts/lifecycle";
 import { canaryService } from "./modules/canary/canary.service";
 import { runMigrations } from "./db/migrate";
+import { startTaskRunner } from "./modules/task-runner";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
@@ -198,6 +199,14 @@ async function bootstrap(): Promise<void> {
     console.log(`[server] DirectWs endpoint: ws://localhost:${PORT}/ws-direct`);
     console.log(`[server] REST API: http://localhost:${PORT}/api`);
   });
+
+  if (process.env.TASK_RUNNER_AUTOSTART !== "false") {
+    startTaskRunner({
+      pollIntervalMs: Number(process.env.TASK_RUNNER_POLL_INTERVAL_MS ?? 30_000),
+      minGapBetweenTasksMs: Number(process.env.TASK_RUNNER_MIN_GAP_MS ?? 60_000),
+      batchSize: Number(process.env.TASK_RUNNER_BATCH_SIZE ?? 10),
+    });
+  }
 
   // ─── Graceful shutdown ────────────────────────────────────────────────────
   async function shutdown(signal: string): Promise<void> {

@@ -57,6 +57,7 @@ function redditAccountHealthWorkflow(): WorkflowTemplate {
         "loginWallDetected",
         "accountSwitcherVisible",
         "observedUsername",
+        "screenState",
         "error",
       ],
       properties: {
@@ -67,6 +68,7 @@ function redditAccountHealthWorkflow(): WorkflowTemplate {
         loginWallDetected: { type: "string" },
         accountSwitcherVisible: { type: "string" },
         observedUsername: { type: "string" },
+        screenState: { type: "string" },
         error: { type: "string" },
       },
     },

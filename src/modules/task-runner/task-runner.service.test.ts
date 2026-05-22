@@ -64,6 +64,7 @@ const REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS = {
   loginWallDetected: "unknown",
   accountSwitcherVisible: "unknown",
   observedUsername: "",
+  screenState: "unknown",
   error: "",
 };
 
@@ -85,6 +86,7 @@ function generatedWorkflow(): WorkflowTemplate {
         "loginWallDetected",
         "accountSwitcherVisible",
         "observedUsername",
+        "screenState",
         "error",
       ],
       properties: {
@@ -95,6 +97,7 @@ function generatedWorkflow(): WorkflowTemplate {
         loginWallDetected: { type: "string" },
         accountSwitcherVisible: { type: "string" },
         observedUsername: { type: "string" },
+        screenState: { type: "string" },
         error: { type: "string" },
       },
     },
@@ -203,6 +206,7 @@ describe("task-runner generated_workflow routine", () => {
       success: true,
       stepsCompleted: 2,
       totalSteps: 2,
+      output: REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
       generatedWorkflow: {
         workflowId: WORKFLOW_ID,
         status: "running",
@@ -212,6 +216,7 @@ describe("task-runner generated_workflow routine", () => {
         canonicalWorkflowId: "agent_generated_reddit_account_health_scan_v1",
         compiledPlanHash: cached.compiledPlanHash,
         llmBudget: { happyPathRequests: 0 },
+        output: REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
         controlPlaneContext: {
           source: "task_runner",
           routine: "generated_workflow",
@@ -267,11 +272,12 @@ describe("task-runner generated_workflow routine", () => {
     mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
     mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
 
-    await executeTaskNow(TASK_ID);
+    const result = await executeTaskNow(TASK_ID);
 
     expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
       variables: expect.objectContaining(REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS),
     }));
+    expect(result).toMatchObject({ output: REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS });
   });
 
   it("dispatches a cached generated workflow by cacheKey", async () => {

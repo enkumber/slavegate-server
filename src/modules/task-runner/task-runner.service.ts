@@ -54,6 +54,7 @@ export interface TaskRunnerConfig {
 }
 
 interface TaskRunnerResult extends TaskResult {
+  output?: Record<string, unknown>;
   generatedWorkflow?: {
     workflowId?: string;
     status?: "queued" | "running";
@@ -66,6 +67,7 @@ interface TaskRunnerResult extends TaskResult {
     compiledPlanHash?: string;
     llmBudget?: GeneratedWorkflowPlanCacheRecord["compiledPlan"]["llmBudget"];
     controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
+    output?: Record<string, unknown>;
     failureCode?: string;
   };
 }
@@ -138,6 +140,17 @@ function generatedWorkflowOutputDefaults(cached: GeneratedWorkflowPlanCacheRecor
   return defaults;
 }
 
+function generatedWorkflowOutput(cached: GeneratedWorkflowPlanCacheRecord, variables: Record<string, unknown>): Record<string, unknown> {
+  const schema = cached.workflow.outputSchema;
+  if (!schema) return {};
+
+  const output: Record<string, unknown> = {};
+  for (const key of schema.required) {
+    output[key] = Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : null;
+  }
+  return output;
+}
+
 function agencyWorkflowRunIdFromTask(task: TaskRow): string | null {
   const value = task.params?.agencyWorkflowRunId ?? task.params?.workflowRunId;
   return typeof value === "string" && UUID_RE.test(value) ? value : null;
@@ -160,6 +173,7 @@ async function completeAgencyWorkflowRun(task: TaskRow, result: TaskRunnerResult
   if (!runId) return;
   const db = getDb();
   const generatedWorkflow = result.generatedWorkflow ?? {};
+  const output = result.output ?? generatedWorkflow.output ?? {};
   await db.query(
     `UPDATE agency_workflow_runs
      SET status = $2,
@@ -174,7 +188,7 @@ async function completeAgencyWorkflowRun(task: TaskRow, result: TaskRunnerResult
       runId,
       result.success ? "completed" : "failed",
       generatedWorkflow.workflowId ?? null,
-      JSON.stringify(generatedWorkflow),
+      JSON.stringify(output),
       JSON.stringify(result.tokenUsage ?? zeroTokenUsage()),
       0,
       result.success ? null : result.failReason ?? "Unknown error",
@@ -408,6 +422,7 @@ async function executeTask(task: TaskRow): Promise<void> {
       tokenUsage: result.tokenUsage,
       durationMs: result.durationMs,
       failedStep: result.failedStep,
+      output: result.output,
       generatedWorkflow: result.generatedWorkflow,
     };
     
@@ -712,6 +727,7 @@ async function executeGeneratedWorkflowTask(
       canonicalWorkflowVersion: cached.canonicalWorkflowVersion,
       compiledPlanHash: cached.compiledPlanHash,
     };
+    const output = generatedWorkflowOutput(cached, variables);
     const controlPlaneContext: GeneratedWorkflowControlPlaneContext = {
       source: "task_runner",
       routine,
@@ -739,6 +755,7 @@ async function executeGeneratedWorkflowTask(
       success: true,
       stepsCompleted: cached.workflow.steps.length,
       totalSteps: cached.workflow.steps.length,
+      output,
       tokenUsage: zeroTokenUsage(),
       durationMs: Date.now() - startedAt,
       generatedWorkflow: {
@@ -753,6 +770,7 @@ async function executeGeneratedWorkflowTask(
         compiledPlanHash: cached.compiledPlanHash,
         llmBudget: cached.compiledPlan.llmBudget,
         controlPlaneContext,
+        output,
       },
     };
   } catch (err) {
@@ -813,9 +831,10 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
   const accountClientId = accountResult.rows[0]?.client_id ?? null;
   
   deviceLocks.set(task.device_id, true);
-  
+
   try {
     await db.query(`UPDATE tasks SET status = 'running', started_at = NOW() WHERE id = $1`, [taskId]);
+    await markAgencyWorkflowRunStarted(task);
     
     let taskResult: TaskRunnerResult;
     switch (task.routine) {
@@ -851,15 +870,19 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
           tokenUsage: taskResult.tokenUsage,
           durationMs: taskResult.durationMs,
           failedStep: taskResult.failedStep,
+          output: taskResult.output,
           generatedWorkflow: taskResult.generatedWorkflow,
         }),
         taskResult.success ? null : taskResult.failReason ?? "Unknown error",
         taskId,
       ]
     );
-    
+    await completeAgencyWorkflowRun(task, taskResult);
+
     return taskResult;
-    
+  } catch (err) {
+    await failAgencyWorkflowRunWithError(task, err as Error);
+    throw err;
   } finally {
     deviceLocks.set(task.device_id, false);
     deviceLastTaskTime.set(task.device_id, Date.now());

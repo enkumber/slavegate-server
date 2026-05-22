@@ -251,6 +251,7 @@ const REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT = [
   "loginWallDetected",
   "accountSwitcherVisible",
   "observedUsername",
+  "screenState",
   "error",
 ] as const;
 
@@ -857,6 +858,7 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
           loginWallDetected: { type: "string" },
           accountSwitcherVisible: { type: "string" },
           observedUsername: { type: "string" },
+          screenState: { type: "string" },
           error: { type: "string" },
         },
       },
