@@ -346,6 +346,11 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("getGeneratedPlanCache");
     expect(source).toContain("getGeneratedPlanCacheByRequestKey");
     expect(source).toContain("generate_validate_and_cache_workflow");
+    expect(source).toContain('nextAction: "reuse_cached_workflow"');
+    expect(source).toContain("requestedCacheKey");
+    expect(source).toContain("requestedRequestKey");
+    expect(source).toContain("resolvedCache?.cacheKey");
+    expect(source).toContain("resolvedCache?.requestKey");
   });
 });
 

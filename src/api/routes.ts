@@ -17,7 +17,7 @@ import { directWsServer } from "../ws/direct-ws.server";
 
 import { sendJobToDevice, isDeviceOnline } from "../transport/transport";
 import { loadMap } from "../modules/app-mapping/recorder.service";
-import { workflowService } from "../modules/workflows/workflow.service";
+import { workflowService, type GeneratedWorkflowPlanCacheRecord } from "../modules/workflows/workflow.service";
 import { startWorkflow } from "../modules/workflows/workflow.executor";
 import {
   buildGeneratedWorkflowAppMapHints,
@@ -654,12 +654,21 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
   }
 
   try {
-    if (cacheKey || requestKey) {
+    const hadCacheLookup = !!(cacheKey || requestKey);
+    if (hadCacheLookup) {
       const cached = cacheKey
         ? await workflowService.getGeneratedPlanCache(cacheKey)
         : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
       if (cached) {
-        return res.json({ ok: true, data: { cacheHit: true, ...cached } });
+        return res.json({
+          ok: true,
+          data: {
+            cacheHit: true,
+            cacheMiss: false,
+            nextAction: "reuse_cached_workflow",
+            ...cached,
+          },
+        });
       }
       if (!workflow) {
         return res.status(200).json({
@@ -696,7 +705,11 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
       ok: true,
       data: {
         cacheHit: false,
-        cacheMiss: !!cacheKey,
+        cacheMiss: hadCacheLookup,
+        requestedCacheKey: cacheKey ?? null,
+        requestedRequestKey: requestKey ?? null,
+        requestKey: requestKey ?? null,
+        nextAction: shouldPersist ? "reuse_cached_workflow" : "validate_or_persist_before_execution",
         persisted: shouldPersist,
         ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist }),
       },
@@ -749,6 +762,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
 
   let resolvedWorkflow = workflow;
   let cacheHit = false;
+  let resolvedCache: GeneratedWorkflowPlanCacheRecord | null = null;
   try {
     if (!resolvedWorkflow && (cacheKey || requestKey)) {
       const cached = cacheKey
@@ -763,6 +777,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         });
       }
       resolvedWorkflow = cached.workflow;
+      resolvedCache = cached;
       cacheHit = true;
     }
 
@@ -787,6 +802,8 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         ok: true,
         data: {
           cacheHit,
+          cacheKey: resolvedCache?.cacheKey ?? compiledPlan.cacheKey,
+          requestKey: resolvedCache?.requestKey ?? requestKey ?? null,
           ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist }),
         },
       });
@@ -805,7 +822,17 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         generatedWorkflowId: template.id,
       },
     });
-    res.status(202).json({ ok: true, data: { ...data, generated: true, cacheHit } });
+    res.status(202).json({
+      ok: true,
+      data: {
+        ...data,
+        generated: true,
+        cacheHit,
+        cacheKey: resolvedCache?.cacheKey ?? compiledPlan.cacheKey,
+        requestKey: resolvedCache?.requestKey ?? requestKey ?? null,
+        compiledPlan,
+      },
+    });
   } catch (err) {
     const typed = err as Error & { status?: number; code?: string };
     res.status(typed.status ?? 500).json({ ok: false, error: typed.message, code: typed.code });
