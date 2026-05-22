@@ -435,6 +435,14 @@ describe("Generated workflow contract validation", () => {
     expect(executorSource).not.toContain("stats.recoveryLlmCalls++");
     expect(executorSource).not.toContain("stats.runtimeLlmCalls++");
 
+    const batchExecutionCatch = executorSource.match(
+      /batchResult = await executeBatchSteps[\s\S]*?catch \(err\) \{([\s\S]*?)\n  \}/
+    )?.[1] ?? "";
+    expect(batchExecutionCatch).toContain("executionStats(checkpoint).failedSteps++");
+    expect(batchExecutionCatch).toContain("const budgetErr = recordGeneratedWorkflowRecoveryFailure(template, checkpoint, stepIndex, err)");
+    expect(batchExecutionCatch).toContain("await workflowService.saveCheckpoint");
+    expect(batchExecutionCatch).toContain("throw budgetErr ?? err");
+
     expect(metricsSource).toContain("phone_network_generated_workflow_recovery_attempt_total");
     expect(metricsSource).toContain('labelNames: ["platform", "reason"]');
     expect(metricsSource).toContain("phone_network_generated_workflow_recovery_budget_exhausted_total");

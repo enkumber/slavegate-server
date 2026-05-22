@@ -1111,6 +1111,8 @@ async function executeBatchSegment(
   } catch (err) {
     // Batch failed to execute (device offline, timeout, network error)
     // Save checkpoint with batch state for retry
+    executionStats(checkpoint).failedSteps++;
+    const budgetErr = recordGeneratedWorkflowRecoveryFailure(template, checkpoint, stepIndex, err);
     if (!isNested) {
       await workflowService.saveCheckpoint(
         workflowId,
@@ -1123,7 +1125,7 @@ async function executeBatchSegment(
         stepIndex - 1,
       );
     }
-    throw err;
+    throw budgetErr ?? err;
   }
 
   const { status, results } = batchResult;
