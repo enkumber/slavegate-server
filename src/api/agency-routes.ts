@@ -11,12 +11,93 @@ import fs from "fs/promises";
 
 const router = Router();
 
+const SPRINT_2_READ_ONLY_INTENTS = new Set(["reddit_account_health_scan"]);
+
+const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
+
 // ─── Pagination helper ────────────────────────────────────────────────────────
 
 function parsePagination(query: Record<string, unknown>): { page: number; pageSize: number; offset: number } {
   const page = Math.max(1, parseInt(query.page as string ?? "1", 10) || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(query.pageSize as string ?? "50", 10) || 50));
   return { page, pageSize, offset: (page - 1) * pageSize };
+}
+
+function rowToAgencyWorkflowRun(row: Record<string, unknown>): Record<string, unknown> {
+  const deviceId = row.device_id as string;
+  return {
+    id: row.id,
+    clientId: row.client_id,
+    accountId: row.account_id,
+    deviceId,
+    shortDeviceId: deviceId?.slice(0, 8),
+    taskId: row.task_id ?? null,
+    workflowId: row.workflow_id ?? null,
+    platform: row.platform,
+    intent: row.intent,
+    safetyClass: row.safety_class,
+    requestKey: row.request_key ?? null,
+    cacheKey: row.cache_key ?? null,
+    canonicalWorkflowId: row.canonical_workflow_id,
+    canonicalWorkflowVersion: row.canonical_workflow_version,
+    compiledPlanHash: row.compiled_plan_hash,
+    status: row.status,
+    output: row.output ?? {},
+    tokenUsage: row.token_usage ?? {},
+    recoveryRequests: row.recovery_requests ?? 0,
+    error: row.error ?? null,
+    context: row.context ?? {},
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at ?? null,
+    startedAt: row.started_at instanceof Date ? row.started_at.toISOString() : row.started_at ?? null,
+    completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at ?? null,
+    accountUsername: row.account_username ?? null,
+    accountPlatform: row.account_platform ?? null,
+    clientName: row.client_name ?? null,
+    deviceName: row.device_name ?? null,
+  };
+}
+
+function cachedWorkflowLlmHappyPathRequests(cached: Record<string, unknown>): number | null {
+  const compiledPlan = (cached.compiled_plan ?? cached.compiledPlan) as Record<string, unknown> | null;
+  const llmBudget = compiledPlan?.llmBudget as Record<string, unknown> | undefined;
+  return typeof llmBudget?.happyPathRequests === "number" ? llmBudget.happyPathRequests : null;
+}
+
+function cachedWorkflowSafetyClass(cached: Record<string, unknown>): string | null {
+  const workflow = cached.workflow as Record<string, unknown> | null;
+  const compiledPlan = (cached.compiled_plan ?? cached.compiledPlan) as Record<string, unknown> | null;
+  const metadata = compiledPlan?.metadata as Record<string, unknown> | undefined;
+  const sourceMetadata = (cached.source_metadata ?? cached.sourceMetadata) as Record<string, unknown> | null;
+  return (metadata?.safetyClass ?? workflow?.safetyClass ?? sourceMetadata?.safetyClass ?? null) as string | null;
+}
+
+function cachedWorkflowIntent(cached: Record<string, unknown>): string | null {
+  const workflow = cached.workflow as Record<string, unknown> | null;
+  const compiledPlan = (cached.compiled_plan ?? cached.compiledPlan) as Record<string, unknown> | null;
+  const metadata = compiledPlan?.metadata as Record<string, unknown> | undefined;
+  const sourceMetadata = (cached.source_metadata ?? cached.sourceMetadata) as Record<string, unknown> | null;
+  return (metadata?.intent ?? workflow?.intent ?? sourceMetadata?.intent ?? null) as string | null;
+}
+
+function cachedWorkflowPlatform(cached: Record<string, unknown>): string | null {
+  const workflow = cached.workflow as Record<string, unknown> | null;
+  return (cached.platform ?? workflow?.platform ?? null) as string | null;
+}
+
+function agencyWorkflowRunSelectSql(where: string): string {
+  return `SELECT r.*,
+                 COALESCE(t.status, r.status) AS status,
+                 a.username AS account_username,
+                 a.platform AS account_platform,
+                 c.name AS client_name,
+                 d.friendly_name AS device_name
+          FROM agency_workflow_runs r
+          LEFT JOIN tasks t ON t.id = r.task_id
+          LEFT JOIN accounts a ON a.id = r.account_id
+          LEFT JOIN clients c ON c.id = r.client_id
+          LEFT JOIN devices d ON d.id = r.device_id
+          ${where ? `WHERE ${where.replace(/^WHERE\s+/i, "")}` : ""}`;
 }
 
 // ─── File upload config ───────────────────────────────────────────────────────
@@ -434,6 +515,252 @@ router.patch("/posts/:id", async (req: Request, res: Response) => {
   }
 
   res.json({ ok: true, data: result.rows[0] });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WORKFLOW RUNS — Control-plane runs for existing canonical generated workflows
+// ═══════════════════════════════════════════════════════════════════════════════
+
+router.post("/workflow-runs", async (req: Request, res: Response) => {
+  const db = getDb();
+  const body = req.body as {
+    clientId?: string;
+    accountId?: string;
+    deviceId?: string;
+    intent?: string;
+    requestKey?: string;
+    cacheKey?: string;
+    scheduledTime?: string;
+    context?: Record<string, unknown>;
+    workflow?: unknown;
+  };
+
+  if (Object.prototype.hasOwnProperty.call(body, "workflow")) {
+    return res.status(400).json({
+      ok: false,
+      code: "WORKFLOW_PAYLOAD_NOT_ALLOWED",
+      error: "workflow payload is not allowed for agency workflow runs",
+    });
+  }
+  if (!body.clientId || !body.accountId || !body.deviceId || !body.intent) {
+    return res.status(400).json({ ok: false, error: "clientId, accountId, deviceId and intent required" });
+  }
+  if (!SPRINT_2_READ_ONLY_INTENTS.has(body.intent)) {
+    return res.status(400).json({
+      ok: false,
+      code: "GENERATED_WORKFLOW_INTENT_NOT_ALLOWED",
+      error: "Sprint 2 agency workflow runs only accept read_only marketing scan intents",
+    });
+  }
+
+  const hasRequestKey = typeof body.requestKey === "string" && body.requestKey.length > 0;
+  const hasCacheKey = typeof body.cacheKey === "string" && body.cacheKey.length > 0;
+  if ((hasRequestKey ? 1 : 0) + (hasCacheKey ? 1 : 0) !== 1) {
+    return res.status(400).json({
+      ok: false,
+      code: "EXACTLY_ONE_CANONICAL_KEY_REQUIRED",
+      error: "exactly one of requestKey or cacheKey required",
+    });
+  }
+  if (hasRequestKey && !GENERATED_WORKFLOW_KEY_RE.test(body.requestKey!)) {
+    return res.status(400).json({ ok: false, error: "requestKey must be a 24-character lowercase hex string" });
+  }
+  if (hasCacheKey && !GENERATED_WORKFLOW_KEY_RE.test(body.cacheKey!)) {
+    return res.status(400).json({ ok: false, error: "cacheKey must be a 24-character lowercase hex string" });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+
+    const cacheResult = await client.query<Record<string, unknown>>(
+      hasCacheKey
+        ? `SELECT * FROM generated_workflow_plan_cache WHERE cache_key = $1`
+        : `SELECT * FROM generated_workflow_plan_cache
+           WHERE request_key = $1
+           ORDER BY updated_at DESC
+           LIMIT 1`,
+      [hasCacheKey ? body.cacheKey : body.requestKey]
+    );
+    const cached = cacheResult.rows[0];
+    if (!cached) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        ok: false,
+        code: "GENERATED_WORKFLOW_CACHE_MISS",
+        error: "canonical generated workflow artifact not found",
+      });
+    }
+
+    const safetyClass = cachedWorkflowSafetyClass(cached);
+    if (safetyClass !== "read_only") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        ok: false,
+        code: "GENERATED_WORKFLOW_NOT_READ_ONLY",
+        error: "Sprint 2 agency workflow runs require safetyClass=read_only",
+      });
+    }
+
+    const artifactIntent = cachedWorkflowIntent(cached);
+    if (artifactIntent && artifactIntent !== body.intent) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        ok: false,
+        code: "GENERATED_WORKFLOW_INTENT_MISMATCH",
+        error: "intent does not match canonical generated workflow artifact",
+      });
+    }
+    if (cachedWorkflowLlmHappyPathRequests(cached) !== 0) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        ok: false,
+        code: "GENERATED_WORKFLOW_LLM_BUDGET_NOT_CACHE_SAFE",
+        error: "canonical workflow happy path must avoid LLM calls",
+      });
+    }
+    const platform = cachedWorkflowPlatform(cached);
+    if (!platform) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        ok: false,
+        code: "GENERATED_WORKFLOW_PLATFORM_MISSING",
+        error: "canonical workflow artifact is missing platform metadata",
+      });
+    }
+
+    const runContext = {
+      ...(body.context ?? {}),
+      source: "agency_workflow_runs",
+      clientId: body.clientId,
+      accountId: body.accountId,
+      deviceId: body.deviceId,
+      intent: body.intent,
+    };
+    const runResult = await client.query<{ id: string }>(
+      `INSERT INTO agency_workflow_runs
+         (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
+          canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, status, context)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued', $12)
+       RETURNING id`,
+      [
+        body.clientId,
+        body.accountId,
+        body.deviceId,
+        platform,
+        body.intent,
+        safetyClass,
+        hasRequestKey ? body.requestKey : null,
+        hasCacheKey ? body.cacheKey : null,
+        cached.canonical_workflow_id,
+        cached.canonical_workflow_version,
+        cached.compiled_plan_hash,
+        JSON.stringify(runContext),
+      ]
+    );
+    const runId = runResult.rows[0].id;
+
+    const taskParams = {
+      ...(hasRequestKey ? { requestKey: body.requestKey } : { cacheKey: body.cacheKey }),
+      clientId: body.clientId,
+      agencyWorkflowRunId: runId,
+      workflowRunId: runId,
+      intent: body.intent,
+    };
+    const taskResult = await client.query<{ id: string }>(
+      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
+       VALUES ($1, $2, 'generated_workflow', $3, $4, 'queued')
+       RETURNING id`,
+      [
+        body.accountId,
+        body.deviceId,
+        JSON.stringify(taskParams),
+        body.scheduledTime ?? new Date().toISOString(),
+      ]
+    );
+
+    await client.query(
+      `UPDATE agency_workflow_runs SET task_id = $1, updated_at = NOW() WHERE id = $2`,
+      [taskResult.rows[0].id, runId]
+    );
+
+    const hydrated = await client.query(
+      agencyWorkflowRunSelectSql(`r.id = $1`),
+      [runId]
+    );
+    await client.query("COMMIT");
+    res.status(201).json({ ok: true, data: rowToAgencyWorkflowRun(hydrated.rows[0]) });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  } finally {
+    client.release();
+  }
+});
+
+router.get("/workflow-runs", async (req: Request, res: Response) => {
+  const db = getDb();
+  const { page, pageSize, offset } = parsePagination(req.query);
+  const filters = {
+    clientId: req.query.clientId as string | undefined,
+    accountId: req.query.accountId as string | undefined,
+    deviceId: req.query.deviceId as string | undefined,
+    intent: req.query.intent as string | undefined,
+    status: req.query.status as string | undefined,
+    taskId: req.query.taskId as string | undefined,
+    requestKey: req.query.requestKey as string | undefined,
+    cacheKey: req.query.cacheKey as string | undefined,
+  };
+
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+  for (const [field, value] of Object.entries(filters)) {
+    if (!value) continue;
+    const column = ({
+      clientId: "r.client_id",
+      accountId: "r.account_id",
+      deviceId: "r.device_id",
+      intent: "r.intent",
+      status: "COALESCE(t.status, r.status)",
+      taskId: "r.task_id",
+      requestKey: "r.request_key",
+      cacheKey: "r.cache_key",
+    } as Record<string, string>)[field];
+    conditions.push(`${column} = $${idx++}`);
+    values.push(value);
+  }
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  values.push(pageSize, offset);
+
+  const [rows, count] = await Promise.all([
+    db.query(
+      `${agencyWorkflowRunSelectSql(where)}
+       ORDER BY r.created_at DESC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      values
+    ),
+    db.query(`SELECT COUNT(*) FROM agency_workflow_runs r LEFT JOIN tasks t ON t.id = r.task_id ${where}`, values.slice(0, -2)),
+  ]);
+
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map(rowToAgencyWorkflowRun),
+      total: parseInt(count.rows[0].count, 10),
+      page,
+      pageSize,
+    },
+  });
+});
+
+router.get("/workflow-runs/:id", async (req: Request, res: Response) => {
+  const db = getDb();
+  const result = await db.query(agencyWorkflowRunSelectSql(`r.id = $1`), [req.params.id]);
+  if (result.rows.length === 0) {
+    return res.status(404).json({ ok: false, error: "Workflow run not found" });
+  }
+  res.json({ ok: true, data: rowToAgencyWorkflowRun(result.rows[0]) });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

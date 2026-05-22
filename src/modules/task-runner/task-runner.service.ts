@@ -123,6 +123,64 @@ function generatedWorkflowTaskFailure(
   };
 }
 
+function agencyWorkflowRunIdFromTask(task: TaskRow): string | null {
+  const value = task.params?.agencyWorkflowRunId ?? task.params?.workflowRunId;
+  return typeof value === "string" && UUID_RE.test(value) ? value : null;
+}
+
+async function markAgencyWorkflowRunStarted(task: TaskRow): Promise<void> {
+  const runId = agencyWorkflowRunIdFromTask(task);
+  if (!runId) return;
+  const db = getDb();
+  await db.query(
+    `UPDATE agency_workflow_runs
+     SET status = 'running', started_at = COALESCE(started_at, NOW())
+     WHERE id = $1`,
+    [runId],
+  );
+}
+
+async function completeAgencyWorkflowRun(task: TaskRow, result: TaskRunnerResult): Promise<void> {
+  const runId = agencyWorkflowRunIdFromTask(task);
+  if (!runId) return;
+  const db = getDb();
+  const generatedWorkflow = result.generatedWorkflow ?? {};
+  await db.query(
+    `UPDATE agency_workflow_runs
+     SET status = $2,
+         workflow_id = COALESCE($3, workflow_id),
+         output = $4,
+         token_usage = $5,
+         recovery_requests = $6,
+         error = $7,
+         completed_at = NOW()
+     WHERE id = $1`,
+    [
+      runId,
+      result.success ? "completed" : "failed",
+      generatedWorkflow.workflowId ?? null,
+      JSON.stringify(generatedWorkflow),
+      JSON.stringify(result.tokenUsage ?? zeroTokenUsage()),
+      0,
+      result.success ? null : result.failReason ?? "Unknown error",
+    ],
+  );
+}
+
+async function failAgencyWorkflowRunWithError(task: TaskRow, error: Error): Promise<void> {
+  const runId = agencyWorkflowRunIdFromTask(task);
+  if (!runId) return;
+  const db = getDb();
+  await db.query(
+    `UPDATE agency_workflow_runs
+     SET status = 'failed',
+         error = $2,
+         completed_at = NOW()
+     WHERE id = $1`,
+    [runId, error.message],
+  );
+}
+
 // ─── Task Runner State ────────────────────────────────────────────────────────
 
 // Device locks: deviceId → true if busy
@@ -290,6 +348,7 @@ async function executeTask(task: TaskRow): Promise<void> {
       UPDATE tasks SET status = 'running', started_at = NOW()
       WHERE id = $1
     `, [taskId]);
+    await markAgencyWorkflowRunStarted(task);
     
     console.log(`[task-runner] Executing task ${taskId.slice(0, 8)} (${task.routine}) on device ${deviceId.slice(0, 8)}`);
     
@@ -344,6 +403,7 @@ async function executeTask(task: TaskRow): Promise<void> {
         SET status = 'completed', completed_at = NOW(), result = $2
         WHERE id = $1
       `, [taskId, JSON.stringify(resultJson)]);
+      await completeAgencyWorkflowRun(task, result);
       
       console.log(`[task-runner] Task ${taskId.slice(0, 8)} completed ✓ (${result.stepsCompleted}/${result.totalSteps} steps)`);
     } else {
@@ -360,6 +420,7 @@ async function executeTask(task: TaskRow): Promise<void> {
             retry_count = $4
         WHERE id = $1
       `, [taskId, JSON.stringify(resultJson), result.failReason || "Unknown error", newRetryCount]);
+      await completeAgencyWorkflowRun(task, result);
       
       // Also log to execution_logs for detailed debugging
       await db.query(`
@@ -387,6 +448,7 @@ async function executeTask(task: TaskRow): Promise<void> {
     // Mark as failed on exception, increment retry_count
     const currentRetryCount = task.retry_count ?? 0;
     const newRetryCount = currentRetryCount + 1;
+    const error = err as Error;
     
     await db.query(`
       UPDATE tasks 
@@ -396,14 +458,15 @@ async function executeTask(task: TaskRow): Promise<void> {
           error = $2,
           retry_count = $3
       WHERE id = $1
-    `, [taskId, (err as Error).message, newRetryCount]);
+    `, [taskId, error.message, newRetryCount]);
+    await failAgencyWorkflowRunWithError(task, error);
     
     await db.query(`
       INSERT INTO execution_logs (task_id, device_id, log_data)
       VALUES ($1, $2, $3)
     `, [taskId, deviceId, JSON.stringify({
-      error: (err as Error).message,
-      stack: (err as Error).stack,
+      error: error.message,
+      stack: error.stack,
       retryCount: newRetryCount,
     })]);
     

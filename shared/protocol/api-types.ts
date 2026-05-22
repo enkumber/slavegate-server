@@ -449,6 +449,66 @@ export type CreateGeneratedWorkflowResponse =
   | GeneratedWorkflowDryRunResponse
   | GeneratedWorkflowExecuteResponse;
 
+// ─── Agency Workflow Runs ────────────────────────────────────────────────────
+
+export type AgencyWorkflowRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "paused"
+  | "cancelled";
+
+interface CreateAgencyWorkflowRunBase {
+  clientId: string;
+  accountId: string;
+  deviceId: string;
+  intent: GeneratedWorkflowIntent;
+  scheduledTime?: string;
+  context?: Record<string, unknown>;
+  workflow?: never;
+}
+
+export type CreateAgencyWorkflowRunRequest =
+  | (CreateAgencyWorkflowRunBase & { requestKey: string; cacheKey?: never })
+  | (CreateAgencyWorkflowRunBase & { cacheKey: string; requestKey?: never });
+
+export interface AgencyWorkflowRun {
+  id: string;
+  clientId: string;
+  accountId: string;
+  deviceId: string;
+  shortDeviceId: string;
+  taskId: string | null;
+  workflowId: string | null;
+  platform: GeneratedWorkflowPlatform;
+  intent: GeneratedWorkflowIntent;
+  safetyClass: GeneratedWorkflowSafetyClass;
+  requestKey: string | null;
+  cacheKey: string | null;
+  canonicalWorkflowId: string;
+  canonicalWorkflowVersion: string;
+  compiledPlanHash: string;
+  status: AgencyWorkflowRunStatus;
+  context: Record<string, unknown>;
+  output: Record<string, unknown>;
+  tokenUsage: Record<string, unknown>;
+  recoveryRequests: number;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  accountUsername?: string | null;
+  accountPlatform?: string | null;
+  clientName?: string | null;
+  deviceName?: string | null;
+}
+
+export type CreateAgencyWorkflowRunResponse = AgencyWorkflowRun;
+export type GetAgencyWorkflowRunResponse = AgencyWorkflowRun;
+export type ListAgencyWorkflowRunsResponse = PaginatedResponse<AgencyWorkflowRun>;
+
 // ─── Audit log ───────────────────────────────────────────────────────────────
 
 export interface CommandLogEntry {
