@@ -5,7 +5,7 @@
 
 import { z } from "zod";
 import { createHash } from "crypto";
-import type { WorkflowStep, WorkflowTemplate } from "./types";
+import type { WorkflowOutputSchema, WorkflowStep, WorkflowTemplate } from "./types";
 import { ALL_SCREEN_IDS } from "../screen-detection/types";
 
 // ── Allowed step types ──────────────────────────────────────────────────────
@@ -227,12 +227,151 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "wait_for_idle",
 ] as const;
 
+const GENERATED_WORKFLOW_INTENTS = [
+  "reddit_account_health_scan",
+] as const;
+
+const GENERATED_WORKFLOW_SAFETY_CLASSES = [
+  "read_only",
+] as const;
+
+const GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS = [
+  "abort_read_only_scan",
+  "refresh_screen_state",
+  "retry_current_step",
+] as const;
+
+const REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT = [
+  "loggedIn",
+  "homeFeedVisible",
+  "challengeDetected",
+  "loginWallDetected",
+  "error",
+] as const;
+
+const READ_ONLY_MUTATION_TERMS = [
+  "comment",
+  "downvote",
+  "follow",
+  "message",
+  "post",
+  "reply",
+  "send",
+  "submit",
+  "upvote",
+] as const;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizeGeneratedWorkflowPlatform(platform: string): string {
   return platform.trim().toLowerCase();
+}
+
+function containsMutationTerm(value: unknown): string | null {
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return READ_ONLY_MUTATION_TERMS.find((term) => normalized.includes(term)) ?? null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = containsMutationTerm(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (isRecord(value)) {
+    for (const [key, nested] of Object.entries(value)) {
+      const found = containsMutationTerm(key) ?? containsMutationTerm(nested);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function validateGeneratedWorkflowOutputSchema(
+  value: unknown,
+  path: string,
+  errors: string[]
+): WorkflowOutputSchema | null {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object`);
+    return null;
+  }
+  const required = value.required;
+  const properties = value.properties;
+  if (!Array.isArray(required) || required.some((item) => typeof item !== "string" || item.length === 0)) {
+    errors.push(`${path}.required must be an array of non-empty strings`);
+  }
+  if (!isRecord(properties)) {
+    errors.push(`${path}.properties must be an object`);
+    return null;
+  }
+
+  const allowedTypes = ["boolean", "string", "number", "object", "array", "null"];
+  for (const [key, property] of Object.entries(properties)) {
+    if (!isRecord(property)) {
+      errors.push(`${path}.properties.${key} must be an object`);
+      continue;
+    }
+    if (typeof property.type !== "string" || !allowedTypes.includes(property.type)) {
+      errors.push(`${path}.properties.${key}.type must be one of: ${allowedTypes.join(", ")}`);
+    }
+  }
+  for (const key of Array.isArray(required) ? required : []) {
+    if (typeof key === "string" && isRecord(properties) && !properties[key]) {
+      errors.push(`${path}.required contains unknown property: ${key}`);
+    }
+  }
+
+  return errors.length === 0 ? value as unknown as WorkflowOutputSchema : null;
+}
+
+function validateGeneratedWorkflowReadOnlySemantics(
+  candidate: Partial<WorkflowTemplate>,
+  errors: string[]
+): void {
+  if (candidate.safetyClass !== "read_only") return;
+  const mutationTerm = containsMutationTerm({
+    id: candidate.id,
+    name: candidate.name,
+    description: candidate.description,
+    intent: candidate.intent,
+    steps: candidate.steps,
+    allowedRecoveryRequests: candidate.allowedRecoveryRequests,
+  });
+  if (mutationTerm) {
+    errors.push(`workflow.safetyClass=read_only cannot include mutating term: ${mutationTerm}`);
+  }
+}
+
+function validateRedditAccountHealthIntent(candidate: Partial<WorkflowTemplate>, errors: string[]): void {
+  if (candidate.intent !== "reddit_account_health_scan") return;
+  if (candidate.platform !== "reddit") {
+    errors.push("workflow.intent=reddit_account_health_scan requires workflow.platform=reddit");
+  }
+  if (candidate.safetyClass !== "read_only") {
+    errors.push("workflow.intent=reddit_account_health_scan requires workflow.safetyClass=read_only");
+  }
+  const schema = candidate.outputSchema;
+  if (!schema) {
+    errors.push("workflow.intent=reddit_account_health_scan requires workflow.outputSchema");
+    return;
+  }
+  for (const key of REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT) {
+    if (!schema.required.includes(key)) {
+      errors.push(`workflow.outputSchema.required must include ${key}`);
+    }
+    const property = schema.properties[key];
+    if (!property) {
+      errors.push(`workflow.outputSchema.properties.${key} is required`);
+    } else if (key === "error" && property.type !== "string" && property.type !== "null") {
+      errors.push("workflow.outputSchema.properties.error.type must be string or null");
+    } else if (key !== "error" && property.type !== "boolean") {
+      errors.push(`workflow.outputSchema.properties.${key}.type must be boolean`);
+    }
+  }
 }
 
 function validateRangeObject(
@@ -395,6 +534,12 @@ export interface GeneratedWorkflowCompiledPlan {
   templateId: string;
   platform: string;
   templateVersion: string;
+  metadata: {
+    intent: string | null;
+    safetyClass: "read_only" | null;
+    outputSchema: WorkflowOutputSchema | null;
+    allowedRecoveryRequests: string[];
+  };
   stepCount: number;
   actionCount: number;
   checkpointCount: number;
@@ -413,6 +558,7 @@ export function computeGeneratedWorkflowCompiledPlanHash(plan: GeneratedWorkflow
     templateId: plan.templateId,
     platform: plan.platform,
     templateVersion: plan.templateVersion,
+    metadata: plan.metadata,
     stepCount: plan.stepCount,
     actionCount: plan.actionCount,
     checkpointCount: plan.checkpointCount,
@@ -443,6 +589,34 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
   }
   if (!candidate.description || typeof candidate.description !== "string") errors.push("workflow.description must be a non-empty string");
   if (!candidate.version || typeof candidate.version !== "string") errors.push("workflow.version must be a non-empty string");
+  if (candidate.intent !== undefined) {
+    if (typeof candidate.intent !== "string" || !GENERATED_WORKFLOW_INTENTS.includes(candidate.intent as typeof GENERATED_WORKFLOW_INTENTS[number])) {
+      errors.push(`workflow.intent must be one of: ${GENERATED_WORKFLOW_INTENTS.join(", ")}`);
+    }
+  }
+  if (candidate.safetyClass !== undefined) {
+    if (typeof candidate.safetyClass !== "string" || !GENERATED_WORKFLOW_SAFETY_CLASSES.includes(candidate.safetyClass as typeof GENERATED_WORKFLOW_SAFETY_CLASSES[number])) {
+      errors.push(`workflow.safetyClass must be one of: ${GENERATED_WORKFLOW_SAFETY_CLASSES.join(", ")}`);
+    }
+  }
+  if ((candidate.intent || candidate.outputSchema || candidate.allowedRecoveryRequests) && candidate.safetyClass !== "read_only") {
+    errors.push("generated workflow marketing metadata requires workflow.safetyClass=read_only");
+  }
+  if (candidate.outputSchema !== undefined) {
+    validateGeneratedWorkflowOutputSchema(candidate.outputSchema, "workflow.outputSchema", errors);
+  }
+  if (candidate.allowedRecoveryRequests !== undefined) {
+    if (!Array.isArray(candidate.allowedRecoveryRequests) || candidate.allowedRecoveryRequests.some((item) => typeof item !== "string" || item.length === 0)) {
+      errors.push("workflow.allowedRecoveryRequests must be an array of non-empty strings");
+    } else {
+      for (const recoveryRequest of candidate.allowedRecoveryRequests) {
+        if (!GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS.includes(recoveryRequest as typeof GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS[number])) {
+          errors.push(`workflow.allowedRecoveryRequests must contain only: ${GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS.join(", ")}`);
+          break;
+        }
+      }
+    }
+  }
   if (
     candidate.defaultVerificationStrategy !== undefined &&
     !GENERATED_WORKFLOW_VERIFICATION_STRATEGIES.includes(candidate.defaultVerificationStrategy as typeof GENERATED_WORKFLOW_VERIFICATION_STRATEGIES[number])
@@ -460,6 +634,8 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
       validateGeneratedWorkflowStepInput(step, `workflow.steps[${index}]`, errors, seenIds)
     );
   }
+  validateRedditAccountHealthIntent(candidate, errors);
+  validateGeneratedWorkflowReadOnlySemantics(candidate, errors);
 
   return errors.length > 0
     ? { ok: false, errors }
@@ -477,6 +653,10 @@ export function summarizeGeneratedWorkflowTemplate(
     templateId: template.id,
     platform: template.platform,
     version: template.version,
+    intent: template.intent ?? null,
+    safetyClass: template.safetyClass ?? null,
+    outputSchema: template.outputSchema ?? null,
+    allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
     stepCount: template.steps.length,
     compiledPlan: options?.compiledPlan ?? compileGeneratedWorkflowTemplate(template),
   };
@@ -523,6 +703,10 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
     id: template.id,
     platform: template.platform,
     version: template.version,
+    intent: template.intent ?? null,
+    safetyClass: template.safetyClass ?? null,
+    outputSchema: template.outputSchema ?? null,
+    allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
     defaultVerificationStrategy: template.defaultVerificationStrategy,
     steps: template.steps,
   });
@@ -534,6 +718,12 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
     templateId: template.id,
     platform: template.platform,
     templateVersion: template.version,
+    metadata: {
+      intent: template.intent ?? null,
+      safetyClass: template.safetyClass ?? null,
+      outputSchema: template.outputSchema ?? null,
+      allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
+    },
     stepCount: steps.length,
     actionCount,
     checkpointCount,
@@ -587,8 +777,11 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
     },
     template: {
       required: ["id", "name", "platform", "description", "version", "steps"],
-      optional: ["defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
+      optional: ["intent", "safetyClass", "outputSchema", "allowedRecoveryRequests", "defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
       platforms: GENERATED_WORKFLOW_PLATFORMS,
+      intents: GENERATED_WORKFLOW_INTENTS,
+      safetyClasses: GENERATED_WORKFLOW_SAFETY_CLASSES,
+      allowedRecoveryRequests: GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS,
       defaultVerificationStrategy: GENERATED_WORKFLOW_VERIFICATION_STRATEGIES,
       stepTypes: GENERATED_WORKFLOW_STEP_TYPES,
     },
@@ -621,6 +814,19 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       platform: "reddit",
       description: "Minimal generated workflow contract example.",
       version: "1.0.0",
+      intent: "reddit_account_health_scan",
+      safetyClass: "read_only",
+      outputSchema: {
+        required: [...REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT],
+        properties: {
+          loggedIn: { type: "boolean" },
+          homeFeedVisible: { type: "boolean" },
+          challengeDetected: { type: "boolean" },
+          loginWallDetected: { type: "boolean" },
+          error: { type: "string" },
+        },
+      },
+      allowedRecoveryRequests: ["refresh_screen_state"],
       defaultVerificationStrategy: "local_with_screenshot",
       dataRetentionDays: 7,
       steps: exampleSteps,

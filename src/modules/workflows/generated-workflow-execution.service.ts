@@ -4,6 +4,7 @@ import { hbeService } from "../hbe/hbe.service";
 import { startWorkflow } from "./workflow.executor";
 import { workflowService } from "./workflow.service";
 import type { WorkflowCheckpoint, WorkflowTemplate } from "./types";
+import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
 
@@ -63,6 +64,14 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
   logPrefix?: string;
 }): Promise<{ workflowId: string; status: "queued" | "running"; mode: "edge" | "server"; templateId: string }> {
   const { templateId, template, deviceId, accountId, variables, logPrefix = "workflow" } = input;
+  const validation = validateGeneratedWorkflowTemplate(template);
+  if (!validation.template) {
+    const err = new Error(`Generated workflow failed executable validation: ${validation.errors.join("; ")}`);
+    (err as Error & { status?: number; code?: string; validationErrors?: string[] }).status = 400;
+    (err as Error & { status?: number; code?: string; validationErrors?: string[] }).code = "GENERATED_WORKFLOW_VALIDATION_FAILED";
+    (err as Error & { status?: number; code?: string; validationErrors?: string[] }).validationErrors = validation.errors;
+    throw err;
+  }
 
   const activeForDevice = await workflowService.countActiveByDevice(deviceId);
   if (activeForDevice >= scalabilityConfig.maxWorkflowsPerDevice) {

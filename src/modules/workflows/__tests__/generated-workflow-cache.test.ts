@@ -40,6 +40,28 @@ function redditHomeWorkflow(): WorkflowTemplate {
   };
 }
 
+function redditAccountHealthWorkflow(): WorkflowTemplate {
+  return {
+    ...redditHomeWorkflow(),
+    id: "agent_generated_reddit_account_health_v1",
+    name: "Agent generated Reddit account health",
+    description: "Read-only generated workflow for Reddit account health.",
+    intent: "reddit_account_health_scan",
+    safetyClass: "read_only",
+    outputSchema: {
+      required: ["loggedIn", "homeFeedVisible", "challengeDetected", "loginWallDetected", "error"],
+      properties: {
+        loggedIn: { type: "boolean" },
+        homeFeedVisible: { type: "boolean" },
+        challengeDetected: { type: "boolean" },
+        loginWallDetected: { type: "boolean" },
+        error: { type: "string" },
+      },
+    },
+    allowedRecoveryRequests: ["refresh_screen_state"],
+  };
+}
+
 function cacheRow(overrides: Record<string, unknown> = {}) {
   const workflow = redditHomeWorkflow();
   const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
@@ -95,7 +117,12 @@ describe("generated workflow plan cache service", () => {
     expect(values[2]).toBe(workflow.id);
     expect(values[3]).toBe(workflow.version);
     expect(values[4]).toBe(computeGeneratedWorkflowCompiledPlanHash(compiledPlan));
-    expect(values[5]).toBe(JSON.stringify({}));
+    expect(values[5]).toBe(JSON.stringify({
+      intent: null,
+      safetyClass: null,
+      outputSchema: null,
+      allowedRecoveryRequests: [],
+    }));
     expect(values[6]).toBe(workflow.id);
     expect(values[7]).toBe("reddit");
     expect(values[8]).toBe("1.0.0");
@@ -116,6 +143,33 @@ describe("generated workflow plan cache service", () => {
     expect(query.mock.calls[0][0]).toContain("WHERE request_key = $1");
   });
 
+  it("persists canonical generated workflow safety metadata in source metadata", async () => {
+    const service = new WorkflowService();
+    const workflow = redditAccountHealthWorkflow();
+    const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
+    const query = mockDbQuery();
+
+    await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97", {
+      source: "test",
+    });
+
+    const [, values] = query.mock.calls[1];
+    expect(JSON.parse(values[5] as string)).toEqual({
+      intent: "reddit_account_health_scan",
+      safetyClass: "read_only",
+      outputSchema: workflow.outputSchema,
+      allowedRecoveryRequests: ["refresh_screen_state"],
+      source: "test",
+    });
+    expect(compiledPlan.metadata).toEqual({
+      intent: "reddit_account_health_scan",
+      safetyClass: "read_only",
+      outputSchema: workflow.outputSchema,
+      allowedRecoveryRequests: ["refresh_screen_state"],
+    });
+    expect(compiledPlan.llmBudget.happyPathRequests).toBe(0);
+  });
+
   it("returns a concrete cache miss without fabricating a workflow", async () => {
     const service = new WorkflowService();
     const query = mockDbQuery([]);
@@ -129,6 +183,23 @@ describe("generated workflow plan cache service", () => {
     expect(sql).toContain("SET hit_count = hit_count + 1, last_used_at = NOW()");
     expect(sql).toContain("WHERE cache_key = $1");
     expect(values).toEqual(["56d91a7aa0e90314241896a2"]);
+  });
+
+  it("rejects unsafe compiled plans before canonical cache persistence", async () => {
+    const service = new WorkflowService();
+    const workflow = redditHomeWorkflow();
+    const compiledPlan = {
+      ...compileGeneratedWorkflowTemplate(workflow),
+      llmBudget: {
+        happyPathRequests: 1,
+        recoveryRequests: "only_on_failure",
+      },
+    } as any;
+    const query = mockDbQuery();
+
+    await expect(service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97"))
+      .rejects.toMatchObject({ code: "GENERATED_WORKFLOW_CACHE_LLM_BUDGET_UNSAFE" });
+    expect(query).not.toHaveBeenCalled();
   });
 
   it("maps cacheKey hits and increments usage atomically", async () => {
@@ -172,6 +243,7 @@ describe("generated workflow plan cache service", () => {
     const reordered = {
       steps: plan.steps,
       llmBudget: plan.llmBudget,
+      metadata: plan.metadata,
       maxDepth: plan.maxDepth,
       checkpointCount: plan.checkpointCount,
       actionCount: plan.actionCount,

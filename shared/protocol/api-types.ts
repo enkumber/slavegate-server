@@ -161,10 +161,41 @@ export type GeneratedWorkflowPlatform = "instagram" | "reddit" | "threads" | "ti
 
 export type GeneratedWorkflowVerificationStrategy = "local_only" | "local_with_screenshot";
 
+export type GeneratedWorkflowIntent = "reddit_account_health_scan";
+
+export type GeneratedWorkflowSafetyClass = "read_only";
+
+export type GeneratedWorkflowAllowedAction =
+  | "close_app"
+  | "get_screen_state"
+  | "open_app"
+  | "press_key"
+  | "screen_wake"
+  | "screenshot"
+  | "scroll"
+  | "swipe"
+  | "ui_tree_dump"
+  | "unlock"
+  | "wait_for_idle";
+
+export type GeneratedWorkflowAllowedRecoveryRequest =
+  | "refresh_screen_state"
+  | "retry_current_step"
+  | "abort_read_only_scan";
+
+export interface GeneratedWorkflowOutputSchema {
+  required: string[];
+  properties: Record<string, GeneratedWorkflowOutputSchemaProperty>;
+}
+
+export interface GeneratedWorkflowOutputSchemaProperty {
+  type: "boolean" | "string" | "number" | "object" | "array" | "null";
+}
+
 export interface GeneratedWorkflowStep {
   type: "action" | "wait" | "condition" | "loop" | "checkpoint";
   id?: string;
-  action?: string;
+  action?: GeneratedWorkflowAllowedAction;
   target?: string;
   x?: number;
   y?: number;
@@ -192,6 +223,10 @@ export interface GeneratedWorkflowTemplate {
   platform: GeneratedWorkflowPlatform;
   description: string;
   version: string;
+  intent?: GeneratedWorkflowIntent;
+  safetyClass?: GeneratedWorkflowSafetyClass;
+  outputSchema?: GeneratedWorkflowOutputSchema;
+  allowedRecoveryRequests?: GeneratedWorkflowAllowedRecoveryRequest[];
   defaultVerificationStrategy?: GeneratedWorkflowVerificationStrategy;
   dataRetentionDays?: number;
   compatibleAppVersions?: string[];
@@ -212,6 +247,12 @@ export interface GeneratedWorkflowCompiledPlanSummary {
   templateId: string;
   platform: GeneratedWorkflowPlatform;
   templateVersion: string;
+  metadata: {
+    intent: GeneratedWorkflowIntent | null;
+    safetyClass: GeneratedWorkflowSafetyClass | null;
+    outputSchema: GeneratedWorkflowOutputSchema | null;
+    allowedRecoveryRequests: GeneratedWorkflowAllowedRecoveryRequest[];
+  };
   stepCount: number;
   actionCount: number;
   checkpointCount: number;
@@ -280,6 +321,10 @@ export interface GeneratedWorkflowSummary {
   templateId: string;
   platform: GeneratedWorkflowPlatform;
   version: string;
+  intent: GeneratedWorkflowIntent | null;
+  safetyClass: GeneratedWorkflowSafetyClass | null;
+  outputSchema: GeneratedWorkflowOutputSchema | null;
+  allowedRecoveryRequests: GeneratedWorkflowAllowedRecoveryRequest[];
   stepCount: number;
   compiledPlan: GeneratedWorkflowCompiledPlanSummary;
 }

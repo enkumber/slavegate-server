@@ -164,6 +164,14 @@ export interface WorkflowTemplate {
   platform:    string;   // "instagram", "tiktok", "reddit", or "*" for platform-agnostic
   description: string;
   version:     string;
+  /** Business intent for generated/canonical workflows. */
+  intent?:      string;
+  /** Safety class used by the control plane before task-runner execution. */
+  safetyClass?: "read_only";
+  /** Structured output contract for read-only marketing workflows. */
+  outputSchema?: WorkflowOutputSchema;
+  /** Recovery request types the runtime may ask for after deterministic failure. */
+  allowedRecoveryRequests?: string[];
   steps:       WorkflowStep[];
   /** Default verification strategy for steps that don't specify one */
   defaultVerificationStrategy: VerificationStrategy;
@@ -171,6 +179,15 @@ export interface WorkflowTemplate {
   dataRetentionDays: number;
   /** Compatible app version patterns (e.g. "300+", "301") */
   compatibleAppVersions?: string[];
+}
+
+export interface WorkflowOutputSchema {
+  required: string[];
+  properties: Record<string, WorkflowOutputSchemaProperty>;
+}
+
+export interface WorkflowOutputSchemaProperty {
+  type: "boolean" | "string" | "number" | "object" | "array" | "null";
 }
 
 // ─── Execution state ──────────────────────────────────────────────────────────

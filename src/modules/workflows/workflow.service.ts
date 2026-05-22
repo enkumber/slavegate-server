@@ -19,6 +19,7 @@ import type {
 } from "./types";
 import {
   computeGeneratedWorkflowCompiledPlanHash,
+  validateGeneratedWorkflowTemplate,
   type GeneratedWorkflowCompiledPlan,
 } from "./workflow-validator";
 
@@ -311,7 +312,27 @@ export class WorkflowService {
     sourceMetadata: Record<string, unknown> = {}
   ): Promise<void> {
     const db = getDb();
+    const validation = validateGeneratedWorkflowTemplate(template);
+    if (!validation.template) {
+      throw Object.assign(
+        new Error(`generated workflow cache persistence failed validation: ${validation.errors.join("; ")}`),
+        { code: "GENERATED_WORKFLOW_CACHE_VALIDATION_FAILED", validationErrors: validation.errors }
+      );
+    }
+    if (compiledPlan.llmBudget.happyPathRequests !== 0) {
+      throw Object.assign(
+        new Error("generated workflow cache persistence requires compiledPlan.llmBudget.happyPathRequests=0"),
+        { code: "GENERATED_WORKFLOW_CACHE_LLM_BUDGET_UNSAFE" }
+      );
+    }
     const compiledPlanHash = computeGeneratedWorkflowCompiledPlanHash(compiledPlan);
+    const canonicalSourceMetadata = {
+      intent: compiledPlan.metadata.intent,
+      safetyClass: compiledPlan.metadata.safetyClass,
+      outputSchema: compiledPlan.metadata.outputSchema,
+      allowedRecoveryRequests: compiledPlan.metadata.allowedRecoveryRequests,
+      ...sourceMetadata,
+    };
     if (requestKey) {
       const existing = await db.query(
         "SELECT cache_key FROM generated_workflow_plan_cache WHERE request_key = $1 LIMIT 1",
@@ -342,7 +363,7 @@ export class WorkflowService {
         template.id,
         template.version,
         compiledPlanHash,
-        JSON.stringify(sourceMetadata),
+        JSON.stringify(canonicalSourceMetadata),
         template.id,
         template.platform,
         template.version,

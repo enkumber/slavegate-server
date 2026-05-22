@@ -363,6 +363,86 @@ describe("Generated workflow contract validation", () => {
     expect(result.ok).toBe(false);
     expect(result.errors).toContain("workflow.platform must be one of: instagram, reddit, threads, tiktok, twitter, youtube");
   });
+
+  it("accepts read-only Reddit account health generated workflows with canonical output metadata", async () => {
+    const { compileGeneratedWorkflowTemplate, validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+
+    const result = validateGeneratedWorkflowTemplate({
+      id: "reddit_account_health_scan_v1",
+      name: "Reddit account health scan",
+      platform: "reddit",
+      description: "Read-only scan of login state and home feed readiness.",
+      version: "1.0.0",
+      intent: "reddit_account_health_scan",
+      safetyClass: "read_only",
+      outputSchema: {
+        required: ["loggedIn", "homeFeedVisible", "challengeDetected", "loginWallDetected", "error"],
+        properties: {
+          loggedIn: { type: "boolean" },
+          homeFeedVisible: { type: "boolean" },
+          challengeDetected: { type: "boolean" },
+          loginWallDetected: { type: "boolean" },
+          error: { type: "string" },
+        },
+      },
+      allowedRecoveryRequests: ["refresh_screen_state"],
+      defaultVerificationStrategy: "local_with_screenshot",
+      dataRetentionDays: 1,
+      steps: [
+        {
+          type: "action",
+          id: "open_reddit",
+          action: "open_app",
+          params: { packageName: "com.reddit.frontpage" },
+          expectedScreen: "REDDIT_HOME_FEED",
+        },
+        { type: "checkpoint", id: "home_readiness_observed" },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    const compiled = compileGeneratedWorkflowTemplate(result.template!);
+    expect(compiled.metadata).toMatchObject({
+      intent: "reddit_account_health_scan",
+      safetyClass: "read_only",
+      allowedRecoveryRequests: ["refresh_screen_state"],
+      outputSchema: {
+        required: ["loggedIn", "homeFeedVisible", "challengeDetected", "loginWallDetected", "error"],
+      },
+    });
+    expect(compiled.llmBudget.happyPathRequests).toBe(0);
+  });
+
+  it("rejects read-only generated workflows that include mutating Reddit semantics", async () => {
+    const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+
+    const result = validateGeneratedWorkflowTemplate({
+      id: "reddit_upvote_probe_v1",
+      name: "Reddit upvote probe",
+      platform: "reddit",
+      description: "Attempts a read-only upvote action.",
+      version: "1.0.0",
+      intent: "reddit_account_health_scan",
+      safetyClass: "read_only",
+      outputSchema: {
+        required: ["loggedIn", "homeFeedVisible", "challengeDetected", "loginWallDetected", "error"],
+        properties: {
+          loggedIn: { type: "boolean" },
+          homeFeedVisible: { type: "boolean" },
+          challengeDetected: { type: "boolean" },
+          loginWallDetected: { type: "boolean" },
+          error: { type: "string" },
+        },
+      },
+      allowedRecoveryRequests: ["refresh_screen_state"],
+      steps: [
+        { type: "action", id: "inspect_upvote_button", action: "get_screen_state", params: { target: "upvote" } },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain("workflow.safetyClass=read_only cannot include mutating term: upvote");
+  });
 });
 
 // ─── POST /workflows/generated — dry-run validation path ──────────────────
@@ -456,6 +536,14 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("canonicalWorkflowId: string");
     expect(source).toContain("canonicalWorkflowVersion: string");
     expect(source).toContain("compiledPlanHash: string");
+    expect(source).toContain("metadata: {");
+    expect(source).toContain("intent: GeneratedWorkflowIntent | null");
+    expect(source).toContain("safetyClass: GeneratedWorkflowSafetyClass | null");
+    expect(source).toContain("outputSchema: GeneratedWorkflowOutputSchema | null");
+    expect(source).toContain("allowedRecoveryRequests: GeneratedWorkflowAllowedRecoveryRequest[]");
+    expect(source).toContain('export type GeneratedWorkflowSafetyClass = "read_only"');
+    expect(source).toContain('export type GeneratedWorkflowIntent = "reddit_account_health_scan"');
+    expect(source).toContain("export type GeneratedWorkflowAllowedAction");
     expect(source).toContain("export type GeneratedWorkflowExecuteRequest");
     expect(source).toContain("workflow?: never");
     expect(source).toContain("cacheKey?: never");
