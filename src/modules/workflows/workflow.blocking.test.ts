@@ -448,6 +448,29 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("compiledPlan.llmBudget.happyPathRequests === 0");
   });
 
+  it("exports generated workflow control-plane DTOs in the shared API contract", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const source = fs.readFileSync(
+      path.join(__dirname, "..", "..", "..", "shared", "protocol", "api-types.ts"),
+      "utf8"
+    );
+
+    expect(source).toContain("export interface GeneratedWorkflowCompiledPlanSummary");
+    expect(source).toContain("happyPathRequests: 0");
+    expect(source).toContain("export interface GeneratedWorkflowPlanCacheRecordDto");
+    expect(source).toContain("canonicalWorkflowId: string");
+    expect(source).toContain("canonicalWorkflowVersion: string");
+    expect(source).toContain("compiledPlanHash: string");
+    expect(source).toContain("export type GeneratedWorkflowExecuteRequest");
+    expect(source).toContain("workflow?: never");
+    expect(source).toContain("cacheKey?: never");
+    expect(source).toContain("requestKey?: never");
+    expect(source).toContain("export type GeneratedWorkflowExecuteResponse");
+    expect(source).toContain("canonicalHit: boolean");
+    expect(source).toContain("canExecuteFromCache: true");
+  });
+
   it("exposes full device ids from edge status for execution APIs", async () => {
     const fs = await import("fs");
     const path = await import("path");

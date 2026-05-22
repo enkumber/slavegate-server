@@ -155,6 +155,234 @@ export type ListReleasesResponse = PaginatedResponse<AgentRelease>;
 // POST /api/ota/deploy
 export type OtaDeployResponse = DeployOtaResponse;
 
+// ─── Generated Workflows ─────────────────────────────────────────────────────
+
+export type GeneratedWorkflowPlatform = "instagram" | "reddit" | "threads" | "tiktok" | "twitter" | "youtube";
+
+export type GeneratedWorkflowVerificationStrategy = "local_only" | "local_with_screenshot";
+
+export interface GeneratedWorkflowStep {
+  type: "action" | "wait" | "condition" | "loop" | "checkpoint";
+  id?: string;
+  action?: string;
+  target?: string;
+  x?: number;
+  y?: number;
+  params?: Record<string, unknown>;
+  verification?: GeneratedWorkflowVerificationStrategy;
+  retries?: number;
+  timeoutMs?: number;
+  expectedScreen?: string;
+  duration?: number;
+  condition?: string;
+  element?: string;
+  check?: string;
+  probability?: number;
+  if_true?: GeneratedWorkflowStep[];
+  if_false?: GeneratedWorkflowStep[];
+  count?: number;
+  steps?: GeneratedWorkflowStep[];
+  breakOn?: string;
+  reason?: string;
+}
+
+export interface GeneratedWorkflowTemplate {
+  id: string;
+  name: string;
+  platform: GeneratedWorkflowPlatform;
+  description: string;
+  version: string;
+  defaultVerificationStrategy?: GeneratedWorkflowVerificationStrategy;
+  dataRetentionDays?: number;
+  compatibleAppVersions?: string[];
+  steps: GeneratedWorkflowStep[];
+}
+
+export interface GeneratedWorkflowCompiledStep {
+  path: string;
+  type: GeneratedWorkflowStep["type"];
+  id?: string;
+  action?: string;
+  verification?: string;
+}
+
+export interface GeneratedWorkflowCompiledPlanSummary {
+  planVersion: "generated-workflow-plan/v1";
+  cacheKey: string;
+  templateId: string;
+  platform: GeneratedWorkflowPlatform;
+  templateVersion: string;
+  stepCount: number;
+  actionCount: number;
+  checkpointCount: number;
+  maxDepth: number;
+  llmBudget: {
+    happyPathRequests: 0;
+    recoveryRequests: "only_on_failure";
+  };
+  steps: GeneratedWorkflowCompiledStep[];
+}
+
+export interface GeneratedWorkflowPlanCacheRecordDto {
+  cacheKey: string;
+  requestKey: string | null;
+  canonicalWorkflowId: string;
+  canonicalWorkflowVersion: string;
+  compiledPlanHash: string;
+  sourceMetadata: Record<string, unknown>;
+  templateId: string;
+  platform: GeneratedWorkflowPlatform;
+  templateVersion: string;
+  workflow: GeneratedWorkflowTemplate;
+  compiledPlan: GeneratedWorkflowCompiledPlanSummary;
+  hitCount: number;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface GeneratedWorkflowPromptRequest {
+  platform: GeneratedWorkflowPlatform;
+  packageName?: string;
+  appId?: string;
+  goal: string;
+  clientContext?: string;
+  availableScreens?: string[];
+  appMapHints?: string[];
+}
+
+export type GeneratedWorkflowPromptResponse =
+  | (GeneratedWorkflowPlanCacheRecordDto & {
+      cacheHit: true;
+      cacheMiss: false;
+      canExecuteFromCache: true;
+      nextAction: "reuse_cached_workflow";
+    })
+  | {
+      requestKey: string;
+      cacheHit: false;
+      cacheMiss: true;
+      canExecuteFromCache: false;
+      nextAction: "generate_validate_and_cache_workflow";
+      appMapLoaded: boolean;
+      screenCount: number;
+      prompt: string;
+    };
+
+export interface GeneratedWorkflowValidateRequest {
+  workflow: GeneratedWorkflowTemplate;
+}
+
+export interface GeneratedWorkflowSummary {
+  generated: true;
+  dryRun?: boolean;
+  persisted?: boolean;
+  templateId: string;
+  platform: GeneratedWorkflowPlatform;
+  version: string;
+  stepCount: number;
+  compiledPlan: GeneratedWorkflowCompiledPlanSummary;
+}
+
+export type GeneratedWorkflowValidateResponse = {
+  valid: true;
+} & GeneratedWorkflowSummary;
+
+export type GeneratedWorkflowCacheResolveRequest =
+  | { cacheKey: string; requestKey?: never; workflow?: never; persist?: boolean }
+  | { requestKey: string; cacheKey?: never; workflow?: never; persist?: boolean }
+  | { workflow: GeneratedWorkflowTemplate; cacheKey?: string; requestKey?: string; persist?: boolean };
+
+export type GeneratedWorkflowCacheResolveResponse =
+  | (GeneratedWorkflowPlanCacheRecordDto & {
+      cacheHit: true;
+      cacheMiss: false;
+      canExecuteFromCache: true;
+      nextAction: "reuse_cached_workflow";
+    })
+  | {
+      cacheHit: false;
+      cacheMiss: true;
+      canExecuteFromCache: false;
+      cacheKey?: string;
+      requestKey?: string;
+      nextAction: "generate_validate_and_cache_workflow";
+    }
+  | ({
+      cacheHit: false;
+      cacheMiss: boolean;
+      canExecuteFromCache: boolean;
+      requestedCacheKey: string | null;
+      requestedRequestKey: string | null;
+      requestKey: string | null;
+      nextAction: "reuse_cached_workflow" | "validate_or_persist_before_execution";
+      persisted: boolean;
+    } & GeneratedWorkflowSummary);
+
+export type GeneratedWorkflowExecuteRequest =
+  | {
+      workflow: GeneratedWorkflowTemplate;
+      cacheKey?: never;
+      requestKey?: never;
+      deviceId?: string;
+      accountId?: string;
+      variables?: Record<string, unknown>;
+      dryRun?: boolean;
+      persist?: boolean;
+    }
+  | {
+      cacheKey: string;
+      requestKey?: never;
+      workflow?: never;
+      deviceId?: string;
+      accountId?: string;
+      variables?: Record<string, unknown>;
+      dryRun?: boolean;
+      persist?: boolean;
+    }
+  | {
+      requestKey: string;
+      cacheKey?: never;
+      workflow?: never;
+      deviceId?: string;
+      accountId?: string;
+      variables?: Record<string, unknown>;
+      dryRun?: boolean;
+      persist?: boolean;
+    };
+
+export type GeneratedWorkflowDryRunResponse = {
+  cacheHit: boolean;
+  canonicalHit: boolean;
+  canExecuteFromCache: boolean;
+  cacheKey: string;
+  requestKey: string | null;
+  canonicalWorkflowId: string;
+  canonicalWorkflowVersion: string;
+  compiledPlanHash: string | null;
+} & GeneratedWorkflowSummary;
+
+export type GeneratedWorkflowExecuteResponse = {
+  workflowId: string;
+  status: "queued";
+  mode: "edge" | "server";
+  templateId: string;
+  generated: true;
+  cacheHit: boolean;
+  canonicalHit: boolean;
+  canExecuteFromCache: true;
+  cacheKey: string;
+  requestKey: string | null;
+  canonicalWorkflowId: string;
+  canonicalWorkflowVersion: string;
+  compiledPlanHash: string | null;
+  compiledPlan: GeneratedWorkflowCompiledPlanSummary;
+};
+
+export type CreateGeneratedWorkflowResponse =
+  | GeneratedWorkflowDryRunResponse
+  | GeneratedWorkflowExecuteResponse;
+
 // ─── Audit log ───────────────────────────────────────────────────────────────
 
 export interface CommandLogEntry {

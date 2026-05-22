@@ -4,9 +4,9 @@ Use this checklist before bumping the Umbrel Phone Network app for the generated
 
 ## Baseline
 
-- Current live Umbrel release: `3.9.20`
-- Current live server commit: `d8398a1baf14b3b0441ec18d1af83804340c4796`
-- Current unreleased server head: `9789dc531` (`fix: constrain generated workflow safety surface`)
+- Current live Umbrel release: `3.9.21`
+- Current live server commit: `040fff78a2cc30d38c3be49d74d20be89804b1c4`
+- Current unreleased server head: Sprint 1 internal branch after canonical generated workflow artifact work.
 - Release decision: do not bump Umbrel until server tests, review, QA, live non-mutating smoke, and metrics evidence are complete.
 
 ## Pre-Release Local Gate
@@ -124,6 +124,7 @@ curl -fsS "${AUTH_HEADER[@]}" \
 Required evidence:
 
 - Response includes `cacheKey`, `requestKey`, `compiledPlan`.
+- Response includes `canonicalWorkflowId`, `canonicalWorkflowVersion`, and `compiledPlanHash` when persisted or loaded from cache.
 - `compiledPlan.llmBudget.happyPathRequests=0`.
 - `canExecuteFromCache=true`.
 - No mutating actions are present in the persisted workflow.
@@ -143,8 +144,30 @@ Required evidence:
 
 - No `workflow` payload is supplied.
 - Response has `cacheHit=true`.
+- Response has `canonicalHit=true`.
 - Response has `canExecuteFromCache=true`.
+- Response includes `canonicalWorkflowId`, `canonicalWorkflowVersion`, and `compiledPlanHash`.
 - Response has `compiledPlan.llmBudget.happyPathRequests=0`.
+
+## Canonical Payload Rejection Gate
+
+Canonical/cache execution must never accept a caller-supplied workflow payload:
+
+```bash
+curl -fsS "${AUTH_HEADER[@]}" \
+  -X POST "${PHONE_NETWORK_BASE_URL}/api/workflows/generated" \
+  --data '{
+    "requestKey": "<requestKey-from-prompt-or-persist>",
+    "deviceId": "'"${DEVICE_ID}"'",
+    "workflow": { "id": "must_not_be_used" }
+  }'
+```
+
+Required evidence:
+
+- Response is `400`.
+- Response code is `WORKFLOW_PAYLOAD_NOT_ALLOWED_FOR_CANONICAL_EXECUTION`.
+- No workflow is persisted or dispatched.
 
 ## Real-Device Non-Mutating Smoke
 
@@ -165,6 +188,7 @@ Required evidence:
 - Request does not include a `workflow` payload.
 - Response is accepted (`202`).
 - Response has `generated=true`, `cacheHit=true`, `canExecuteFromCache=true`.
+- Response has `canonicalHit=true` and canonical artifact fields.
 - Response has `compiledPlan.llmBudget.happyPathRequests=0`.
 - Device receives existing `WORKFLOW_START` with cached workflow and workflow id.
 - No vote/comment/post/join/follow/message/login/settings mutation is executed.
@@ -174,12 +198,14 @@ Required evidence:
 Scrape metrics after the accepted cached execution:
 
 ```bash
-curl -fsS "${PHONE_NETWORK_BASE_URL}/metrics" | grep 'phone_network_generated_workflow'
+curl -fsS "${PHONE_NETWORK_BASE_URL}/api/metrics" | grep 'phone_network_generated_workflow'
 ```
 
 Required evidence:
 
-- `phone_network_generated_workflow_cache_lookup_total{endpoint="execute",result="hit"}` increments.
+- `phone_network_generated_workflow_cache_lookup_total{endpoint="execute",result="canonical_hit"}` increments for canonical request-key hits.
+- Legacy cache-key hits, if exercised, use bounded result labels such as `cache_hit`.
+- Newly compiled generated workflows use bounded result label `compiled_new`.
 - `phone_network_generated_workflow_executions_total{platform="reddit",cache_hit="true",source="request_key"}` or `source="cache_key"` increments.
 - `phone_network_generated_workflow_llm_avoided_total{platform="reddit",reason="cache_hit"}` increments.
 - No metric label includes `cacheKey`, `requestKey`, `templateId`, `deviceId`, prompt text, or client context.
@@ -203,6 +229,6 @@ Verify rejected generated workflows:
 If release verification fails after Umbrel update:
 
 - Do not continue real-device workflow execution.
-- Roll Umbrel back to previous working release `3.9.20`.
+- Roll Umbrel back to previous working release `3.9.21`.
 - Preserve failed request/response bodies with secrets redacted.
 - Keep the generated workflow cache keys/request keys for reproduction, but do not expose them as metric labels.
