@@ -1936,7 +1936,8 @@ router.get("/debug/connections", requireAuth, (_req, res) => {
   // DirectWs only - show connected devices
   const onlineDevices = directWsServer.getConnectedDeviceIds();
   const list = onlineDevices.map((id) => ({
-    deviceId: id.slice(0, 8),
+    deviceId: id,
+    shortDeviceId: id.slice(0, 8),
     online: true,
     agentVersion: directWsServer.getAgentVersion(id),
     edgeCapable: directWsServer.supportsEdgeExecution(id),
@@ -2081,7 +2082,8 @@ router.get("/edge/status", requireAuth, async (_req, res) => {
     const legacyDevices = onlineDevices.filter(id => !directWsServer.supportsEdgeExecution(id));
 
     const deviceInfo = onlineDevices.map(id => ({
-      deviceId: id.slice(0, 8),
+      deviceId: id,
+      shortDeviceId: id.slice(0, 8),
       agentVersion: directWsServer.getAgentVersion(id),
       edgeCapable: directWsServer.supportsEdgeExecution(id),
     }));

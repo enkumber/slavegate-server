@@ -448,6 +448,18 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain('"execute", "hit"');
     expect(source).toContain("compiledPlan.llmBudget.happyPathRequests === 0");
   });
+
+  it("exposes full device ids from edge status for execution APIs", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const source = fs.readFileSync(
+      path.join(__dirname, "..", "..", "api", "routes.ts"),
+      "utf8"
+    );
+
+    expect(source).toContain("shortDeviceId: id.slice(0, 8)");
+    expect(source).not.toContain("deviceId: id.slice(0, 8)");
+  });
 });
 
 describe("Generated workflow validator module", () => {
