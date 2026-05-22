@@ -189,6 +189,11 @@ describe("generated workflow cache-only execution route", () => {
     mocks.workflowService.markRunning.mockResolvedValue(undefined);
     mocks.directWsServer.supportsEdgeExecution.mockReturnValue(true);
     mocks.directWsServer.sendWorkflowStart.mockReturnValue(true);
+    mocks.directWsServer.getConnectedDeviceIds.mockReturnValue([
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "22222222-3333-4333-8333-333333333333",
+    ]);
     mocks.directWsServer.getAgentVersion.mockReturnValue("4.0.0");
     mocks.hbeService.initSession.mockReturnValue({});
   });
@@ -203,7 +208,7 @@ describe("generated workflow cache-only execution route", () => {
 
     const response = await postGeneratedWorkflow({
       cacheKey: cached.cacheKey,
-      deviceId: "device-cache-smoke",
+      deviceId: "11111111-1111-4111-8111-111111111111",
     });
 
     expect(response.status, JSON.stringify(response.json)).toBe(202);
@@ -221,7 +226,7 @@ describe("generated workflow cache-only execution route", () => {
     });
     expect(mocks.workflowService.getGeneratedPlanCache).toHaveBeenCalledWith(cached.cacheKey);
     expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalledWith(
-      "device-cache-smoke",
+      "11111111-1111-4111-8111-111111111111",
       cached.workflow,
       expect.objectContaining({
         generatedWorkflow: true,
@@ -241,7 +246,7 @@ describe("generated workflow cache-only execution route", () => {
 
     const response = await postGeneratedWorkflow({
       requestKey: cached.requestKey,
-      deviceId: "device-request-smoke",
+      deviceId: "11111111",
     });
 
     expect(response.status, JSON.stringify(response.json)).toBe(202);
@@ -258,7 +263,49 @@ describe("generated workflow cache-only execution route", () => {
       },
     });
     expect(mocks.workflowService.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(cached.requestKey);
+    expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      cached.workflow,
+      expect.any(Object),
+      "wf-cache-smoke",
+    );
     expect(mocks.metrics.executionLabels).toHaveBeenCalledWith("reddit", "true", "request_key");
     expect(mocks.metrics.llmAvoidedLabels).toHaveBeenCalledWith("reddit", "cache_hit");
+  });
+
+  it("rejects ambiguous short device id prefixes before database writes", async () => {
+    const cached = cacheRecord();
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    const response = await postGeneratedWorkflow({
+      requestKey: cached.requestKey,
+      deviceId: "22222222",
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.json).toMatchObject({
+      ok: false,
+      code: "DEVICE_ID_AMBIGUOUS",
+    });
+    expect(mocks.workflowService.create).not.toHaveBeenCalled();
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
+  });
+
+  it("rejects unknown non-uuid device ids before database writes", async () => {
+    const cached = cacheRecord();
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    const response = await postGeneratedWorkflow({
+      requestKey: cached.requestKey,
+      deviceId: "missing1",
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.json).toMatchObject({
+      ok: false,
+      code: "DEVICE_NOT_FOUND",
+    });
+    expect(mocks.workflowService.create).not.toHaveBeenCalled();
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
   });
 });

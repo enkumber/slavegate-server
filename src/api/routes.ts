@@ -460,6 +460,29 @@ function createWorkflowCheckpoint(
   };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function resolveDeviceIdForDispatch(deviceId: string): string {
+  if (UUID_RE.test(deviceId)) return deviceId;
+
+  const matches = directWsServer
+    .getConnectedDeviceIds()
+    .filter((id) => id.startsWith(deviceId));
+
+  if (matches.length === 1) return matches[0];
+
+  const err = new Error(
+    matches.length === 0
+      ? "deviceId must be a full UUID or unique online device prefix"
+      : "deviceId prefix is ambiguous; use the full UUID"
+  );
+  (err as Error & { status?: number; code?: string }).status = 400;
+  (err as Error & { status?: number; code?: string }).code = matches.length === 0
+    ? "DEVICE_NOT_FOUND"
+    : "DEVICE_ID_AMBIGUOUS";
+  throw err;
+}
+
 async function dispatchWorkflowTemplate(input: {
   templateId: string;
   template: WorkflowTemplate;
@@ -830,12 +853,14 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
       });
     }
 
+    const dispatchDeviceId = dryRun ? undefined : resolveDeviceIdForDispatch(deviceId!);
+
     await workflowService.saveTemplate(template);
     await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey);
     const data = await dispatchWorkflowTemplate({
       templateId: template.id,
       template,
-      deviceId: deviceId!,
+      deviceId: dispatchDeviceId!,
       accountId,
       variables: {
         ...(variables ?? {}),
