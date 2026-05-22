@@ -100,6 +100,14 @@ function agencyWorkflowRunSelectSql(where: string): string {
           ${where ? `WHERE ${where.replace(/^WHERE\s+/i, "")}` : ""}`;
 }
 
+async function hydrateAgencyWorkflowRun(db: ReturnType<typeof getDb>, runId: string): Promise<Record<string, unknown> | null> {
+  const hydrated = await db.query(
+    agencyWorkflowRunSelectSql(`r.id = $1`),
+    [runId]
+  );
+  return hydrated.rows[0] ?? null;
+}
+
 // ─── File upload config ───────────────────────────────────────────────────────
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR ?? "/data/uploads/materials";
@@ -520,6 +528,139 @@ router.patch("/posts/:id", async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // WORKFLOW RUNS — Control-plane runs for existing canonical generated workflows
 // ═══════════════════════════════════════════════════════════════════════════════
+
+router.post("/reddit/account-health-scans", async (req: Request, res: Response) => {
+  const db = getDb();
+  const body = req.body as {
+    accountId?: string;
+    deviceId?: string;
+    scheduledTime?: string;
+    context?: Record<string, unknown>;
+  };
+
+  if (!body.accountId || !body.deviceId) {
+    return res.status(400).json({ ok: false, error: "accountId and deviceId required" });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+
+    const accountResult = await client.query<{
+      id: string;
+      client_id: string | null;
+      platform: string;
+      username: string | null;
+    }>(
+      `SELECT id, client_id, platform, username FROM accounts WHERE id = $1`,
+      [body.accountId],
+    );
+    const account = accountResult.rows[0];
+    if (!account) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ ok: false, error: "Account not found" });
+    }
+    if (account.platform !== "reddit") {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        ok: false,
+        code: "ACCOUNT_PLATFORM_NOT_REDDIT",
+        error: "Reddit account health scans require a reddit account",
+      });
+    }
+    if (!account.client_id) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        ok: false,
+        code: "ACCOUNT_CLIENT_REQUIRED",
+        error: "Account must be linked to a client before agency scans can run",
+      });
+    }
+
+    const cacheResult = await client.query<Record<string, unknown>>(
+      `SELECT * FROM generated_workflow_plan_cache
+       WHERE platform = 'reddit'
+         AND COALESCE(compiled_plan #>> '{metadata,intent}', workflow ->> 'intent', source_metadata ->> 'intent') = 'reddit_account_health_scan'
+         AND COALESCE(compiled_plan #>> '{metadata,safetyClass}', workflow ->> 'safetyClass', source_metadata ->> 'safetyClass') = 'read_only'
+         AND COALESCE(compiled_plan #>> '{llmBudget,happyPathRequests}', '') = '0'
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+    );
+    const cached = cacheResult.rows[0];
+    if (!cached) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        ok: false,
+        code: "REDDIT_HEALTH_SCAN_WORKFLOW_NOT_READY",
+        error: "No cache-safe reddit_account_health_scan workflow artifact found",
+      });
+    }
+
+    const runContext = {
+      ...(body.context ?? {}),
+      source: "agency_reddit_account_health_scan",
+      clientId: account.client_id,
+      accountId: body.accountId,
+      deviceId: body.deviceId,
+      intent: "reddit_account_health_scan",
+      accountUsername: account.username,
+      requiresScreenshotArtifact: true,
+      requiresRealClassifierOutput: true,
+    };
+    const runResult = await client.query<{ id: string }>(
+      `INSERT INTO agency_workflow_runs
+         (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
+          canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, status, context)
+       VALUES ($1, $2, $3, 'reddit', 'reddit_account_health_scan', 'read_only', NULL, $4, $5, $6, $7, 'queued', $8)
+       RETURNING id`,
+      [
+        account.client_id,
+        body.accountId,
+        body.deviceId,
+        cached.cache_key,
+        cached.canonical_workflow_id,
+        cached.canonical_workflow_version,
+        cached.compiled_plan_hash,
+        JSON.stringify(runContext),
+      ],
+    );
+    const runId = runResult.rows[0].id;
+
+    const taskParams = {
+      cacheKey: cached.cache_key,
+      clientId: account.client_id,
+      agencyWorkflowRunId: runId,
+      workflowRunId: runId,
+      intent: "reddit_account_health_scan",
+      source: "agency_reddit_account_health_scan",
+    };
+    const taskResult = await client.query<{ id: string }>(
+      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
+       VALUES ($1, $2, 'generated_workflow', $3, $4, 'queued')
+       RETURNING id`,
+      [
+        body.accountId,
+        body.deviceId,
+        JSON.stringify(taskParams),
+        body.scheduledTime ?? new Date().toISOString(),
+      ],
+    );
+
+    await client.query(
+      `UPDATE agency_workflow_runs SET task_id = $1, updated_at = NOW() WHERE id = $2`,
+      [taskResult.rows[0].id, runId],
+    );
+
+    const hydrated = await hydrateAgencyWorkflowRun(client as unknown as ReturnType<typeof getDb>, runId);
+    await client.query("COMMIT");
+    res.status(201).json({ ok: true, data: rowToAgencyWorkflowRun(hydrated!) });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  } finally {
+    client.release();
+  }
+});
 
 router.post("/workflow-runs", async (req: Request, res: Response) => {
   const db = getDb();

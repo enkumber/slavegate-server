@@ -89,13 +89,17 @@ function hydratedRun(overrides: Record<string, unknown> = {}) {
 }
 
 async function postWorkflowRun(body: Record<string, unknown>) {
+  return postAgency("/api/agency/workflow-runs", body);
+}
+
+async function postAgency(path: string, body: Record<string, unknown>) {
   const server = await app();
   const response = await new Promise<{ status: number; body: any }>((resolve, reject) => {
     const listener = server.listen(0, async () => {
       try {
         const address = listener.address();
         if (!address || typeof address === "string") throw new Error("no address");
-        const res = await fetch(`http://127.0.0.1:${address.port}/api/agency/workflow-runs`, {
+        const res = await fetch(`http://127.0.0.1:${address.port}${path}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body),
@@ -174,6 +178,56 @@ describe("agency workflow runs API", () => {
       intent: "reddit_account_health_scan",
     }));
     expect(JSON.parse(taskInsert![1][2])).not.toHaveProperty("workflow");
+  });
+
+  it("creates a product-level Reddit account health scan from the latest cache-safe artifact", async () => {
+    const run = hydratedRun({ cache_key: "0123456789abcdef01234567", request_key: null });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({
+        rows: [{
+          id: run.account_id,
+          client_id: run.client_id,
+          platform: "reddit",
+          username: "Consistent-Beyond386",
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [cachedArtifact({ cache_key: run.cache_key })] })
+      .mockResolvedValueOnce({ rows: [{ id: run.id }] })
+      .mockResolvedValueOnce({ rows: [{ id: run.task_id }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [run] })
+      .mockResolvedValueOnce({ rows: [] }); // COMMIT
+
+    const response = await postAgency("/api/agency/reddit/account-health-scans", {
+      accountId: run.account_id,
+      deviceId: run.device_id,
+      context: { requestedBy: "test" },
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      id: run.id,
+      intent: "reddit_account_health_scan",
+      safetyClass: "read_only",
+      cacheKey: "0123456789abcdef01234567",
+      accountPlatform: "reddit",
+    });
+
+    const cacheLookup = mocks.client.query.mock.calls.find(([sql]) =>
+      String(sql).includes("generated_workflow_plan_cache")
+    );
+    expect(cacheLookup?.[0]).toContain("reddit_account_health_scan");
+
+    const taskInsert = mocks.client.query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO tasks")
+    );
+    expect(taskInsert).toBeDefined();
+    expect(JSON.parse(taskInsert![1][2])).toMatchObject({
+      cacheKey: "0123456789abcdef01234567",
+      intent: "reddit_account_health_scan",
+      source: "agency_reddit_account_health_scan",
+    });
   });
 
   it("rejects inline workflow payloads before database access", async () => {
