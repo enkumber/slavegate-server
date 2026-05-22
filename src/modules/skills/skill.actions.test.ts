@@ -4,8 +4,8 @@
  * Run: npx vitest run src/modules/skills/skill.actions.test.ts
  */
 
-import { describe, it, expect } from 'vitest';
-import { evalConditionExpr } from './skill.actions';
+import { describe, it, expect, vi } from 'vitest';
+import { evalConditionExpr, executeSkillAction, type SkillActionContext } from './skill.actions';
 
 describe('evalConditionExpr', () => {
   const vars: Record<string, unknown> = {
@@ -51,4 +51,69 @@ describe('evalConditionExpr', () => {
   it('false literal', () => expect(evalConditionExpr('false',   vars)).toBe(false));
   it('truthy var',    () => expect(evalConditionExpr('_flag',   vars)).toBe(true));
   it('falsy var',     () => expect(evalConditionExpr('_falsy',  vars)).toBe(false));
+});
+
+describe('set_variable', () => {
+  function context(): SkillActionContext {
+    return {
+      workflowId: 'wf-test',
+      deviceId: 'device-test',
+      platform: 'reddit',
+      checkpoint: {
+        stepIndex: 0,
+        loopStack: [],
+        variables: {},
+        hbeParams: {},
+        checkpointAt: new Date().toISOString(),
+      },
+      stepIndex: 0,
+      dispatchAndWait: vi.fn(),
+      cascadeTap: vi.fn(),
+      executeSteps: vi.fn(),
+      persistCheckpoint: vi.fn(),
+      sleep: vi.fn(),
+    };
+  }
+
+  it('sets a single key/value pair', async () => {
+    const ctx = context();
+
+    await executeSkillAction('set_variable', { key: 'loggedIn', value: 'unknown' }, ctx);
+
+    expect(ctx.checkpoint.variables.loggedIn).toBe('unknown');
+  });
+
+  it('sets a map of canonical output variables', async () => {
+    const ctx = context();
+
+    await executeSkillAction('set_variable', {
+      variables: {
+        loggedIn: 'unknown',
+        homeFeedVisible: 'unknown',
+        searchSurfaceAvailable: 'unknown',
+        challengeDetected: 'false',
+        loginWallDetected: 'false',
+        accountSwitcherVisible: 'unknown',
+        observedUsername: null,
+        error: null,
+      },
+    }, ctx);
+
+    expect(ctx.checkpoint.variables).toMatchObject({
+      loggedIn: 'unknown',
+      homeFeedVisible: 'unknown',
+      searchSurfaceAvailable: 'unknown',
+      challengeDetected: 'false',
+      loginWallDetected: 'false',
+      accountSwitcherVisible: 'unknown',
+      observedUsername: null,
+      error: null,
+    });
+  });
+
+  it('rejects empty set_variable params', async () => {
+    await expect(executeSkillAction('set_variable', {}, context())).rejects.toThrow(
+      'set_variable requires key/value or variables map',
+    );
+  });
 });

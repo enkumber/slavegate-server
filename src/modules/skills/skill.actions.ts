@@ -1201,7 +1201,18 @@ async function handleMarkProcessed(params: Record<string, unknown>, ctx: SkillAc
 }
 
 async function handleSetVariable(params: Record<string, unknown>, ctx: SkillActionContext): Promise<void> {
+  const variables = params.variables;
+  if (variables && typeof variables === "object" && !Array.isArray(variables)) {
+    for (const [key, value] of Object.entries(variables)) {
+      ctx.checkpoint.variables[key] = value;
+    }
+    return;
+  }
+
   const key   = params.key as string;
+  if (!key) {
+    throw new Error("[skill-actions] set_variable requires key/value or variables map");
+  }
   const value = params.value;
   ctx.checkpoint.variables[key] = value;
 }
