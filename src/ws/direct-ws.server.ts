@@ -32,6 +32,27 @@ import { visionService } from "../modules/vision/vision.service";
 import { llmComplete } from "../utils/llm";
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+export function mergeWorkflowStatusVariables(
+  existingCheckpoint: unknown,
+  reportedVariables: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const existingVariables = isRecord(existingCheckpoint)
+    && isRecord(existingCheckpoint.variables)
+    ? existingCheckpoint.variables
+    : {};
+  const merged: Record<string, unknown> = { ...existingVariables };
+  if (reportedVariables) {
+    for (const [key, value] of Object.entries(reportedVariables)) {
+      if (value !== undefined) merged[key] = value;
+    }
+  }
+  return merged;
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const AUTH_TIMEOUT_MS       = scalabilityConfig.wsAuthTimeout;
@@ -766,11 +787,16 @@ export class DirectWsServer {
     if (!workflowId) return;
     const { getDb } = require("../db/client");
     const db = getDb();
+    const existing = await db.query(
+      "SELECT checkpoint FROM workflows WHERE id = $1",
+      [workflowId]
+    );
+    const mergedVariables = mergeWorkflowStatusVariables(existing.rows[0]?.checkpoint, variables);
 
     const checkpoint = {
       stepIndex: step,
       loopStack: [],
-      variables: variables ?? {},
+      variables: mergedVariables,
       executionStats: {
         compileLlmCalls: 0,
         recoveryLlmCalls: 0,
@@ -800,7 +826,7 @@ export class DirectWsServer {
              checkpoint = $3,
              completed_at = NOW()
          WHERE id = $4`,
-        [step ?? total, total, JSON.stringify({ ...checkpoint, result: { step, total, variables } }), workflowId]
+        [step ?? total, total, JSON.stringify({ ...checkpoint, result: { step, total, variables: mergedVariables } }), workflowId]
       );
     } else if (status === 'failed') {
       await db.query(
@@ -831,7 +857,7 @@ export class DirectWsServer {
           total,
           JSON.stringify({
             ...checkpoint,
-            progress: { step, total, error, variables: variables ? JSON.stringify(variables).slice(0, 1000) : null },
+            progress: { step, total, error, variables: JSON.stringify(mergedVariables).slice(0, 1000) },
           }),
           workflowId,
         ]

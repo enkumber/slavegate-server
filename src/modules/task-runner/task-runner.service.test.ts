@@ -56,14 +56,49 @@ const CLIENT_ID = "55555555-5555-4555-8555-555555555555";
 const CAMPAIGN_ID = "66666666-6666-4666-8666-666666666666";
 const REQUEST_KEY = "c02c59dfbe512562f8c65c97";
 const CACHE_KEY = "56d91a7aa0e90314241896a2";
+const REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS = {
+  loggedIn: "unknown",
+  homeFeedVisible: "unknown",
+  searchSurfaceAvailable: "unknown",
+  challengeDetected: "unknown",
+  loginWallDetected: "unknown",
+  accountSwitcherVisible: "unknown",
+  observedUsername: "",
+  error: "",
+};
 
 function generatedWorkflow(): WorkflowTemplate {
   return {
-    id: "agent_generated_reddit_home_smoke_v1",
-    name: "Agent generated Reddit home smoke",
+    id: "agent_generated_reddit_account_health_scan_v1",
+    name: "Reddit account health scan",
     platform: "reddit",
-    description: "Non-mutating generated workflow for task-runner tests.",
+    description: "Read-only generated workflow for task-runner tests.",
     version: "1.0.0",
+    intent: "reddit_account_health_scan",
+    safetyClass: "read_only",
+    outputSchema: {
+      required: [
+        "loggedIn",
+        "homeFeedVisible",
+        "searchSurfaceAvailable",
+        "challengeDetected",
+        "loginWallDetected",
+        "accountSwitcherVisible",
+        "observedUsername",
+        "error",
+      ],
+      properties: {
+        loggedIn: { type: "string" },
+        homeFeedVisible: { type: "string" },
+        searchSurfaceAvailable: { type: "string" },
+        challengeDetected: { type: "string" },
+        loginWallDetected: { type: "string" },
+        accountSwitcherVisible: { type: "string" },
+        observedUsername: { type: "string" },
+        error: { type: "string" },
+      },
+    },
+    allowedRecoveryRequests: ["refresh_screen_state"],
     defaultVerificationStrategy: "local_with_screenshot",
     dataRetentionDays: 1,
     steps: [
@@ -152,7 +187,7 @@ describe("task-runner generated_workflow routine", () => {
       workflowId: WORKFLOW_ID,
       status: "running",
       mode: "edge",
-      templateId: "agent_generated_reddit_home_smoke_v1",
+      templateId: "agent_generated_reddit_account_health_scan_v1",
     });
   });
 
@@ -174,7 +209,7 @@ describe("task-runner generated_workflow routine", () => {
         mode: "edge",
         cacheKey: CACHE_KEY,
         requestKey: REQUEST_KEY,
-        canonicalWorkflowId: "agent_generated_reddit_home_smoke_v1",
+        canonicalWorkflowId: "agent_generated_reddit_account_health_scan_v1",
         compiledPlanHash: cached.compiledPlanHash,
         llmBudget: { happyPathRequests: 0 },
         controlPlaneContext: {
@@ -193,16 +228,18 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.getGeneratedPlanCache).not.toHaveBeenCalled();
     expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
     expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
-      templateId: "agent_generated_reddit_home_smoke_v1",
+      templateId: "agent_generated_reddit_account_health_scan_v1",
       template: cached.workflow,
       deviceId: DEVICE_ID,
       accountId: ACCOUNT_ID,
     }));
     expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
       variables: expect.objectContaining({
+        ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+        timezone: "UTC",
         taskId: TASK_ID,
         generatedWorkflow: true,
-        generatedWorkflowId: "agent_generated_reddit_home_smoke_v1",
+        generatedWorkflowId: "agent_generated_reddit_account_health_scan_v1",
         generatedWorkflowCacheKey: CACHE_KEY,
         generatedWorkflowRequestKey: REQUEST_KEY,
         compiledPlanHash: cached.compiledPlanHash,
@@ -223,6 +260,18 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.executionLabels).toHaveBeenCalledWith("reddit", "true", "task_runner_request_key");
     expect(mocks.llmAvoidedLabels).toHaveBeenCalledWith("reddit", "task_runner_cache_hit");
     expect(mocks.taskRunnerDispatchLabels).toHaveBeenCalledWith("generated_workflow", "request_key", "accepted");
+  });
+
+  it("materializes output schema defaults so edge checkpoints retain required result fields", async () => {
+    const cached = cacheRecord();
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    await executeTaskNow(TASK_ID);
+
+    expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      variables: expect.objectContaining(REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS),
+    }));
   });
 
   it("dispatches a cached generated workflow by cacheKey", async () => {

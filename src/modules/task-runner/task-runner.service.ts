@@ -123,6 +123,21 @@ function generatedWorkflowTaskFailure(
   };
 }
 
+function generatedWorkflowOutputDefaults(cached: GeneratedWorkflowPlanCacheRecord): Record<string, unknown> {
+  const schema = cached.workflow.outputSchema;
+  if (!schema) return {};
+
+  const defaults: Record<string, unknown> = {};
+  for (const key of schema.required) {
+    if (key === "error" || key === "observedUsername") {
+      defaults[key] = "";
+    } else {
+      defaults[key] = "unknown";
+    }
+  }
+  return defaults;
+}
+
 function agencyWorkflowRunIdFromTask(task: TaskRow): string | null {
   const value = task.params?.agencyWorkflowRunId ?? task.params?.workflowRunId;
   return typeof value === "string" && UUID_RE.test(value) ? value : null;
@@ -686,6 +701,7 @@ async function executeGeneratedWorkflowTask(
       ? params.variables as Record<string, unknown>
       : undefined;
     const variables: Record<string, unknown> = {
+      ...generatedWorkflowOutputDefaults(cached),
       ...(suppliedVariables ?? {}),
       taskId: task.id,
       generatedWorkflow: true,
