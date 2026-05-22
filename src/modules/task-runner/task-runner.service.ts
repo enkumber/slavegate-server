@@ -16,6 +16,21 @@ import { getDb } from "../../db/client";
 import { agentOrchestrator } from "../agents/orchestrator";
 import { isDeviceOnline } from "../../transport/transport";
 import type { TaskResult } from "../agents/types";
+import { scalabilityConfig } from "../../config/scalability.config";
+import { directWsServer } from "../../ws/direct-ws.server";
+import { hbeService } from "../hbe/hbe.service";
+import {
+  generatedWorkflowCacheLookups,
+  generatedWorkflowExecutions,
+  generatedWorkflowLlmAvoided,
+  generatedWorkflowTaskRunnerDispatches,
+} from "../observability/metrics";
+import { startWorkflow } from "../workflows/workflow.executor";
+import {
+  workflowService,
+  type GeneratedWorkflowPlanCacheRecord,
+} from "../workflows/workflow.service";
+import type { WorkflowCheckpoint, WorkflowTemplate } from "../workflows/types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -41,6 +56,22 @@ export interface TaskRunnerConfig {
   retryBackoffMs: number;
 }
 
+interface TaskRunnerResult extends TaskResult {
+  generatedWorkflow?: {
+    workflowId?: string;
+    status?: "queued" | "running";
+    mode?: "edge" | "server";
+    templateId?: string;
+    cacheKey?: string;
+    requestKey?: string | null;
+    canonicalWorkflowId?: string;
+    canonicalWorkflowVersion?: string;
+    compiledPlanHash?: string;
+    llmBudget?: GeneratedWorkflowPlanCacheRecord["compiledPlan"]["llmBudget"];
+    failureCode?: string;
+  };
+}
+
 const DEFAULT_CONFIG: TaskRunnerConfig = {
   pollIntervalMs: 30_000,           // 30 seconds
   minGapBetweenTasksMs: 60_000,     // 1 minute gap between tasks on same device
@@ -48,6 +79,76 @@ const DEFAULT_CONFIG: TaskRunnerConfig = {
   maxRetries: 3,                    // 3 retries: 5s, 15s, 45s (exponential backoff)
   retryBackoffMs: 5_000,            // Base backoff: 5 * 3^retry_count seconds
 };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function zeroTokenUsage(): TaskResult["tokenUsage"] {
+  return {
+    planner: { input: 0, output: 0 },
+    executor: { input: 0, output: 0, calls: 0 },
+    verifier: { input: 0, output: 0, calls: 0 },
+    total: 0,
+  };
+}
+
+function createWorkflowCheckpoint(
+  variables: Record<string, unknown> | undefined,
+  hbeSession: Record<string, unknown>,
+  mode: "edge" | "server",
+): WorkflowCheckpoint {
+  return {
+    stepIndex: 0,
+    loopStack: [],
+    variables: variables ?? {},
+    hbeParams: hbeSession,
+    executionStats: {
+      compileLlmCalls: 0,
+      recoveryLlmCalls: 0,
+      creativeLlmCalls: 0,
+      runtimeLlmCalls: 0,
+      vlmCalls: 0,
+      deterministicSteps: 0,
+      batchedSteps: 0,
+      failedSteps: 0,
+      retriedSteps: 0,
+      mode,
+    },
+    checkpointAt: new Date().toISOString(),
+  };
+}
+
+function generatedWorkflowTaskSource(cacheKey?: string, requestKey?: string): "cache_key" | "request_key" {
+  return cacheKey ? "cache_key" : requestKey ? "request_key" : "request_key";
+}
+
+function generatedWorkflowTaskCacheResult(cacheKey?: string, requestKey?: string): "cache_hit" | "canonical_hit" {
+  return requestKey && !cacheKey ? "canonical_hit" : "cache_hit";
+}
+
+function generatedWorkflowTaskFailure(
+  code: string,
+  reason: string,
+  startedAt: number,
+  cached?: GeneratedWorkflowPlanCacheRecord | null,
+): TaskRunnerResult {
+  return {
+    success: false,
+    stepsCompleted: 0,
+    totalSteps: cached?.workflow.steps.length ?? 0,
+    failReason: `${code}: ${reason}`,
+    tokenUsage: zeroTokenUsage(),
+    durationMs: Date.now() - startedAt,
+    generatedWorkflow: {
+      failureCode: code,
+      cacheKey: cached?.cacheKey,
+      requestKey: cached?.requestKey,
+      canonicalWorkflowId: cached?.canonicalWorkflowId,
+      canonicalWorkflowVersion: cached?.canonicalWorkflowVersion,
+      compiledPlanHash: cached?.compiledPlanHash,
+      llmBudget: cached?.compiledPlan.llmBudget,
+    },
+  };
+}
 
 // ─── Task Runner State ────────────────────────────────────────────────────────
 
@@ -227,9 +328,12 @@ async function executeTask(task: TaskRow): Promise<void> {
     const platform = accountResult.rows[0]?.platform || "instagram";
     
     // Route by task type
-    let result: TaskResult;
+    let result: TaskRunnerResult;
     
     switch (task.routine) {
+      case "generated_workflow":
+        result = await executeGeneratedWorkflowTask(task, platform);
+        break;
       case "engage_session":
         result = await executeEngageSession(task, platform);
         break;
@@ -256,6 +360,7 @@ async function executeTask(task: TaskRow): Promise<void> {
       tokenUsage: result.tokenUsage,
       durationMs: result.durationMs,
       failedStep: result.failedStep,
+      generatedWorkflow: result.generatedWorkflow,
     };
     
     // Update task status
@@ -431,6 +536,228 @@ async function executePost(task: TaskRow, platform: string): Promise<TaskResult>
 }
 
 /**
+ * generated_workflow: Dispatch a cached generated workflow by canonical requestKey or cacheKey.
+ * The task payload is a pointer only; workflow bodies are rejected to keep execution deterministic.
+ */
+async function executeGeneratedWorkflowTask(task: TaskRow, platform: string): Promise<TaskRunnerResult> {
+  const startedAt = Date.now();
+  const params = (task.params ?? {}) as {
+    cacheKey?: unknown;
+    requestKey?: unknown;
+    deviceId?: unknown;
+    workflow?: unknown;
+    variables?: unknown;
+  };
+
+  if (Object.prototype.hasOwnProperty.call(params, "workflow")) {
+    generatedWorkflowTaskRunnerDispatches?.labels(platform, "unknown", "dispatch_failed").inc();
+    return generatedWorkflowTaskFailure(
+      "WORKFLOW_PAYLOAD_NOT_ALLOWED",
+      "generated_workflow tasks must use cacheKey or requestKey only",
+      startedAt,
+    );
+  }
+
+  const cacheKey = typeof params.cacheKey === "string" ? params.cacheKey : undefined;
+  const requestKey = typeof params.requestKey === "string" ? params.requestKey : undefined;
+  const taskParamDeviceId = typeof params.deviceId === "string" ? params.deviceId : undefined;
+  const source = generatedWorkflowTaskSource(cacheKey, requestKey);
+
+  if (!cacheKey && !requestKey) {
+    generatedWorkflowTaskRunnerDispatches?.labels(platform, "unknown", "dispatch_failed").inc();
+    return generatedWorkflowTaskFailure(
+      "GENERATED_WORKFLOW_KEY_REQUIRED",
+      "cacheKey or requestKey is required",
+      startedAt,
+    );
+  }
+
+  if (cacheKey && requestKey) {
+    generatedWorkflowTaskRunnerDispatches?.labels(platform, "unknown", "dispatch_failed").inc();
+    return generatedWorkflowTaskFailure(
+      "GENERATED_WORKFLOW_EXACTLY_ONE_KEY_REQUIRED",
+      "generated_workflow tasks must use exactly one of cacheKey or requestKey",
+      startedAt,
+    );
+  }
+
+  if (cacheKey && !/^[a-f0-9]{24}$/.test(cacheKey)) {
+    generatedWorkflowTaskRunnerDispatches?.labels(platform, source, "dispatch_failed").inc();
+    return generatedWorkflowTaskFailure("INVALID_CACHE_KEY", "cacheKey must be a 24-character lowercase hex string", startedAt);
+  }
+
+  if (requestKey && !/^[a-f0-9]{24}$/.test(requestKey)) {
+    generatedWorkflowTaskRunnerDispatches?.labels(platform, source, "dispatch_failed").inc();
+    return generatedWorkflowTaskFailure("INVALID_REQUEST_KEY", "requestKey must be a 24-character lowercase hex string", startedAt);
+  }
+
+  if (!UUID_RE.test(task.device_id) || (taskParamDeviceId && !UUID_RE.test(taskParamDeviceId))) {
+    generatedWorkflowTaskRunnerDispatches?.labels(platform, source, "dispatch_failed").inc();
+    return generatedWorkflowTaskFailure(
+      "DEVICE_ID_INVALID_OR_AMBIGUOUS",
+      "generated_workflow tasks require a full task device UUID",
+      startedAt,
+    );
+  }
+
+  if (taskParamDeviceId && taskParamDeviceId !== task.device_id) {
+    generatedWorkflowTaskRunnerDispatches?.labels(platform, source, "dispatch_failed").inc();
+    return generatedWorkflowTaskFailure(
+      "DEVICE_ID_MISMATCH",
+      "params.deviceId must match the task device_id",
+      startedAt,
+    );
+  }
+
+  const cached = cacheKey
+    ? await workflowService.getGeneratedPlanCache(cacheKey)
+    : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
+
+  if (!cached) {
+    generatedWorkflowCacheLookups?.labels("task_runner", "miss").inc();
+    generatedWorkflowTaskRunnerDispatches?.labels(platform, source, "miss").inc();
+    return generatedWorkflowTaskFailure(
+      "GENERATED_WORKFLOW_CACHE_MISS",
+      "canonical generated workflow artifact not found",
+      startedAt,
+    );
+  }
+
+  generatedWorkflowCacheLookups?.labels("task_runner", generatedWorkflowTaskCacheResult(cacheKey, requestKey)).inc();
+
+  if (cached.compiledPlan.llmBudget.happyPathRequests !== 0) {
+    generatedWorkflowTaskRunnerDispatches?.labels(cached.platform, source, "dispatch_failed").inc();
+    return generatedWorkflowTaskFailure(
+      "GENERATED_WORKFLOW_LLM_BUDGET_NOT_CACHE_SAFE",
+      "compiled plan happy path must not require LLM calls",
+      startedAt,
+      cached,
+    );
+  }
+
+  try {
+    const variables = params.variables && typeof params.variables === "object" && !Array.isArray(params.variables)
+      ? params.variables as Record<string, unknown>
+      : undefined;
+    const dispatch = await dispatchCachedGeneratedWorkflowTask(task, cached, source, variables);
+    generatedWorkflowTaskRunnerDispatches?.labels(cached.platform, source, "accepted").inc();
+    generatedWorkflowExecutions?.labels(cached.platform, "true", `task_runner_${source}`).inc();
+    generatedWorkflowLlmAvoided?.labels(cached.platform, "task_runner_cache_hit").inc();
+
+    return {
+      success: true,
+      stepsCompleted: cached.workflow.steps.length,
+      totalSteps: cached.workflow.steps.length,
+      tokenUsage: zeroTokenUsage(),
+      durationMs: Date.now() - startedAt,
+      generatedWorkflow: {
+        workflowId: dispatch.workflowId,
+        status: dispatch.status,
+        mode: dispatch.mode,
+        templateId: dispatch.templateId,
+        cacheKey: cached.cacheKey,
+        requestKey: cached.requestKey,
+        canonicalWorkflowId: cached.canonicalWorkflowId,
+        canonicalWorkflowVersion: cached.canonicalWorkflowVersion,
+        compiledPlanHash: cached.compiledPlanHash,
+        llmBudget: cached.compiledPlan.llmBudget,
+      },
+    };
+  } catch (err) {
+    generatedWorkflowTaskRunnerDispatches?.labels(cached.platform, source, "dispatch_failed").inc();
+    return generatedWorkflowTaskFailure(
+      (err as Error & { code?: string }).code ?? "GENERATED_WORKFLOW_DISPATCH_FAILED",
+      (err as Error).message,
+      startedAt,
+      cached,
+    );
+  }
+}
+
+async function dispatchCachedGeneratedWorkflowTask(
+  task: TaskRow,
+  cached: GeneratedWorkflowPlanCacheRecord,
+  source: "cache_key" | "request_key",
+  variables?: Record<string, unknown>,
+): Promise<{ workflowId: string; status: "queued" | "running"; mode: "edge" | "server"; templateId: string }> {
+  const template = cached.workflow as WorkflowTemplate;
+  const deviceId = task.device_id;
+  const activeForDevice = await workflowService.countActiveByDevice(deviceId);
+  if (activeForDevice >= scalabilityConfig.maxWorkflowsPerDevice) {
+    throw Object.assign(
+      new Error(`Device already has ${activeForDevice} active workflow(s). Max: ${scalabilityConfig.maxWorkflowsPerDevice} per device.`),
+      { code: "DEVICE_BUSY" },
+    );
+  }
+
+  const globalRunning = await workflowService.countByStatus("running");
+  if (globalRunning >= scalabilityConfig.maxGlobalConcurrentWorkflows) {
+    throw Object.assign(
+      new Error(`Server at capacity: ${globalRunning}/${scalabilityConfig.maxGlobalConcurrentWorkflows} concurrent workflows. Retry later.`),
+      { code: "SERVER_BUSY" },
+    );
+  }
+
+  const workflowVariables: Record<string, unknown> = {
+    ...(variables ?? {}),
+    taskId: task.id,
+    generatedWorkflow: true,
+    generatedWorkflowId: template.id,
+    generatedWorkflowCacheKey: cached.cacheKey,
+    generatedWorkflowRequestKey: cached.requestKey,
+    canonicalWorkflowId: cached.canonicalWorkflowId,
+    canonicalWorkflowVersion: cached.canonicalWorkflowVersion,
+    compiledPlanHash: cached.compiledPlanHash,
+  };
+  const accountAgeDays = (workflowVariables["accountAgeDays"] as number) ?? 30;
+  const simulatedTimezone = (workflowVariables["timezone"] as string) ?? "Europe/Bucharest";
+  const hbeSession = hbeService.initSession(accountAgeDays, simulatedTimezone) as unknown as Record<string, unknown>;
+
+  if (directWsServer.supportsEdgeExecution(deviceId)) {
+    const wf = await workflowService.create({
+      templateId: template.id,
+      deviceId,
+      accountId: task.account_id,
+      totalSteps: template.steps.length,
+      hbeParams: hbeSession,
+      checkpoint: createWorkflowCheckpoint(workflowVariables, hbeSession, "edge"),
+    });
+    await workflowService.markRunning(wf.id);
+
+    const sent = directWsServer.sendWorkflowStart(
+      deviceId,
+      template as unknown as Record<string, unknown>,
+      workflowVariables,
+      wf.id,
+    );
+
+    if (sent) {
+      console.log(`[task-runner] Generated workflow ${wf.id} dispatched via cached artifact (${source})`);
+      return { workflowId: wf.id, status: "running", mode: "edge", templateId: template.id };
+    }
+
+    await workflowService.markFailed(wf.id, "Edge dispatch failed");
+    console.warn(`[task-runner] Generated workflow edge dispatch failed for ${deviceId.slice(0, 8)} — falling back to server execution`);
+  }
+
+  const checkpoint = createWorkflowCheckpoint(workflowVariables, hbeSession, "server");
+  const wf = await workflowService.create({
+    templateId: template.id,
+    deviceId,
+    accountId: task.account_id,
+    totalSteps: template.steps.length,
+    hbeParams: hbeSession,
+    checkpoint,
+  });
+
+  startWorkflow(wf.id).catch(err => {
+    console.error(`[task-runner] Failed to enqueue generated workflow ${wf.id}: ${err.message}`);
+  });
+
+  return { workflowId: wf.id, status: "queued", mode: "server", templateId: template.id };
+}
+
+/**
  * Generic task: Pass routine as task description
  */
 async function executeGenericTask(task: TaskRow, platform: string): Promise<TaskResult> {
@@ -480,8 +807,11 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
   try {
     await db.query(`UPDATE tasks SET status = 'running', started_at = NOW() WHERE id = $1`, [taskId]);
     
-    let taskResult: TaskResult;
+    let taskResult: TaskRunnerResult;
     switch (task.routine) {
+      case "generated_workflow":
+        taskResult = await executeGeneratedWorkflowTask(task, platform);
+        break;
       case "engage_session":
         taskResult = await executeEngageSession(task, platform);
         break;
@@ -501,7 +831,22 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
     }
     
     const status = taskResult.success ? "completed" : "failed";
-    await db.query(`UPDATE tasks SET status = $1, completed_at = NOW() WHERE id = $2`, [status, taskId]);
+    await db.query(
+      `UPDATE tasks SET status = $1, completed_at = NOW(), result = $2, error = $3 WHERE id = $4`,
+      [
+        status,
+        JSON.stringify({
+          stepsCompleted: taskResult.stepsCompleted,
+          totalSteps: taskResult.totalSteps,
+          tokenUsage: taskResult.tokenUsage,
+          durationMs: taskResult.durationMs,
+          failedStep: taskResult.failedStep,
+          generatedWorkflow: taskResult.generatedWorkflow,
+        }),
+        taskResult.success ? null : taskResult.failReason ?? "Unknown error",
+        taskId,
+      ]
+    );
     
     return taskResult;
     
