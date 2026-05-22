@@ -204,8 +204,35 @@ const GENERATED_WORKFLOW_VERIFICATION_STRATEGIES = [
   "local_with_screenshot",
 ] as const;
 
+const GENERATED_WORKFLOW_PLATFORMS = [
+  "instagram",
+  "reddit",
+  "threads",
+  "tiktok",
+  "twitter",
+  "youtube",
+] as const;
+
+const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
+  "close_app",
+  "get_screen_state",
+  "open_app",
+  "press_key",
+  "screen_wake",
+  "screenshot",
+  "scroll",
+  "swipe",
+  "ui_tree_dump",
+  "unlock",
+  "wait_for_idle",
+] as const;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeGeneratedWorkflowPlatform(platform: string): string {
+  return platform.trim().toLowerCase();
 }
 
 function validateRangeObject(
@@ -254,6 +281,8 @@ function validateGeneratedWorkflowStepInput(
     case "action":
       if (typeof step.action !== "string" || step.action.length === 0) {
         errors.push(`${path}.action must be a non-empty string for action steps`);
+      } else if (!GENERATED_WORKFLOW_ALLOWED_ACTIONS.includes(step.action as typeof GENERATED_WORKFLOW_ALLOWED_ACTIONS[number])) {
+        errors.push(`${path}.action must be one of: ${GENERATED_WORKFLOW_ALLOWED_ACTIONS.join(", ")}`);
       }
       if (step.params !== undefined && !isRecord(step.params)) {
         errors.push(`${path}.params must be an object when provided`);
@@ -386,7 +415,16 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
   const candidate = template as Partial<WorkflowTemplate>;
   if (!candidate.id || typeof candidate.id !== "string") errors.push("workflow.id must be a non-empty string");
   if (!candidate.name || typeof candidate.name !== "string") errors.push("workflow.name must be a non-empty string");
-  if (!candidate.platform || typeof candidate.platform !== "string") errors.push("workflow.platform must be a non-empty string");
+  if (!candidate.platform || typeof candidate.platform !== "string") {
+    errors.push("workflow.platform must be a non-empty string");
+  } else {
+    const normalizedPlatform = normalizeGeneratedWorkflowPlatform(candidate.platform);
+    if (!GENERATED_WORKFLOW_PLATFORMS.includes(normalizedPlatform as typeof GENERATED_WORKFLOW_PLATFORMS[number])) {
+      errors.push(`workflow.platform must be one of: ${GENERATED_WORKFLOW_PLATFORMS.join(", ")}`);
+    } else {
+      candidate.platform = normalizedPlatform;
+    }
+  }
   if (!candidate.description || typeof candidate.description !== "string") errors.push("workflow.description must be a non-empty string");
   if (!candidate.version || typeof candidate.version !== "string") errors.push("workflow.version must be a non-empty string");
   if (
@@ -534,6 +572,7 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
     template: {
       required: ["id", "name", "platform", "description", "version", "steps"],
       optional: ["defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
+      platforms: GENERATED_WORKFLOW_PLATFORMS,
       defaultVerificationStrategy: GENERATED_WORKFLOW_VERIFICATION_STRATEGIES,
       stepTypes: GENERATED_WORKFLOW_STEP_TYPES,
     },
@@ -541,6 +580,7 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       action: {
         required: ["type", "action"],
         optional: ["id", "target", "x", "y", "params", "verification", "retries", "timeoutMs", "expectedScreen"],
+        allowedActions: GENERATED_WORKFLOW_ALLOWED_ACTIONS,
       },
       wait: {
         required: ["type", "duration or condition"],

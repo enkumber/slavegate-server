@@ -285,6 +285,90 @@ describe("Generated workflow contract validation", () => {
     expect(result.ok).toBe(false);
     expect(result.errors).toContain("workflow.steps[0].params.packageName is blocked for generated workflows: com.android.settings");
   });
+
+  it("rejects generated workflow actions that can trigger root, VLM, file, or mutation paths", async () => {
+    const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+
+    const result = validateGeneratedWorkflowTemplate({
+      id: "unsafe_generated_actions",
+      name: "Unsafe generated actions",
+      platform: "reddit",
+      description: "Should not allow arbitrary dispatcher jobs from generated workflows.",
+      version: "1.0.0",
+      steps: [
+        { type: "action", id: "root_uninstall", action: "pm_uninstall", params: { packageName: "com.example" } },
+        { type: "action", id: "vlm_tap", action: "cascade_tap", params: { target: "vote" } },
+        { type: "action", id: "delete_file", action: "file_delete", params: { path: "/sdcard/file" } },
+        { type: "action", id: "type_text", action: "type_text", params: { text: "mutating input" } },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain(
+      "workflow.steps[0].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, swipe, ui_tree_dump, unlock, wait_for_idle"
+    );
+    expect(result.errors).toContain(
+      "workflow.steps[1].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, swipe, ui_tree_dump, unlock, wait_for_idle"
+    );
+    expect(result.errors).toContain(
+      "workflow.steps[2].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, swipe, ui_tree_dump, unlock, wait_for_idle"
+    );
+    expect(result.errors).toContain(
+      "workflow.steps[3].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, swipe, ui_tree_dump, unlock, wait_for_idle"
+    );
+  });
+
+  it("normalizes generated workflow platform labels to a bounded set", async () => {
+    const { validateGeneratedWorkflowTemplate, summarizeGeneratedWorkflowTemplate } = await import("./workflow-validator");
+
+    const result = validateGeneratedWorkflowTemplate({
+      id: "normalized_platform_workflow",
+      name: "Normalized platform workflow",
+      platform: " Reddit ",
+      description: "Platform should be normalized before metrics labels use it.",
+      version: "1.0.0",
+      steps: [
+        {
+          type: "action",
+          id: "open_reddit",
+          action: "open_app",
+          params: { packageName: "com.reddit.frontpage" },
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.template?.platform).toBe("reddit");
+    expect(summarizeGeneratedWorkflowTemplate(result.template!)).toMatchObject({
+      platform: "reddit",
+      compiledPlan: {
+        platform: "reddit",
+      },
+    });
+  });
+
+  it("rejects unknown generated workflow platforms before metrics labels can use them", async () => {
+    const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+
+    const result = validateGeneratedWorkflowTemplate({
+      id: "unknown_platform_workflow",
+      name: "Unknown platform workflow",
+      platform: "client-123",
+      description: "Should not create high-cardinality metrics labels.",
+      version: "1.0.0",
+      steps: [
+        {
+          type: "action",
+          id: "open_unknown",
+          action: "open_app",
+          params: { packageName: "com.example.app" },
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain("workflow.platform must be one of: instagram, reddit, threads, tiktok, twitter, youtube");
+  });
 });
 
 // ─── POST /workflows/generated — dry-run validation path ──────────────────
