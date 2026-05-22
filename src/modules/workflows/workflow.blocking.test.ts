@@ -341,6 +341,8 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("requestKey");
     expect(source).toContain("computeGeneratedWorkflowRequestKey");
     expect(source).toContain("reuse_cached_workflow");
+    expect(source).toContain("cacheMiss: true");
+    expect(source).toContain("cacheMiss: false");
     expect(source).toContain("workflow, cacheKey or requestKey required");
     expect(source).toContain("saveGeneratedPlanCache");
     expect(source).toContain("getGeneratedPlanCache");

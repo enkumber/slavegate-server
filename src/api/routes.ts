@@ -586,6 +586,8 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
         ok: true,
         data: {
           cacheHit: true,
+          cacheMiss: false,
+          canExecuteFromCache: true,
           nextAction: "reuse_cached_workflow",
           ...cached,
         },
@@ -597,6 +599,8 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
       data: {
         requestKey,
         cacheHit: false,
+        cacheMiss: true,
+        canExecuteFromCache: false,
         nextAction: "generate_validate_and_cache_workflow",
         appMapLoaded: !!appMap,
         screenCount: resolvedScreens.length,
