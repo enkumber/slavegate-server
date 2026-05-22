@@ -223,6 +223,8 @@ export interface RunCompiledResult {
     batchedSteps: number;
     failedSteps: number;
     retriedSteps: number;
+    recoveryAttempts: number;
+    recoveryBudgetExhausted: number;
   };
   error?: string;
 }

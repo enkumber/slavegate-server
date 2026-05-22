@@ -122,6 +122,18 @@ describe("attemptRecovery", () => {
       expect(r2).toBe(false);
     });
 
+    it("should not call the LLM again after the per-step budget is exhausted", async () => {
+      const ctx = makeRunnerContext({ recoveryCount: 0 });
+
+      await attemptRecovery(ctx, 0, "mismatch");
+      vi.mocked(llmJson).mockClear();
+
+      const result = await attemptRecovery(ctx, 0, "mismatch");
+
+      expect(result).toBe(false);
+      expect(llmJson).not.toHaveBeenCalled();
+    });
+
     it("should track step recovery counts independently per step index", async () => {
       const workflow = makeWorkflow({
         steps: [makeStep({ id: "s1" }), makeStep({ id: "s2", expectedPage: "page_home", expectedPageHash: "hash123" })],

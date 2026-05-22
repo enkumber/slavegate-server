@@ -1,0 +1,132 @@
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+vi.mock("uuid", () => ({
+  v4: () => "mock-job-id",
+}));
+
+vi.mock("../../../transport/transport", () => ({
+  sendJobToDevice: vi.fn().mockReturnValue(true),
+  isDeviceOnline: vi.fn().mockReturnValue(true),
+  waitForResult: vi.fn().mockResolvedValue({ status: "completed", output: {} }),
+}));
+
+vi.mock("../../../ws/direct-ws.server", () => ({
+  directWsServer: {
+    sendBatch: vi.fn(),
+    waitForBatchResult: vi.fn(),
+  },
+}));
+
+vi.mock("../../app-mapping/page-fingerprint", () => ({
+  computePageSignature: vi.fn().mockReturnValue("actual_hash"),
+  isSamePage: vi.fn().mockReturnValue(false),
+}));
+
+vi.mock("../planner.service", () => ({
+  updateWorkflowStatus: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../../observability/metrics", () => ({
+  generatedWorkflowRecoveryAttempts: {
+    labels: vi.fn(() => ({ inc: vi.fn() })),
+  },
+  generatedWorkflowRecoveryBudgetExhausted: {
+    labels: vi.fn(() => ({ inc: vi.fn() })),
+  },
+}));
+
+import { runCompiledWorkflow, RECOVERY_BUDGET_EXCEEDED } from "../runner.service";
+import type { CompiledWorkflow } from "../types";
+import { sendJobToDevice, waitForResult } from "../../../transport/transport";
+import {
+  generatedWorkflowRecoveryAttempts,
+  generatedWorkflowRecoveryBudgetExhausted,
+} from "../../observability/metrics";
+
+function makeWorkflow(overrides: Partial<CompiledWorkflow> = {}): CompiledWorkflow {
+  return {
+    id: "wf-runner-budget",
+    name: "Runner Budget Test",
+    source: "Open Reddit and read the first visible post",
+    appId: "com.reddit.frontpage",
+    compiledAt: "2026-05-22T00:00:00.000Z",
+    steps: [
+      {
+        id: "step-1",
+        action: "wait",
+        expectedPage: "reddit_home",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Wait briefly",
+        params: { durationMs: 1 },
+      },
+    ],
+    appMapVersion: "1",
+    startPage: "reddit_home",
+    maxRecoveryAttempts: 1,
+    maxTotalRecoveryAttempts: 10,
+    ...overrides,
+    recoveryModel: overrides.recoveryModel ?? "openai-codex/gpt-5.5",
+  };
+}
+
+describe("runCompiledWorkflow recovery budget", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(sendJobToDevice).mockReturnValue(true);
+    vi.mocked(waitForResult).mockResolvedValue({ status: "completed", output: {} });
+  });
+
+  it("keeps happy-path token and recovery usage at zero", async () => {
+    const result = await runCompiledWorkflow(
+      { deviceId: "device-1", workflow: makeWorkflow() },
+      vi.fn().mockResolvedValue(false)
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.counters.compileLlmCalls).toBe(0);
+    expect(result.counters.recoveryLlmCalls).toBe(0);
+    expect(result.counters.runtimeLlmCalls).toBe(0);
+    expect(result.counters.vlmCalls).toBe(0);
+    expect(result.counters.recoveryAttempts).toBe(0);
+    expect(result.counters.recoveryBudgetExhausted).toBe(0);
+    expect(generatedWorkflowRecoveryAttempts?.labels).not.toHaveBeenCalled();
+    expect(generatedWorkflowRecoveryBudgetExhausted?.labels).not.toHaveBeenCalled();
+  });
+
+  it("allows one recovery after deterministic failure then fails explicitly when the step budget is exhausted", async () => {
+    const workflow = makeWorkflow({
+      steps: [
+        {
+          id: "step-1",
+          action: "tap",
+          target: { coords: { x: 0.5, y: 0.5 } },
+          expectedPage: "reddit_home",
+          expectedPageHash: "expected_hash",
+          retries: 0,
+          retryDelay: 0,
+          description: "Tap visible Reddit item",
+        },
+      ],
+    });
+    const onRecoveryNeeded = vi.fn().mockResolvedValue(true);
+
+    const result = await runCompiledWorkflow(
+      { deviceId: "device-1", workflow },
+      onRecoveryNeeded
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("failed");
+    expect(onRecoveryNeeded).toHaveBeenCalledTimes(1);
+    expect(result.recoveryCount).toBe(1);
+    expect(result.counters.recoveryAttempts).toBe(1);
+    expect(result.counters.recoveryLlmCalls).toBe(1);
+    expect(result.counters.runtimeLlmCalls).toBe(1);
+    expect(result.counters.recoveryBudgetExhausted).toBe(1);
+    expect(result.results[0]?.error).toBe(RECOVERY_BUDGET_EXCEEDED);
+    expect(generatedWorkflowRecoveryAttempts?.labels).toHaveBeenCalledWith("reddit", "fingerprint_mismatch");
+    expect(generatedWorkflowRecoveryBudgetExhausted?.labels).toHaveBeenCalledWith("reddit");
+  });
+});

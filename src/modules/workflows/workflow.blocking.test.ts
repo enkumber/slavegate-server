@@ -413,6 +413,34 @@ describe("Generated workflow contract validation", () => {
     expect(compiled.llmBudget.happyPathRequests).toBe(0);
   });
 
+  it("enforces generated workflow recovery budget without adding happy-path LLM calls", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const executorSource = fs.readFileSync(
+      path.join(__dirname, "workflow.executor.ts"),
+      "utf8"
+    );
+    const metricsSource = fs.readFileSync(
+      path.join(__dirname, "..", "observability", "metrics.ts"),
+      "utf8"
+    );
+
+    expect(executorSource).toContain('export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED"');
+    expect(executorSource).toContain("GENERATED_WORKFLOW_MAX_RECOVERY_ATTEMPTS_PER_STEP = 1");
+    expect(executorSource).toContain("recordGeneratedWorkflowRecoveryFailure");
+    expect(executorSource).toContain("stats.recoveryAttempts++");
+    expect(executorSource).toContain("stats.recoveryBudgetExhausted++");
+    expect(executorSource).toContain("generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReasonFromError(err)).inc()");
+    expect(executorSource).toContain("generatedWorkflowRecoveryBudgetExhausted?.labels(platform).inc()");
+    expect(executorSource).not.toContain("stats.recoveryLlmCalls++");
+    expect(executorSource).not.toContain("stats.runtimeLlmCalls++");
+
+    expect(metricsSource).toContain("phone_network_generated_workflow_recovery_attempt_total");
+    expect(metricsSource).toContain('labelNames: ["platform", "reason"]');
+    expect(metricsSource).toContain("phone_network_generated_workflow_recovery_budget_exhausted_total");
+    expect(metricsSource).toContain('labelNames: ["platform"]');
+  });
+
   it("rejects read-only generated workflows that include mutating Reddit semantics", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
 

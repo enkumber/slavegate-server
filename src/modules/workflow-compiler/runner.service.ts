@@ -23,6 +23,10 @@ import { directWsServer } from "../../ws/direct-ws.server";
 import type { BATCH_RESULT, BatchStep } from "../../protocol/batch-types";
 import { computePageSignature, isSamePage } from "../app-mapping/page-fingerprint";
 import type { UiTreeNode } from "../app-mapping/schema";
+import {
+  generatedWorkflowRecoveryAttempts,
+  generatedWorkflowRecoveryBudgetExhausted,
+} from "../observability/metrics";
 
 // Import types from canonical types.ts (re-exported via planner for backward compat)
 import type { CompiledWorkflow, CompiledStep } from "./types";
@@ -74,6 +78,8 @@ export interface WorkflowExecutionCounters {
   batchedSteps: number;
   failedSteps: number;
   retriedSteps: number;
+  recoveryAttempts: number;
+  recoveryBudgetExhausted: number;
 }
 
 export interface RunnerContext {
@@ -81,6 +87,7 @@ export interface RunnerContext {
   workflow: CompiledWorkflow;
   stepsCompleted: number;
   recoveryCount: number;
+  recoveryAttemptsByStep?: Record<number, number>;
   results: StepExecutionResult[];
   /** Callback for recovery — injected to avoid circular deps */
   onRecoveryNeeded: (ctx: RunnerContext, stepIndex: number, reason: string) => Promise<boolean>;
@@ -93,6 +100,54 @@ export interface RunnerContext {
 const STEP_TIMEOUT_MS = 30_000;
 const DEFAULT_WAIT_AFTER_ACTION_MS = 800;
 const MIN_COMPILED_BATCH_SIZE = 2;
+const DEFAULT_RECOVERY_ATTEMPTS_PER_STEP = 1;
+const MAX_TOTAL_RECOVERY_ATTEMPTS = 10;
+export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED";
+
+function recoveryPlatform(workflow: CompiledWorkflow): string {
+  const source = `${workflow.appId ?? ""} ${workflow.source ?? ""}`.toLowerCase();
+  if (source.includes("reddit")) return "reddit";
+  if (source.includes("instagram")) return "instagram";
+  if (source.includes("tiktok")) return "tiktok";
+  if (source.includes("youtube")) return "youtube";
+  if (source.includes("x.com") || source.includes("twitter")) return "twitter";
+  return "unknown";
+}
+
+function recoveryReason(reason: string): string {
+  if (reason.startsWith("fingerprint_mismatch")) return "fingerprint_mismatch";
+  if (reason.startsWith("post_action_mismatch")) return "post_action_mismatch";
+  if (reason.startsWith("action_failed")) return "action_failed";
+  if (reason.startsWith("batch_failed")) return "batch_failed";
+  return "deterministic_failure";
+}
+
+async function attemptBoundedRecovery(
+  ctx: RunnerContext,
+  counters: WorkflowExecutionCounters,
+  stepIndex: number,
+  reason: string
+): Promise<{ recovered: boolean; error?: string }> {
+  const platform = recoveryPlatform(ctx.workflow);
+  const stepAttempts = ctx.recoveryAttemptsByStep?.[stepIndex] ?? 0;
+
+  if (stepAttempts >= DEFAULT_RECOVERY_ATTEMPTS_PER_STEP || ctx.recoveryCount >= MAX_TOTAL_RECOVERY_ATTEMPTS) {
+    counters.recoveryBudgetExhausted++;
+    generatedWorkflowRecoveryBudgetExhausted?.labels(platform).inc();
+    return { recovered: false, error: RECOVERY_BUDGET_EXCEEDED };
+  }
+
+  ctx.recoveryAttemptsByStep ??= {};
+  ctx.recoveryAttemptsByStep[stepIndex] = stepAttempts + 1;
+  ctx.recoveryCount++;
+  counters.recoveryAttempts++;
+  counters.recoveryLlmCalls++;
+  counters.runtimeLlmCalls++;
+  generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReason(reason)).inc();
+
+  const recovered = await ctx.onRecoveryNeeded(ctx, stepIndex, reason);
+  return { recovered };
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // UI TREE CAPTURE
@@ -449,7 +504,6 @@ export async function runCompiledWorkflow(
   const startTime = Date.now();
   const { deviceId, workflow, startStepIndex = 0, compileLlmCalls = 0 } = req;
   const results: StepExecutionResult[] = [];
-  const MAX_TOTAL_RECOVERY = 10;
   const counters: WorkflowExecutionCounters = {
     compileLlmCalls,
     recoveryLlmCalls: 0,
@@ -460,6 +514,8 @@ export async function runCompiledWorkflow(
     batchedSteps: 0,
     failedSteps: 0,
     retriedSteps: 0,
+    recoveryAttempts: 0,
+    recoveryBudgetExhausted: 0,
   };
 
   if (!isDeviceOnline(deviceId)) {
@@ -485,6 +541,7 @@ export async function runCompiledWorkflow(
     workflow,
     stepsCompleted: 0,
     recoveryCount: 0,
+    recoveryAttemptsByStep: {},
     results,
     onRecoveryNeeded,
   };
@@ -576,12 +633,13 @@ export async function runCompiledWorkflow(
           );
 
           // Attempt recovery
-          if (ctx.recoveryCount < MAX_TOTAL_RECOVERY) {
-            counters.recoveryLlmCalls++;
-            counters.runtimeLlmCalls++;
-            const recovered = await onRecoveryNeeded(ctx, i, `fingerprint_mismatch:expected=${step.expectedPageHash},actual=${fp.actualHash}`);
-            ctx.recoveryCount++;
-            if (!recovered) {
+          const recovery = await attemptBoundedRecovery(
+            ctx,
+            counters,
+            i,
+            `fingerprint_mismatch:expected=${step.expectedPageHash},actual=${fp.actualHash}`
+          );
+          if (!recovery.recovered) {
               counters.failedSteps++;
               results.push({
                 stepIndex: i,
@@ -589,25 +647,11 @@ export async function runCompiledWorkflow(
                 success: false,
                 fingerprintMatch: false,
                 postActionVerified: false,
-                error: "Fingerprint mismatch, recovery failed",
+                error: recovery.error ?? "Fingerprint mismatch, recovery failed",
                 latencyMs: Date.now() - stepStart,
               });
               aborted = true;
               break;
-            }
-          } else {
-            counters.failedSteps++;
-            results.push({
-              stepIndex: i,
-              stepId: step.id,
-              success: false,
-              fingerprintMatch: false,
-              postActionVerified: false,
-              error: "Max total recovery attempts reached",
-              latencyMs: Date.now() - stepStart,
-            });
-            aborted = true;
-            break;
           }
         }
       } catch (err) {
@@ -637,12 +681,8 @@ export async function runCompiledWorkflow(
 
       if (!retried) {
         // Attempt recovery
-        if (ctx.recoveryCount < MAX_TOTAL_RECOVERY) {
-          counters.recoveryLlmCalls++;
-          counters.runtimeLlmCalls++;
-          const recovered = await onRecoveryNeeded(ctx, i, `action_failed:${actionResult.error}`);
-          ctx.recoveryCount++;
-          if (!recovered) {
+        const recovery = await attemptBoundedRecovery(ctx, counters, i, `action_failed:${actionResult.error}`);
+        if (!recovery.recovered) {
             counters.failedSteps++;
             results.push({
               stepIndex: i,
@@ -650,25 +690,11 @@ export async function runCompiledWorkflow(
               success: false,
               fingerprintMatch,
               postActionVerified: false,
-              error: actionResult.error,
+              error: recovery.error ?? actionResult.error,
               latencyMs: Date.now() - stepStart,
             });
             aborted = true;
             break;
-          }
-        } else {
-          counters.failedSteps++;
-          results.push({
-            stepIndex: i,
-            stepId: step.id,
-            success: false,
-            fingerprintMatch,
-            postActionVerified: false,
-            error: `Action failed, max recovery reached: ${actionResult.error}`,
-            latencyMs: Date.now() - stepStart,
-          });
-          aborted = true;
-          break;
         }
       }
     }
@@ -684,16 +710,27 @@ export async function runCompiledWorkflow(
           `[runner] Post-action mismatch at step ${i}: expected="${step.expectedPageHash}" actual="${postCheck.actualHash}"`
         );
 
-        if (ctx.recoveryCount < MAX_TOTAL_RECOVERY) {
-          counters.recoveryLlmCalls++;
-          counters.runtimeLlmCalls++;
-          const recovered = await onRecoveryNeeded(ctx, i, `post_action_mismatch:expected=${step.expectedPageHash},actual=${postCheck.actualHash}`);
-          ctx.recoveryCount++;
-          if (recovered) {
-            postActionVerified = true; // Recovery fixed it
-          } else {
-            counters.failedSteps++;
-          }
+        const recovery = await attemptBoundedRecovery(
+          ctx,
+          counters,
+          i,
+          `post_action_mismatch:expected=${step.expectedPageHash},actual=${postCheck.actualHash}`
+        );
+        if (recovery.recovered) {
+          postActionVerified = true; // Recovery fixed it
+        } else {
+          counters.failedSteps++;
+          results.push({
+            stepIndex: i,
+            stepId: step.id,
+            success: false,
+            fingerprintMatch,
+            postActionVerified: false,
+            error: recovery.error ?? "Post-action mismatch, recovery failed",
+            latencyMs: Date.now() - stepStart,
+          });
+          aborted = true;
+          break;
         }
       }
     }

@@ -49,6 +49,8 @@ function createGeneratedWorkflowCheckpoint(
       batchedSteps: 0,
       failedSteps: 0,
       retriedSteps: 0,
+      recoveryAttempts: 0,
+      recoveryBudgetExhausted: 0,
       mode,
     },
     checkpointAt: new Date().toISOString(),

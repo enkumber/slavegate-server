@@ -225,6 +225,8 @@ export interface WorkflowExecutionStats {
   batchedSteps: number;
   failedSteps: number;
   retriedSteps: number;
+  recoveryAttempts: number;
+  recoveryBudgetExhausted: number;
   mode?: "edge" | "server";
 }
 

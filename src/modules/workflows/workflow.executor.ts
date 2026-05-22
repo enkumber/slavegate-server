@@ -47,6 +47,10 @@ import {
   type SkillActionContext,
 } from "../skills/skill.actions";
 import { verifyScreenAfterStep } from "./screen-verifier";
+import {
+  generatedWorkflowRecoveryAttempts,
+  generatedWorkflowRecoveryBudgetExhausted,
+} from "../observability/metrics";
 
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
@@ -63,6 +67,8 @@ function defaultExecutionStats(mode: "edge" | "server" = "server"): WorkflowExec
     batchedSteps: 0,
     failedSteps: 0,
     retriedSteps: 0,
+    recoveryAttempts: 0,
+    recoveryBudgetExhausted: 0,
     mode,
   };
 }
@@ -70,6 +76,69 @@ function defaultExecutionStats(mode: "edge" | "server" = "server"): WorkflowExec
 function executionStats(checkpoint: WorkflowCheckpoint): WorkflowExecutionStats {
   checkpoint.executionStats ??= defaultExecutionStats("server");
   return checkpoint.executionStats;
+}
+
+export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED";
+const GENERATED_WORKFLOW_RECOVERY_ATTEMPTS_KEY = "_generatedWorkflowRecoveryAttemptsByStep";
+const GENERATED_WORKFLOW_MAX_RECOVERY_ATTEMPTS_PER_STEP = 1;
+
+function generatedWorkflowPlatform(template: WorkflowTemplate): string {
+  const platform = template.platform.toLowerCase().trim();
+  return ["instagram", "reddit", "threads", "tiktok", "twitter", "youtube"].includes(platform)
+    ? platform
+    : "unknown";
+}
+
+function isGeneratedWorkflowTemplate(template: WorkflowTemplate): boolean {
+  return Boolean(template.intent || template.safetyClass || template.outputSchema || template.allowedRecoveryRequests);
+}
+
+function recoveryReasonFromError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.includes("Screen mismatch")) return "screen_mismatch";
+  if (message.includes("Batch timeout")) return "batch_timeout";
+  if (message.includes("Batch failed")) return "batch_failed";
+  if (message.includes("Cascade tap failed")) return "cascade_failed";
+  if (message.includes("JOB_RESULT timeout")) return "job_timeout";
+  if (message.includes("failed")) return "action_failed";
+  return "deterministic_failure";
+}
+
+function generatedWorkflowRecoveryAttemptsByStep(checkpoint: WorkflowCheckpoint): Record<string, number> {
+  const existing = checkpoint.variables[GENERATED_WORKFLOW_RECOVERY_ATTEMPTS_KEY];
+  if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+    return existing as Record<string, number>;
+  }
+
+  const created: Record<string, number> = {};
+  checkpoint.variables[GENERATED_WORKFLOW_RECOVERY_ATTEMPTS_KEY] = created;
+  return created;
+}
+
+function recordGeneratedWorkflowRecoveryFailure(
+  template: WorkflowTemplate,
+  checkpoint: WorkflowCheckpoint,
+  stepIndex: number,
+  err: unknown,
+): Error | null {
+  if (!isGeneratedWorkflowTemplate(template)) return null;
+
+  const stats = executionStats(checkpoint);
+  const attemptsByStep = generatedWorkflowRecoveryAttemptsByStep(checkpoint);
+  const key = String(stepIndex);
+  const priorAttempts = attemptsByStep[key] ?? 0;
+  const platform = generatedWorkflowPlatform(template);
+
+  if (priorAttempts >= GENERATED_WORKFLOW_MAX_RECOVERY_ATTEMPTS_PER_STEP) {
+    stats.recoveryBudgetExhausted++;
+    generatedWorkflowRecoveryBudgetExhausted?.labels(platform).inc();
+    return Object.assign(new Error(RECOVERY_BUDGET_EXCEEDED), { code: RECOVERY_BUDGET_EXCEEDED });
+  }
+
+  attemptsByStep[key] = priorAttempts + 1;
+  stats.recoveryAttempts++;
+  generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReasonFromError(err)).inc();
+  return null;
 }
 
 // ─── Pending job result registry ─────────────────────────────────────────────
@@ -325,6 +394,7 @@ async function executeSteps(
           executionStats(checkpoint).deterministicSteps++;
         } catch (err) {
           executionStats(checkpoint).failedSteps++;
+          const budgetErr = recordGeneratedWorkflowRecoveryFailure(template, checkpoint, segIdx, err);
           if (!isNested) {
             await workflowService.saveCheckpoint(
               workflowId,
@@ -333,7 +403,7 @@ async function executeSteps(
               segIdx,
             );
           }
-          throw err;
+          throw budgetErr ?? err;
         }
 
         // Extend BullMQ lock after each step
@@ -1140,6 +1210,16 @@ async function executeBatchSegment(
   // Save batch state for retry (resume from failed step on next attempt)
   const failedGlobalIndex = stepIndex + (failedStepIdx >= 0 ? failedStepIdx : 0);
   executionStats(checkpoint).failedSteps++;
+  const budgetErr = recordGeneratedWorkflowRecoveryFailure(
+    template,
+    checkpoint,
+    failedGlobalIndex,
+    new Error(
+      status === "timeout"
+        ? `Batch timeout after ${batchTimeoutMs}ms`
+        : `Batch failed at step ${failedStepIdx + 1}`,
+    ),
+  );
 
   if (!isNested) {
     const saved = await workflowService.saveCheckpoint(
@@ -1163,7 +1243,7 @@ async function executeBatchSegment(
           results.find(r => r.status === "failed" || r.status === "timeout")?.error ?? "Unknown"
         }`;
 
-  throw new Error(errorMsg);
+  throw budgetErr ?? new Error(errorMsg);
 }
 
 // ─── Batch execution (Fast-Path) ────────────────────────────────────────────

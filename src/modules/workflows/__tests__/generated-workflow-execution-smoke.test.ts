@@ -242,6 +242,16 @@ describe("generated workflow cache-only execution route", () => {
       }),
       "wf-cache-smoke",
     );
+    expect(mocks.workflowService.create).toHaveBeenCalledWith(expect.objectContaining({
+      checkpoint: expect.objectContaining({
+        executionStats: expect.objectContaining({
+          recoveryLlmCalls: 0,
+          runtimeLlmCalls: 0,
+          recoveryAttempts: 0,
+          recoveryBudgetExhausted: 0,
+        }),
+      }),
+    }));
     expect(mocks.metrics.executionLabels).toHaveBeenCalledWith("reddit", "true", "cache_key");
     expect(mocks.metrics.executionInc).toHaveBeenCalledTimes(1);
     expect(mocks.metrics.llmAvoidedLabels).toHaveBeenCalledWith("reddit", "cache_hit");
