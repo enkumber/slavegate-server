@@ -257,14 +257,23 @@ const REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT = [
 const READ_ONLY_MUTATION_TERMS = [
   "comment",
   "downvote",
+  "edit_profile",
   "follow",
+  "join",
+  "login",
   "message",
   "post",
+  "profile_edit",
   "reply",
+  "settings",
   "send",
   "submit",
+  "type_text",
   "upvote",
+  "vote",
 ] as const;
+
+const READ_ONLY_EVIDENCE_KEYS = new Set<string>(REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -277,7 +286,19 @@ function normalizeGeneratedWorkflowPlatform(platform: string): string {
 function containsMutationTerm(value: unknown): string | null {
   if (typeof value === "string") {
     const normalized = value.trim().toLowerCase();
-    return READ_ONLY_MUTATION_TERMS.find((term) => normalized.includes(term)) ?? null;
+    const tokenized = value
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean);
+    const compact = normalized.replace(/[^a-z0-9]/g, "");
+    return READ_ONLY_MUTATION_TERMS.find((term) => {
+      if (term === "login" && (normalized.includes("login state") || compact === "loginwalldetected")) {
+        return false;
+      }
+      const compactTerm = term.replace(/[^a-z0-9]/g, "");
+      return tokenized.includes(compactTerm) || compact.includes(compactTerm);
+    }) ?? null;
   }
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -288,7 +309,7 @@ function containsMutationTerm(value: unknown): string | null {
   }
   if (isRecord(value)) {
     for (const [key, nested] of Object.entries(value)) {
-      const found = containsMutationTerm(key) ?? containsMutationTerm(nested);
+      const found = (READ_ONLY_EVIDENCE_KEYS.has(key) ? null : containsMutationTerm(key)) ?? containsMutationTerm(nested);
       if (found) return found;
     }
   }

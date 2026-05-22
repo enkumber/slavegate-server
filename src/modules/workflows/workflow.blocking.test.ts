@@ -454,36 +454,52 @@ describe("Generated workflow contract validation", () => {
 
   it("rejects read-only generated workflows that include mutating Reddit semantics", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+    const mutatingTerms = [
+      "upvote",
+      "downvote",
+      "vote",
+      "comment",
+      "post",
+      "join",
+      "follow",
+      "message",
+      "login",
+      "settings",
+      "profile_edit",
+      "type_text",
+    ];
 
-    const result = validateGeneratedWorkflowTemplate({
-      id: "reddit_upvote_probe_v1",
-      name: "Reddit upvote probe",
-      platform: "reddit",
-      description: "Attempts a read-only upvote action.",
-      version: "1.0.0",
-      intent: "reddit_account_health_scan",
-      safetyClass: "read_only",
-      outputSchema: {
-        required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "error"],
-        properties: {
-          loggedIn: { type: "string" },
-          homeFeedVisible: { type: "string" },
-          searchSurfaceAvailable: { type: "string" },
-          challengeDetected: { type: "string" },
-          loginWallDetected: { type: "string" },
-          accountSwitcherVisible: { type: "string" },
-          observedUsername: { type: "string" },
-          error: { type: "string" },
+    for (const term of mutatingTerms) {
+      const result = validateGeneratedWorkflowTemplate({
+        id: `reddit_${term}_probe_v1`,
+        name: `Reddit ${term} probe`,
+        platform: "reddit",
+        description: "Read-only scan contract must reject mutating semantics.",
+        version: "1.0.0",
+        intent: "reddit_account_health_scan",
+        safetyClass: "read_only",
+        outputSchema: {
+          required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "error"],
+          properties: {
+            loggedIn: { type: "string" },
+            homeFeedVisible: { type: "string" },
+            searchSurfaceAvailable: { type: "string" },
+            challengeDetected: { type: "string" },
+            loginWallDetected: { type: "string" },
+            accountSwitcherVisible: { type: "string" },
+            observedUsername: { type: "string" },
+            error: { type: "string" },
+          },
         },
-      },
-      allowedRecoveryRequests: ["refresh_screen_state"],
-      steps: [
-        { type: "action", id: "inspect_upvote_button", action: "get_screen_state", params: { target: "upvote" } },
-      ],
-    });
+        allowedRecoveryRequests: ["refresh_screen_state"],
+        steps: [
+          { type: "action", id: `inspect_${term}`, action: "get_screen_state", params: { target: term } },
+        ],
+      });
 
-    expect(result.ok).toBe(false);
-    expect(result.errors).toContain("workflow.safetyClass=read_only cannot include mutating term: upvote");
+      expect(result.ok, term).toBe(false);
+      expect(result.errors).toContain(`workflow.safetyClass=read_only cannot include mutating term: ${term}`);
+    }
   });
 });
 
