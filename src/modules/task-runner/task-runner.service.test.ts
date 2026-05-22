@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   taskRunnerDispatchLabels: vi.fn(() => ({ inc: vi.fn() })),
   getGeneratedPlanCache: vi.fn(),
   getGeneratedPlanCacheByRequestKey: vi.fn(),
+  getWorkflow: vi.fn(),
 }));
 
 vi.mock("../../db/client", () => ({
@@ -45,6 +46,7 @@ vi.mock("../workflows/workflow.service", () => ({
   workflowService: {
     getGeneratedPlanCache: mocks.getGeneratedPlanCache,
     getGeneratedPlanCacheByRequestKey: mocks.getGeneratedPlanCacheByRequestKey,
+    get: mocks.getWorkflow,
   },
 }));
 
@@ -159,6 +161,45 @@ function cacheRecord(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function completedWorkflow(variables: Record<string, unknown> = REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS) {
+  return {
+    id: WORKFLOW_ID,
+    templateId: "agent_generated_reddit_account_health_scan_v1",
+    accountId: ACCOUNT_ID,
+    deviceId: DEVICE_ID,
+    status: "completed",
+    currentStep: 2,
+    totalSteps: 2,
+    checkpoint: {
+      stepIndex: 2,
+      loopStack: [],
+      variables,
+      hbeParams: {},
+      checkpointAt: "2026-05-22T08:00:10.000Z",
+      executionStats: {
+        compileLlmCalls: 0,
+        recoveryLlmCalls: 0,
+        creativeLlmCalls: 0,
+        runtimeLlmCalls: 0,
+        vlmCalls: 0,
+        deterministicSteps: 2,
+        batchedSteps: 0,
+        failedSteps: 0,
+        retriedSteps: 0,
+        recoveryAttempts: 0,
+        recoveryBudgetExhausted: 0,
+        mode: "edge",
+      },
+    },
+    executionStats: null,
+    hbeParams: {},
+    startedAt: "2026-05-22T08:00:00.000Z",
+    completedAt: "2026-05-22T08:00:10.000Z",
+    error: null,
+    createdAt: "2026-05-22T08:00:00.000Z",
+  };
+}
+
 function task(params: Record<string, unknown>, overrides: Partial<TaskRow> = {}): TaskRow {
   return {
     id: TASK_ID,
@@ -192,6 +233,7 @@ describe("task-runner generated_workflow routine", () => {
       mode: "edge",
       templateId: "agent_generated_reddit_account_health_scan_v1",
     });
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow());
   });
 
   it("dispatches a cached generated workflow by requestKey and preserves task account/device linkage", async () => {
@@ -278,6 +320,32 @@ describe("task-runner generated_workflow routine", () => {
       variables: expect.objectContaining(REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS),
     }));
     expect(result).toMatchObject({ output: REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS });
+  });
+
+  it("waits for workflow completion and materializes final checkpoint output", async () => {
+    const cached = cacheRecord();
+    const finalOutput = {
+      ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+      loggedIn: "true",
+      homeFeedVisible: "true",
+      searchSurfaceAvailable: "true",
+      challengeDetected: "false",
+      loginWallDetected: "false",
+      accountSwitcherVisible: "false",
+      screenState: "reddit_home_feed",
+    };
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow(finalOutput));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(mocks.getWorkflow).toHaveBeenCalledWith(WORKFLOW_ID);
+    expect(result).toMatchObject({
+      success: true,
+      output: finalOutput,
+      generatedWorkflow: { output: finalOutput },
+    });
   });
 
   it("dispatches a cached generated workflow by cacheKey", async () => {

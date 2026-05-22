@@ -27,6 +27,7 @@ import type { GeneratedWorkflowControlPlaneContext } from "../workflows/generate
 import {
   workflowService,
   type GeneratedWorkflowPlanCacheRecord,
+  type WorkflowRecord,
 } from "../workflows/workflow.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -82,6 +83,8 @@ const DEFAULT_CONFIG: TaskRunnerConfig = {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATED_WORKFLOW_ROUTINE = "generated_workflow";
+const GENERATED_WORKFLOW_FINAL_POLL_INTERVAL_MS = 2_000;
+const GENERATED_WORKFLOW_FINAL_TIMEOUT_MS = 180_000;
 
 function zeroTokenUsage(): TaskResult["tokenUsage"] {
   return {
@@ -149,6 +152,47 @@ function generatedWorkflowOutput(cached: GeneratedWorkflowPlanCacheRecord, varia
     output[key] = Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : null;
   }
   return output;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function checkpointVariables(workflow: WorkflowRecord | null): Record<string, unknown> {
+  if (!workflow?.checkpoint) return {};
+  const checkpoint = workflow.checkpoint as unknown as {
+    variables?: unknown;
+    result?: { variables?: unknown };
+  };
+
+  const variables = checkpoint.variables && typeof checkpoint.variables === "object" && !Array.isArray(checkpoint.variables)
+    ? checkpoint.variables as Record<string, unknown>
+    : {};
+  const resultVariables = checkpoint.result?.variables && typeof checkpoint.result.variables === "object" && !Array.isArray(checkpoint.result.variables)
+    ? checkpoint.result.variables as Record<string, unknown>
+    : {};
+
+  return { ...variables, ...resultVariables };
+}
+
+async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<WorkflowRecord> {
+  const startedAt = Date.now();
+  let latest: WorkflowRecord | null = null;
+
+  while (Date.now() - startedAt < GENERATED_WORKFLOW_FINAL_TIMEOUT_MS) {
+    latest = await workflowService.get(workflowId);
+    if (!latest) {
+      throw new Error(`Generated workflow ${workflowId} not found after dispatch`);
+    }
+    if (latest.status === "completed" || latest.status === "failed" || latest.status === "cancelled") {
+      return latest;
+    }
+    await sleep(GENERATED_WORKFLOW_FINAL_POLL_INTERVAL_MS);
+  }
+
+  throw new Error(
+    `Generated workflow ${workflowId} did not reach a final status within ${GENERATED_WORKFLOW_FINAL_TIMEOUT_MS}ms; latest=${latest?.status ?? "missing"}`,
+  );
 }
 
 function agencyWorkflowRunIdFromTask(task: TaskRow): string | null {
@@ -727,7 +771,6 @@ async function executeGeneratedWorkflowTask(
       canonicalWorkflowVersion: cached.canonicalWorkflowVersion,
       compiledPlanHash: cached.compiledPlanHash,
     };
-    const output = generatedWorkflowOutput(cached, variables);
     const controlPlaneContext: GeneratedWorkflowControlPlaneContext = {
       source: "task_runner",
       routine,
@@ -750,28 +793,45 @@ async function executeGeneratedWorkflowTask(
     generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "accepted").inc();
     generatedWorkflowExecutions?.labels(cached.platform, "true", `task_runner_${source}`).inc();
     generatedWorkflowLlmAvoided?.labels(cached.platform, "task_runner_cache_hit").inc();
+    const finalWorkflow = await waitForGeneratedWorkflowFinal(dispatch.workflowId);
+    const finalOutput = generatedWorkflowOutput(cached, checkpointVariables(finalWorkflow));
+
+    const generatedWorkflowResult = {
+      workflowId: dispatch.workflowId,
+      status: dispatch.status,
+      mode: dispatch.mode,
+      templateId: dispatch.templateId,
+      cacheKey: cached.cacheKey,
+      requestKey: cached.requestKey,
+      canonicalWorkflowId: cached.canonicalWorkflowId,
+      canonicalWorkflowVersion: cached.canonicalWorkflowVersion,
+      compiledPlanHash: cached.compiledPlanHash,
+      llmBudget: cached.compiledPlan.llmBudget,
+      controlPlaneContext,
+      output: finalOutput,
+    };
+
+    if (finalWorkflow.status !== "completed") {
+      return {
+        success: false,
+        stepsCompleted: finalWorkflow.currentStep,
+        totalSteps: finalWorkflow.totalSteps ?? cached.workflow.steps.length,
+        output: finalOutput,
+        tokenUsage: zeroTokenUsage(),
+        durationMs: Date.now() - startedAt,
+        failReason: finalWorkflow.error ?? `Generated workflow ended with status ${finalWorkflow.status}`,
+        generatedWorkflow: generatedWorkflowResult,
+      };
+    }
 
     return {
       success: true,
-      stepsCompleted: cached.workflow.steps.length,
-      totalSteps: cached.workflow.steps.length,
-      output,
+      stepsCompleted: finalWorkflow.currentStep,
+      totalSteps: finalWorkflow.totalSteps ?? cached.workflow.steps.length,
+      output: finalOutput,
       tokenUsage: zeroTokenUsage(),
       durationMs: Date.now() - startedAt,
-      generatedWorkflow: {
-        workflowId: dispatch.workflowId,
-        status: dispatch.status,
-        mode: dispatch.mode,
-        templateId: dispatch.templateId,
-        cacheKey: cached.cacheKey,
-        requestKey: cached.requestKey,
-        canonicalWorkflowId: cached.canonicalWorkflowId,
-        canonicalWorkflowVersion: cached.canonicalWorkflowVersion,
-        compiledPlanHash: cached.compiledPlanHash,
-        llmBudget: cached.compiledPlan.llmBudget,
-        controlPlaneContext,
-        output,
-      },
+      generatedWorkflow: generatedWorkflowResult,
     };
   } catch (err) {
     generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "dispatch_failed").inc();
