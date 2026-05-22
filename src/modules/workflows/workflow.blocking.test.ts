@@ -461,6 +461,7 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("cacheKey?: never");
     expect(source).toContain("requestKey?: never");
     expect(source).toContain("export type GeneratedWorkflowExecuteResponse");
+    expect(source).toContain('status: "queued" | "running"');
     expect(source).toContain("canonicalHit: boolean");
     expect(source).toContain("canExecuteFromCache: true");
   });

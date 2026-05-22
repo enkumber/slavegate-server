@@ -364,7 +364,7 @@ export type GeneratedWorkflowDryRunResponse = {
 
 export type GeneratedWorkflowExecuteResponse = {
   workflowId: string;
-  status: "queued";
+  status: "queued" | "running";
   mode: "edge" | "server";
   templateId: string;
   generated: true;
