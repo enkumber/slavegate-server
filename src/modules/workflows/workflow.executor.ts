@@ -18,6 +18,7 @@
  */
 
 import { Queue, Worker } from "bullmq";
+import { createHash } from "crypto";
 import { getRedisConnectionOptions } from "../../redis/client";
 import { workflowService } from "./workflow.service";
 import { hbeService } from "../hbe/hbe.service";
@@ -157,6 +158,37 @@ export interface JobStepResult {
   error?:       string;
   durationMs:   number;
   verification?: unknown;
+}
+
+function materializeScreenshotArtifact(
+  checkpoint: WorkflowCheckpoint,
+  jobId: string,
+  result: JobStepResult,
+): void {
+  const output = result.output as Record<string, unknown> | undefined;
+  const imageBase64 = typeof output?.image_base64 === "string" ? output.image_base64 : null;
+
+  const artifact = {
+    jobId,
+    jobEndpoint: `/api/jobs/${jobId}`,
+    capturedAt: new Date().toISOString(),
+    hasImage: Boolean(imageBase64),
+    width: typeof output?.width === "number" ? output.width : null,
+    height: typeof output?.height === "number" ? output.height : null,
+    originalWidth: typeof output?.original_width === "number" ? output.original_width : null,
+    originalHeight: typeof output?.original_height === "number" ? output.original_height : null,
+    format: typeof output?.format === "string" ? output.format : null,
+    bytes: imageBase64 ? Buffer.byteLength(imageBase64, "base64") : 0,
+    sha256: imageBase64
+      ? createHash("sha256").update(Buffer.from(imageBase64, "base64")).digest("hex")
+      : null,
+  };
+
+  checkpoint.variables.lastScreenshotArtifact = artifact;
+  const existing = checkpoint.variables.screenshotArtifacts;
+  const artifacts = Array.isArray(existing) ? existing : [];
+  artifacts.push(artifact);
+  checkpoint.variables.screenshotArtifacts = artifacts.slice(-5);
 }
 
 const pendingJobResults = new Map<string, PendingResult>();
@@ -847,6 +879,10 @@ async function executeActionStep(
       return;
     }
     throw new Error(`Step ${stepIndex} (${step.action}) failed: ${result.error ?? result.status}`);
+  }
+
+  if (step.action === "screenshot") {
+    materializeScreenshotArtifact(checkpoint, jobId, result);
   }
 
   // Post-action HBE delay (human settle time after action)
