@@ -222,6 +222,7 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "screenshot",
   "scroll",
   "detect_current_screen",
+  "classify_reddit_health_scan",
   "set_variable",
   "swipe",
   "ui_tree_dump",

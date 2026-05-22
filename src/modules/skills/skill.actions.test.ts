@@ -117,3 +117,60 @@ describe('set_variable', () => {
     );
   });
 });
+
+describe('classify_reddit_health_scan', () => {
+  function context(uiTree: string): SkillActionContext {
+    return {
+      workflowId: 'wf-test',
+      deviceId: 'device-test',
+      platform: 'reddit',
+      checkpoint: {
+        stepIndex: 0,
+        loopStack: [],
+        variables: {},
+        hbeParams: {},
+        checkpointAt: new Date().toISOString(),
+      },
+      stepIndex: 0,
+      dispatchAndWait: vi.fn().mockResolvedValue({
+        status: 'completed',
+        output: { uiTree },
+      }),
+      cascadeTap: vi.fn(),
+      executeSteps: vi.fn(),
+      persistCheckpoint: vi.fn(),
+      sleep: vi.fn(),
+    };
+  }
+
+  it('materializes Reddit health output fields from a local UI tree', async () => {
+    const ctx = context('packageName=com.reddit.frontpage text="Find anything" text="Home" text="Create" text="Inbox" text="u/Consistent-Beyond386"');
+
+    await executeSkillAction('classify_reddit_health_scan', {}, ctx);
+
+    expect(ctx.dispatchAndWait).toHaveBeenCalledWith('ui_tree_dump', {}, 10_000);
+    expect(ctx.checkpoint.variables).toMatchObject({
+      loggedIn: 'true',
+      homeFeedVisible: 'true',
+      searchSurfaceAvailable: 'true',
+      challengeDetected: 'false',
+      loginWallDetected: 'false',
+      accountSwitcherVisible: 'false',
+      observedUsername: 'Consistent-Beyond386',
+      screenState: 'reddit_home_feed',
+      error: '',
+    });
+  });
+
+  it('marks login wall when Reddit asks for authentication', async () => {
+    const ctx = context('packageName=com.reddit.frontpage text="Log in" text="Continue with Google" text="Sign up"');
+
+    await executeSkillAction('classify_reddit_health_scan', {}, ctx);
+
+    expect(ctx.checkpoint.variables).toMatchObject({
+      loggedIn: 'false',
+      loginWallDetected: 'true',
+      screenState: 'reddit_unknown',
+    });
+  });
+});

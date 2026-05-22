@@ -44,6 +44,7 @@ export const SKILL_ACTION_NAMES = new Set<string>([
   'vlm_analyze_post_for_outreach',
   'vlm_generate_comment',
   'detect_current_screen',
+  'classify_reddit_health_scan',
   // Utility state-management actions (used by smart_unfollow handlers)
   'random_delay',
   'increment',
@@ -137,6 +138,7 @@ export async function executeSkillAction(
     case 'vlm_analyze_post_for_outreach':   return handleVlmAnalyzePostForOutreach(params, ctx);
     case 'vlm_generate_comment':            return handleVlmGenerateComment(params, ctx);
     case 'detect_current_screen':           return handleDetectCurrentScreen(params, ctx);
+    case 'classify_reddit_health_scan':     return handleClassifyRedditHealthScan(ctx);
 
     default:
       throw new Error(`[skill-actions] Unknown skill action: "${actionName}"`);
@@ -1215,6 +1217,60 @@ async function handleSetVariable(params: Record<string, unknown>, ctx: SkillActi
   }
   const value = params.value;
   ctx.checkpoint.variables[key] = value;
+}
+
+function textIncludesAny(text: string, needles: string[]): boolean {
+  return needles.some((needle) => text.includes(needle));
+}
+
+function extractUiTreeText(output: unknown): string {
+  if (!output || typeof output !== "object") return "";
+  const record = output as Record<string, unknown>;
+  const raw = record.uiTree ?? record.tree ?? record.nodes ?? record;
+  return typeof raw === "string" ? raw : JSON.stringify(raw);
+}
+
+function classifyRedditHealthFromUiTree(uiTreeText: string): Record<string, string> {
+  const lower = uiTreeText.toLowerCase();
+  const isReddit = lower.includes("com.reddit.frontpage");
+  const loginWall = textIncludesAny(lower, ["log in", "login", "sign up", "continue with google", "continue with apple"]);
+  const challenge = textIncludesAny(lower, ["challenge", "captcha", "verify", "suspicious", "blocked", "try again later"]);
+  const searchAvailable = textIncludesAny(lower, ["find anything", "search reddit", "search"]);
+  const homeFeed = isReddit && textIncludesAny(lower, ["find anything", "home", "create", "inbox", "r/"]);
+  const accountSwitcher = textIncludesAny(lower, ["switch account", "accounts", "add account"]);
+  const usernameMatch = uiTreeText.match(/u\/([A-Za-z0-9_-]{3,30})/) ?? uiTreeText.match(/"text"\s*:\s*"([A-Za-z][A-Za-z0-9_-]{2,29})"/);
+
+  return {
+    loggedIn: isReddit && !loginWall ? "true" : loginWall ? "false" : "unknown",
+    homeFeedVisible: homeFeed ? "true" : "false",
+    searchSurfaceAvailable: searchAvailable ? "true" : "false",
+    challengeDetected: challenge ? "true" : "false",
+    loginWallDetected: loginWall ? "true" : "false",
+    accountSwitcherVisible: accountSwitcher ? "true" : "false",
+    observedUsername: usernameMatch?.[1] ?? "",
+    screenState: isReddit ? (homeFeed ? "reddit_home_feed" : "reddit_unknown") : "not_reddit",
+    error: "",
+  };
+}
+
+async function handleClassifyRedditHealthScan(ctx: SkillActionContext): Promise<void> {
+  const result = await ctx.dispatchAndWait("ui_tree_dump", {}, 10_000);
+  if (result.status === "failed" || result.status === "timeout") {
+    ctx.checkpoint.variables.error = result.error ?? "ui_tree_dump_failed";
+    ctx.checkpoint.variables.screenState = "unknown";
+    return;
+  }
+
+  const uiTreeText = extractUiTreeText(result.output);
+  const classified = classifyRedditHealthFromUiTree(uiTreeText);
+  for (const [key, value] of Object.entries(classified)) {
+    ctx.checkpoint.variables[key] = value;
+  }
+  ctx.checkpoint.variables.redditHealthClassifier = {
+    method: "ui_tree_l1",
+    packageDetected: uiTreeText.toLowerCase().includes("com.reddit.frontpage"),
+    uiTreeChars: uiTreeText.length,
+  };
 }
 
 /**

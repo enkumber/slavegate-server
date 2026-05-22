@@ -65,20 +65,8 @@ const readOnlyMarketingScanWorkflow = {
     {
       type: "action",
       id: "classify_local_state",
-      action: "set_variable",
-      params: {
-        variables: {
-          loggedIn: "unknown",
-          homeFeedVisible: "unknown",
-          searchSurfaceAvailable: "unknown",
-          challengeDetected: "unknown",
-          loginWallDetected: "unknown",
-          accountSwitcherVisible: "unknown",
-          observedUsername: "",
-          screenState: "unknown",
-          error: "",
-        },
-      },
+      action: "classify_reddit_health_scan",
+      timeoutMs: 10000,
     },
     {
       type: "checkpoint",
@@ -112,7 +100,7 @@ const readOnlyMarketingCompiledPlan = {
     { path: "workflow.steps[0]", type: "action", id: "open_reddit", action: "open_app", verification: "local_with_screenshot" },
     { path: "workflow.steps[1]", type: "action", id: "dump_ui_state", action: "ui_tree_dump", verification: "local_with_screenshot" },
     { path: "workflow.steps[2]", type: "action", id: "capture_screen", action: "screenshot", verification: "local_with_screenshot" },
-    { path: "workflow.steps[3]", type: "action", id: "classify_local_state", action: "set_variable", verification: "local_with_screenshot" },
+    { path: "workflow.steps[3]", type: "action", id: "classify_local_state", action: "classify_reddit_health_scan", verification: "local_with_screenshot" },
     { path: "workflow.steps[4]", type: "checkpoint", id: "account_health_observed" },
   ],
 } satisfies GeneratedWorkflowCompiledPlanSummary;
