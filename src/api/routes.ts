@@ -36,7 +36,13 @@ import { accountsService } from "../modules/accounts/accounts.service";
 import { dataPipelineService } from "../modules/data-pipeline/data-pipeline.service";
 import { visionService } from "../modules/vision/vision.service";
 import { modelConfigService, ModelConfigError, type ModelRole } from "../modules/model-config/model-config.service";
-import { registry, refreshAccountMetrics, killSwitchActive as killSwitchGauge } from "../modules/observability/metrics";
+import {
+  generatedWorkflowCacheLookups,
+  generatedWorkflowLlmAvoided,
+  registry,
+  refreshAccountMetrics,
+  killSwitchActive as killSwitchGauge,
+} from "../modules/observability/metrics";
 import { canaryService } from "../modules/canary/canary.service";
 import { alerting, AlertType } from "../modules/observability/alerts";
 import { getDb } from "../db/client";
@@ -582,6 +588,8 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
 
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
     if (cached) {
+      generatedWorkflowCacheLookups?.labels("prompt", "hit").inc();
+      generatedWorkflowLlmAvoided?.labels("prompt_cache_hit").inc();
       return res.json({
         ok: true,
         data: {
@@ -593,6 +601,7 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
         },
       });
     }
+    generatedWorkflowCacheLookups?.labels("prompt", "miss").inc();
 
     res.json({
       ok: true,
@@ -664,6 +673,8 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
         ? await workflowService.getGeneratedPlanCache(cacheKey)
         : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
       if (cached) {
+        generatedWorkflowCacheLookups?.labels("resolve", "hit").inc();
+        generatedWorkflowLlmAvoided?.labels("resolve_cache_hit").inc();
         return res.json({
           ok: true,
           data: {
@@ -675,6 +686,7 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
           },
         });
       }
+      generatedWorkflowCacheLookups?.labels("resolve", "miss").inc();
       if (!workflow) {
         return res.status(200).json({
           ok: true,
@@ -776,6 +788,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         ? await workflowService.getGeneratedPlanCache(cacheKey)
         : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
       if (!cached) {
+        generatedWorkflowCacheLookups?.labels("execute", "miss").inc();
         return res.status(404).json({
           ok: false,
           error: "generated workflow plan cache miss",
@@ -786,6 +799,8 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
       resolvedWorkflow = cached.workflow;
       resolvedCache = cached;
       cacheHit = true;
+      generatedWorkflowCacheLookups?.labels("execute", "hit").inc();
+      generatedWorkflowLlmAvoided?.labels("execute_cache_hit").inc();
     }
 
     const validation = validateGeneratedWorkflowTemplate(resolvedWorkflow);
