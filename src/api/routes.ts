@@ -846,7 +846,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
     const executionSource = cacheKey ? "cache_key" : requestKey ? "request_key" : "workflow";
     generatedWorkflowExecutions?.labels(template.platform, String(cacheHit), executionSource).inc();
     if (cacheHit && compiledPlan.llmBudget.happyPathRequests === 0) {
-      generatedWorkflowLlmAvoided?.labels(executionSource).inc();
+      generatedWorkflowLlmAvoided?.labels(template.platform, "cache_hit").inc();
     }
     res.status(202).json({
       ok: true,
