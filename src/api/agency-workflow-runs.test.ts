@@ -230,6 +230,76 @@ describe("agency workflow runs API", () => {
     });
   });
 
+  it("creates a product-level Reddit account health scan with an explicit client for an unlinked account", async () => {
+    const run = hydratedRun({ cache_key: "0123456789abcdef01234567", request_key: null });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({
+        rows: [{
+          id: run.account_id,
+          client_id: null,
+          platform: "reddit",
+          username: "Consistent-Beyond386",
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [cachedArtifact({ cache_key: run.cache_key })] })
+      .mockResolvedValueOnce({ rows: [{ id: run.id }] })
+      .mockResolvedValueOnce({ rows: [{ id: run.task_id }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [run] })
+      .mockResolvedValueOnce({ rows: [] }); // COMMIT
+
+    const response = await postAgency("/api/agency/reddit/account-health-scans", {
+      clientId: run.client_id,
+      accountId: run.account_id,
+      deviceId: run.device_id,
+      context: { requestedBy: "test" },
+    });
+
+    expect(response.status).toBe(201);
+
+    const runInsert = mocks.client.query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO agency_workflow_runs")
+    );
+    expect(runInsert).toBeDefined();
+    expect(runInsert![1][0]).toBe(run.client_id);
+
+    const taskInsert = mocks.client.query.mock.calls.find(([sql]) =>
+      String(sql).includes("INSERT INTO tasks")
+    );
+    expect(JSON.parse(taskInsert![1][2])).toMatchObject({
+      clientId: run.client_id,
+      cacheKey: "0123456789abcdef01234567",
+    });
+  });
+
+  it("rejects product-level Reddit account health scans when explicit client mismatches the account client", async () => {
+    const run = hydratedRun();
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({
+        rows: [{
+          id: run.account_id,
+          client_id: run.client_id,
+          platform: "reddit",
+          username: "Consistent-Beyond386",
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] }); // ROLLBACK
+
+    const response = await postAgency("/api/agency/reddit/account-health-scans", {
+      clientId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      accountId: run.account_id,
+      deviceId: run.device_id,
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("ACCOUNT_CLIENT_MISMATCH");
+    expect(mocks.client.query.mock.calls.some(([sql]) =>
+      String(sql).includes("generated_workflow_plan_cache")
+    )).toBe(false);
+  });
+
   it("rejects inline workflow payloads before database access", async () => {
     const response = await postWorkflowRun({
       clientId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",

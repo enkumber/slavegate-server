@@ -532,6 +532,7 @@ router.patch("/posts/:id", async (req: Request, res: Response) => {
 router.post("/reddit/account-health-scans", async (req: Request, res: Response) => {
   const db = getDb();
   const body = req.body as {
+    clientId?: string;
     accountId?: string;
     deviceId?: string;
     scheduledTime?: string;
@@ -568,12 +569,22 @@ router.post("/reddit/account-health-scans", async (req: Request, res: Response) 
         error: "Reddit account health scans require a reddit account",
       });
     }
-    if (!account.client_id) {
+    if (account.client_id && body.clientId && account.client_id !== body.clientId) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        ok: false,
+        code: "ACCOUNT_CLIENT_MISMATCH",
+        error: "Account is linked to a different client",
+      });
+    }
+
+    const resolvedClientId = account.client_id ?? body.clientId;
+    if (!resolvedClientId) {
       await client.query("ROLLBACK");
       return res.status(400).json({
         ok: false,
         code: "ACCOUNT_CLIENT_REQUIRED",
-        error: "Account must be linked to a client before agency scans can run",
+        error: "Account must be linked to a client or clientId must be supplied",
       });
     }
 
@@ -599,7 +610,7 @@ router.post("/reddit/account-health-scans", async (req: Request, res: Response) 
     const runContext = {
       ...(body.context ?? {}),
       source: "agency_reddit_account_health_scan",
-      clientId: account.client_id,
+      clientId: resolvedClientId,
       accountId: body.accountId,
       deviceId: body.deviceId,
       intent: "reddit_account_health_scan",
@@ -612,9 +623,9 @@ router.post("/reddit/account-health-scans", async (req: Request, res: Response) 
          (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
           canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, status, context)
        VALUES ($1, $2, $3, 'reddit', 'reddit_account_health_scan', 'read_only', NULL, $4, $5, $6, $7, 'queued', $8)
-       RETURNING id`,
+      RETURNING id`,
       [
-        account.client_id,
+        resolvedClientId,
         body.accountId,
         body.deviceId,
         cached.cache_key,
@@ -628,7 +639,7 @@ router.post("/reddit/account-health-scans", async (req: Request, res: Response) 
 
     const taskParams = {
       cacheKey: cached.cache_key,
-      clientId: account.client_id,
+      clientId: resolvedClientId,
       agencyWorkflowRunId: runId,
       workflowRunId: runId,
       intent: "reddit_account_health_scan",
