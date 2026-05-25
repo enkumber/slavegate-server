@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   executionLabels: vi.fn(() => ({ inc: vi.fn() })),
   llmAvoidedLabels: vi.fn(() => ({ inc: vi.fn() })),
   taskRunnerDispatchLabels: vi.fn(() => ({ inc: vi.fn() })),
+  workflowEventsPublish: vi.fn(),
   getGeneratedPlanCache: vi.fn(),
   getGeneratedPlanCacheByRequestKey: vi.fn(),
   getWorkflow: vi.fn(),
@@ -48,6 +49,10 @@ vi.mock("../workflows/workflow.service", () => ({
     getGeneratedPlanCacheByRequestKey: mocks.getGeneratedPlanCacheByRequestKey,
     get: mocks.getWorkflow,
   },
+}));
+
+vi.mock("../workflow-events", () => ({
+  workflowEvents: { publish: mocks.workflowEventsPublish },
 }));
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
@@ -307,6 +312,20 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.executionLabels).toHaveBeenCalledWith("reddit", "true", "task_runner_request_key");
     expect(mocks.llmAvoidedLabels).toHaveBeenCalledWith("reddit", "task_runner_cache_hit");
     expect(mocks.taskRunnerDispatchLabels).toHaveBeenCalledWith("generated_workflow", "request_key", "accepted");
+    expect(mocks.workflowEventsPublish).toHaveBeenCalledWith(expect.objectContaining({
+      source: "task_runner",
+      event: "task_running",
+      taskId: TASK_ID,
+      deviceId: DEVICE_ID,
+      status: "running",
+    }));
+    expect(mocks.workflowEventsPublish).toHaveBeenCalledWith(expect.objectContaining({
+      source: "task_runner",
+      event: "task_completed",
+      workflowId: WORKFLOW_ID,
+      taskId: TASK_ID,
+      status: "completed",
+    }));
   });
 
   it("materializes output schema defaults so edge checkpoints retain required result fields", async () => {

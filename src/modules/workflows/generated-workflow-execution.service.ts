@@ -5,6 +5,7 @@ import { startWorkflow } from "./workflow.executor";
 import { workflowService } from "./workflow.service";
 import type { WorkflowCheckpoint, WorkflowTemplate } from "./types";
 import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
+import { workflowEvents } from "../workflow-events";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
 
@@ -63,6 +64,7 @@ export interface GeneratedWorkflowControlPlaneContext {
   campaignId?: string;
   deviceId?: string;
   taskId?: string;
+  agencyWorkflowRunId?: string;
   platform?: string;
   routine?: string;
   source: "api" | "task_runner";
@@ -103,6 +105,23 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     throw err;
   }
 
+  workflowEvents.publish({
+    source: "workflow_executor",
+    event: "dispatch_accepted",
+    taskId: controlPlaneContext?.taskId,
+    agencyWorkflowRunId: controlPlaneContext?.agencyWorkflowRunId,
+    clientId: controlPlaneContext?.clientId,
+    accountId,
+    deviceId,
+    status: "accepted",
+    totalSteps: template.steps.length,
+    details: {
+      templateId,
+      accountId,
+      controlPlaneContext,
+    },
+  });
+
   const accountAgeDays = (variables?.["accountAgeDays"] as number) ?? 30;
   const simulatedTimezone = (variables?.["timezone"] as string) ?? "Europe/Bucharest";
   const hbeSession = hbeService.initSession(accountAgeDays, simulatedTimezone) as unknown as Record<string, unknown>;
@@ -129,6 +148,25 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     );
 
     if (sent) {
+      workflowEvents.publish({
+        source: "workflow_executor",
+        event: "dispatch_running",
+        workflowId: wf.id,
+        taskId: controlPlaneContext?.taskId,
+        agencyWorkflowRunId: controlPlaneContext?.agencyWorkflowRunId,
+        clientId: controlPlaneContext?.clientId,
+        accountId,
+        deviceId,
+        mode: "edge",
+        status: "running",
+        totalSteps: template.steps.length,
+        details: {
+          mode: "edge",
+          templateId,
+          accountId,
+          controlPlaneContext,
+        },
+      });
       console.log(`[${logPrefix}] ${wf.id} dispatched to device (edge execution, agent=${directWsServer.getAgentVersion(deviceId)})`);
       return { workflowId: wf.id, status: "running", mode: "edge", templateId, controlPlaneContext };
     }
@@ -149,6 +187,26 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
 
   startWorkflow(wf.id).catch(err => {
     console.error(`[${logPrefix}] Failed to enqueue ${wf.id}: ${err.message}`);
+  });
+
+  workflowEvents.publish({
+    source: "workflow_executor",
+    event: "dispatch_queued",
+    workflowId: wf.id,
+    taskId: controlPlaneContext?.taskId,
+    agencyWorkflowRunId: controlPlaneContext?.agencyWorkflowRunId,
+    clientId: controlPlaneContext?.clientId,
+    accountId,
+    deviceId,
+    mode: "server",
+    status: "queued",
+    totalSteps: template.steps.length,
+    details: {
+      mode: "server",
+      templateId,
+      accountId,
+      controlPlaneContext,
+    },
   });
 
   return { workflowId: wf.id, status: "queued", mode: "server", templateId, controlPlaneContext };

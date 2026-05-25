@@ -201,8 +201,8 @@ router.post("/auth/login", async (req, res) => {
     return res.status(401).json({ ok: false, error: "Invalid credentials" });
   }
 
-  const accessToken  = signJwt({ sub: username, role: "admin" }, 15 * 60 * 1_000);      // 15min
-  const refreshToken = signJwt({ sub: username, role: "admin", refresh: true }, 7 * 24 * 60 * 60 * 1_000); // 7d
+  const accessToken  = signJwt({ sub: username, role: "admin", aud: "dashboard_access" }, 15 * 60 * 1_000);      // 15min
+  const refreshToken = signJwt({ sub: username, role: "admin", refresh: true, aud: "dashboard_refresh" }, 7 * 24 * 60 * 60 * 1_000); // 7d
 
   res.json({ ok: true, data: { accessToken, refreshToken } });
 });
@@ -216,7 +216,7 @@ router.post("/auth/refresh", (req, res) => {
     return res.status(401).json({ ok: false, error: "Invalid refresh token" });
   }
 
-  const newAccess = signJwt({ sub: payload.sub, role: payload.role }, 15 * 60 * 1_000);
+  const newAccess = signJwt({ sub: payload.sub, role: payload.role, aud: "dashboard_access" }, 15 * 60 * 1_000);
   res.json({ ok: true, data: { accessToken: newAccess } });
 });
 

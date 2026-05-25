@@ -29,6 +29,7 @@ import { devicesService } from "../modules/devices/devices.service";
 import { devicesConnected, deviceOfflineEvents, recordDeviceHealth } from "../modules/observability/metrics";
 import { alerting } from "../modules/observability/alerts";
 import { visionService } from "../modules/vision/vision.service";
+import { workflowEvents } from "../modules/workflow-events";
 import { llmComplete } from "../utils/llm";
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
 
@@ -763,12 +764,44 @@ export class DirectWsServer {
     const total      = msg.totalSteps as number;
     const error      = msg.error as string | undefined;
     const variables  = msg.variables as Record<string, unknown> | undefined;
+    const controlPlaneContext = variables?.controlPlaneContext &&
+      typeof variables.controlPlaneContext === "object" &&
+      !Array.isArray(variables.controlPlaneContext)
+      ? variables.controlPlaneContext as Record<string, unknown>
+      : {};
 
     console.log(
       `[direct-ws] WORKFLOW_STATUS: device=${conn.deviceId.slice(0,8)} ` +
       `workflow=${workflowId?.slice(0,8)} status=${status} step=${step}/${total}` +
       (error ? ` error=${error}` : '')
     );
+
+    if (workflowId) {
+      workflowEvents.publish({
+        source: "edge_device",
+        event: status === "completed"
+          ? "completed"
+          : status === "failed"
+            ? "failed"
+            : "checkpoint_updated",
+        workflowId,
+        taskId: typeof controlPlaneContext.taskId === "string" ? controlPlaneContext.taskId : undefined,
+        agencyWorkflowRunId: typeof controlPlaneContext.agencyWorkflowRunId === "string" ? controlPlaneContext.agencyWorkflowRunId : undefined,
+        clientId: typeof controlPlaneContext.clientId === "string" ? controlPlaneContext.clientId : undefined,
+        accountId: typeof controlPlaneContext.accountId === "string" ? controlPlaneContext.accountId : undefined,
+        deviceId: conn.deviceId,
+        mode: "edge",
+        status,
+        currentStep: typeof step === "number" ? step : undefined,
+        stepIndex: typeof step === "number" ? Math.max(0, step - 1) : undefined,
+        totalSteps: typeof total === "number" ? total : undefined,
+        error,
+        details: {
+          variables,
+          source: "edge",
+        },
+      });
+    }
 
     // Update DB (fire-and-forget)
     this._persistWorkflowStatus(conn.deviceId, workflowId, status, step, total, error, variables)

@@ -29,6 +29,7 @@ import {
   type GeneratedWorkflowPlanCacheRecord,
   type WorkflowRecord,
 } from "../workflows/workflow.service";
+import { workflowEvents } from "../workflow-events";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -80,6 +81,31 @@ const DEFAULT_CONFIG: TaskRunnerConfig = {
   maxRetries: 3,                    // 3 retries: 5s, 15s, 45s (exponential backoff)
   retryBackoffMs: 5_000,            // Base backoff: 5 * 3^retry_count seconds
 };
+
+function publishGeneratedWorkflowTaskEvent(
+  task: TaskRow,
+  event: "task_running" | "task_completed" | "task_failed",
+  details: Record<string, unknown> = {},
+): void {
+  if (task.routine !== GENERATED_WORKFLOW_ROUTINE) return;
+  const clientId = typeof task.params?.clientId === "string" ? task.params.clientId : undefined;
+  const agencyWorkflowRunId = agencyWorkflowRunIdFromTask(task) ?? undefined;
+  workflowEvents.publish({
+    source: "task_runner",
+    event,
+    workflowId: typeof details.workflowId === "string" ? details.workflowId : undefined,
+    taskId: task.id,
+    agencyWorkflowRunId,
+    clientId,
+    accountId: task.account_id,
+    deviceId: task.device_id,
+    status: event.replace("task_", ""),
+    details: {
+      routine: task.routine,
+      ...details,
+    },
+  });
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATED_WORKFLOW_ROUTINE = "generated_workflow";
@@ -422,6 +448,7 @@ async function executeTask(task: TaskRow): Promise<void> {
       WHERE id = $1
     `, [taskId]);
     await markAgencyWorkflowRunStarted(task);
+    publishGeneratedWorkflowTaskEvent(task, "task_running");
     
     console.log(`[task-runner] Executing task ${taskId.slice(0, 8)} (${task.routine}) on device ${deviceId.slice(0, 8)}`);
     
@@ -478,6 +505,12 @@ async function executeTask(task: TaskRow): Promise<void> {
         WHERE id = $1
       `, [taskId, JSON.stringify(resultJson)]);
       await completeAgencyWorkflowRun(task, result);
+      publishGeneratedWorkflowTaskEvent(task, "task_completed", {
+        workflowId: result.generatedWorkflow?.workflowId,
+        stepsCompleted: result.stepsCompleted,
+        totalSteps: result.totalSteps,
+        mode: result.generatedWorkflow?.mode,
+      });
       
       console.log(`[task-runner] Task ${taskId.slice(0, 8)} completed ✓ (${result.stepsCompleted}/${result.totalSteps} steps)`);
     } else {
@@ -495,6 +528,13 @@ async function executeTask(task: TaskRow): Promise<void> {
         WHERE id = $1
       `, [taskId, JSON.stringify(resultJson), result.failReason || "Unknown error", newRetryCount]);
       await completeAgencyWorkflowRun(task, result);
+      publishGeneratedWorkflowTaskEvent(task, "task_failed", {
+        workflowId: result.generatedWorkflow?.workflowId,
+        stepsCompleted: result.stepsCompleted,
+        totalSteps: result.totalSteps,
+        error: result.failReason,
+        failureCode: result.generatedWorkflow?.failureCode,
+      });
       
       // Also log to execution_logs for detailed debugging
       await db.query(`
@@ -534,6 +574,7 @@ async function executeTask(task: TaskRow): Promise<void> {
       WHERE id = $1
     `, [taskId, error.message, newRetryCount]);
     await failAgencyWorkflowRunWithError(task, error);
+    publishGeneratedWorkflowTaskEvent(task, "task_failed", { error: error.message });
     
     await db.query(`
       INSERT INTO execution_logs (task_id, device_id, log_data)
@@ -778,6 +819,7 @@ async function executeGeneratedWorkflowTask(
       accountId: task.account_id,
       deviceId: task.device_id,
       platform,
+      ...(agencyWorkflowRunIdFromTask(task) ? { agencyWorkflowRunId: agencyWorkflowRunIdFromTask(task)! } : {}),
       ...(clientId ? { clientId } : {}),
       ...(campaignId ? { campaignId } : {}),
     };
@@ -895,6 +937,7 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
   try {
     await db.query(`UPDATE tasks SET status = 'running', started_at = NOW() WHERE id = $1`, [taskId]);
     await markAgencyWorkflowRunStarted(task);
+    publishGeneratedWorkflowTaskEvent(task, "task_running");
     
     let taskResult: TaskRunnerResult;
     switch (task.routine) {
@@ -938,10 +981,18 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
       ]
     );
     await completeAgencyWorkflowRun(task, taskResult);
+    publishGeneratedWorkflowTaskEvent(task, taskResult.success ? "task_completed" : "task_failed", {
+      workflowId: taskResult.generatedWorkflow?.workflowId,
+      stepsCompleted: taskResult.stepsCompleted,
+      totalSteps: taskResult.totalSteps,
+      error: taskResult.failReason,
+      failureCode: taskResult.generatedWorkflow?.failureCode,
+    });
 
     return taskResult;
   } catch (err) {
     await failAgencyWorkflowRunWithError(task, err as Error);
+    publishGeneratedWorkflowTaskEvent(task, "task_failed", { error: (err as Error).message });
     throw err;
   } finally {
     deviceLocks.set(task.device_id, false);

@@ -8,12 +8,40 @@ import { getDb } from "../db/client";
 import multer from "multer";
 import path from "path";
 import fs from "fs/promises";
+import { workflowEvents } from "../modules/workflow-events";
 
 const router = Router();
 
 const SPRINT_2_READ_ONLY_INTENTS = new Set(["reddit_account_health_scan"]);
 
 const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
+
+function publishAgencyWorkflowQueued(input: {
+  agencyWorkflowRunId: string;
+  taskId: string;
+  clientId: string;
+  accountId: string;
+  deviceId: string;
+  intent: string;
+  platform?: string;
+}): void {
+  workflowEvents.publish({
+    source: "agency",
+    event: "queued",
+    taskId: input.taskId,
+    agencyWorkflowRunId: input.agencyWorkflowRunId,
+    clientId: input.clientId,
+    accountId: input.accountId,
+    deviceId: input.deviceId,
+    mode: "edge",
+    status: "queued",
+    message: "Generated workflow task queued",
+    details: {
+      intent: input.intent,
+      platform: input.platform,
+    },
+  });
+}
 
 // ─── Pagination helper ────────────────────────────────────────────────────────
 
@@ -656,14 +684,24 @@ router.post("/reddit/account-health-scans", async (req: Request, res: Response) 
         body.scheduledTime ?? new Date().toISOString(),
       ],
     );
+    const taskId = taskResult.rows[0].id;
 
     await client.query(
       `UPDATE agency_workflow_runs SET task_id = $1, updated_at = NOW() WHERE id = $2`,
-      [taskResult.rows[0].id, runId],
+      [taskId, runId],
     );
 
     const hydrated = await hydrateAgencyWorkflowRun(client as unknown as ReturnType<typeof getDb>, runId);
     await client.query("COMMIT");
+    publishAgencyWorkflowQueued({
+      agencyWorkflowRunId: runId,
+      taskId,
+      clientId: resolvedClientId,
+      accountId: body.accountId,
+      deviceId: body.deviceId,
+      intent: "reddit_account_health_scan",
+      platform: "reddit",
+    });
     res.status(201).json({ ok: true, data: rowToAgencyWorkflowRun(hydrated!) });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -830,10 +868,11 @@ router.post("/workflow-runs", async (req: Request, res: Response) => {
         body.scheduledTime ?? new Date().toISOString(),
       ]
     );
+    const taskId = taskResult.rows[0].id;
 
     await client.query(
       `UPDATE agency_workflow_runs SET task_id = $1, updated_at = NOW() WHERE id = $2`,
-      [taskResult.rows[0].id, runId]
+      [taskId, runId]
     );
 
     const hydrated = await client.query(
@@ -841,6 +880,15 @@ router.post("/workflow-runs", async (req: Request, res: Response) => {
       [runId]
     );
     await client.query("COMMIT");
+    publishAgencyWorkflowQueued({
+      agencyWorkflowRunId: runId,
+      taskId,
+      clientId: body.clientId,
+      accountId: body.accountId,
+      deviceId: body.deviceId,
+      intent: body.intent,
+      platform,
+    });
     res.status(201).json({ ok: true, data: rowToAgencyWorkflowRun(hydrated.rows[0]) });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -1102,6 +1150,15 @@ router.get("/reports/stats", async (_req: Request, res: Response) => {
       materials: materials.rows[0],
     },
   });
+});
+
+// ─── Creative Workflow E2E ───
+import { createCreativeWorkflowRun } from "../modules/creative-workflows/creative-workflow.service";
+
+router.post("/creative-workflows", async (req, res) => {
+  const { clientId, accountId, deviceId, objective, dryRun } = req.body || {};
+  const result = await createCreativeWorkflowRun({ clientId, accountId, deviceId, objective: objective || "", dryRun: dryRun ?? false });
+  res.json({ ok: true, data: result });
 });
 
 export default router;

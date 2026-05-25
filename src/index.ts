@@ -29,6 +29,7 @@ import { lifecycleManager } from "./modules/accounts/lifecycle";
 import { canaryService } from "./modules/canary/canary.service";
 import { runMigrations } from "./db/migrate";
 import { startTaskRunner } from "./modules/task-runner";
+import { dashboardWorkflowWsServer } from "./modules/workflow-events/dashboard-ws.server";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
@@ -179,7 +180,9 @@ async function bootstrap(): Promise<void> {
 
   // ─── Transport layer — DirectWs only ───────────────────────────────────────
   directWsServer.attach(httpServer);
+  dashboardWorkflowWsServer.attach(httpServer);
   console.log("[server] DirectWs transport attached on /ws-direct");
+  console.log("[server] Dashboard workflow stream attached on /ws-dashboard");
 
   // ─── Startup check: warn if no openclaw_agent API token ────────────────────
   {
@@ -197,6 +200,7 @@ async function bootstrap(): Promise<void> {
   httpServer.listen(PORT, () => {
     console.log(`[server] Listening on :${PORT}`);
     console.log(`[server] DirectWs endpoint: ws://localhost:${PORT}/ws-direct`);
+    console.log(`[server] Dashboard workflow endpoint: ws://localhost:${PORT}/ws-dashboard`);
     console.log(`[server] REST API: http://localhost:${PORT}/api`);
   });
 
@@ -213,6 +217,7 @@ async function bootstrap(): Promise<void> {
     console.log(`\n[server] ${signal} received — shutting down...`);
     httpServer.close();
     await directWsServer.close();
+    await dashboardWorkflowWsServer.close();
     await dispatcherService.close();
     // Workflow worker cleanup handled by BullMQ process exit hooks
     await closeRedis();

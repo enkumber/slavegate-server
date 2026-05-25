@@ -27,6 +27,7 @@ import {
   generatedWorkflowRecoveryAttempts,
   generatedWorkflowRecoveryBudgetExhausted,
 } from "../observability/metrics";
+import { workflowEvents } from "../workflow-events";
 
 // Import types from canonical types.ts (re-exported via planner for backward compat)
 import type { CompiledWorkflow, CompiledStep } from "./types";
@@ -145,7 +146,39 @@ async function attemptBoundedRecovery(
   counters.runtimeLlmCalls++;
   generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReason(reason)).inc();
 
+  workflowEvents.publish({
+    source: "workflow_compiler",
+    event: "recovery_started",
+    workflowId: ctx.workflow.id,
+    deviceId: ctx.deviceId,
+    currentStep: ctx.stepsCompleted,
+    stepIndex,
+    totalSteps: ctx.workflow.steps.length,
+    details: {
+      reason,
+      attempt: ctx.recoveryAttemptsByStep[stepIndex],
+      recoveryCount: ctx.recoveryCount,
+      platform,
+    },
+  });
+
   const recovered = await ctx.onRecoveryNeeded(ctx, stepIndex, reason);
+  workflowEvents.publish({
+    source: "workflow_compiler",
+    event: recovered ? "recovery_succeeded" : "recovery_failed",
+    workflowId: ctx.workflow.id,
+    deviceId: ctx.deviceId,
+    currentStep: ctx.stepsCompleted,
+    stepIndex,
+    totalSteps: ctx.workflow.steps.length,
+    status: recovered ? "recovered" : "failed",
+    details: {
+      reason,
+      recovered,
+      recoveryCount: ctx.recoveryCount,
+      platform,
+    },
+  });
   return { recovered };
 }
 
@@ -519,6 +552,17 @@ export async function runCompiledWorkflow(
   };
 
   if (!isDeviceOnline(deviceId)) {
+    workflowEvents.publish({
+      source: "workflow_compiler",
+      event: "failed",
+      workflowId: workflow.id,
+      deviceId,
+      status: "failed",
+      currentStep: 0,
+      totalSteps: workflow.steps.length,
+      error: `Device ${deviceId} is offline`,
+      details: { error: `Device ${deviceId} is offline` },
+    });
     return {
       ok: false,
       workflowId: workflow.id,
@@ -535,6 +579,21 @@ export async function runCompiledWorkflow(
 
   // Update status to running
   await updateWorkflowStatus(workflow.id, "running");
+  workflowEvents.publish({
+    source: "workflow_compiler",
+    event: "started",
+    workflowId: workflow.id,
+    deviceId,
+    status: "running",
+    currentStep: startStepIndex,
+    stepIndex: startStepIndex,
+    totalSteps: workflow.steps.length,
+    details: {
+      name: workflow.name,
+      appId: workflow.appId,
+      startStepIndex,
+    },
+  });
 
   const ctx: RunnerContext = {
     deviceId,
@@ -554,6 +613,20 @@ export async function runCompiledWorkflow(
     if (batch.batchSteps.length >= MIN_COMPILED_BATCH_SIZE) {
       const batchStart = Date.now();
       console.log(`[runner] Fast-path batch from step ${i}: ${batch.batchSteps.length} deterministic steps`);
+      workflowEvents.publish({
+        source: "workflow_compiler",
+        event: "batch_started",
+        workflowId: workflow.id,
+        deviceId,
+        status: "running",
+        currentStep: ctx.stepsCompleted,
+        stepIndex: i,
+        totalSteps: workflow.steps.length,
+        details: {
+          batchSize: batch.batchSteps.length,
+          stepIds: batch.steps.map((step) => step.id),
+        },
+      });
       try {
         const batchResult = await executeCompiledBatch(deviceId, workflow.id, i, batch.batchSteps);
         const firstFailed = batchResult.results.findIndex(
@@ -597,6 +670,20 @@ export async function runCompiledWorkflow(
 
         if (batchCompleted) {
           await updateWorkflowStatus(workflow.id, "running", ctx.stepsCompleted, ctx.recoveryCount);
+          workflowEvents.publish({
+            source: "workflow_compiler",
+            event: "batch_completed",
+            workflowId: workflow.id,
+            deviceId,
+            status: "running",
+            currentStep: ctx.stepsCompleted,
+            stepIndex: ctx.stepsCompleted,
+            totalSteps: workflow.steps.length,
+            details: {
+              batchSize: verifiedSuccessfulCount,
+              latencyMs: Date.now() - batchStart,
+            },
+          });
           console.log(`[runner] Batch completed ${verifiedSuccessfulCount} steps (${Date.now() - batchStart}ms)`);
           i += verifiedSuccessfulCount;
           continue;
@@ -608,9 +695,36 @@ export async function runCompiledWorkflow(
           `[runner] Batch stopped at local step ${localFailedStep}/${batch.steps.length}; ` +
           `falling back to single-step recovery from global step ${i + verifiedSuccessfulCount}`
         );
+        workflowEvents.publish({
+          source: "workflow_compiler",
+          event: "batch_failed",
+          workflowId: workflow.id,
+          deviceId,
+          status: "running",
+          currentStep: ctx.stepsCompleted,
+          stepIndex: i + verifiedSuccessfulCount,
+          totalSteps: workflow.steps.length,
+          details: {
+            localFailedStep,
+            verifiedSuccessfulCount,
+            batchStatus: batchResult.status,
+          },
+        });
         i += verifiedSuccessfulCount;
       } catch (err) {
         console.warn(`[runner] Batch fast-path failed at step ${i}: ${(err as Error).message}; falling back to single-step execution`);
+        workflowEvents.publish({
+          source: "workflow_compiler",
+          event: "batch_failed",
+          workflowId: workflow.id,
+          deviceId,
+          status: "running",
+          currentStep: ctx.stepsCompleted,
+          stepIndex: i,
+          error: (err as Error).message,
+          totalSteps: workflow.steps.length,
+          details: { error: (err as Error).message },
+        });
       }
     }
 
@@ -619,6 +733,21 @@ export async function runCompiledWorkflow(
     counters.deterministicSteps++;
 
     console.log(`[runner] Step ${i + 1}/${workflow.steps.length}: ${step.action} — "${step.description}"`);
+    workflowEvents.publish({
+      source: "workflow_compiler",
+      event: "step_started",
+      workflowId: workflow.id,
+      deviceId,
+      status: "running",
+      currentStep: ctx.stepsCompleted,
+      stepIndex: i,
+      stepId: step.id,
+      totalSteps: workflow.steps.length,
+      details: {
+        action: step.action,
+        description: step.description,
+      },
+    });
 
     // ─── Pre-action fingerprint check (verify we're on expected page) ───────
     let fingerprintMatch = true;
@@ -649,6 +778,19 @@ export async function runCompiledWorkflow(
                 postActionVerified: false,
                 error: recovery.error ?? "Fingerprint mismatch, recovery failed",
                 latencyMs: Date.now() - stepStart,
+              });
+              workflowEvents.publish({
+                source: "workflow_compiler",
+                event: "step_failed",
+                workflowId: workflow.id,
+                deviceId,
+                status: "failed",
+                currentStep: ctx.stepsCompleted,
+                stepIndex: i,
+                stepId: step.id,
+                totalSteps: workflow.steps.length,
+                error: recovery.error ?? "Fingerprint mismatch, recovery failed",
+                details: { error: recovery.error ?? "Fingerprint mismatch, recovery failed" },
               });
               aborted = true;
               break;
@@ -693,6 +835,19 @@ export async function runCompiledWorkflow(
               error: recovery.error ?? actionResult.error,
               latencyMs: Date.now() - stepStart,
             });
+            workflowEvents.publish({
+              source: "workflow_compiler",
+              event: "step_failed",
+              workflowId: workflow.id,
+              deviceId,
+              status: "failed",
+              currentStep: ctx.stepsCompleted,
+              stepIndex: i,
+              stepId: step.id,
+              totalSteps: workflow.steps.length,
+              error: recovery.error ?? actionResult.error,
+              details: { error: recovery.error ?? actionResult.error },
+            });
             aborted = true;
             break;
         }
@@ -729,6 +884,19 @@ export async function runCompiledWorkflow(
             error: recovery.error ?? "Post-action mismatch, recovery failed",
             latencyMs: Date.now() - stepStart,
           });
+          workflowEvents.publish({
+            source: "workflow_compiler",
+            event: "step_failed",
+            workflowId: workflow.id,
+            deviceId,
+            status: "failed",
+            currentStep: ctx.stepsCompleted,
+            stepIndex: i,
+            stepId: step.id,
+            totalSteps: workflow.steps.length,
+            error: recovery.error ?? "Post-action mismatch, recovery failed",
+            details: { error: recovery.error ?? "Post-action mismatch, recovery failed" },
+          });
           aborted = true;
           break;
         }
@@ -749,6 +917,23 @@ export async function runCompiledWorkflow(
 
     // Update DB progress
     await updateWorkflowStatus(workflow.id, "running", ctx.stepsCompleted, ctx.recoveryCount);
+    workflowEvents.publish({
+      source: "workflow_compiler",
+      event: "step_completed",
+      workflowId: workflow.id,
+      deviceId,
+      status: "running",
+      currentStep: ctx.stepsCompleted,
+      stepIndex: i,
+      stepId: step.id,
+      totalSteps: workflow.steps.length,
+      details: {
+        stepsCompleted: ctx.stepsCompleted,
+        fingerprintMatch,
+        postActionVerified,
+        latencyMs: Date.now() - stepStart,
+      },
+    });
 
     console.log(`[runner] Step ${i + 1} completed (${Date.now() - stepStart}ms)`);
     i++;
@@ -776,6 +961,24 @@ export async function runCompiledWorkflow(
     `${ctx.stepsCompleted}/${workflow.steps.length} steps, ` +
     `${ctx.recoveryCount} recoveries, ${totalLatencyMs}ms`
   );
+  workflowEvents.publish({
+    source: "workflow_compiler",
+    event: finalStatus === "completed" ? "completed" : "failed",
+    workflowId: workflow.id,
+    deviceId,
+    status: finalStatus,
+    currentStep: ctx.stepsCompleted,
+    stepIndex: ctx.stepsCompleted,
+    totalSteps: workflow.steps.length,
+    error: aborted ? "Workflow aborted — see step results" : undefined,
+    details: {
+      stepsCompleted: ctx.stepsCompleted,
+      recoveryCount: ctx.recoveryCount,
+      totalLatencyMs,
+      counters,
+      error: aborted ? "Workflow aborted — see step results" : undefined,
+    },
+  });
 
   return {
     ok: !aborted,
