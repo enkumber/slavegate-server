@@ -63,18 +63,22 @@ export interface CreativeWorkflowRun {
 }
 
 export interface CreativeWorkflowCreateRequest {
-  clientId: string;
-  accountId: string;
-  deviceId: string;
-  objective: string;
+  clientId?: string;
+  accountId?: string;
+  deviceId?: string;
+  objective?: string;
   dryRun?: boolean;
 }
 
 export interface CreativeWorkflowCreateResponse {
-  runId: string;
+  runId: string | null;
   proposal: CreativeProposal;
   status: CreativeWorkflowStatus;
+  code?: string;
   agencyWorkflowRunId: string | null;
   taskId: string | null;
+  cacheKey?: string | null;
+  requestKey?: string | null;
+  report?: Record<string, unknown>;
   message: string;
 }

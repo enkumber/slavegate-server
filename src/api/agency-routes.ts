@@ -1157,8 +1157,15 @@ import { createCreativeWorkflowRun } from "../modules/creative-workflows/creativ
 
 router.post("/creative-workflows", async (req, res) => {
   const { clientId, accountId, deviceId, objective, dryRun } = req.body || {};
-  const result = await createCreativeWorkflowRun({ clientId, accountId, deviceId, objective: objective || "", dryRun: dryRun ?? false });
-  res.json({ ok: true, data: result });
+  const result = await createCreativeWorkflowRun({ clientId, accountId, deviceId, objective, dryRun: dryRun ?? false });
+  const status = result.status === "queued"
+    ? 201
+    : result.code === "CREATIVE_WORKFLOW_MISSING_FIELDS"
+      ? 400
+      : result.status === "not_ready"
+        ? 409
+        : 200;
+  res.status(status).json({ ok: result.status !== "not_ready", code: result.code, data: result });
 });
 
 export default router;
