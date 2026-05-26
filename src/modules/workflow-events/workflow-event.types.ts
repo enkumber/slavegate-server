@@ -3,7 +3,8 @@ export type WorkflowEventSource =
   | "workflow_compiler"
   | "edge_device"
   | "workflow_executor"
-  | "agency";
+  | "agency"
+  | "workflow_runs";
 
 export type WorkflowEventType =
   | "queued"
@@ -44,6 +45,7 @@ export interface WorkflowEvent {
   timestamp: string;
   occurredAt: string;
   workflowId?: string;
+  workflowRunId?: string;
   taskId?: string;
   agencyWorkflowRunId?: string;
   clientId?: string;

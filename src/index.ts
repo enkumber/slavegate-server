@@ -13,7 +13,7 @@ import { directWsServer } from "./ws/direct-ws.server";
 import { createWsGateway, wsGateway } from "./ws";
 import apiRouter from "./api/routes";
 import agencyRouter from "./api/agency-routes";
-import creativeWorkflowRouter from "./api/creative-workflow-routes";
+import workflowRunRouter from "./api/workflow-run-routes";
 import hydraRouter from "./api/hydra-routes";
 import vlmRouter from "./api/vlm-routes";
 import workflowDispatchRoutes from "./api/workflow-dispatch-routes";
@@ -133,7 +133,7 @@ async function bootstrap(): Promise<void> {
   app.use(express.json({ limit: "1mb" }));
   app.use("/api/device-tokens", deviceTokenRouter);
   app.use("/api", apiRouter);
-  app.use("/api/creative-workflows", creativeWorkflowRouter);
+  app.use("/api/workflow-runs", workflowRunRouter);
   app.use("/api/agency", agencyRouter);
   // Workflow dispatch — MUST be before hydraRouter so /workflow/dispatch matches before /workflow/:name/dispatch
   app.use("/api/hydra/workflow", workflowDispatchRoutes);

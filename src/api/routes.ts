@@ -443,25 +443,15 @@ router.get("/workflows/:id", requireAuth, async (req, res) => {
 });
 
 router.post("/workflows", requireAuth, async (req, res) => {
-  const { templateId, deviceId, accountId, variables } = req.body as {
-    templateId: string;
-    deviceId:   string;
-    accountId?: string;
-    variables?: Record<string, unknown>;
-  };
-  if (!templateId || !deviceId) {
-    return res.status(400).json({ ok: false, error: "templateId and deviceId required" });
-  }
-  const template = await workflowService.getTemplate(templateId);
-  if (!template) return res.status(404).json({ ok: false, error: `Template ${templateId} not found` });
-
-  try {
-    const data = await dispatchGeneratedWorkflowTemplate({ templateId, template, deviceId, accountId, variables });
-    res.status(202).json({ ok: true, data });
-  } catch (err) {
-    const typed = err as Error & { status?: number; code?: string };
-    res.status(typed.status ?? 500).json({ ok: false, error: typed.message, code: typed.code });
-  }
+  res.status(410).json({
+    ok: false,
+    code: "WORKFLOW_TEMPLATES_ARE_EXAMPLES_ONLY",
+    error: "Direct template workflow dispatch is deprecated. Use POST /api/workflow-runs with instruction, appId and deviceId.",
+    data: {
+      replacement: "/api/workflow-runs",
+      requiredBody: ["instruction", "appId", "deviceId"],
+    },
+  });
 });
 
 router.get("/workflows/generated/schema", requireAuth, async (_req, res) => {
@@ -843,13 +833,27 @@ router.post("/workflows/:id/cancel", requireAuth, async (req, res) => {
 
 router.get("/workflow-templates", requireAuth, async (_req, res) => {
   const templates = await workflowService.listTemplates();
-  res.json({ ok: true, data: templates });
+  res.json({
+    ok: true,
+    data: templates.map((template) => ({
+      ...template,
+      exampleOnly: true,
+      executableVia: "/api/workflow-runs",
+    })),
+  });
 });
 
 router.get("/workflow-templates/:id", requireAuth, async (req, res) => {
   const t = await workflowService.getTemplate(req.params.id);
   if (!t) return res.status(404).json({ ok: false, error: "Not found" });
-  res.json({ ok: true, data: t });
+  res.json({
+    ok: true,
+    data: {
+      ...t,
+      exampleOnly: true,
+      executableVia: "/api/workflow-runs",
+    },
+  });
 });
 
 // ─── Accounts ─────────────────────────────────────────────────────────────────
@@ -1963,43 +1967,15 @@ router.get("/scalability/status", requireAuth, async (_req, res) => {
 // ─── Edge Workflow: Push template to device (ADR-001) ────────────────────────
 
 router.post("/edge/push-template", requireAuth, async (req, res) => {
-  const { deviceId, templateId, variables } = req.body as {
-    deviceId?: string;
-    templateId?: string;
-    variables?: Record<string, unknown>;
-  };
-
-  if (!deviceId || !templateId) {
-    res.status(400).json({ ok: false, error: "Missing deviceId or templateId" });
-    return;
-  }
-
-  // Check device is online
-  if (!directWsServer.isDeviceOnline(deviceId)) {
-    res.status(409).json({ ok: false, error: "Device offline" });
-    return;
-  }
-
-  try {
-    // Load template from DB
-    const template = await workflowService.getTemplate(templateId);
-    if (!template) {
-      res.status(404).json({ ok: false, error: `Template ${templateId} not found` });
-      return;
-    }
-
-    // Push to device via WebSocket
-    const sent = directWsServer.sendWorkflowStart(deviceId, template as unknown as Record<string, unknown>, variables);
-    if (!sent) {
-      res.status(503).json({ ok: false, error: "Failed to send template to device" });
-      return;
-    }
-
-    console.log(`[api] Edge template push: device=${deviceId.slice(0, 8)} template=${templateId}`);
-    res.json({ ok: true, data: { deviceId, templateId, sent: true } });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
+  res.status(410).json({
+    ok: false,
+    code: "WORKFLOW_TEMPLATES_ARE_EXAMPLES_ONLY",
+    error: "Direct edge template push is deprecated. Use POST /api/workflow-runs with instruction, appId and deviceId.",
+    data: {
+      replacement: "/api/workflow-runs",
+      requiredBody: ["instruction", "appId", "deviceId"],
+    },
+  });
 });
 
 // ─── Edge Workflow: List templates for device ─────────────────────────────────
@@ -2007,7 +1983,14 @@ router.post("/edge/push-template", requireAuth, async (req, res) => {
 router.get("/edge/templates", requireAuth, async (_req, res) => {
   try {
     const templates = await workflowService.listTemplates();
-    res.json({ ok: true, data: templates });
+    res.json({
+      ok: true,
+      data: templates.map((template) => ({
+        ...template,
+        exampleOnly: true,
+        executableVia: "/api/workflow-runs",
+      })),
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
@@ -2016,24 +1999,15 @@ router.get("/edge/templates", requireAuth, async (_req, res) => {
 // ─── Edge Workflow: Broadcast template to all online devices ───────────────────
 
 router.post("/edge/broadcast-template", requireAuth, async (req, res) => {
-  const { templateId } = req.body as { templateId?: string };
-  if (!templateId) {
-    res.status(400).json({ ok: false, error: "Missing templateId" });
-    return;
-  }
-
-  try {
-    const template = await workflowService.getTemplate(templateId);
-    if (!template) {
-      res.status(404).json({ ok: false, error: `Template ${templateId} not found` });
-      return;
-    }
-
-    const sent = directWsServer.broadcastTemplate(template as unknown as Record<string, unknown>);
-    res.json({ ok: true, data: { templateId, devicesReached: sent } });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
+  res.status(410).json({
+    ok: false,
+    code: "WORKFLOW_TEMPLATES_ARE_EXAMPLES_ONLY",
+    error: "Direct edge template broadcast is deprecated. Use POST /api/workflow-runs with instruction, appId and deviceId.",
+    data: {
+      replacement: "/api/workflow-runs",
+      requiredBody: ["instruction", "appId", "deviceId"],
+    },
+  });
 });
 
 // ─── Edge Workflow: Status overview (ADR-001 Phase 5) ─────────────────────────

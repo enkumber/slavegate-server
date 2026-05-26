@@ -15,6 +15,8 @@
 import { sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
 import { getDb } from "../../db/client";
+import fs from "fs/promises";
+import path from "path";
 import { computePageSignature, buildPageDetection, isSamePage } from "./page-fingerprint";
 import { filterRelevantElements, generateElementId } from "./element-filter";
 import type {
@@ -34,6 +36,7 @@ const UI_TREE_TIMEOUT = 8000;
 const LAUNCH_TIMEOUT = 25000;
 const MAX_PAGES = 50;
 const MAX_EXPLORATIONS = 200;
+const APP_MAP_SEED_DIR = path.resolve(process.cwd(), "seeds", "app-maps");
 
 // ─── State (module-level singleton) ────────────────────────────────────────
 
@@ -404,6 +407,12 @@ export async function saveMap(map: AppMap): Promise<void> {
   const db = getDb();
   const pageCount = map.pageCount || Object.keys(map.pages).length;
   const transitionCount = map.transitionCount ?? countTransitions(map);
+  const persistedMap = {
+    ...map,
+    pageCount,
+    transitionCount,
+    updatedAt: map.updatedAt || new Date().toISOString(),
+  };
 
   await db.query(
     `INSERT INTO app_maps (app_id, app_name, map_data, version, page_count, transition_count, updated_at)
@@ -415,9 +424,14 @@ export async function saveMap(map: AppMap): Promise<void> {
        page_count = EXCLUDED.page_count,
        transition_count = EXCLUDED.transition_count,
        updated_at = NOW()`,
-    [map.appId, map.appName, JSON.stringify(map), map.version, pageCount, transitionCount],
+    [persistedMap.appId, persistedMap.appName, JSON.stringify(persistedMap), persistedMap.version, pageCount, transitionCount],
   );
-  console.log(`[app-mapping] Saved map for ${map.appId} to database`);
+  try {
+    await saveSeedMap(persistedMap);
+  } catch (err) {
+    console.warn(`[app-mapping] Could not mirror map to seeds/app-maps: ${(err as Error).message}`);
+  }
+  console.log(`[app-mapping] Saved map for ${map.appId} to database and seeds/app-maps`);
 }
 
 export async function loadMap(appId: string): Promise<AppMap | null> {
@@ -426,14 +440,16 @@ export async function loadMap(appId: string): Promise<AppMap | null> {
     "SELECT map_data FROM app_maps WHERE app_id = $1",
     [appId],
   );
-  if (rows.length === 0) return null;
-  try {
-    return typeof rows[0].map_data === "string"
-      ? JSON.parse(rows[0].map_data)
-      : (rows[0].map_data as AppMap);
-  } catch {
-    return null;
+  if (rows.length > 0) {
+    try {
+      return typeof rows[0].map_data === "string"
+        ? JSON.parse(rows[0].map_data)
+        : (rows[0].map_data as AppMap);
+    } catch {
+      return null;
+    }
   }
+  return loadSeedMap(appId);
 }
 
 export async function deleteMap(appId: string): Promise<boolean> {
@@ -470,4 +486,23 @@ function countTransitions(map: AppMap): number {
     }
   }
   return count;
+}
+
+function appMapSeedPath(appId: string): string {
+  const safeAppId = appId.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return path.join(APP_MAP_SEED_DIR, `${safeAppId}.json`);
+}
+
+async function saveSeedMap(map: AppMap): Promise<void> {
+  await fs.mkdir(APP_MAP_SEED_DIR, { recursive: true });
+  await fs.writeFile(appMapSeedPath(map.appId), `${JSON.stringify(map, null, 2)}\n`, "utf8");
+}
+
+async function loadSeedMap(appId: string): Promise<AppMap | null> {
+  try {
+    const raw = await fs.readFile(appMapSeedPath(appId), "utf8");
+    return JSON.parse(raw) as AppMap;
+  } catch {
+    return null;
+  }
 }
