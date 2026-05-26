@@ -24,6 +24,8 @@ Remaining live-device gap: this environment did not run a real device BFS discov
 - Execution uses the deterministic compiled workflow runner.
 - Workflow-run lifecycle events publish with persisted `workflowRunId`.
 - App-map persistence now mirrors DB maps to `seeds/app-maps/{appId}.json` and falls back to those seed files when DB has no map.
+- Seed fallback maps are imported into DB before `loadMap()` returns them; if DB import fails, `loadMap()` returns `null` so workflow-runs trigger discovery instead of compiling against seed-only state.
+- The workflow compiler now loads app-maps through the app-mapping service rather than a separate DB-only query path.
 - Legacy template dispatch endpoints now return `410 WORKFLOW_TEMPLATES_ARE_EXAMPLES_ONLY`; template listing endpoints mark templates as `exampleOnly`.
 - Stale tracked backup file `src/api/routes.ts.backup` was removed so old template execution routes are not present in the source tree.
 - `POST /api/agency/workflow-runs` remains unchanged and compatibility tests pass.
@@ -45,7 +47,7 @@ Result: PASS.
 Command:
 
 ```bash
-npm test -- workflow-run-routes workflow-run.service creative-workflow creative-workflow-routes agency-workflow-runs
+npm test -- recorder.service workflow-run.service workflow-run-routes agency-workflow-runs
 ```
 
 Result: PASS.
@@ -53,8 +55,8 @@ Result: PASS.
 Summary:
 
 ```text
-Test Files  5 passed (5)
-Tests       32 passed (32)
+Test Files  4 passed (4)
+Tests       22 passed (22)
 ```
 
 Coverage:
@@ -64,6 +66,8 @@ Coverage:
 - Existing app-map path.
 - Missing app-map discovery path.
 - Incomplete app-map failure before compile.
+- Seed fallback import into DB before returning a map.
+- Seed fallback import failure returns `null`.
 - Compile failure does not execute.
 - Non-persisted compiled workflow ID is rejected before execution.
 - Lifecycle events include persisted run IDs.
@@ -83,8 +87,8 @@ Result: PASS.
 Summary:
 
 ```text
-Test Files  24 passed (24)
-Tests       275 passed (275)
+Test Files  25 passed (25)
+Tests       278 passed (278)
 ```
 
 ### Diff Hygiene
@@ -104,4 +108,4 @@ Result: PASS.
 - Route never returns fake run/task IDs: PASS for unified workflow IDs; service rejects non-persisted compiled workflow IDs before execution.
 - Deterministic execution remains app-map based: PASS locally; execution goes through `runCompiledWorkflow`.
 - Legacy templates are examples only: PASS locally; direct template dispatch and edge template push/broadcast now return 410.
-- App-map persistence ambiguity: PARTIAL PASS; DB remains runtime source, with durable `seeds/app-maps/{appId}.json` mirror/fallback.
+- App-map persistence ambiguity: PASS locally; DB remains runtime source, seed files are durable mirrors/fallbacks, seed fallback is imported before use, and compiler uses the same app-mapping loader.

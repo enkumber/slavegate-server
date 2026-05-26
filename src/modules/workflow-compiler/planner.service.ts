@@ -3,7 +3,7 @@
  * Nivel 3: AI Planning — NL instruction → Compiled Workflow JSON.
  *
  * Flow:
- *   1. Load app map from DB (app_maps table)
+ *   1. Load app map via app-mapping service (DB first, seed import fallback)
  *   2. Check cache (same instruction + app map version = cache hit)
  *   3. Build LLM prompt via prompt-builder logic
  *   4. Call LLM via utils/llm.ts
@@ -14,6 +14,7 @@
 import crypto from "crypto";
 import { getDb } from "../../db/client";
 import { llmJson } from "../../utils/llm";
+import { loadMap } from "../app-mapping/recorder.service";
 import type { AppMap } from "../app-mapping/schema";
 import { buildCompilePrompt } from "./prompt-builder";
 import type {
@@ -161,27 +162,18 @@ export async function compileInstruction(req: CompileRequest): Promise<CompileRe
     return { ok: false, error: "Instruction is empty after trimming." };
   }
 
-  // 1. Load app map from DB
-  let appMapRow;
+  // 1. Load app map through the canonical app-mapping service. This keeps seed-only maps
+  // importable before compilation instead of treating them as complete but uncompileable.
+  let appMap: AppMap | null;
   try {
-    const result = await db.query(
-      `SELECT app_id, app_name, version, map_data, created_at, updated_at
-       FROM app_maps WHERE app_id = $1
-       ORDER BY updated_at DESC LIMIT 1`,
-      [appId]
-    );
-    if (result.rows.length === 0) {
+    appMap = await loadMap(appId);
+    if (!appMap) {
       return { ok: false, error: `App map not found for appId="${appId}". Run app-mapping first.` };
     }
-    appMapRow = result.rows[0];
   } catch (err) {
     console.error("[planner] Failed to load app map:", (err as Error).message);
-    return { ok: false, error: `DB error loading app map: ${(err as Error).message}` };
+    return { ok: false, error: `Error loading app map: ${(err as Error).message}` };
   }
-
-  const appMap: AppMap = typeof appMapRow.map_data === "string"
-    ? JSON.parse(appMapRow.map_data)
-    : appMapRow.map_data;
 
   // 2. Check cache (using SHA256 hash for efficient indexed lookup)
   const cacheKey = computeCacheKey(sanitizedInstruction, appId, appMap.version);
