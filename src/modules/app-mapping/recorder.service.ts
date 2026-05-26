@@ -449,7 +449,16 @@ export async function loadMap(appId: string): Promise<AppMap | null> {
       return null;
     }
   }
-  return loadSeedMap(appId);
+  const seedMap = await loadSeedMap(appId);
+  if (!seedMap) return null;
+
+  try {
+    await saveMap(seedMap);
+  } catch (err) {
+    console.warn(`[app-mapping] Could not import seeds/app-maps/${appId}.json to database: ${(err as Error).message}`);
+    return null;
+  }
+  return seedMap;
 }
 
 export async function deleteMap(appId: string): Promise<boolean> {
