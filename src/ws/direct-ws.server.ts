@@ -21,7 +21,8 @@
  */
 
 import { WebSocketServer, WebSocket } from "ws";
-import type { IncomingMessage, Server } from "http";
+import type { IncomingMessage } from "http";
+import type { Duplex } from "stream";
 import { getDb } from "../db/client";
 import { scalabilityConfig } from "../config/scalability.config";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
@@ -135,14 +136,27 @@ export class DirectWsServer {
 
   // ─── Lifecycle ──────────────────────────────────────────────────────────
 
-  attach(httpServer: Server): void {
-    this.wss = new WebSocketServer({ server: httpServer, path: "/ws-direct" });
+  attach(): void {
+    if (this.wss) return;
+
+    this.wss = new WebSocketServer({ noServer: true });
     this.wss.on("connection", (ws, req) => this._onConnection(ws, req));
     this.wss.on("error", (err) => console.error("[direct-ws] WSS error:", err.message));
 
     // Periodic PING + stale connection cleanup
     this.pingTimer = setInterval(() => this._pingAll(), PING_INTERVAL_MS);
-    console.log("[direct-ws] Attached to HTTP server on /ws-direct");
+    console.log("[direct-ws] Ready for HTTP upgrade routing on /ws-direct");
+  }
+
+  handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    if (!this.wss) {
+      socket.destroy();
+      return;
+    }
+
+    this.wss.handleUpgrade(req, socket, head, (ws) => {
+      this.wss?.emit("connection", ws, req);
+    });
   }
 
   async close(): Promise<void> {

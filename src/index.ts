@@ -180,9 +180,22 @@ async function bootstrap(): Promise<void> {
   // ─── HTTP server ──────────────────────────────────────────────────────────
   const httpServer = http.createServer(app);
 
-  // ─── Transport layer — DirectWs only ───────────────────────────────────────
-  directWsServer.attach(httpServer);
-  dashboardWorkflowWsServer.attach(httpServer);
+  // ─── Transport layer — route all WebSocket upgrades from one listener ─────
+  directWsServer.attach();
+  dashboardWorkflowWsServer.attach();
+  httpServer.on("upgrade", (req, socket, head) => {
+    const pathname = new URL(req.url ?? "", "http://localhost").pathname;
+    if (pathname === "/ws-direct") {
+      directWsServer.handleUpgrade(req, socket, head);
+      return;
+    }
+    if (pathname === "/ws-dashboard") {
+      dashboardWorkflowWsServer.handleUpgrade(req, socket, head);
+      return;
+    }
+    socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+    socket.destroy();
+  });
   console.log("[server] DirectWs transport attached on /ws-direct");
   console.log("[server] Dashboard workflow stream attached on /ws-dashboard");
 

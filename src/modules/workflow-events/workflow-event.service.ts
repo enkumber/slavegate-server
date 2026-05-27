@@ -1,5 +1,6 @@
 import crypto, { randomUUID } from "crypto";
-import type { IncomingMessage, Server } from "http";
+import type { IncomingMessage } from "http";
+import type { Duplex } from "stream";
 import { WebSocket, WebSocketServer } from "ws";
 import type { WorkflowEvent, WorkflowEventInput, WorkflowEventSubscriber } from "./workflow-event.types";
 
@@ -211,17 +212,27 @@ export function serializeWorkflowEventForSend(event: WorkflowEvent): string {
 export class DashboardWorkflowWsServer {
   private wss: WebSocketServer | null = null;
 
-  attach(httpServer: Server): void {
+  attach(): void {
     if (this.wss) return;
 
     this.wss = new WebSocketServer({
-      server: httpServer,
-      path: "/ws-dashboard",
+      noServer: true,
       handleProtocols: (protocols) => protocols.has("workflow-events") ? "workflow-events" : false,
     });
     this.wss.on("connection", (ws, req) => this.onConnection(ws, req));
     this.wss.on("error", (err) => console.error("[dashboard-ws] WSS error:", err.message));
-    console.log("[dashboard-ws] Attached to HTTP server on /ws-dashboard");
+    console.log("[dashboard-ws] Ready for HTTP upgrade routing on /ws-dashboard");
+  }
+
+  handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    if (!this.wss) {
+      socket.destroy();
+      return;
+    }
+
+    this.wss.handleUpgrade(req, socket, head, (ws) => {
+      this.wss?.emit("connection", ws, req);
+    });
   }
 
   async close(): Promise<void> {
