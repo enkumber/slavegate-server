@@ -39,6 +39,9 @@ const mocks = vi.hoisted(() => {
     hbeService: {
       initSession: vi.fn(),
     },
+    appMapping: {
+      loadMap: vi.fn(),
+    },
     metrics: {
       executionInc,
       executionLabels,
@@ -58,7 +61,7 @@ vi.mock("../../../transport/transport", () => ({
   sendJobToDevice: vi.fn(),
   isDeviceOnline: vi.fn(() => true),
 }));
-vi.mock("../../../modules/app-mapping/recorder.service", () => ({ loadMap: vi.fn() }));
+vi.mock("../../../modules/app-mapping/recorder.service", () => ({ loadMap: mocks.appMapping.loadMap }));
 vi.mock("../../../modules/workflows/workflow.service", () => ({
   workflowService: mocks.workflowService,
 }));
@@ -126,9 +129,89 @@ function redditHomeWorkflow(): WorkflowTemplate {
   };
 }
 
-function cacheRecord() {
+function redditAppMap(version = "map-v1") {
+  return {
+    appId: "com.reddit.frontpage",
+    appName: "Reddit",
+    version,
+    appVersion: "2026.20.0",
+    deviceProfile: { width: 1080, height: 2400 },
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+    pageCount: 1,
+    transitionCount: 0,
+    pages: {
+      page_0: {
+        name: "home",
+        discoveryOrder: 0,
+        detection: {
+          method: "ui_tree_signature",
+          anchors: ["home_screen_surface"],
+          signatureHash: "sig-home",
+        },
+        elements: {
+          main_top_app_bar_search: {
+            type: "button",
+            bounds: { x: 0.1, y: 0.02, w: 0.8, h: 0.06 },
+            resourceId: "main_top_app_bar_search",
+            text: "",
+            contentDescription: "Search",
+            clickable: true,
+            leadsTo: null,
+          },
+        },
+      },
+    },
+  };
+}
+
+function cacheRecord(overrides: { appMapBound?: boolean; mapVersion?: string } = {}) {
   const workflow = redditHomeWorkflow();
-  const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
+  if (overrides.appMapBound) {
+    workflow.steps = [
+      {
+        type: "action",
+        id: "tap_search",
+        action: "get_screen_state",
+        target: "app_map:main_top_app_bar_search",
+        params: {
+          bindingSource: "app_map_selector",
+          selectorId: "main_top_app_bar_search",
+          selectorName: "Search",
+          pageId: "page_0",
+          pageSignature: "sig-home",
+        },
+      },
+    ];
+  }
+  let compiledPlan = compileGeneratedWorkflowTemplate(workflow);
+  if (overrides.appMapBound) {
+    compiledPlan = {
+      ...compiledPlan,
+      metadata: {
+        ...compiledPlan.metadata,
+        appMap: {
+          appId: "com.reddit.frontpage",
+          mapVersion: overrides.mapVersion ?? "map-v1",
+          appVersion: "2026.20.0",
+          resolution: { width: 1080, height: 2400 },
+          qualityUsable: true,
+          qualityStats: {
+            pagesMissingSignatureHash: 0,
+            elementsMissingBounds: 0,
+            pageCount: 1,
+            elementCount: 1,
+            elementsInvalidBounds: 0,
+            elementsMissingSelector: 0,
+            elementsMissingSelectorMetadata: 0,
+            pagesMissingAnchors: 0,
+          },
+          qualityErrors: [],
+          qualityWarnings: [],
+        },
+      },
+    };
+  }
   return {
     cacheKey: compiledPlan.cacheKey,
     requestKey: "c02c59dfbe512562f8c65c97",
@@ -200,6 +283,7 @@ describe("generated workflow cache-only execution route", () => {
     ]);
     mocks.directWsServer.getAgentVersion.mockReturnValue("4.0.0");
     mocks.hbeService.initSession.mockReturnValue({});
+    mocks.appMapping.loadMap.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -314,6 +398,70 @@ describe("generated workflow cache-only execution route", () => {
     );
     expect(mocks.metrics.executionLabels).toHaveBeenCalledWith("reddit", "true", "request_key");
     expect(mocks.metrics.llmAvoidedLabels).toHaveBeenCalledWith("reddit", "cache_hit");
+  });
+
+  it("rejects stale app-map cache hits before dispatch", async () => {
+    const cached = cacheRecord({ appMapBound: true, mapVersion: "map-v1" });
+    mocks.workflowService.getGeneratedPlanCache.mockResolvedValue(cached);
+    mocks.appMapping.loadMap.mockResolvedValue(redditAppMap("map-v2"));
+
+    const response = await postGeneratedWorkflow({
+      cacheKey: cached.cacheKey,
+      appId: "com.reddit.frontpage",
+      deviceId: "11111111-1111-4111-8111-111111111111",
+    });
+
+    expect(response.status, JSON.stringify(response.json)).toBe(409);
+    expect(response.json).toMatchObject({
+      ok: false,
+      code: "GENERATED_WORKFLOW_CACHE_STALE",
+      data: {
+        cacheHit: true,
+        canExecuteFromCache: false,
+        cacheInvalidated: true,
+        invalidation: {
+          stale: true,
+          code: "APP_MAP_VERSION_CHANGED",
+        },
+      },
+    });
+    expect(mocks.workflowService.create).not.toHaveBeenCalled();
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
+  });
+
+  it("keeps valid app-map cache hits executable", async () => {
+    const cached = cacheRecord({ appMapBound: true, mapVersion: "map-v1" });
+    mocks.workflowService.getGeneratedPlanCache.mockResolvedValue(cached);
+    mocks.appMapping.loadMap.mockResolvedValue(redditAppMap("map-v1"));
+
+    const response = await postGeneratedWorkflow({
+      cacheKey: cached.cacheKey,
+      appId: "com.reddit.frontpage",
+      deviceId: "11111111-1111-4111-8111-111111111111",
+    });
+
+    expect(response.status, JSON.stringify(response.json)).toBe(202);
+    expect(response.json.data).toMatchObject({
+      cacheHit: true,
+      canExecuteFromCache: true,
+      compiledPlan: {
+        metadata: {
+          appMap: {
+            appId: "com.reddit.frontpage",
+            mapVersion: "map-v1",
+          },
+        },
+        steps: [
+          {
+            usedAppMap: true,
+            bindingSource: "app_map_selector",
+            selectorId: "main_top_app_bar_search",
+            pageId: "page_0",
+          },
+        ],
+      },
+    });
+    expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalled();
   });
 
   it("rejects workflow payloads in canonical cache execution mode", async () => {

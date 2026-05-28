@@ -5,6 +5,7 @@
 
 import { z } from "zod";
 import { createHash } from "crypto";
+import type { AppMap, AppMapQualityReport } from "../app-mapping/schema";
 import type { WorkflowOutputSchema, WorkflowStep, WorkflowTemplate } from "./types";
 import { ALL_SCREEN_IDS } from "../screen-detection/types";
 
@@ -560,6 +561,15 @@ export interface GeneratedWorkflowCompiledStep {
   action?: string;
   verification?: string;
   bindingSource?: GeneratedWorkflowBindingSource;
+  usedAppMap?: boolean;
+  selectorId?: string;
+  selectorName?: string;
+  pageId?: string;
+  pageSignature?: string;
+  coordinateSource?: string;
+  boundsSource?: string;
+  fallbackReason?: string;
+  provenance?: GeneratedWorkflowStepProvenance;
 }
 
 export type GeneratedWorkflowBindingSource =
@@ -568,6 +578,51 @@ export type GeneratedWorkflowBindingSource =
   | "ui_tree_selector"
   | "raw_coordinate"
   | "fallback";
+
+export interface GeneratedWorkflowStepProvenance {
+  usedAppMap: boolean;
+  bindingSource: GeneratedWorkflowBindingSource;
+  selector?: {
+    id?: string;
+    name?: string;
+    target?: string;
+  };
+  page?: {
+    id?: string;
+    signature?: string;
+  };
+  coordinate?: {
+    x?: number;
+    y?: number;
+    bounds?: unknown;
+    source?: string;
+    boundsSource?: string;
+  };
+  fallbackReason?: string;
+}
+
+export interface GeneratedWorkflowAppMapCacheMetadata {
+  appId: string;
+  mapVersion: string;
+  appVersion: string | null;
+  resolution: {
+    width: number | null;
+    height: number | null;
+  };
+  qualityUsable: boolean;
+  qualityStats: AppMapQualityReport["stats"];
+  qualityErrors: string[];
+  qualityWarnings: string[];
+}
+
+export interface GeneratedWorkflowCacheInvalidation {
+  stale: boolean;
+  code?: "APP_MAP_MISSING" | "APP_MAP_UNUSABLE" | "APP_MAP_VERSION_CHANGED" | "APP_VERSION_CHANGED" | "RESOLUTION_CHANGED";
+  reason?: string;
+  expected?: Record<string, unknown>;
+  actual?: Record<string, unknown>;
+  cachedAppMap?: GeneratedWorkflowAppMapCacheMetadata;
+}
 
 export interface GeneratedWorkflowCompiledPlan {
   planVersion: "generated-workflow-plan/v1";
@@ -580,6 +635,7 @@ export interface GeneratedWorkflowCompiledPlan {
     safetyClass: "read_only" | null;
     outputSchema: WorkflowOutputSchema | null;
     allowedRecoveryRequests: string[];
+    appMap?: GeneratedWorkflowAppMapCacheMetadata;
   };
   stepCount: number;
   actionCount: number;
@@ -723,7 +779,16 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
         actionCount++;
         compiledStep.action = step.action;
         compiledStep.verification = step.verification ?? template.defaultVerificationStrategy;
-        compiledStep.bindingSource = inferGeneratedWorkflowBindingSource(step);
+        compiledStep.provenance = getGeneratedWorkflowStepProvenance(step);
+        compiledStep.bindingSource = compiledStep.provenance.bindingSource;
+        compiledStep.usedAppMap = compiledStep.provenance.usedAppMap;
+        compiledStep.selectorId = compiledStep.provenance.selector?.id;
+        compiledStep.selectorName = compiledStep.provenance.selector?.name;
+        compiledStep.pageId = compiledStep.provenance.page?.id;
+        compiledStep.pageSignature = compiledStep.provenance.page?.signature;
+        compiledStep.coordinateSource = compiledStep.provenance.coordinate?.source;
+        compiledStep.boundsSource = compiledStep.provenance.coordinate?.boundsSource;
+        compiledStep.fallbackReason = compiledStep.provenance.fallbackReason;
       } else if (step.type === "checkpoint") {
         checkpointCount++;
       }
@@ -765,6 +830,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
       safetyClass: template.safetyClass ?? null,
       outputSchema: template.outputSchema ?? null,
       allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
+      appMap: undefined,
     },
     stepCount: steps.length,
     actionCount,
@@ -779,6 +845,76 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
 }
 
 export function inferGeneratedWorkflowBindingSource(step: WorkflowStep): GeneratedWorkflowBindingSource {
+  return getGeneratedWorkflowStepProvenance(step).bindingSource;
+}
+
+export function getGeneratedWorkflowStepProvenance(step: WorkflowStep): GeneratedWorkflowStepProvenance {
+  if (step.type !== "action") {
+    return {
+      usedAppMap: false,
+      bindingSource: "fallback",
+      fallbackReason: "non_action_step",
+    };
+  }
+
+  const bindingSource = step.params?.bindingSource;
+  const inferredBindingSource = inferGeneratedWorkflowBindingSourceFromShape(step);
+  const normalizedBindingSource =
+    bindingSource === "app_map_selector"
+    || bindingSource === "app_map_coordinate"
+    || bindingSource === "ui_tree_selector"
+    || bindingSource === "raw_coordinate"
+    || bindingSource === "fallback"
+      ? bindingSource
+      : inferredBindingSource;
+  const params = step.params ?? {};
+  const target = typeof step.target === "string" && step.target.length > 0 ? step.target : undefined;
+  const selectorId =
+    stringParam(params.selectorId)
+    ?? stringParam(params.elementId)
+    ?? stringParam(params.appMapElementId)
+    ?? parseSelectorIdFromTarget(target);
+  const selectorName =
+    stringParam(params.selectorName)
+    ?? stringParam(params.elementName)
+    ?? stringParam(params.accessibilityName)
+    ?? (target && !target.includes(":") ? target : undefined);
+  const coordinateSource =
+    stringParam(params.coordinateSource)
+    ?? (normalizedBindingSource === "app_map_coordinate" ? "app_map" : undefined)
+    ?? (normalizedBindingSource === "raw_coordinate" ? "raw" : undefined);
+  const boundsSource =
+    stringParam(params.boundsSource)
+    ?? (normalizedBindingSource === "app_map_coordinate" ? "app_map" : undefined);
+  const fallbackReason =
+    normalizedBindingSource === "fallback"
+      ? stringParam(params.fallbackReason) ?? inferFallbackReason(step)
+      : undefined;
+
+  return {
+    usedAppMap: normalizedBindingSource === "app_map_selector" || normalizedBindingSource === "app_map_coordinate",
+    bindingSource: normalizedBindingSource,
+    selector: selectorId || selectorName || target ? { id: selectorId, name: selectorName, target } : undefined,
+    page: stringParam(params.pageId) || stringParam(params.appMapPageId) || stringParam(params.pageSignature) || stringParam(params.signatureHash)
+      ? {
+          id: stringParam(params.pageId) ?? stringParam(params.appMapPageId),
+          signature: stringParam(params.pageSignature) ?? stringParam(params.signatureHash),
+        }
+      : undefined,
+    coordinate: Number.isFinite(step.x) || Number.isFinite(step.y) || params.bounds !== undefined || coordinateSource || boundsSource
+      ? {
+          x: Number.isFinite(step.x) ? step.x : undefined,
+          y: Number.isFinite(step.y) ? step.y : undefined,
+          bounds: params.bounds,
+          source: coordinateSource,
+          boundsSource,
+        }
+      : undefined,
+    fallbackReason,
+  };
+}
+
+function inferGeneratedWorkflowBindingSourceFromShape(step: WorkflowStep): GeneratedWorkflowBindingSource {
   if (step.type !== "action") return "fallback";
 
   const bindingSource = step.params?.bindingSource;
@@ -805,6 +941,129 @@ export function inferGeneratedWorkflowBindingSource(step: WorkflowStep): Generat
   }
 
   return "fallback";
+}
+
+function stringParam(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function parseSelectorIdFromTarget(target: string | undefined): string | undefined {
+  if (!target) return undefined;
+  const marker = target.includes(":") ? target.split(":").slice(1).join(":") : target;
+  return marker.trim().length > 0 ? marker : undefined;
+}
+
+function inferFallbackReason(step: WorkflowStep): string {
+  if (step.type !== "action") return "non_action_step";
+  if (!step.target && !Number.isFinite(step.x) && !Number.isFinite(step.y)) {
+    return "no_selector_or_coordinate";
+  }
+  return "explicit_fallback_binding";
+}
+
+export function generatedWorkflowPlanUsesAppMap(plan: GeneratedWorkflowCompiledPlan): boolean {
+  return Boolean(plan.metadata.appMap) || plan.steps.some((step) => step.usedAppMap || step.bindingSource === "app_map_selector" || step.bindingSource === "app_map_coordinate");
+}
+
+export function buildGeneratedWorkflowAppMapCacheMetadata(
+  appMap: AppMap,
+  quality: AppMapQualityReport
+): GeneratedWorkflowAppMapCacheMetadata {
+  return {
+    appId: appMap.appId,
+    mapVersion: appMap.version,
+    appVersion: appMap.appVersion ?? null,
+    resolution: {
+      width: appMap.deviceProfile?.width ?? null,
+      height: appMap.deviceProfile?.height ?? null,
+    },
+    qualityUsable: quality.usable,
+    qualityStats: quality.stats,
+    qualityErrors: quality.errors,
+    qualityWarnings: quality.warnings,
+  };
+}
+
+export function withGeneratedWorkflowAppMapCacheMetadata(
+  plan: GeneratedWorkflowCompiledPlan,
+  appMap: GeneratedWorkflowAppMapCacheMetadata | undefined
+): GeneratedWorkflowCompiledPlan {
+  if (!appMap) return plan;
+  return {
+    ...plan,
+    metadata: {
+      ...plan.metadata,
+      appMap,
+    },
+  };
+}
+
+export function assessGeneratedWorkflowCacheInvalidation(
+  plan: GeneratedWorkflowCompiledPlan,
+  currentAppMap: AppMap | null | undefined,
+  currentQuality: AppMapQualityReport | null | undefined
+): GeneratedWorkflowCacheInvalidation {
+  if (!generatedWorkflowPlanUsesAppMap(plan)) {
+    return { stale: false };
+  }
+  const cachedAppMap = plan.metadata.appMap;
+  if (!cachedAppMap) {
+    return {
+      stale: true,
+      code: "APP_MAP_MISSING",
+      reason: "cached workflow uses app-map bindings but does not include app-map cache metadata",
+    };
+  }
+  if (!currentAppMap || !currentQuality) {
+    return {
+      stale: true,
+      code: "APP_MAP_MISSING",
+      reason: `cached workflow expects app map ${cachedAppMap.appId}, but no current app map was available`,
+      cachedAppMap,
+    };
+  }
+  if (!currentQuality.usable) {
+    return {
+      stale: true,
+      code: "APP_MAP_UNUSABLE",
+      reason: `current app map ${currentAppMap.appId} is not usable`,
+      actual: { qualityErrors: currentQuality.errors, qualityWarnings: currentQuality.warnings, qualityStats: currentQuality.stats },
+      cachedAppMap,
+    };
+  }
+  if (currentAppMap.version !== cachedAppMap.mapVersion) {
+    return {
+      stale: true,
+      code: "APP_MAP_VERSION_CHANGED",
+      reason: `app map version changed from ${cachedAppMap.mapVersion} to ${currentAppMap.version}`,
+      expected: { mapVersion: cachedAppMap.mapVersion },
+      actual: { mapVersion: currentAppMap.version },
+      cachedAppMap,
+    };
+  }
+  if ((currentAppMap.appVersion ?? null) !== cachedAppMap.appVersion) {
+    return {
+      stale: true,
+      code: "APP_VERSION_CHANGED",
+      reason: `app version changed from ${cachedAppMap.appVersion ?? "unknown"} to ${currentAppMap.appVersion ?? "unknown"}`,
+      expected: { appVersion: cachedAppMap.appVersion },
+      actual: { appVersion: currentAppMap.appVersion ?? null },
+      cachedAppMap,
+    };
+  }
+  const currentWidth = currentAppMap.deviceProfile?.width ?? null;
+  const currentHeight = currentAppMap.deviceProfile?.height ?? null;
+  if (currentWidth !== cachedAppMap.resolution.width || currentHeight !== cachedAppMap.resolution.height) {
+    return {
+      stale: true,
+      code: "RESOLUTION_CHANGED",
+      reason: `app map resolution changed from ${cachedAppMap.resolution.width ?? "unknown"}x${cachedAppMap.resolution.height ?? "unknown"} to ${currentWidth ?? "unknown"}x${currentHeight ?? "unknown"}`,
+      expected: { resolution: cachedAppMap.resolution },
+      actual: { resolution: { width: currentWidth, height: currentHeight } },
+      cachedAppMap,
+    };
+  }
+  return { stale: false, cachedAppMap };
 }
 
 function stableStringify(value: unknown): string {

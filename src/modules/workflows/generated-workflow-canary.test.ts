@@ -103,9 +103,20 @@ describe("agent-generated workflow canary", () => {
   it("reports per-step binding sources for generated workflow gates", () => {
     const workflow = redditHomeSmokeWorkflow();
     workflow.steps = [
-      { type: "action", id: "tap_map_selector", action: "tap", target: "app_map:main_top_app_bar_search" },
+      {
+        type: "action",
+        id: "tap_map_selector",
+        action: "tap",
+        target: "app_map:main_top_app_bar_search",
+        params: {
+          selectorId: "main_top_app_bar_search",
+          selectorName: "Search",
+          pageId: "page_0",
+          pageSignature: "sig-home",
+        },
+      },
       { type: "action", id: "tap_ui_tree", action: "tap", target: "search_button" },
-      { type: "action", id: "tap_map_coordinate", action: "tap", x: 0.5, y: 0.1, params: { coordinateSource: "app_map" } },
+      { type: "action", id: "tap_map_coordinate", action: "tap", x: 0.5, y: 0.1, params: { coordinateSource: "app_map", boundsSource: "app_map", pageId: "page_0" } },
       { type: "action", id: "tap_raw_coordinate", action: "tap", x: 0.5, y: 0.9 },
     ];
 
@@ -117,6 +128,43 @@ describe("agent-generated workflow canary", () => {
       "app_map_coordinate",
       "raw_coordinate",
     ]);
+    expect(plan.steps[0]).toMatchObject({
+      usedAppMap: true,
+      selectorId: "main_top_app_bar_search",
+      selectorName: "Search",
+      pageId: "page_0",
+      pageSignature: "sig-home",
+      provenance: {
+        usedAppMap: true,
+        bindingSource: "app_map_selector",
+        selector: {
+          id: "main_top_app_bar_search",
+          name: "Search",
+          target: "app_map:main_top_app_bar_search",
+        },
+        page: {
+          id: "page_0",
+          signature: "sig-home",
+        },
+      },
+    });
+    expect(plan.steps[2]).toMatchObject({
+      usedAppMap: true,
+      coordinateSource: "app_map",
+      boundsSource: "app_map",
+      provenance: {
+        coordinate: {
+          x: 0.5,
+          y: 0.1,
+          source: "app_map",
+          boundsSource: "app_map",
+        },
+      },
+    });
+    expect(plan.steps[3]).toMatchObject({
+      usedAppMap: false,
+      bindingSource: "raw_coordinate",
+    });
   });
 
   it("is accepted by the dry-run route without dispatch hooks", async () => {

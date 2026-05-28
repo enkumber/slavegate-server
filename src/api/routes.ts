@@ -17,6 +17,7 @@ import { directWsServer } from "../ws/direct-ws.server";
 
 import { sendJobToDevice, isDeviceOnline } from "../transport/transport";
 import { loadMap } from "../modules/app-mapping/recorder.service";
+import { validateAppMapQuality, type AppMap, type AppMapQualityReport } from "../modules/app-mapping/schema";
 import { workflowService, type GeneratedWorkflowPlanCacheRecord } from "../modules/workflows/workflow.service";
 import {
   buildGeneratedWorkflowAppMapHints,
@@ -26,10 +27,15 @@ import {
 } from "../modules/workflows/generated-workflow-prompt";
 import {
   compileGeneratedWorkflowTemplate,
+  assessGeneratedWorkflowCacheInvalidation,
+  buildGeneratedWorkflowAppMapCacheMetadata,
   getGeneratedWorkflowContract,
+  generatedWorkflowPlanUsesAppMap,
   summarizeGeneratedWorkflowTemplate,
   validateGeneratedWorkflowTemplate,
+  withGeneratedWorkflowAppMapCacheMetadata,
   type GeneratedWorkflowCompiledPlan,
+  type GeneratedWorkflowCacheInvalidation,
 } from "../modules/workflows/workflow-validator";
 import {
   dispatchGeneratedWorkflowTemplate,
@@ -64,6 +70,70 @@ const router = Router();
 
 function generatedWorkflowCacheResult(cacheKey?: string, requestKey?: string): "cache_hit" | "canonical_hit" {
   return requestKey && !cacheKey ? "canonical_hit" : "cache_hit";
+}
+
+function inferGeneratedWorkflowAppId(template: WorkflowTemplate): string | null {
+  for (const step of template.steps) {
+    if (step.type === "action" && step.action === "open_app") {
+      const packageName = step.params?.packageName;
+      if (typeof packageName === "string" && packageName.trim().length > 0) return packageName;
+    }
+  }
+  return null;
+}
+
+async function loadGeneratedWorkflowCurrentAppMap(
+  appId: string | null | undefined
+): Promise<{ appMap: AppMap | null; quality: AppMapQualityReport | null }> {
+  if (!appId) return { appMap: null, quality: null };
+  const appMap = await loadMap(appId);
+  if (!appMap) return { appMap: null, quality: null };
+  return { appMap, quality: validateAppMapQuality(appMap) };
+}
+
+async function annotateGeneratedWorkflowCompiledPlanForCache(
+  template: WorkflowTemplate,
+  compiledPlan: GeneratedWorkflowCompiledPlan,
+  appId?: string | null
+): Promise<GeneratedWorkflowCompiledPlan> {
+  if (!generatedWorkflowPlanUsesAppMap(compiledPlan)) return compiledPlan;
+  const current = await loadGeneratedWorkflowCurrentAppMap(appId ?? inferGeneratedWorkflowAppId(template));
+  if (!current.appMap || !current.quality) return compiledPlan;
+  return withGeneratedWorkflowAppMapCacheMetadata(
+    compiledPlan,
+    buildGeneratedWorkflowAppMapCacheMetadata(current.appMap, current.quality)
+  );
+}
+
+async function assessGeneratedWorkflowCachedRecord(
+  cached: GeneratedWorkflowPlanCacheRecord,
+  appId?: string | null
+): Promise<GeneratedWorkflowCacheInvalidation> {
+  if (!generatedWorkflowPlanUsesAppMap(cached.compiledPlan)) return { stale: false };
+  const current = await loadGeneratedWorkflowCurrentAppMap(
+    appId
+      ?? cached.compiledPlan.metadata.appMap?.appId
+      ?? inferGeneratedWorkflowAppId(cached.workflow)
+  );
+  return assessGeneratedWorkflowCacheInvalidation(cached.compiledPlan, current.appMap, current.quality);
+}
+
+function generatedWorkflowStaleCachePayload(
+  invalidation: GeneratedWorkflowCacheInvalidation,
+  cacheKey?: string,
+  requestKey?: string
+): Record<string, unknown> {
+  return {
+    cacheHit: true,
+    cacheMiss: false,
+    canExecuteFromCache: false,
+    cacheExecutable: false,
+    cacheInvalidated: true,
+    invalidation,
+    cacheKey: cacheKey ?? null,
+    requestKey: requestKey ?? null,
+    nextAction: "generate_validate_and_cache_workflow",
+  };
 }
 
 // ─── Global request timeout (hard deadline) ────────────────────────────────────
@@ -489,6 +559,33 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
 
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
     if (cached) {
+      const invalidation = await assessGeneratedWorkflowCachedRecord(cached, appId ?? resolvedPackageName);
+      if (invalidation.stale) {
+        generatedWorkflowCacheLookups?.labels("prompt", "miss").inc();
+        return res.json({
+          ok: true,
+          data: {
+            ...generatedWorkflowStaleCachePayload(invalidation, cached.cacheKey, cached.requestKey ?? requestKey),
+            appMapLoaded: !!appMap,
+            mapUsable: appMapHintSet?.mapUsable ?? false,
+            appMapQuality: appMapHintSet
+              ? {
+                  reasons: appMapHintSet.reasons,
+                  warnings: appMapHintSet.warnings,
+                  stats: appMapHintSet.stats,
+                }
+              : null,
+            prompt: buildGeneratedWorkflowPrompt({
+              platform,
+              packageName: resolvedPackageName,
+              goal,
+              clientContext,
+              availableScreens: resolvedScreens,
+              appMapHints: resolvedAppMapHints,
+            }),
+          },
+        });
+      }
       generatedWorkflowCacheLookups?.labels("prompt", "canonical_hit").inc();
       return res.json({
         ok: true,
@@ -557,11 +654,12 @@ router.post("/workflows/generated/validate", requireAuth, async (req, res) => {
 });
 
 router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) => {
-  const { cacheKey, requestKey, workflow, persist } = req.body as {
+  const { cacheKey, requestKey, workflow, persist, appId } = req.body as {
     cacheKey?: string;
     requestKey?: string;
     workflow?: unknown;
     persist?: boolean;
+    appId?: string;
   };
 
   if (!cacheKey && !requestKey && !workflow) {
@@ -581,6 +679,14 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
         ? await workflowService.getGeneratedPlanCache(cacheKey)
         : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
       if (cached) {
+        const invalidation = await assessGeneratedWorkflowCachedRecord(cached, appId);
+        if (invalidation.stale) {
+          generatedWorkflowCacheLookups?.labels("resolve", "miss").inc();
+          return res.json({
+            ok: true,
+            data: generatedWorkflowStaleCachePayload(invalidation, cached.cacheKey, cached.requestKey ?? requestKey),
+          });
+        }
         generatedWorkflowCacheLookups?.labels("resolve", generatedWorkflowCacheResult(cacheKey, requestKey)).inc();
         return res.json({
           ok: true,
@@ -619,7 +725,8 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
     }
 
     const template = validation.template;
-    const compiledPlan = compileGeneratedWorkflowTemplate(template);
+    let compiledPlan = compileGeneratedWorkflowTemplate(template);
+    compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, appId);
     const shouldPersist = persist !== false;
     if (shouldPersist) {
       await workflowService.saveTemplate(template);
@@ -659,6 +766,15 @@ router.get("/workflows/generated/cache/:cacheKey", requireAuth, async (req, res)
   try {
     const cached = await workflowService.getGeneratedPlanCache(cacheKey);
     if (!cached) return res.status(404).json({ ok: false, error: "generated workflow plan cache miss" });
+    const invalidation = await assessGeneratedWorkflowCachedRecord(cached, typeof req.query.appId === "string" ? req.query.appId : undefined);
+    if (invalidation.stale) {
+      return res.status(409).json({
+        ok: false,
+        error: "generated workflow plan cache is stale for current app map",
+        code: "GENERATED_WORKFLOW_CACHE_STALE",
+        data: generatedWorkflowStaleCachePayload(invalidation, cached.cacheKey, cached.requestKey ?? undefined),
+      });
+    }
     res.json({ ok: true, data: cached });
   } catch (err) {
     const typed = err as Error & { status?: number; code?: string };
@@ -667,7 +783,7 @@ router.get("/workflows/generated/cache/:cacheKey", requireAuth, async (req, res)
 });
 
 router.post("/workflows/generated", requireAuth, async (req, res) => {
-  const { workflow, cacheKey, deviceId, accountId, clientId, campaignId, variables, dryRun, persist, requestKey } = req.body as {
+  const { workflow, cacheKey, deviceId, accountId, clientId, campaignId, variables, dryRun, persist, requestKey, appId } = req.body as {
     workflow?: unknown;
     cacheKey?: string;
     deviceId?: string;
@@ -678,6 +794,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
     dryRun?: boolean;
     persist?: boolean;
     requestKey?: string;
+    appId?: string;
   };
   if (!workflow && !cacheKey && !requestKey) {
     return res.status(400).json({ ok: false, error: "workflow, cacheKey or requestKey required" });
@@ -716,6 +833,16 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         });
       }
       if (cached) {
+        const invalidation = await assessGeneratedWorkflowCachedRecord(cached, appId);
+        if (invalidation.stale) {
+          generatedWorkflowCacheLookups?.labels("execute", "miss").inc();
+          return res.status(409).json({
+            ok: false,
+            error: "generated workflow plan cache is stale for current app map",
+            code: "GENERATED_WORKFLOW_CACHE_STALE",
+            data: generatedWorkflowStaleCachePayload(invalidation, cached.cacheKey, cached.requestKey ?? requestKey),
+          });
+        }
         resolvedCache = cached;
         cacheHit = true;
         generatedWorkflowCacheLookups?.labels("execute", generatedWorkflowCacheResult(cacheKey, requestKey)).inc();
@@ -740,6 +867,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
       }
       template = validation.template;
       compiledPlan = compileGeneratedWorkflowTemplate(template);
+      compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, appId);
     }
     const controlPlaneContext: GeneratedWorkflowControlPlaneContext = {
       source: "api",
@@ -797,6 +925,22 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         ...(variables ?? {}),
         generatedWorkflow: true,
         generatedWorkflowId: template.id,
+        generatedWorkflowCompiledPlan: compiledPlan,
+        generatedWorkflowRuntimeProvenance: compiledPlan.steps.map((step) => ({
+          path: step.path,
+          id: step.id,
+          action: step.action,
+          usedAppMap: step.usedAppMap ?? false,
+          bindingSource: step.bindingSource ?? "fallback",
+          selectorId: step.selectorId,
+          selectorName: step.selectorName,
+          pageId: step.pageId,
+          pageSignature: step.pageSignature,
+          coordinateSource: step.coordinateSource,
+          boundsSource: step.boundsSource,
+          fallbackReason: step.fallbackReason,
+          provenance: step.provenance,
+        })),
       },
       controlPlaneContext,
     });
