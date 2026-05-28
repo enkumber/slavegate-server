@@ -66,7 +66,16 @@ export function buildGeneratedWorkflowAppMapHints(appMap: AppMap, maxPages = 8, 
       const centerY = formatNumber(element.bounds.y + element.bounds.h / 2);
       const bounds = `${formatNumber(element.bounds.x)},${formatNumber(element.bounds.y)},${formatNumber(element.bounds.w)},${formatNumber(element.bounds.h)}`;
       const selector = element.resourceId || element.contentDescription || element.text || elementId;
-      hints.push(`  ${elementId}: ${element.type}; selector=${selector}; label=${label}; bounds=${bounds}; center=${centerX},${centerY}${target}`);
+      const provenance = element.selectorProvenance?.length
+        ? element.selectorProvenance.join(",")
+        : [
+            element.resourceId ? "resourceId" : "",
+            element.contentDescription ? "contentDescription" : "",
+            element.text ? "text" : "",
+            element.semanticId ? "semanticId" : "",
+            "elementId",
+          ].filter(Boolean).join(",");
+      hints.push(`  ${elementId}: ${element.type}; selector=${selector}; provenance=${provenance}; label=${label}; bounds=${bounds}; center=${centerX},${centerY}${target}`);
     }
   }
 

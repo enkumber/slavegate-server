@@ -136,8 +136,11 @@ export interface AppMapQualityStats {
   pageCount: number;
   elementCount: number;
   elementsInvalidBounds: number;
+  elementsMissingSelector: number;
+  /** @deprecated use elementsMissingSelector */
   elementsMissingSelectorMetadata: number;
   pagesMissingAnchors: number;
+  staleVersion?: boolean;
 }
 
 export interface AppMapQualityReport {
@@ -145,6 +148,14 @@ export interface AppMapQualityReport {
   errors: string[];
   warnings: string[];
   stats: AppMapQualityStats;
+}
+
+export interface AppMapQualityOptions {
+  expectedAppVersion?: string | null;
+  expectedResolution?: {
+    width?: number | null;
+    height?: number | null;
+  } | null;
 }
 
 function hasNormalizedBounds(element: Partial<ElementDef> | null | undefined): boolean {
@@ -166,21 +177,24 @@ function hasNormalizedBounds(element: Partial<ElementDef> | null | undefined): b
   );
 }
 
-function hasSelectorMetadata(element: Partial<ElementDef> | null | undefined): boolean {
+function hasSelectorMetadata(elementId: string, element: Partial<ElementDef> | null | undefined): boolean {
   return Boolean(
     element?.resourceId?.trim()
     || element?.text?.trim()
     || element?.contentDescription?.trim()
+    || element?.semanticId?.trim()
+    || elementId.trim()
   );
 }
 
-export function validateAppMapQuality(map: AppMap | null | undefined): AppMapQualityReport {
+export function validateAppMapQuality(map: AppMap | null | undefined, options: AppMapQualityOptions = {}): AppMapQualityReport {
   const stats: AppMapQualityStats = {
     pagesMissingSignatureHash: 0,
     elementsMissingBounds: 0,
     pageCount: 0,
     elementCount: 0,
     elementsInvalidBounds: 0,
+    elementsMissingSelector: 0,
     elementsMissingSelectorMetadata: 0,
     pagesMissingAnchors: 0,
   };
@@ -218,7 +232,8 @@ export function validateAppMapQuality(map: AppMap | null | undefined): AppMapQua
       } else if (!hasNormalizedBounds(element)) {
         stats.elementsInvalidBounds += 1;
       }
-      if (!hasSelectorMetadata(element)) {
+      if (!hasSelectorMetadata(elementId, element)) {
+        stats.elementsMissingSelector += 1;
         stats.elementsMissingSelectorMetadata += 1;
       }
       if (element?.leadsTo && element.leadsTo !== "self" && !map.pages[element.leadsTo]) {
@@ -236,8 +251,8 @@ export function validateAppMapQuality(map: AppMap | null | undefined): AppMapQua
   if (stats.elementsInvalidBounds > 0) {
     errors.push(`${stats.elementsInvalidBounds} element(s) have invalid normalized bounds`);
   }
-  if (stats.elementsMissingSelectorMetadata > 0) {
-    warnings.push(`${stats.elementsMissingSelectorMetadata} element(s) missing resourceId/text/contentDescription selector metadata`);
+  if (stats.elementsMissingSelector > 0) {
+    warnings.push(`${stats.elementsMissingSelector} element(s) missing stable selector metadata`);
   }
   if (stats.pagesMissingAnchors > 0) {
     warnings.push(`${stats.pagesMissingAnchors} page(s) missing detection anchors`);
@@ -247,6 +262,25 @@ export function validateAppMapQuality(map: AppMap | null | undefined): AppMapQua
   }
   if (!map.deviceProfile?.width || !map.deviceProfile?.height) {
     warnings.push("deviceProfile resolution metadata missing; bounds are normalized but recording profile is unknown");
+  }
+
+  const expectedAppVersion = options.expectedAppVersion?.trim();
+  if (expectedAppVersion && map.appVersion && map.appVersion !== expectedAppVersion) {
+    stats.staleVersion = true;
+    warnings.push(`appVersion mismatch: map=${map.appVersion}, expected=${expectedAppVersion}`);
+  }
+
+  const expectedWidth = options.expectedResolution?.width;
+  const expectedHeight = options.expectedResolution?.height;
+  if (
+    expectedWidth
+    && expectedHeight
+    && map.deviceProfile?.width
+    && map.deviceProfile?.height
+    && (map.deviceProfile.width !== expectedWidth || map.deviceProfile.height !== expectedHeight)
+  ) {
+    stats.staleVersion = true;
+    warnings.push(`resolution mismatch: map=${map.deviceProfile.width}x${map.deviceProfile.height}, expected=${expectedWidth}x${expectedHeight}`);
   }
 
   return {
