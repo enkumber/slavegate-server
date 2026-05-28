@@ -84,17 +84,17 @@ describe("validateAppMapQuality", () => {
     expect(report.stats.elementsMissingBounds).toBe(1);
   });
 
-  it("does not mark zero-element empty-signature pages as usable", () => {
+  it("marks maps with pages but zero elements unusable", () => {
     const report = validateAppMapQuality(makeMap({
       pageCount: 4,
       pages: {
         page_0: {
-          name: "empty",
+          name: "home",
           discoveryOrder: 0,
           detection: {
             method: "ui_tree_signature",
-            anchors: [],
-            signatureHash: "e3b0c44298fc1c14",
+            anchors: ["text:Home"],
+            signatureHash: "hash-home",
           },
           elements: {},
         },
@@ -102,21 +102,17 @@ describe("validateAppMapQuality", () => {
     }));
 
     expect(report.usable).toBe(false);
-    expect(report.errors).toContain("1 page(s) have empty-content signatureHash");
-    expect(report.errors).toContain("app map has no bindable elements");
-    expect(report.errors).toContain("all pages are missing required detection anchors");
+    expect(report.errors).toContain("app map has pages but no bindable elements");
     expect(report.stats).toMatchObject({
       elementCount: 0,
-      pagesMissingAnchors: 1,
-      pagesWithEmptyContentSignature: 1,
     });
   });
 
-  it("fails hard when selector or bounds coverage is zero", () => {
+  it("marks zero selector coverage unusable", () => {
     const report = validateAppMapQuality(makeMap({
       pages: {
         page_0: {
-          name: "bad elements",
+          name: "bad selectors",
           discoveryOrder: 0,
           detection: {
             method: "ui_tree_signature",
@@ -126,7 +122,7 @@ describe("validateAppMapQuality", () => {
           elements: {
             anonymous: {
               type: "button",
-              bounds: { x: 1.2, y: 0.1, w: 0.1, h: 0.1 },
+              bounds: { x: 0.1, y: 0.1, w: 0.1, h: 0.1 },
               resourceId: "",
               text: "",
               contentDescription: "",
@@ -139,7 +135,99 @@ describe("validateAppMapQuality", () => {
     }));
 
     expect(report.usable).toBe(false);
-    expect(report.errors).toContain("app map has zero bounds coverage");
     expect(report.errors).toContain("app map has zero selector coverage");
+    expect(report.stats.elementsMissingSelector).toBe(1);
+  });
+
+  it("marks zero bounds coverage unusable", () => {
+    const report = validateAppMapQuality(makeMap({
+      pages: {
+        page_0: {
+          name: "bad bounds",
+          discoveryOrder: 0,
+          detection: {
+            method: "ui_tree_signature",
+            anchors: ["text:Home"],
+            signatureHash: "hash-home",
+          },
+          elements: {
+            anonymous: {
+              type: "button",
+              bounds: { x: 1.2, y: 0.1, w: 0.1, h: 0.1 },
+              resourceId: "bad_bounds",
+              text: "",
+              contentDescription: "",
+              clickable: true,
+              leadsTo: null,
+            },
+          },
+        },
+      },
+    }));
+
+    expect(report.usable).toBe(false);
+    expect(report.errors).toContain("app map has zero bounds coverage");
+    expect(report.stats.elementsInvalidBounds).toBe(1);
+  });
+
+  it("marks empty-content signatures unusable", () => {
+    const report = validateAppMapQuality(makeMap({
+      pages: {
+        page_0: {
+          name: "empty",
+          discoveryOrder: 0,
+          detection: {
+            method: "ui_tree_signature",
+            anchors: [],
+            signatureHash: "e3b0c44298fc1c14",
+          },
+          elements: {
+            search: {
+              type: "button",
+              bounds: { x: 0.1, y: 0.02, w: 0.8, h: 0.06 },
+              resourceId: "search",
+              text: "",
+              contentDescription: "Search",
+              clickable: true,
+              leadsTo: null,
+            },
+          },
+        },
+      },
+    }));
+
+    expect(report.usable).toBe(false);
+    expect(report.errors).toContain("1 page(s) have empty-content signatureHash");
+    expect(report.stats.pagesWithEmptyContentSignature).toBe(1);
+  });
+
+  it("marks empty signature hashes unusable", () => {
+    const report = validateAppMapQuality(makeMap({
+      pages: {
+        page_0: {
+          name: "empty hash",
+          discoveryOrder: 0,
+          detection: {
+            method: "ui_tree_signature",
+            anchors: ["text:Home"],
+            signatureHash: "",
+          },
+          elements: {
+            search: {
+              type: "button",
+              bounds: { x: 0.1, y: 0.02, w: 0.8, h: 0.06 },
+              resourceId: "search",
+              text: "",
+              contentDescription: "Search",
+              clickable: true,
+              leadsTo: null,
+            },
+          },
+        },
+      },
+    }));
+
+    expect(report.usable).toBe(false);
+    expect(report.errors).toContain("1 page(s) missing detection.signatureHash");
   });
 });

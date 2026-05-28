@@ -75,7 +75,7 @@ export function filterRelevantElements(
   }
 
   walk(uiTree, "", 0);
-  return elements;
+  return elements.length > 0 ? elements : collectFallbackBindableElements(uiTree, screenWidth, screenHeight);
 }
 
 /**
@@ -114,6 +114,57 @@ function isRelevantElement(node: UiTreeNode, parentClassName: string, depth: num
   if (depth <= 3) return true;
 
   return !!hasContent;
+}
+
+function collectFallbackBindableElements(
+  uiTree: UiTreeNode[],
+  screenWidth: number,
+  screenHeight: number,
+): ElementDef[] {
+  const elements: ElementDef[] = [];
+  const seen = new Set<string>();
+
+  function walk(nodes: UiTreeNode[]) {
+    for (const node of nodes) {
+      if (elements.length >= 20) return;
+      const el = isFallbackBindableNode(node, screenWidth, screenHeight)
+        ? toElementDef(node, screenWidth, screenHeight)
+        : null;
+
+      if (el) {
+        const key = el.resourceId || el.contentDescription || el.text || `${el.bounds.x}:${el.bounds.y}:${el.bounds.w}:${el.bounds.h}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          elements.push(el);
+        }
+      }
+
+      if (node.children) walk(node.children);
+    }
+  }
+
+  walk(uiTree);
+  return elements;
+}
+
+function isFallbackBindableNode(node: UiTreeNode, screenWidth: number, screenHeight: number): boolean {
+  if (!node.bounds) return false;
+  if (node.visible === false || node.enabled === false) return false;
+  if (!node.resourceId?.trim() && !node.text?.trim() && !node.contentDescription?.trim()) return false;
+
+  const { left, top, right, bottom } = node.bounds;
+  const width = right - left;
+  const height = bottom - top;
+  if (width < 20 || height < 20) return false;
+  if (left < 0 || top < 0 || right <= left || bottom <= top) return false;
+
+  const coversScreen = screenWidth > 0
+    && screenHeight > 0
+    && width / screenWidth > 0.9
+    && height / screenHeight > 0.9;
+  if (coversScreen) return false;
+
+  return true;
 }
 
 /**

@@ -114,4 +114,42 @@ describe("reddit app-map refresh helpers", () => {
 
     expect(isUsableRedditUiTree(tree)).toBe(true);
   });
+
+  it("falls back to selector-rich bounded nodes when Reddit exposes no clickable elements", () => {
+    const tree = parseUiTreeResult({
+      output: {
+        screenWidth: 1080,
+        screenHeight: 2400,
+        uiTree: {
+          packageName: "com.reddit.frontpage",
+          className: "android.widget.FrameLayout",
+          bounds: { left: 0, top: 0, right: 1080, bottom: 2400 },
+          children: [
+            {
+              packageName: "com.reddit.frontpage",
+              className: "androidx.recyclerview.widget.RecyclerView",
+              bounds: { left: 0, top: 200, right: 1080, bottom: 2200 },
+              children: [
+                {
+                  packageName: "com.reddit.frontpage",
+                  text: "AskReddit",
+                  className: "android.view.View",
+                  clickable: false,
+                  bounds: { left: 40, top: 220, right: 500, bottom: 300 },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    const elements = filterRelevantElements(tree.nodes, tree.width, tree.height);
+
+    expect(elements).toHaveLength(1);
+    expect(elements[0]).toMatchObject({
+      text: "AskReddit",
+      bounds: { x: 0.037, y: 0.0917, w: 0.4259, h: 0.0333 },
+    });
+  });
 });

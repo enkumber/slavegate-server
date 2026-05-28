@@ -257,8 +257,8 @@ export function validateAppMapQuality(map: AppMap | null | undefined, options: A
   if (stats.pagesWithEmptyContentSignature > 0) {
     errors.push(`${stats.pagesWithEmptyContentSignature} page(s) have empty-content signatureHash`);
   }
-  if (stats.elementCount === 0) {
-    errors.push("app map has no bindable elements");
+  if (stats.pageCount > 0 && stats.elementCount === 0) {
+    errors.push("app map has pages but no bindable elements");
   }
   if (stats.elementsMissingBounds > 0) {
     errors.push(`${stats.elementsMissingBounds} element(s) missing normalized bounds`);
@@ -269,10 +269,10 @@ export function validateAppMapQuality(map: AppMap | null | undefined, options: A
   if (stats.elementsMissingSelector > 0) {
     warnings.push(`${stats.elementsMissingSelector} element(s) missing stable selector metadata`);
   }
-  if (stats.elementCount > 0 && stats.elementsMissingBounds + stats.elementsInvalidBounds >= stats.elementCount) {
+  if (stats.pageCount > 0 && stats.elementCount > 0 && stats.elementsMissingBounds + stats.elementsInvalidBounds >= stats.elementCount) {
     errors.push("app map has zero bounds coverage");
   }
-  if (stats.elementCount > 0 && stats.elementsMissingSelector >= stats.elementCount) {
+  if (stats.pageCount > 0 && stats.elementCount > 0 && stats.elementsMissingSelector >= stats.elementCount) {
     errors.push("app map has zero selector coverage");
   }
   if (stats.pagesMissingAnchors > 0) {
