@@ -96,6 +96,7 @@ export interface RecorderState {
 // ─── UI Tree Node (from device) ──────────────────────────────────────────────
 
 export interface UiTreeNode {
+  packageName?: string;
   resourceId?: string;
   text?: string;
   contentDescription?: string;
@@ -132,6 +133,7 @@ export interface ExplorationEntry {
 
 export interface AppMapQualityStats {
   pagesMissingSignatureHash: number;
+  pagesWithEmptyContentSignature: number;
   elementsMissingBounds: number;
   pageCount: number;
   elementCount: number;
@@ -183,13 +185,18 @@ function hasSelectorMetadata(elementId: string, element: Partial<ElementDef> | n
     || element?.text?.trim()
     || element?.contentDescription?.trim()
     || element?.semanticId?.trim()
-    || elementId.trim()
   );
+}
+
+function isEmptyContentSignature(signatureHash: string | null | undefined): boolean {
+  const hash = signatureHash?.trim().toLowerCase();
+  return Boolean(hash && "e3b0c44298fc1c149afbf4c8996fb924".startsWith(hash));
 }
 
 export function validateAppMapQuality(map: AppMap | null | undefined, options: AppMapQualityOptions = {}): AppMapQualityReport {
   const stats: AppMapQualityStats = {
     pagesMissingSignatureHash: 0,
+    pagesWithEmptyContentSignature: 0,
     elementsMissingBounds: 0,
     pageCount: 0,
     elementCount: 0,
@@ -219,6 +226,8 @@ export function validateAppMapQuality(map: AppMap | null | undefined, options: A
   for (const [pageId, page] of pages) {
     if (!page?.detection?.signatureHash?.trim()) {
       stats.pagesMissingSignatureHash += 1;
+    } else if (isEmptyContentSignature(page.detection.signatureHash)) {
+      stats.pagesWithEmptyContentSignature += 1;
     }
     if (!Array.isArray(page?.detection?.anchors) || page.detection.anchors.length === 0) {
       stats.pagesMissingAnchors += 1;
@@ -245,6 +254,12 @@ export function validateAppMapQuality(map: AppMap | null | undefined, options: A
   if (stats.pagesMissingSignatureHash > 0) {
     errors.push(`${stats.pagesMissingSignatureHash} page(s) missing detection.signatureHash`);
   }
+  if (stats.pagesWithEmptyContentSignature > 0) {
+    errors.push(`${stats.pagesWithEmptyContentSignature} page(s) have empty-content signatureHash`);
+  }
+  if (stats.elementCount === 0) {
+    errors.push("app map has no bindable elements");
+  }
   if (stats.elementsMissingBounds > 0) {
     errors.push(`${stats.elementsMissingBounds} element(s) missing normalized bounds`);
   }
@@ -254,8 +269,17 @@ export function validateAppMapQuality(map: AppMap | null | undefined, options: A
   if (stats.elementsMissingSelector > 0) {
     warnings.push(`${stats.elementsMissingSelector} element(s) missing stable selector metadata`);
   }
+  if (stats.elementCount > 0 && stats.elementsMissingBounds + stats.elementsInvalidBounds >= stats.elementCount) {
+    errors.push("app map has zero bounds coverage");
+  }
+  if (stats.elementCount > 0 && stats.elementsMissingSelector >= stats.elementCount) {
+    errors.push("app map has zero selector coverage");
+  }
   if (stats.pagesMissingAnchors > 0) {
     warnings.push(`${stats.pagesMissingAnchors} page(s) missing detection anchors`);
+  }
+  if (stats.pageCount > 0 && stats.pagesMissingAnchors >= stats.pageCount) {
+    errors.push("all pages are missing required detection anchors");
   }
   if (!map.appVersion) {
     warnings.push("appVersion metadata missing; cannot compare map against live app version");

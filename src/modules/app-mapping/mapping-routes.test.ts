@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseUiTreeResult } from "./mapping-routes";
+import { isUsableRedditUiTree, parseUiTreeResult } from "./mapping-routes";
 import { filterRelevantElements } from "./element-filter";
 import { buildPageDetection } from "./page-fingerprint";
 import { validateAppMapQuality, type AppMap } from "./schema";
@@ -68,5 +68,50 @@ describe("reddit app-map refresh helpers", () => {
         elementsInvalidBounds: 0,
       },
     });
+  });
+
+  it("rejects SystemUI one-node dumps before app-map generation", () => {
+    const tree = parseUiTreeResult({
+      output: {
+        screenWidth: 1080,
+        screenHeight: 2400,
+        uiTree: {
+          packageName: "com.android.systemui",
+          className: "android.widget.FrameLayout",
+          bounds: { left: 0, top: 0, right: 1080, bottom: 2400 },
+          children: [],
+        },
+      },
+    });
+
+    expect(tree.packageName).toBe("com.android.systemui");
+    expect(tree.nodeCount).toBe(1);
+    expect(isUsableRedditUiTree(tree)).toBe(false);
+  });
+
+  it("accepts Reddit dumps with anchors and non-empty signatures", () => {
+    const tree = parseUiTreeResult({
+      output: {
+        screenWidth: 1080,
+        screenHeight: 2400,
+        uiTree: {
+          packageName: "com.reddit.frontpage",
+          className: "android.widget.FrameLayout",
+          bounds: { left: 0, top: 0, right: 1080, bottom: 2400 },
+          children: [
+            {
+              packageName: "com.reddit.frontpage",
+              resourceId: "com.reddit.frontpage:id/search",
+              contentDescription: "Search Reddit",
+              className: "android.widget.Button",
+              clickable: true,
+              bounds: { left: 80, top: 40, right: 1000, bottom: 160 },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(isUsableRedditUiTree(tree)).toBe(true);
   });
 });

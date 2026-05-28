@@ -87,6 +87,7 @@ export function normalizeUiNode(node: any): UiTreeNode {
   const bounds = normalizeBounds(node?.bounds);
 
   return {
+    packageName: node?.packageName ?? node?.package_name ?? node?.package ?? "",
     resourceId: node?.resourceId ?? node?.resource_id ?? node?.id ?? "",
     text: node?.text ?? "",
     contentDescription: node?.contentDescription ?? node?.content_description ?? node?.desc ?? "",
@@ -111,7 +112,42 @@ function extractUiTreeRoots(parsed: any): any[] {
   return [];
 }
 
-export function parseUiTreeResult(result: any): { nodes: UiTreeNode[]; width: number; height: number; appVersion?: string } {
+function countUiNodes(nodes: UiTreeNode[]): number {
+  let count = 0;
+  function scan(node: UiTreeNode): void {
+    count += 1;
+    for (const child of node.children ?? []) scan(child);
+  }
+  for (const node of nodes) scan(node);
+  return count;
+}
+
+function findPackageName(nodes: UiTreeNode[]): string | undefined {
+  for (const node of nodes) {
+    if (node.packageName?.trim()) return node.packageName;
+    const childPackage = findPackageName(node.children ?? []);
+    if (childPackage) return childPackage;
+  }
+  return undefined;
+}
+
+function foregroundPackageFromResult(result: any): string | undefined {
+  return result?.output?.packageName
+    ?? result?.output?.package
+    ?? result?.output?.currentPackage
+    ?? result?.output?.currentPackageName
+    ?? result?.packageName
+    ?? result?.package;
+}
+
+export function parseUiTreeResult(result: any): {
+  nodes: UiTreeNode[];
+  width: number;
+  height: number;
+  appVersion?: string;
+  packageName?: string;
+  nodeCount: number;
+} {
   const output = result?.output;
   if (!output) throw new Error("ui_tree_dump returned no output");
   const parsed = typeof output.uiTree === "string"
@@ -119,6 +155,13 @@ export function parseUiTreeResult(result: any): { nodes: UiTreeNode[]; width: nu
     : output.uiTree ?? output.nodes ?? output.tree ?? output;
   const roots = extractUiTreeRoots(parsed);
   const nodes = roots.filter(Boolean).map(normalizeUiNode);
+  const packageName = output.packageName
+    ?? output.package
+    ?? output.currentPackage
+    ?? output.currentPackageName
+    ?? parsed?.packageName
+    ?? parsed?.package
+    ?? findPackageName(nodes);
   let width = Number(output.screenWidth ?? output.width ?? output.original_width ?? 0);
   let height = Number(output.screenHeight ?? output.height ?? output.original_height ?? 0);
   const appVersion = output.appVersion ?? output.versionName ?? output.packageVersion;
@@ -136,7 +179,7 @@ export function parseUiTreeResult(result: any): { nodes: UiTreeNode[]; width: nu
     width = 1080;
     height = 2400;
   }
-  return { nodes, width, height, appVersion };
+  return { nodes, width, height, appVersion, packageName, nodeCount: countUiNodes(nodes) };
 }
 
 function buildCapturedPage(
@@ -167,6 +210,16 @@ function buildCapturedPage(
     elements: elementsWithIds,
     discoveryOrder,
   };
+}
+
+export function isUsableRedditUiTree(tree: { nodes: UiTreeNode[]; packageName?: string; nodeCount?: number }): boolean {
+  const observedPackage = tree.packageName ?? findPackageName(tree.nodes);
+  if (observedPackage && observedPackage !== REDDIT_APP_ID) return false;
+  if ((tree.nodeCount ?? countUiNodes(tree.nodes)) <= 1) return false;
+  const detection = buildPageDetection(tree.nodes);
+  if (detection.signatureHash.startsWith("e3b0c44298fc1c14")) return false;
+  if (detection.anchors.length === 0) return false;
+  return true;
 }
 
 function summarizeRefresh(map: AppMap, failures: string[], screenshotPaths: string[]) {
@@ -227,29 +280,53 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
     const captures: Array<{ id: string; name: string; nodes: UiTreeNode[]; width: number; height: number }> = [];
     let observedAppVersion: string | undefined;
 
-    async function settle(): Promise<void> {
+    async function settle(delayMs = 750): Promise<void> {
       await dispatchAndAwaitRefresh(deviceId, "wait_for_idle", { timeoutMs: 2500 }, 5000).catch(() => undefined);
-      await new Promise((resolve) => setTimeout(resolve, 750));
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
-    async function capture(id: string, name: string): Promise<void> {
-      const tree = parseUiTreeResult(await dispatchAndAwaitRefresh(deviceId, "ui_tree_dump", { packageName: REDDIT_APP_ID }, 12000));
-      observedAppVersion ??= tree.appVersion;
-      captures.push({ id, name, ...tree });
-      if (body.captureScreenshots) {
-        const shot = await dispatchAndAwaitRefresh(deviceId, "screenshot_for_vlm", { quality: 80 }, 20000);
-        const imageBase64 = shot?.output?.image_base64 ?? shot?.output?.screenshotBase64;
-        if (imageBase64) {
-          await fs.mkdir(REDDIT_REFRESH_ARTIFACT_DIR, { recursive: true });
-          const imagePath = path.join(REDDIT_REFRESH_ARTIFACT_DIR, `${startedAt.toISOString().replace(/[:.]/g, "-")}-${id}.jpg`);
-          await fs.writeFile(imagePath, Buffer.from(imageBase64, "base64"));
-          screenshotPaths.push(imagePath);
-        }
+    async function ensureRedditForeground(context: string): Promise<void> {
+      const foreground = await dispatchAndAwaitRefresh(deviceId, "get_foreground_app", {}, 10000).catch(() => null);
+      const observedPackage = foregroundPackageFromResult(foreground);
+      if (observedPackage && observedPackage !== REDDIT_APP_ID) {
+        failures.push(`${context}: foreground was ${observedPackage}; reopening Reddit`);
+        await dispatchAndAwaitRefresh(deviceId, "open_app", { packageName: REDDIT_APP_ID }, 25000);
+        await settle(1500);
       }
     }
 
+    async function capture(id: string, name: string): Promise<void> {
+      let lastReject = "";
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        await ensureRedditForeground(`${id} attempt ${attempt}`);
+        const tree = parseUiTreeResult(await dispatchAndAwaitRefresh(deviceId, "ui_tree_dump", { packageName: REDDIT_APP_ID }, 12000));
+        if (isUsableRedditUiTree(tree)) {
+          observedAppVersion ??= tree.appVersion;
+          captures.push({ id, name, ...tree });
+          if (body.captureScreenshots) {
+            const shot = await dispatchAndAwaitRefresh(deviceId, "screenshot_for_vlm", { quality: 80 }, 20000);
+            const imageBase64 = shot?.output?.image_base64 ?? shot?.output?.screenshotBase64;
+            if (imageBase64) {
+              await fs.mkdir(REDDIT_REFRESH_ARTIFACT_DIR, { recursive: true });
+              const imagePath = path.join(REDDIT_REFRESH_ARTIFACT_DIR, `${startedAt.toISOString().replace(/[:.]/g, "-")}-${id}.jpg`);
+              await fs.writeFile(imagePath, Buffer.from(imageBase64, "base64"));
+              screenshotPaths.push(imagePath);
+            }
+          }
+          return;
+        }
+
+        lastReject = `package=${tree.packageName ?? "unknown"} nodeCount=${tree.nodeCount}`;
+        failures.push(`${id} attempt ${attempt}: rejected non-Reddit/empty UI tree (${lastReject})`);
+        await dispatchAndAwaitRefresh(deviceId, "open_app", { packageName: REDDIT_APP_ID }, 25000);
+        await settle(1500);
+      }
+
+      throw new Error(`${id}: unable to capture usable Reddit UI tree after retries (${lastReject || "no tree"})`);
+    }
+
     await dispatchAndAwaitRefresh(deviceId, "open_app", { packageName: REDDIT_APP_ID }, 25000);
-    await settle();
+    await settle(1500);
     const foreground = await dispatchAndAwaitRefresh(deviceId, "get_foreground_app", {}, 10000).catch(() => null);
     observedAppVersion =
       foreground?.output?.appVersion
@@ -322,8 +399,6 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
     };
 
     const quality = validateAppMapQuality(map);
-    await saveMap(map);
-
     const summary = summarizeRefresh(map, failures, screenshotPaths);
     const summaryPath = path.join(
       REDDIT_REFRESH_ARTIFACT_DIR,
@@ -331,6 +406,17 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
     );
     await fs.mkdir(REDDIT_REFRESH_ARTIFACT_DIR, { recursive: true });
     await fs.writeFile(summaryPath, `${JSON.stringify({ summary, quality }, null, 2)}\n`, "utf8");
+
+    if (!quality.usable) {
+      return res.status(422).json({
+        ok: false,
+        error: "Reddit app-map refresh produced an unusable map; refusing to save",
+        quality,
+        summary: { ...summary, summaryPath },
+      });
+    }
+
+    await saveMap(map);
 
     res.json({
       ok: quality.usable,

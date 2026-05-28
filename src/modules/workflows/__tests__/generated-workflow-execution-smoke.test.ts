@@ -198,6 +198,7 @@ function cacheRecord(overrides: { appMapBound?: boolean; mapVersion?: string } =
           qualityUsable: true,
           qualityStats: {
             pagesMissingSignatureHash: 0,
+            pagesWithEmptyContentSignature: 0,
             elementsMissingBounds: 0,
             pageCount: 1,
             elementCount: 1,
