@@ -1,10 +1,57 @@
-import { describe, expect, it } from "vitest";
+import express from "express";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isUsableRedditUiTree, parseUiTreeResult } from "./mapping-routes";
 import { filterRelevantElements } from "./element-filter";
 import { buildPageDetection } from "./page-fingerprint";
 import { validateAppMapQuality, type AppMap } from "./schema";
 
+const mocks = vi.hoisted(() => ({
+  saveMap: vi.fn(),
+}));
+
+vi.mock("./recorder.service", () => ({
+  startRecording: vi.fn(),
+  stopRecording: vi.fn(),
+  getRecorderState: vi.fn(() => ({ status: "idle" })),
+  loadMap: vi.fn(),
+  deleteMap: vi.fn(),
+  listMaps: vi.fn(() => []),
+  saveMap: mocks.saveMap,
+}));
+
+async function app() {
+  const app = express();
+  app.use(express.json());
+  const { default: router } = await import("./mapping-routes");
+  app.use("/mapping", router);
+  return app;
+}
+
+async function postJson(server: express.Express, path: string, body: Record<string, unknown>) {
+  return new Promise<{ status: number; body: any }>((resolve, reject) => {
+    const listener = server.listen(0, async () => {
+      try {
+        const address = listener.address();
+        if (!address || typeof address === "string") throw new Error("no address");
+        const res = await fetch(`http://127.0.0.1:${address.port}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const json = await res.json();
+        listener.close(() => resolve({ status: res.status, body: json }));
+      } catch (err) {
+        listener.close(() => reject(err));
+      }
+    });
+  });
+}
+
 describe("reddit app-map refresh helpers", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("normalizes x/y/width/height UI-tree bounds into usable app-map bounds", () => {
     const tree = parseUiTreeResult({
       output: {
@@ -239,5 +286,37 @@ describe("reddit app-map refresh helpers", () => {
       semanticId: "",
       selectorProvenance: [],
     });
+  });
+
+  it("rejects unusable Reddit upload maps before saving", async () => {
+    const server = await app();
+    const response = await postJson(server, "/mapping/upload", {
+      appId: "com.reddit.frontpage",
+      appName: "Reddit",
+      version: "generated-test",
+      pages: {
+        reddit_home_feed: {
+          name: "Reddit home/feed",
+          discoveryOrder: 0,
+          detection: {
+            method: "ui_tree_signature",
+            anchors: ["resourceId:feed"],
+            signatureHash: "hash-feed",
+          },
+          elements: {},
+        },
+      },
+    });
+
+    expect(response.status).toBe(422);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: "Uploaded app map is unusable; refusing to save",
+      quality: {
+        usable: false,
+        errors: ["app map has pages but no bindable elements"],
+      },
+    });
+    expect(mocks.saveMap).not.toHaveBeenCalled();
   });
 });

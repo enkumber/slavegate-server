@@ -598,6 +598,14 @@ router.post("/upload", async (req: Request, res: Response) => {
     };
 
     const quality = validateAppMapQuality(fullMap as any);
+    if (!quality.usable) {
+      return res.status(422).json({
+        ok: false,
+        error: "Uploaded app map is unusable; refusing to save",
+        quality,
+      });
+    }
+
     await saveMap(fullMap as any);
     console.log(`[mapping-routes] Uploaded map for ${map.appId}: ${fullMap.pageCount} pages, ${fullMap.transitionCount} transitions`);
 
