@@ -52,10 +52,12 @@ describe("buildGeneratedWorkflowPrompt", () => {
   });
 
   it("summarizes app maps into compact prompt hints", () => {
-    const hints = buildGeneratedWorkflowAppMapHints({
+    const hintSet = buildGeneratedWorkflowAppMapHints({
       appId: "com.reddit.frontpage",
       appName: "Reddit",
       version: "3.0.0",
+      appVersion: "2026.20.0",
+      deviceProfile: { width: 1080, height: 2400 },
       createdAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-01T00:00:00Z",
       pageCount: 1,
@@ -83,15 +85,19 @@ describe("buildGeneratedWorkflowPrompt", () => {
         },
       },
     });
+    const hints = hintSet.hints;
 
+    expect(hintSet.mapUsable).toBe(true);
     expect(hints[0]).toContain("Reddit (com.reddit.frontpage)");
     expect(hints).toContain("page_0: home; signature=abc123; anchors=home_screen_surface, feed_lazy_column");
     expect(hints.join("\n")).toContain("main_top_app_bar_search");
+    expect(hints.join("\n")).toContain("selector=main_top_app_bar_search");
+    expect(hints.join("\n")).toContain("bounds=0.1,0.02,0.8,0.06");
     expect(hints.join("\n")).toContain("-> page_1");
   });
 
-  it("summarizes legacy app-map elements without bounds", () => {
-    const hints = buildGeneratedWorkflowAppMapHints({
+  it("marks legacy app-map elements without bounds unusable", () => {
+    const hintSet = buildGeneratedWorkflowAppMapHints({
       appId: "com.reddit.frontpage",
       appName: "Reddit",
       version: "3.0.0",
@@ -122,8 +128,10 @@ describe("buildGeneratedWorkflowPrompt", () => {
       },
     });
 
-    expect(hints.join("\n")).toContain("legacy_search: button; label=Search");
-    expect(hints.join("\n")).not.toContain("center=NaN");
+    expect(hintSet.mapUsable).toBe(false);
+    expect(hintSet.reasons).toContain("1 element(s) missing normalized bounds");
+    expect(hintSet.hints.join("\n")).toContain("mapUsable=false");
+    expect(hintSet.hints.join("\n")).not.toContain("legacy_search: button; label=Search");
   });
 
   it("resolves platform screens when the caller does not provide a screen list", () => {

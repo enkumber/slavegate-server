@@ -279,6 +279,14 @@ export async function startRecording(deviceId: string, appId: string, appName?: 
 
     // 2. Initial UI tree dump
     const initialTree = await getUiTree(deviceId);
+    if (currentMap) {
+      currentMap.recordedOn = deviceId;
+      currentMap.deviceProfile = {
+        width: initialTree.screenWidth,
+        height: initialTree.screenHeight,
+      };
+      currentMap.version = `recorded-${new Date().toISOString()}`;
+    }
     findOrCreatePage(initialTree.nodes, initialTree.screenWidth, initialTree.screenHeight);
 
     // 3. BFS exploration

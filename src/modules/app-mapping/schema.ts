@@ -9,6 +9,15 @@ export interface AppMap {
   appId: string;
   appName: string;
   version: string;
+  /** App version observed when this map was recorded, if known. */
+  appVersion?: string;
+  /** Device profile observed when this map was recorded. Bounds remain normalized. */
+  deviceProfile?: {
+    model?: string;
+    width?: number;
+    height?: number;
+    density?: number;
+  };
   pages: Record<string, PageDef>;
   /** When this map was created */
   createdAt: string;
@@ -52,6 +61,10 @@ export interface ElementDef {
   text: string;
   /** Content description (accessibility) */
   contentDescription: string;
+  /** Selector fields present on the source UI node, for compiler/binding provenance. */
+  selectorProvenance?: Array<"resourceId" | "text" | "contentDescription" | "semanticId">;
+  /** Stable semantic-ish ID derived from selector metadata and page context. */
+  semanticId?: string;
   /** Whether the element is clickable */
   clickable: boolean;
   /** Target page ID after tapping this element, or "self" if stays on same page, or null if unknown */
@@ -113,4 +126,133 @@ export interface ExplorationEntry {
   elementId: string;
   /** The element to tap */
   element: ElementDef;
+}
+
+// ─── Quality Gate ───────────────────────────────────────────────────────────
+
+export interface AppMapQualityStats {
+  pagesMissingSignatureHash: number;
+  elementsMissingBounds: number;
+  pageCount: number;
+  elementCount: number;
+  elementsInvalidBounds: number;
+  elementsMissingSelectorMetadata: number;
+  pagesMissingAnchors: number;
+}
+
+export interface AppMapQualityReport {
+  usable: boolean;
+  errors: string[];
+  warnings: string[];
+  stats: AppMapQualityStats;
+}
+
+function hasNormalizedBounds(element: Partial<ElementDef> | null | undefined): boolean {
+  const b = element?.bounds;
+  if (!b) return false;
+  return (
+    Number.isFinite(b.x)
+    && Number.isFinite(b.y)
+    && Number.isFinite(b.w)
+    && Number.isFinite(b.h)
+    && b.x >= 0
+    && b.y >= 0
+    && b.w > 0
+    && b.h > 0
+    && b.x <= 1
+    && b.y <= 1
+    && b.x + b.w <= 1.02
+    && b.y + b.h <= 1.02
+  );
+}
+
+function hasSelectorMetadata(element: Partial<ElementDef> | null | undefined): boolean {
+  return Boolean(
+    element?.resourceId?.trim()
+    || element?.text?.trim()
+    || element?.contentDescription?.trim()
+  );
+}
+
+export function validateAppMapQuality(map: AppMap | null | undefined): AppMapQualityReport {
+  const stats: AppMapQualityStats = {
+    pagesMissingSignatureHash: 0,
+    elementsMissingBounds: 0,
+    pageCount: 0,
+    elementCount: 0,
+    elementsInvalidBounds: 0,
+    elementsMissingSelectorMetadata: 0,
+    pagesMissingAnchors: 0,
+  };
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!map || !map.appId || !map.version || !map.pages || typeof map.pages !== "object") {
+    return {
+      usable: false,
+      errors: ["app map is missing required root metadata"],
+      warnings,
+      stats,
+    };
+  }
+
+  const pages = Object.entries(map.pages);
+  stats.pageCount = pages.length;
+  if (pages.length === 0) {
+    errors.push("app map has no pages");
+  }
+
+  for (const [pageId, page] of pages) {
+    if (!page?.detection?.signatureHash?.trim()) {
+      stats.pagesMissingSignatureHash += 1;
+    }
+    if (!Array.isArray(page?.detection?.anchors) || page.detection.anchors.length === 0) {
+      stats.pagesMissingAnchors += 1;
+    }
+
+    const elements = Object.entries(page?.elements ?? {});
+    for (const [elementId, element] of elements) {
+      stats.elementCount += 1;
+      if (!element?.bounds) {
+        stats.elementsMissingBounds += 1;
+      } else if (!hasNormalizedBounds(element)) {
+        stats.elementsInvalidBounds += 1;
+      }
+      if (!hasSelectorMetadata(element)) {
+        stats.elementsMissingSelectorMetadata += 1;
+      }
+      if (element?.leadsTo && element.leadsTo !== "self" && !map.pages[element.leadsTo]) {
+        warnings.push(`${pageId}.${elementId} leadsTo missing page "${element.leadsTo}"`);
+      }
+    }
+  }
+
+  if (stats.pagesMissingSignatureHash > 0) {
+    errors.push(`${stats.pagesMissingSignatureHash} page(s) missing detection.signatureHash`);
+  }
+  if (stats.elementsMissingBounds > 0) {
+    errors.push(`${stats.elementsMissingBounds} element(s) missing normalized bounds`);
+  }
+  if (stats.elementsInvalidBounds > 0) {
+    errors.push(`${stats.elementsInvalidBounds} element(s) have invalid normalized bounds`);
+  }
+  if (stats.elementsMissingSelectorMetadata > 0) {
+    warnings.push(`${stats.elementsMissingSelectorMetadata} element(s) missing resourceId/text/contentDescription selector metadata`);
+  }
+  if (stats.pagesMissingAnchors > 0) {
+    warnings.push(`${stats.pagesMissingAnchors} page(s) missing detection anchors`);
+  }
+  if (!map.appVersion) {
+    warnings.push("appVersion metadata missing; cannot compare map against live app version");
+  }
+  if (!map.deviceProfile?.width || !map.deviceProfile?.height) {
+    warnings.push("deviceProfile resolution metadata missing; bounds are normalized but recording profile is unknown");
+  }
+
+  return {
+    usable: errors.length === 0,
+    errors,
+    warnings,
+    stats,
+  };
 }

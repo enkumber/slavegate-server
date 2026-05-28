@@ -1,6 +1,6 @@
 import { getDb } from "../../db/client";
 import { loadMap, startRecording } from "../app-mapping/recorder.service";
-import type { AppMap } from "../app-mapping/schema";
+import { validateAppMapQuality, type AppMap } from "../app-mapping/schema";
 import { compileInstruction } from "../workflow-compiler/planner.service";
 import { attemptRecovery, resetRecoveryCounts } from "../workflow-compiler/recovery.service";
 import { runCompiledWorkflow } from "../workflow-compiler/runner.service";
@@ -36,20 +36,7 @@ function validateInput(input: CreateWorkflowRunRequest): { ok: true; instruction
 }
 
 export function isAppMapCompleteEnough(map: AppMap | null): map is AppMap {
-  if (!map || !map.appId || !map.version || !map.pages || typeof map.pages !== "object") return false;
-  const pages = Object.values(map.pages);
-  if (pages.length === 0) return false;
-  return pages.every((page) => {
-    if (!page?.detection?.signatureHash) return false;
-    if (!page.elements || typeof page.elements !== "object") return false;
-    return Object.values(page.elements).every((element) =>
-      element?.bounds
-      && Number.isFinite(element.bounds.x)
-      && Number.isFinite(element.bounds.y)
-      && Number.isFinite(element.bounds.w)
-      && Number.isFinite(element.bounds.h)
-    );
-  });
+  return validateAppMapQuality(map).usable;
 }
 
 function rowToWorkflowRun(row: Record<string, unknown>): WorkflowRunRecord {

@@ -10,7 +10,8 @@
     "db:migrate": "node -r tsx/cjs src/db/migrate.ts",
     "db:seed": "node -r tsx/cjs src/db/seed.ts",
     "lint": "eslint src --ext .ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "reddit:map-refresh": "tsx scripts/reddit-map-refresh-remote.ts"
   },
   "dependencies": {
     "@types/multer": "^2.1.0",

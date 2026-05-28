@@ -146,9 +146,32 @@ function toElementDef(
     resourceId: node.resourceId || "",
     text: node.text || "",
     contentDescription: node.contentDescription || "",
+    selectorProvenance: selectorProvenance(node),
+    semanticId: semanticId(node),
     clickable: true,
     leadsTo: null, // filled in later by recorder
   };
+}
+
+function selectorProvenance(node: UiTreeNode): ElementDef["selectorProvenance"] {
+  const provenance: NonNullable<ElementDef["selectorProvenance"]> = [];
+  if (node.resourceId?.trim()) provenance.push("resourceId");
+  if (node.text?.trim()) provenance.push("text");
+  if (node.contentDescription?.trim()) provenance.push("contentDescription");
+  if (semanticId(node)) provenance.push("semanticId");
+  return provenance;
+}
+
+function semanticId(node: UiTreeNode): string {
+  const source = node.resourceId || node.contentDescription || node.text || node.className || "element";
+  return source
+    .split("/")
+    .pop()!
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
 }
 
 /**

@@ -95,8 +95,28 @@ describe("agent-generated workflow canary", () => {
       id: "open_reddit",
       action: "open_app",
       verification: "local_with_screenshot",
+      bindingSource: "fallback",
     });
     expect(first.llmBudget.happyPathRequests).toBe(0);
+  });
+
+  it("reports per-step binding sources for generated workflow gates", () => {
+    const workflow = redditHomeSmokeWorkflow();
+    workflow.steps = [
+      { type: "action", id: "tap_map_selector", action: "tap", target: "app_map:main_top_app_bar_search" },
+      { type: "action", id: "tap_ui_tree", action: "tap", target: "search_button" },
+      { type: "action", id: "tap_map_coordinate", action: "tap", x: 0.5, y: 0.1, params: { coordinateSource: "app_map" } },
+      { type: "action", id: "tap_raw_coordinate", action: "tap", x: 0.5, y: 0.9 },
+    ];
+
+    const plan = compileGeneratedWorkflowTemplate(workflow);
+
+    expect(plan.steps.map((step) => step.bindingSource)).toEqual([
+      "app_map_selector",
+      "ui_tree_selector",
+      "app_map_coordinate",
+      "raw_coordinate",
+    ]);
   });
 
   it("is accepted by the dry-run route without dispatch hooks", async () => {

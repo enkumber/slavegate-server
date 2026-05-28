@@ -7,7 +7,7 @@
 
 import { createHash } from "crypto";
 import { getGeneratedWorkflowContract } from "./workflow-validator";
-import type { AppMap } from "../app-mapping/schema";
+import { validateAppMapQuality, type AppMap, type AppMapQualityReport } from "../app-mapping/schema";
 import { ALL_SCREEN_IDS } from "../screen-detection/types";
 
 export interface BuildGeneratedWorkflowPromptInput {
@@ -19,9 +19,35 @@ export interface BuildGeneratedWorkflowPromptInput {
   appMapHints?: string[];
 }
 
-export function buildGeneratedWorkflowAppMapHints(appMap: AppMap, maxPages = 8, maxElementsPerPage = 6): string[] {
+export interface GeneratedWorkflowAppMapHints {
+  mapUsable: boolean;
+  reasons: string[];
+  warnings: string[];
+  stats: AppMapQualityReport["stats"];
+  hints: string[];
+}
+
+function formatNumber(value: number): string {
+  return Number(value.toFixed(4)).toString();
+}
+
+export function buildGeneratedWorkflowAppMapHints(appMap: AppMap, maxPages = 8, maxElementsPerPage = 6): GeneratedWorkflowAppMapHints {
+  const quality = validateAppMapQuality(appMap);
+  if (!quality.usable) {
+    return {
+      mapUsable: false,
+      reasons: quality.errors,
+      warnings: quality.warnings,
+      stats: quality.stats,
+      hints: [
+        `mapUsable=false; reasons=${quality.errors.join("; ")}`,
+        `stats pages=${quality.stats.pageCount}, elements=${quality.stats.elementCount}, pagesMissingSignatureHash=${quality.stats.pagesMissingSignatureHash}, elementsMissingBounds=${quality.stats.elementsMissingBounds}`,
+      ],
+    };
+  }
+
   const hints: string[] = [
-    `App map ${appMap.appName} (${appMap.appId}) version ${appMap.version}: ${appMap.pageCount} pages, ${appMap.transitionCount} transitions`,
+    `mapUsable=true; App map ${appMap.appName} (${appMap.appId}) version ${appMap.version}: ${appMap.pageCount} pages, ${appMap.transitionCount} transitions`,
   ];
 
   const pages = Object.entries(appMap.pages)
@@ -36,10 +62,11 @@ export function buildGeneratedWorkflowAppMapHints(appMap: AppMap, maxPages = 8, 
     for (const [elementId, element] of elements) {
       const target = element.leadsTo ? ` -> ${element.leadsTo}` : "";
       const label = element.text || element.contentDescription || element.resourceId || "unlabeled";
-      const center = element.bounds
-        ? `; center=${element.bounds.x + element.bounds.w / 2},${element.bounds.y + element.bounds.h / 2}`
-        : "";
-      hints.push(`  ${elementId}: ${element.type}; label=${label}${center}${target}`);
+      const centerX = formatNumber(element.bounds.x + element.bounds.w / 2);
+      const centerY = formatNumber(element.bounds.y + element.bounds.h / 2);
+      const bounds = `${formatNumber(element.bounds.x)},${formatNumber(element.bounds.y)},${formatNumber(element.bounds.w)},${formatNumber(element.bounds.h)}`;
+      const selector = element.resourceId || element.contentDescription || element.text || elementId;
+      hints.push(`  ${elementId}: ${element.type}; selector=${selector}; label=${label}; bounds=${bounds}; center=${centerX},${centerY}${target}`);
     }
   }
 
@@ -47,7 +74,13 @@ export function buildGeneratedWorkflowAppMapHints(appMap: AppMap, maxPages = 8, 
     hints.push(`... ${Object.keys(appMap.pages).length - maxPages} more app-map pages omitted`);
   }
 
-  return hints;
+  return {
+    mapUsable: true,
+    reasons: [],
+    warnings: quality.warnings,
+    stats: quality.stats,
+    hints,
+  };
 }
 
 export function resolveGeneratedWorkflowScreens(platform: string, provided?: string[]): string[] {
@@ -121,6 +154,8 @@ export function buildGeneratedWorkflowPrompt(input: BuildGeneratedWorkflowPrompt
     "- Use wait steps for loading, debounce, or explicit UI conditions.",
     "- Use checkpoint steps after important navigation or irreversible actions.",
     "- Include expectedScreen on action steps when a known screen should result.",
+    "- If App Map Hints says mapUsable=true, prefer app-map selector targets and set params.bindingSource=\"app_map_selector\"; use params.coordinateSource=\"app_map\" only when no selector is available.",
+    "- If App Map Hints says mapUsable=false, do not use app-map selectors or coordinates; use UI-tree/platform skill targets instead.",
     "- Keep runtime LLM calls at zero on the happy path.",
     "- Before calling an LLM for the same goal/context again, call POST /api/workflows/generated/cache/resolve with requestKey.",
     "- After validation, cache compiledPlan.cacheKey and reuse the same validated workflow for identical goals/context.",

@@ -475,7 +475,8 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
     }
 
     const appMap = appId ? await loadMap(appId) : null;
-    const resolvedAppMapHints = appMapHints ?? (appMap ? buildGeneratedWorkflowAppMapHints(appMap) : undefined);
+    const appMapHintSet = appMap ? buildGeneratedWorkflowAppMapHints(appMap) : null;
+    const resolvedAppMapHints = appMapHints ?? appMapHintSet?.hints;
     const resolvedScreens = resolveGeneratedWorkflowScreens(platform, availableScreens);
     const requestKey = computeGeneratedWorkflowRequestKey({
       platform,
@@ -511,6 +512,14 @@ router.post("/workflows/generated/prompt", requireAuth, async (req, res) => {
         canExecuteFromCache: false,
         nextAction: "generate_validate_and_cache_workflow",
         appMapLoaded: !!appMap,
+        mapUsable: appMapHintSet?.mapUsable ?? false,
+        appMapQuality: appMapHintSet
+          ? {
+              reasons: appMapHintSet.reasons,
+              warnings: appMapHintSet.warnings,
+              stats: appMapHintSet.stats,
+            }
+          : null,
         screenCount: resolvedScreens.length,
         prompt: buildGeneratedWorkflowPrompt({
           platform,

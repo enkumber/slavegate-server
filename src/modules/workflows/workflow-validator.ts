@@ -559,7 +559,15 @@ export interface GeneratedWorkflowCompiledStep {
   id?: string;
   action?: string;
   verification?: string;
+  bindingSource?: GeneratedWorkflowBindingSource;
 }
+
+export type GeneratedWorkflowBindingSource =
+  | "app_map_selector"
+  | "app_map_coordinate"
+  | "ui_tree_selector"
+  | "raw_coordinate"
+  | "fallback";
 
 export interface GeneratedWorkflowCompiledPlan {
   planVersion: "generated-workflow-plan/v1";
@@ -715,6 +723,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
         actionCount++;
         compiledStep.action = step.action;
         compiledStep.verification = step.verification ?? template.defaultVerificationStrategy;
+        compiledStep.bindingSource = inferGeneratedWorkflowBindingSource(step);
       } else if (step.type === "checkpoint") {
         checkpointCount++;
       }
@@ -767,6 +776,35 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
     },
     steps,
   };
+}
+
+export function inferGeneratedWorkflowBindingSource(step: WorkflowStep): GeneratedWorkflowBindingSource {
+  if (step.type !== "action") return "fallback";
+
+  const bindingSource = step.params?.bindingSource;
+  if (
+    bindingSource === "app_map_selector"
+    || bindingSource === "app_map_coordinate"
+    || bindingSource === "ui_tree_selector"
+    || bindingSource === "raw_coordinate"
+    || bindingSource === "fallback"
+  ) {
+    return bindingSource;
+  }
+
+  if (typeof step.target === "string" && step.target.length > 0) {
+    return step.target.startsWith("app_map:")
+      || step.target.startsWith("app_map_selector:")
+      || step.target.startsWith("map:")
+      ? "app_map_selector"
+      : "ui_tree_selector";
+  }
+
+  if (Number.isFinite(step.x) && Number.isFinite(step.y)) {
+    return step.params?.coordinateSource === "app_map" ? "app_map_coordinate" : "raw_coordinate";
+  }
+
+  return "fallback";
 }
 
 function stableStringify(value: unknown): string {
