@@ -139,6 +139,69 @@ describe("validateAppMapQuality", () => {
     expect(report.stats.elementsMissingSelector).toBe(1);
   });
 
+  it("does not count generated element IDs or synthetic semantic IDs as selector coverage", () => {
+    const report = validateAppMapQuality(makeMap({
+      pages: {
+        page_0: {
+          name: "synthetic selectors",
+          discoveryOrder: 0,
+          detection: {
+            method: "ui_tree_signature",
+            anchors: ["text:Home"],
+            signatureHash: "hash-home",
+          },
+          elements: {
+            el_0_10_20: {
+              type: "button",
+              bounds: { x: 0.1, y: 0.2, w: 0.2, h: 0.1 },
+              resourceId: "",
+              text: "",
+              contentDescription: "",
+              semanticId: "page_0.el_0_10_20",
+              selectorProvenance: ["semanticId"],
+              clickable: true,
+              leadsTo: null,
+            },
+          },
+        },
+      },
+    }));
+
+    expect(report.usable).toBe(false);
+    expect(report.errors).toContain("app map has zero selector coverage");
+    expect(report.stats.elementsMissingSelector).toBe(1);
+  });
+
+  it("keeps empty-signature zero-element maps unusable for APP_MAP_UNUSABLE callers", () => {
+    const report = validateAppMapQuality(makeMap({
+      pageCount: 1,
+      pages: {
+        page_0: {
+          name: "empty",
+          discoveryOrder: 0,
+          detection: {
+            method: "ui_tree_signature",
+            anchors: [],
+            signatureHash: "e3b0c44298fc1c14",
+          },
+          elements: {},
+        },
+      },
+    }));
+
+    expect(report.usable).toBe(false);
+    expect(report.errors).toEqual(expect.arrayContaining([
+      "1 page(s) have empty-content signatureHash",
+      "app map has pages but no bindable elements",
+      "all pages are missing required detection anchors",
+    ]));
+    expect(report.stats).toMatchObject({
+      pageCount: 1,
+      elementCount: 0,
+      pagesWithEmptyContentSignature: 1,
+    });
+  });
+
   it("marks zero bounds coverage unusable", () => {
     const report = validateAppMapQuality(makeMap({
       pages: {

@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  assessGeneratedWorkflowCacheInvalidation,
+  buildGeneratedWorkflowAppMapCacheMetadata,
   compileGeneratedWorkflowTemplate,
   summarizeGeneratedWorkflowTemplate,
   validateGeneratedWorkflowTemplate,
+  withGeneratedWorkflowAppMapCacheMetadata,
 } from "./workflow-validator";
 import type { WorkflowTemplate } from "./types";
+import { validateAppMapQuality, type AppMap } from "../app-mapping/schema";
 
 function redditHomeSmokeWorkflow(): WorkflowTemplate {
   return {
@@ -36,6 +40,42 @@ function redditHomeSmokeWorkflow(): WorkflowTemplate {
         reason: "Home feed reached or app launch validated",
       },
     ],
+  };
+}
+
+function usableRedditMap(): AppMap {
+  return {
+    appId: "com.reddit.frontpage",
+    appName: "Reddit",
+    version: "recorded-2026-05-28T00:00:00.000Z",
+    appVersion: "2026.20.0",
+    deviceProfile: { width: 1080, height: 2400 },
+    createdAt: "2026-05-28T00:00:00.000Z",
+    updatedAt: "2026-05-28T00:00:00.000Z",
+    pageCount: 1,
+    transitionCount: 0,
+    pages: {
+      page_0: {
+        name: "home",
+        discoveryOrder: 0,
+        detection: {
+          method: "ui_tree_signature",
+          anchors: ["resourceId:main_top_app_bar_search"],
+          signatureHash: "hash-home",
+        },
+        elements: {
+          main_top_app_bar_search: {
+            type: "button",
+            bounds: { x: 0.1, y: 0.02, w: 0.8, h: 0.06 },
+            resourceId: "main_top_app_bar_search",
+            text: "",
+            contentDescription: "Search",
+            clickable: true,
+            leadsTo: null,
+          },
+        },
+      },
+    },
   };
 }
 
@@ -164,6 +204,54 @@ describe("agent-generated workflow canary", () => {
     expect(plan.steps[3]).toMatchObject({
       usedAppMap: false,
       bindingSource: "raw_coordinate",
+    });
+  });
+
+  it("invalidates app-map generated workflow plans when the current map is unusable", () => {
+    const workflow = redditHomeSmokeWorkflow();
+    workflow.steps = [
+      {
+        type: "action",
+        id: "tap_map_selector",
+        action: "tap",
+        target: "app_map:main_top_app_bar_search",
+        params: { pageId: "page_0", pageSignature: "hash-home" },
+      },
+    ];
+    const cachedMap = usableRedditMap();
+    const cachedQuality = validateAppMapQuality(cachedMap);
+    const plan = withGeneratedWorkflowAppMapCacheMetadata(
+      compileGeneratedWorkflowTemplate(workflow),
+      buildGeneratedWorkflowAppMapCacheMetadata(cachedMap, cachedQuality),
+    );
+    const unusableMap: AppMap = {
+      ...cachedMap,
+      pages: {
+        page_0: {
+          ...cachedMap.pages.page_0,
+          detection: {
+            method: "ui_tree_signature",
+            anchors: [],
+            signatureHash: "e3b0c44298fc1c14",
+          },
+          elements: {},
+        },
+      },
+    };
+    const currentQuality = validateAppMapQuality(unusableMap);
+
+    const invalidation = assessGeneratedWorkflowCacheInvalidation(plan, unusableMap, currentQuality);
+
+    expect(currentQuality.usable).toBe(false);
+    expect(invalidation).toMatchObject({
+      stale: true,
+      code: "APP_MAP_UNUSABLE",
+      actual: {
+        qualityErrors: expect.arrayContaining([
+          "1 page(s) have empty-content signatureHash",
+          "app map has pages but no bindable elements",
+        ]),
+      },
     });
   });
 

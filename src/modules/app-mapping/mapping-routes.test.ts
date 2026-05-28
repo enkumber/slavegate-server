@@ -89,6 +89,60 @@ describe("reddit app-map refresh helpers", () => {
     expect(isUsableRedditUiTree(tree)).toBe(false);
   });
 
+  it("rejects multi-node dumps without positive Reddit package proof", () => {
+    const tree = parseUiTreeResult({
+      output: {
+        screenWidth: 1080,
+        screenHeight: 2400,
+        uiTree: {
+          className: "android.widget.FrameLayout",
+          bounds: { left: 0, top: 0, right: 1080, bottom: 2400 },
+          children: [
+            {
+              resourceId: "search",
+              contentDescription: "Search Reddit",
+              className: "android.widget.Button",
+              clickable: true,
+              bounds: { left: 80, top: 40, right: 1000, bottom: 160 },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(tree.packageName).toBeUndefined();
+    expect(tree.nodeCount).toBe(2);
+    expect(isUsableRedditUiTree(tree)).toBe(false);
+  });
+
+  it("rejects multi-node dumps from unknown non-Reddit packages", () => {
+    const tree = parseUiTreeResult({
+      output: {
+        screenWidth: 1080,
+        screenHeight: 2400,
+        uiTree: {
+          packageName: "com.example.unknown",
+          className: "android.widget.FrameLayout",
+          bounds: { left: 0, top: 0, right: 1080, bottom: 2400 },
+          children: [
+            {
+              packageName: "com.example.unknown",
+              resourceId: "com.example.unknown:id/search",
+              contentDescription: "Search Reddit",
+              className: "android.widget.Button",
+              clickable: true,
+              bounds: { left: 80, top: 40, right: 1000, bottom: 160 },
+            },
+          ],
+        },
+      },
+    });
+
+    expect(tree.packageName).toBe("com.example.unknown");
+    expect(tree.nodeCount).toBe(2);
+    expect(isUsableRedditUiTree(tree)).toBe(false);
+  });
+
   it("accepts Reddit dumps with anchors and non-empty signatures", () => {
     const tree = parseUiTreeResult({
       output: {
@@ -150,6 +204,40 @@ describe("reddit app-map refresh helpers", () => {
     expect(elements[0]).toMatchObject({
       text: "AskReddit",
       bounds: { x: 0.037, y: 0.0917, w: 0.4259, h: 0.0333 },
+    });
+  });
+
+  it("does not treat class-derived semantic IDs as real selector evidence", () => {
+    const tree = parseUiTreeResult({
+      output: {
+        screenWidth: 1080,
+        screenHeight: 2400,
+        packageName: "com.reddit.frontpage",
+        uiTree: {
+          packageName: "com.reddit.frontpage",
+          className: "android.widget.FrameLayout",
+          bounds: { left: 0, top: 0, right: 1080, bottom: 2400 },
+          children: [
+            {
+              packageName: "com.reddit.frontpage",
+              className: "android.widget.Button",
+              clickable: true,
+              bounds: { left: 80, top: 40, right: 1000, bottom: 160 },
+            },
+          ],
+        },
+      },
+    });
+
+    const elements = filterRelevantElements(tree.nodes, tree.width, tree.height);
+
+    expect(elements).toHaveLength(1);
+    expect(elements[0]).toMatchObject({
+      resourceId: "",
+      text: "",
+      contentDescription: "",
+      semanticId: "",
+      selectorProvenance: [],
     });
   });
 });

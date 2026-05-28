@@ -209,12 +209,12 @@ function selectorProvenance(node: UiTreeNode): ElementDef["selectorProvenance"] 
   if (node.resourceId?.trim()) provenance.push("resourceId");
   if (node.text?.trim()) provenance.push("text");
   if (node.contentDescription?.trim()) provenance.push("contentDescription");
-  if (semanticId(node)) provenance.push("semanticId");
   return provenance;
 }
 
 function semanticId(node: UiTreeNode): string {
-  const source = node.resourceId || node.contentDescription || node.text || node.className || "element";
+  const source = node.resourceId || node.contentDescription || node.text;
+  if (!source?.trim()) return "";
   return source
     .split("/")
     .pop()!

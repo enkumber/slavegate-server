@@ -133,10 +133,14 @@ function findPackageName(nodes: UiTreeNode[]): string | undefined {
 
 function foregroundPackageFromResult(result: any): string | undefined {
   return result?.output?.packageName
+    ?? result?.output?.appId
+    ?? result?.output?.applicationId
     ?? result?.output?.package
     ?? result?.output?.currentPackage
     ?? result?.output?.currentPackageName
     ?? result?.packageName
+    ?? result?.appId
+    ?? result?.applicationId
     ?? result?.package;
 }
 
@@ -156,10 +160,14 @@ export function parseUiTreeResult(result: any): {
   const roots = extractUiTreeRoots(parsed);
   const nodes = roots.filter(Boolean).map(normalizeUiNode);
   const packageName = output.packageName
+    ?? output.appId
+    ?? output.applicationId
     ?? output.package
     ?? output.currentPackage
     ?? output.currentPackageName
     ?? parsed?.packageName
+    ?? parsed?.appId
+    ?? parsed?.applicationId
     ?? parsed?.package
     ?? findPackageName(nodes);
   let width = Number(output.screenWidth ?? output.width ?? output.original_width ?? 0);
@@ -214,7 +222,7 @@ function buildCapturedPage(
 
 export function isUsableRedditUiTree(tree: { nodes: UiTreeNode[]; packageName?: string; nodeCount?: number }): boolean {
   const observedPackage = tree.packageName ?? findPackageName(tree.nodes);
-  if (observedPackage && observedPackage !== REDDIT_APP_ID) return false;
+  if (observedPackage !== REDDIT_APP_ID) return false;
   if ((tree.nodeCount ?? countUiNodes(tree.nodes)) <= 1) return false;
   const detection = buildPageDetection(tree.nodes);
   if (detection.signatureHash.startsWith("e3b0c44298fc1c14")) return false;
@@ -228,7 +236,7 @@ function summarizeRefresh(map: AppMap, failures: string[], screenshotPaths: stri
   const elements = pages.flatMap((page) => Object.values(page.elements ?? {}));
   const boundsCount = elements.filter((element: any) => element.bounds).length;
   const selectorCount = elements.filter((element: any) =>
-    element.resourceId || element.text || element.contentDescription || element.semanticId
+    element.resourceId || element.text || element.contentDescription
   ).length;
   const signatureHashes = Object.fromEntries(
     Object.entries(map.pages).map(([id, page]) => [id, page.detection.signatureHash]),
@@ -288,8 +296,8 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
     async function ensureRedditForeground(context: string): Promise<void> {
       const foreground = await dispatchAndAwaitRefresh(deviceId, "get_foreground_app", {}, 10000).catch(() => null);
       const observedPackage = foregroundPackageFromResult(foreground);
-      if (observedPackage && observedPackage !== REDDIT_APP_ID) {
-        failures.push(`${context}: foreground was ${observedPackage}; reopening Reddit`);
+      if (observedPackage !== REDDIT_APP_ID) {
+        failures.push(`${context}: foreground was ${observedPackage ?? "unknown"}; reopening Reddit`);
         await dispatchAndAwaitRefresh(deviceId, "open_app", { packageName: REDDIT_APP_ID }, 25000);
         await settle(1500);
       }

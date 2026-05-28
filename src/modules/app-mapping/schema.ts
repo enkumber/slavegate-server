@@ -184,7 +184,6 @@ function hasSelectorMetadata(elementId: string, element: Partial<ElementDef> | n
     element?.resourceId?.trim()
     || element?.text?.trim()
     || element?.contentDescription?.trim()
-    || element?.semanticId?.trim()
   );
 }
 
