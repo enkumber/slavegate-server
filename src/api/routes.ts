@@ -141,6 +141,11 @@ function generatedWorkflowStaleCachePayload(
 // Any handler that takes too long will get a 504 response.
 
 function requestTimeout(req: Request, res: Response, next: NextFunction): void {
+  if (req.path.startsWith("/mapping/")) {
+    next();
+    return;
+  }
+
   const timer = setTimeout(() => {
     if (!res.headersSent) {
       res.status(504).json({ ok: false, error: "Request timeout" });

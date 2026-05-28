@@ -63,16 +63,28 @@ async function dispatchAndAwaitRefresh(
   return resultPromise;
 }
 
-function normalizeUiNode(node: any): UiTreeNode {
-  const rawBounds = node?.bounds ?? {};
-  const bounds = rawBounds && typeof rawBounds === "object"
-    ? {
-        left: Number(rawBounds.left ?? rawBounds.l ?? 0),
-        top: Number(rawBounds.top ?? rawBounds.t ?? 0),
-        right: Number(rawBounds.right ?? rawBounds.r ?? 0),
-        bottom: Number(rawBounds.bottom ?? rawBounds.b ?? 0),
-      }
-    : undefined;
+function normalizeBounds(rawBounds: any): UiTreeNode["bounds"] {
+  if (!rawBounds || typeof rawBounds !== "object") return undefined;
+
+  const leftRaw = rawBounds.left ?? rawBounds.l ?? rawBounds.x;
+  const topRaw = rawBounds.top ?? rawBounds.t ?? rawBounds.y;
+  const rightRaw = rawBounds.right ?? rawBounds.r;
+  const bottomRaw = rawBounds.bottom ?? rawBounds.b;
+  const widthRaw = rawBounds.width ?? rawBounds.w;
+  const heightRaw = rawBounds.height ?? rawBounds.h;
+
+  const left = Number(leftRaw);
+  const top = Number(topRaw);
+  const right = rightRaw !== undefined ? Number(rightRaw) : left + Number(widthRaw);
+  const bottom = bottomRaw !== undefined ? Number(bottomRaw) : top + Number(heightRaw);
+
+  if (![left, top, right, bottom].every(Number.isFinite)) return undefined;
+
+  return { left, top, right, bottom };
+}
+
+export function normalizeUiNode(node: any): UiTreeNode {
+  const bounds = normalizeBounds(node?.bounds);
 
   return {
     resourceId: node?.resourceId ?? node?.resource_id ?? node?.id ?? "",
@@ -90,16 +102,26 @@ function normalizeUiNode(node: any): UiTreeNode {
   };
 }
 
-function parseUiTreeResult(result: any): { nodes: UiTreeNode[]; width: number; height: number } {
+function extractUiTreeRoots(parsed: any): any[] {
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed?.nodes)) return parsed.nodes;
+  if (Array.isArray(parsed?.children)) return [parsed];
+  if (parsed?.root) return extractUiTreeRoots(parsed.root);
+  if (parsed && typeof parsed === "object") return [parsed];
+  return [];
+}
+
+export function parseUiTreeResult(result: any): { nodes: UiTreeNode[]; width: number; height: number; appVersion?: string } {
   const output = result?.output;
   if (!output) throw new Error("ui_tree_dump returned no output");
   const parsed = typeof output.uiTree === "string"
     ? JSON.parse(output.uiTree)
-    : output.uiTree ?? output;
-  const roots = Array.isArray(parsed) ? parsed : [parsed];
+    : output.uiTree ?? output.nodes ?? output.tree ?? output;
+  const roots = extractUiTreeRoots(parsed);
   const nodes = roots.filter(Boolean).map(normalizeUiNode);
   let width = Number(output.screenWidth ?? output.width ?? output.original_width ?? 0);
   let height = Number(output.screenHeight ?? output.height ?? output.original_height ?? 0);
+  const appVersion = output.appVersion ?? output.versionName ?? output.packageVersion;
 
   function scan(node: UiTreeNode): void {
     if (node.bounds) {
@@ -114,7 +136,7 @@ function parseUiTreeResult(result: any): { nodes: UiTreeNode[]; width: number; h
     width = 1080;
     height = 2400;
   }
-  return { nodes, width, height };
+  return { nodes, width, height, appVersion };
 }
 
 function buildCapturedPage(
@@ -212,6 +234,7 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
 
     async function capture(id: string, name: string): Promise<void> {
       const tree = parseUiTreeResult(await dispatchAndAwaitRefresh(deviceId, "ui_tree_dump", { packageName: REDDIT_APP_ID }, 12000));
+      observedAppVersion ??= tree.appVersion;
       captures.push({ id, name, ...tree });
       if (body.captureScreenshots) {
         const shot = await dispatchAndAwaitRefresh(deviceId, "screenshot_for_vlm", { quality: 80 }, 20000);
