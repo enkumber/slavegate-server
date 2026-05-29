@@ -21,7 +21,33 @@ vi.mock("../../app-mapping/recorder.service", () => ({
   loadMap: mocks.loadMap,
 }));
 
-import { compileInstruction } from "../planner.service";
+import { compileInstruction, getCompiledWorkflow } from "../planner.service";
+
+function compiledWorkflow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "compiled-workflow-id",
+    name: "AskReddit read 3",
+    source: "Read the first 3 r/AskReddit posts",
+    appId: "com.reddit.frontpage",
+    compiledAt: "2026-01-01T00:00:00.000Z",
+    steps: [
+      {
+        id: "read",
+        action: "wait",
+        expectedPage: "reddit_home",
+        expectedPageHash: "sig-home",
+        retries: 1,
+        retryDelay: 500,
+        description: "Wait for feed",
+      },
+    ],
+    appMapVersion: "map-v1",
+    startPage: "reddit_home",
+    maxRecoveryAttempts: 1,
+    maxTotalRecoveryAttempts: 10,
+    ...overrides,
+  };
+}
 
 function appMap(): AppMap {
   return {
@@ -86,5 +112,52 @@ describe("compileInstruction model routing", () => {
       expect.objectContaining({ system: "You are a workflow compiler. Respond ONLY with valid JSON." }),
     );
     expect(result.compiledWorkflow?.recoveryModel).toBeUndefined();
+  });
+
+  it("strips a retired recovery model from cached compiled workflows", async () => {
+    mocks.db.query.mockReset();
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [
+        {
+          id: "cached-workflow-id",
+          compiled_data: compiledWorkflow({ recoveryModel: "openai-codex/gpt-5.5" }),
+        },
+      ],
+    });
+
+    const result = await compileInstruction({
+      appId: "com.reddit.frontpage",
+      instruction: "Read the first 3 r/AskReddit posts",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.fromCache).toBe(true);
+    expect(result.compiledWorkflow?.recoveryModel).toBeUndefined();
+    expect(mocks.llmJson).not.toHaveBeenCalled();
+  });
+
+  it("strips a retired recovery model when loading a stored compiled workflow", async () => {
+    mocks.db.query.mockReset();
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [
+        {
+          id: "stored-workflow-id",
+          compiled_data: JSON.stringify(compiledWorkflow({ recoveryModel: "openai-codex/gpt-5.5" })),
+          status: "compiled",
+          steps_completed: 0,
+          recovery_count: 0,
+        },
+      ],
+    });
+
+    const result = await getCompiledWorkflow("stored-workflow-id");
+
+    expect(result.ok).toBe(true);
+    expect(result.compiledWorkflow?.recoveryModel).toBeUndefined();
+    expect((result.compiledWorkflow as any)?._meta).toEqual({
+      status: "compiled",
+      stepsCompleted: 0,
+      recoveryCount: 0,
+    });
   });
 });

@@ -16,6 +16,7 @@ import { getDb } from "../../db/client";
 import { llmJson } from "../../utils/llm";
 import { loadMap } from "../app-mapping/recorder.service";
 import type { AppMap } from "../app-mapping/schema";
+import { canonicalizeCompiledWorkflow, canonicalModelOverride } from "./model-routing";
 import { buildCompilePrompt } from "./prompt-builder";
 import type {
   CompiledStep,
@@ -56,14 +57,6 @@ function computeCacheKey(instruction: string, appId: string, appMapVersion: stri
 interface ValidationError {
   stepId?: string;
   message: string;
-}
-
-const LEGACY_CODEX_MODEL = "openai-codex/gpt-5.5";
-
-function canonicalModelOverride(model: string | undefined): string | undefined {
-  const trimmed = model?.trim();
-  if (!trimmed || trimmed === LEGACY_CODEX_MODEL) return undefined;
-  return trimmed;
 }
 
 function validateCompiledWorkflow(
@@ -195,11 +188,12 @@ export async function compileInstruction(req: CompileRequest): Promise<CompileRe
       const compiledData = typeof cached.rows[0].compiled_data === "string"
         ? JSON.parse(cached.rows[0].compiled_data)
         : cached.rows[0].compiled_data;
+      const workflow = canonicalizeCompiledWorkflow(compiledData);
       console.log(`[planner] Cache hit for "${sanitizedInstruction.slice(0, 60)}..." (appId=${appId})`);
       return {
         ok: true,
         workflowId: cached.rows[0].id,
-        compiledWorkflow: compiledData,
+        compiledWorkflow: workflow,
         fromCache: true,
       };
     }
@@ -237,6 +231,7 @@ export async function compileInstruction(req: CompileRequest): Promise<CompileRe
   workflow.source = sanitizedInstruction;
   workflow.maxRecoveryAttempts = options.maxRecoveryAttempts ?? 1;
   workflow.recoveryModel = canonicalModelOverride(options.recoveryModel);
+  canonicalizeCompiledWorkflow(workflow);
 
   // 6. Save to DB
   let workflowId: string;
@@ -294,12 +289,13 @@ export async function getCompiledWorkflow(workflowId: string): Promise<CompileRe
     const compiledData = typeof row.compiled_data === "string"
       ? JSON.parse(row.compiled_data)
       : row.compiled_data;
-    compiledData._meta = {
+    const workflow = canonicalizeCompiledWorkflow(compiledData);
+    (workflow as CompiledWorkflow & { _meta?: unknown })._meta = {
       status: row.status,
       stepsCompleted: row.steps_completed,
       recoveryCount: row.recovery_count,
     };
-    return { ok: true, workflowId: row.id, compiledWorkflow: compiledData };
+    return { ok: true, workflowId: row.id, compiledWorkflow: workflow };
   } catch (err) {
     return { ok: false, error: `DB error: ${(err as Error).message}` };
   }

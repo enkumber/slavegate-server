@@ -272,6 +272,21 @@ describe("attemptRecovery", () => {
       const result = await attemptRecovery(ctx, 0, "test");
       expect(result).toBe(true);
     });
+
+    it("does not pass the retired codex recovery model override to llmJson", async () => {
+      const ctx = makeRunnerContext();
+
+      const result = await attemptRecovery(ctx, 0, "test", "openai-codex/gpt-5.5");
+
+      expect(result).toBe(true);
+      expect(llmJson).toHaveBeenCalledWith(
+        expect.any(String),
+        undefined,
+        expect.objectContaining({
+          system: "You are an Android workflow recovery agent. Respond ONLY with valid JSON recovery action.",
+        }),
+      );
+    });
   });
 
   // ── Device state checks ──────────────────────────────────────────────────

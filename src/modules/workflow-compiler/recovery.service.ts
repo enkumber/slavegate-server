@@ -18,6 +18,7 @@ import { computePageSignature } from "../app-mapping/page-fingerprint";
 import type { UiTreeNode } from "../app-mapping/schema";
 import { llmJson } from "../../utils/llm";
 import type { CompiledStep } from "./types";
+import { canonicalModelOverride } from "./model-routing";
 import type { RunnerContext } from "./runner.service";
 import { validateStepSchema } from "./workflow-validator";
 
@@ -392,11 +393,11 @@ export async function attemptRecovery(
   // 3. Call LLM for recovery decision
   let recoveryAction: RecoveryAction;
   let llmLatencyMs: number;
+  const modelOverride = canonicalModelOverride(model);
 
   try {
     const llmStart = Date.now();
     const prompt = buildRecoveryPrompt(recoveryCtx, uiTreeSummary);
-    const modelOverride = model?.trim() || undefined;
 
     recoveryAction = await llmJson<RecoveryAction>(
       prompt,
@@ -455,7 +456,7 @@ export async function attemptRecovery(
     success: execResult.success,
     screenshotAvailable: !!screenshotBase64,
     uiTreeHash: currentFingerprint,
-    llmModel: model?.trim() || "decision_llm",
+    llmModel: modelOverride || "decision_llm",
     llmLatencyMs,
     totalLatencyMs,
     createdAt: new Date().toISOString(),
