@@ -36,8 +36,8 @@ export interface CompiledWorkflow {
   maxRecoveryAttempts: number;
   /** Max total recovery attempts per workflow (default: 10) */
   maxTotalRecoveryAttempts: number;
-  /** LLM model identifier for recovery */
-  recoveryModel: string;
+  /** Optional explicit LLM model override for recovery. Omit to use Dashboard decision_llm config. */
+  recoveryModel?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -136,7 +136,7 @@ export interface CompileOptions {
   maxTotalRecoveryAttempts?: number;
   /** LLM model for recovery (default: from config) */
   recoveryModel?: string;
-  /** LLM model for compilation (default: openai-codex/gpt-5.5) */
+  /** Optional LLM model override for compilation. Omit to use Dashboard decision_llm config. */
   model?: string;
   /** If true, compile only — don't execute */
   dryRun?: boolean;

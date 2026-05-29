@@ -401,6 +401,24 @@ describe("generated workflow cache-only execution route", () => {
     expect(mocks.metrics.llmAvoidedLabels).toHaveBeenCalledWith("reddit", "cache_hit");
   });
 
+  it("rejects raw workflow payload execution and requires canonical cache execution", async () => {
+    const response = await postGeneratedWorkflow({
+      workflow: redditHomeWorkflow(),
+      deviceId: "11111111-1111-4111-8111-111111111111",
+    });
+
+    expect(response.status, JSON.stringify(response.json)).toBe(409);
+    expect(response.json).toMatchObject({
+      ok: false,
+      code: "GENERATED_WORKFLOW_CANONICAL_CACHE_REQUIRED",
+      data: {
+        nextAction: "validate_or_persist_before_execution",
+      },
+    });
+    expect(mocks.workflowService.create).not.toHaveBeenCalled();
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
+  });
+
   it("rejects stale app-map cache hits before dispatch", async () => {
     const cached = cacheRecord({ appMapBound: true, mapVersion: "map-v1" });
     mocks.workflowService.getGeneratedPlanCache.mockResolvedValue(cached);

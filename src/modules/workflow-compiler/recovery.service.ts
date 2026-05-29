@@ -73,7 +73,6 @@ export interface RecoveryHistoryEntry {
 
 const MAX_RECOVERY_PER_STEP = 1;
 const MAX_RECOVERY_PER_WORKFLOW = 10;
-const DEFAULT_RECOVERY_MODEL = "openai-codex/gpt-5.5";
 
 // Track per-step recovery counts with TTL (auto-expire after 30 min)
 const RECOVERY_TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -344,7 +343,7 @@ export async function attemptRecovery(
   ctx: RunnerContext,
   stepIndex: number,
   reason: string,
-  model: string = DEFAULT_RECOVERY_MODEL
+  model?: string
 ): Promise<boolean> {
   const startTime = Date.now();
   const { deviceId, workflow } = ctx;
@@ -397,10 +396,11 @@ export async function attemptRecovery(
   try {
     const llmStart = Date.now();
     const prompt = buildRecoveryPrompt(recoveryCtx, uiTreeSummary);
+    const modelOverride = model?.trim() || undefined;
 
     recoveryAction = await llmJson<RecoveryAction>(
       prompt,
-      model,
+      modelOverride,
       {
         max_tokens: 2048,
         system: "You are an Android workflow recovery agent. Respond ONLY with valid JSON recovery action.",
@@ -455,7 +455,7 @@ export async function attemptRecovery(
     success: execResult.success,
     screenshotAvailable: !!screenshotBase64,
     uiTreeHash: currentFingerprint,
-    llmModel: model,
+    llmModel: model?.trim() || "decision_llm",
     llmLatencyMs,
     totalLatencyMs,
     createdAt: new Date().toISOString(),

@@ -146,8 +146,6 @@ router.post("/compile-and-run", async (req: Request, res: Response) => {
   // ── Execute ───────────────────────────────────────────────────────────────
   resetRecoveryCounts(workflow.id);
 
-  const recoveryModel = workflow.recoveryModel || "openai-codex/gpt-5.5";
-
   const runResult: RunCompiledResult = await runCompiledWorkflow(
     {
       deviceId,
@@ -156,7 +154,7 @@ router.post("/compile-and-run", async (req: Request, res: Response) => {
     },
     // Recovery callback — delegates to recovery.service
     async (ctx, stepIndex, reason) => {
-      return attemptRecovery(ctx, stepIndex, reason, recoveryModel);
+      return attemptRecovery(ctx, stepIndex, reason, workflow.recoveryModel);
     },
   );
 
@@ -283,8 +281,6 @@ router.post("/run-compiled", async (req: Request, res: Response) => {
   // ── Execute ───────────────────────────────────────────────────────────────
   resetRecoveryCounts(workflow.id);
 
-  const recoveryModel = workflow.recoveryModel || "openai-codex/gpt-5.5";
-
   const runResult: RunCompiledResult = await runCompiledWorkflow(
     {
       deviceId,
@@ -292,7 +288,7 @@ router.post("/run-compiled", async (req: Request, res: Response) => {
       compileLlmCalls: 0,
     },
     async (ctx, stepIndex, reason) => {
-      return attemptRecovery(ctx, stepIndex, reason, recoveryModel);
+      return attemptRecovery(ctx, stepIndex, reason, workflow.recoveryModel);
     },
   );
 

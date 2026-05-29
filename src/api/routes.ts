@@ -811,6 +811,16 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
       code: "WORKFLOW_PAYLOAD_NOT_ALLOWED_FOR_CANONICAL_EXECUTION",
     });
   }
+  if (workflow && !dryRun) {
+    return res.status(409).json({
+      ok: false,
+      error: "workflow payload execution is disabled; validate and persist the generated workflow, then execute by cacheKey or requestKey",
+      code: "GENERATED_WORKFLOW_CANONICAL_CACHE_REQUIRED",
+      data: {
+        nextAction: "validate_or_persist_before_execution",
+      },
+    });
+  }
   if (!dryRun && !deviceId) {
     return res.status(400).json({ ok: false, error: "deviceId required unless dryRun is true" });
   }

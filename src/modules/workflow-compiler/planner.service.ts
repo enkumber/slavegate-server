@@ -58,6 +58,14 @@ interface ValidationError {
   message: string;
 }
 
+const LEGACY_CODEX_MODEL = "openai-codex/gpt-5.5";
+
+function canonicalModelOverride(model: string | undefined): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed || trimmed === LEGACY_CODEX_MODEL) return undefined;
+  return trimmed;
+}
+
 function validateCompiledWorkflow(
   raw: { steps?: unknown[]; startPage?: unknown; name?: unknown },
   appMap: AppMap
@@ -136,7 +144,6 @@ function validateCompiledWorkflow(
     startPage: raw.startPage as string,
     maxRecoveryAttempts: 1,
     maxTotalRecoveryAttempts: 10,
-    recoveryModel: "openai-codex/gpt-5.5",
   };
 
   return { valid: true, errors: [], workflow };
@@ -155,7 +162,7 @@ export const MAX_INSTRUCTION_LENGTH = 2000;
 export async function compileInstruction(req: CompileRequest): Promise<CompileResult> {
   const { appId, instruction, options = {} } = req;
   const sanitizedInstruction = instruction.trim().slice(0, MAX_INSTRUCTION_LENGTH);
-  const model = options.model ?? "openai-codex/gpt-5.5";
+  const model = canonicalModelOverride(options.model);
   const db = getDb();
 
   if (!sanitizedInstruction) {
@@ -229,7 +236,7 @@ export async function compileInstruction(req: CompileRequest): Promise<CompileRe
   const workflow = validation.workflow;
   workflow.source = sanitizedInstruction;
   workflow.maxRecoveryAttempts = options.maxRecoveryAttempts ?? 1;
-  workflow.recoveryModel = options.recoveryModel ?? "openai-codex/gpt-5.5";
+  workflow.recoveryModel = canonicalModelOverride(options.recoveryModel);
 
   // 6. Save to DB
   let workflowId: string;

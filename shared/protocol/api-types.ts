@@ -377,7 +377,7 @@ export type GeneratedWorkflowExecuteRequest =
       clientId?: string;
       campaignId?: string;
       variables?: Record<string, unknown>;
-      dryRun?: boolean;
+      dryRun: true;
       persist?: boolean;
     }
   | {

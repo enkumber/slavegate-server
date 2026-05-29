@@ -219,14 +219,13 @@ export async function createWorkflowRun(input: CreateWorkflowRunRequest): Promis
     });
 
     resetRecoveryCounts(compileResult.compiledWorkflow.id);
-    const recoveryModel = compileResult.compiledWorkflow.recoveryModel || "openai-codex/gpt-5.5";
     const execution = await runCompiledWorkflow(
       {
         deviceId: run.deviceId,
         workflow: compileResult.compiledWorkflow,
         compileLlmCalls: compileResult.fromCache ? 0 : 1,
       },
-      async (ctx, stepIndex, reason) => attemptRecovery(ctx, stepIndex, reason, recoveryModel)
+      async (ctx, stepIndex, reason) => attemptRecovery(ctx, stepIndex, reason, compileResult.compiledWorkflow!.recoveryModel)
     );
 
     const finalStatus: WorkflowRunStatus = execution.status === "completed" ? "completed" : execution.status;
