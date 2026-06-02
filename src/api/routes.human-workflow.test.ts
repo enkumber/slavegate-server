@@ -255,6 +255,28 @@ describe("dashboard human workflow routes", () => {
     });
   });
 
+  it.each([
+    ["posteaza", "postează o poză pe Instagram"],
+    ["cumpara", "cumpără ceva din aplicație"],
+    ["sterge contul", "șterge contul de Reddit"],
+    ["dezactiveaza contul", "dezactivează contul"],
+    ["trimite mesaj", "trimite un mesaj prietenului"],
+    ["comenteaza", "comentează la prima postare"],
+    ["urmareste", "urmărește primele zece conturi"],
+  ])("rejects Romanian social/account-changing intent: %s", async (_name, intent) => {
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent,
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+    });
+  });
+
   it("rejects destructive cached plans during compile preview", async () => {
     const base = cachedPlan();
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({

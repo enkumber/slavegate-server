@@ -76,10 +76,15 @@ const HUMAN_WORKFLOW_DESTRUCTIVE_ACTIONS = new Set(["uninstall", "reboot", "ota_
 const HUMAN_WORKFLOW_SOCIAL_ACCOUNT_DENY_PATTERNS: RegExp[] = [
   /\b(post|publish|comment|reply|like|unlike|upvote|downvote|follow|unfollow)\b/i,
   /\b(subscribe|unsubscribe|join|leave)\b/i,
-  /\b(dm|direct message|private message|send message|send a message|postează|comentează|urmărește|dezurmărește|abonează-te|dezabonează-te)\b/i,
-  /\b(change|reset|update|schimbă|resetează|actualizează)\s+(my\s+|the\s+)?password\b/i,
-  /\b(password|parole|purchase|buy|checkout|cumpără|plată|delete account|deletează cont|șterge cont|deactivate account|dezactivează cont)\b/i,
+  /\b(dm|direct message|private message|send message|send a message)\b/i,
+  /\b(change|reset|update)\s+(my\s+|the\s+)?password\b/i,
+  /\b(password|purchase|buy|checkout|delete account|deactivate account)\b/i,
   /\b(send|trimite)\s+(message|mesaj)\b/i,
+  /postează|comentează|urmărește|dezurmărește|abonează-te|dezabonează-te/iu,
+  /cumpără|plată|parolă|parola|parole/iu,
+  /(?:șterge|deletează|dezactivează)\s+cont(?:ul)?/iu,
+  /trimite\s+(?:un\s+)?mesaj/iu,
+  /(?:schimbă|resetează|actualizează)\s+(?:parola|parolă|contul|profilul|datele)/iu,
 ];
 const PLATFORM_APP_IDS: Record<string, string> = {
   reddit: "com.reddit.frontpage",
