@@ -1,0 +1,182 @@
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { accountsApi } from "../api/accounts";
+import { agencyApi } from "../api/agency";
+export function HumanWorkflowModal({ device, onClose }) {
+    const [accounts, setAccounts] = useState([]);
+    const [accountId, setAccountId] = useState("");
+    const [intent, setIntent] = useState("");
+    const [compileResult, setCompileResult] = useState(null);
+    const [runResult, setRunResult] = useState(null);
+    const [runStatus, setRunStatus] = useState(null);
+    const [loadingAccounts, setLoadingAccounts] = useState(true);
+    const [compiling, setCompiling] = useState(false);
+    const [running, setRunning] = useState(false);
+    const [error, setError] = useState(null);
+    const selectedAccount = useMemo(() => accounts.find((account) => account.id === accountId) ?? null, [accounts, accountId]);
+    useEffect(() => {
+        let alive = true;
+        setLoadingAccounts(true);
+        accountsApi.list({ deviceId: device.id, pageSize: 100 })
+            .then((data) => {
+            if (!alive)
+                return;
+            setAccounts(data.items);
+            setAccountId((current) => current || data.items[0]?.id || "");
+        })
+            .catch((err) => {
+            if (alive)
+                setError(err.message);
+        })
+            .finally(() => {
+            if (alive)
+                setLoadingAccounts(false);
+        });
+        return () => { alive = false; };
+    }, [device.id]);
+    const refreshRun = useCallback(async (id) => {
+        const next = await agencyApi.humanWorkflow.getRun(id);
+        setRunStatus(next);
+    }, []);
+    useEffect(() => {
+        if (!runResult?.id)
+            return;
+        refreshRun(runResult.id).catch((err) => setError(err.message));
+        const timer = setInterval(() => {
+            refreshRun(runResult.id).catch((err) => setError(err.message));
+        }, 5000);
+        return () => clearInterval(timer);
+    }, [refreshRun, runResult?.id]);
+    const compile = async () => {
+        if (!accountId || !intent.trim()) {
+            setError("Select an account and enter an instruction.");
+            return;
+        }
+        setCompiling(true);
+        setError(null);
+        setRunResult(null);
+        setRunStatus(null);
+        try {
+            const data = await agencyApi.humanWorkflow.compile({
+                device_id: device.id,
+                account_id: accountId,
+                intent: intent.trim(),
+            });
+            setCompileResult(data);
+        }
+        catch (err) {
+            setCompileResult(null);
+            setError(err.message);
+        }
+        finally {
+            setCompiling(false);
+        }
+    };
+    const run = async () => {
+        if (!compileResult || compileResult.safetyClass === "destructive")
+            return;
+        setRunning(true);
+        setError(null);
+        try {
+            const data = await agencyApi.humanWorkflow.run({
+                device_id: device.id,
+                account_id: compileResult.target.account_id,
+                intent: intent.trim(),
+                requestKey: compileResult.requestKey,
+                cacheKey: compileResult.cacheKey,
+            });
+            setRunResult(data);
+        }
+        catch (err) {
+            setError(err.message);
+        }
+        finally {
+            setRunning(false);
+        }
+    };
+    const planStepCount = compileResult?.plan.steps?.length ?? compileResult?.plan.compiledPlan?.steps?.length ?? 0;
+    const actionCount = compileResult?.plan.actions?.length ?? 0;
+    const canRun = !!compileResult && compileResult.safetyClass !== "destructive" && !running;
+    const terminalStatus = runStatus?.status === "completed" || runStatus?.status === "failed" || runStatus?.status === "cancelled";
+    return (_jsx("div", { style: {
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+            padding: "24px",
+        }, onClick: (e) => { if (e.target === e.currentTarget)
+            onClose(); }, children: _jsxs("div", { style: {
+                width: "min(860px, 100%)", maxHeight: "92vh", overflow: "auto",
+                background: "#0f172a", border: "1px solid #1e3a5f", borderRadius: "8px",
+                color: "#e2e8f0", fontFamily: "monospace",
+            }, children: [_jsxs("div", { style: { padding: "18px 20px", borderBottom: "1px solid #1e293b", display: "flex", justifyContent: "space-between", gap: "16px" }, children: [_jsxs("div", { children: [_jsx("h3", { style: { margin: 0, fontSize: "16px" }, children: "AI Workflow" }), _jsxs("div", { style: { marginTop: "4px", fontSize: "12px", color: "#64748b" }, children: [device.friendlyName ?? device.model ?? device.id, " \u00B7 ", device.status] })] }), _jsx("button", { onClick: onClose, style: ghostButtonStyle, children: "Close" })] }), _jsxs("div", { style: { padding: "18px 20px", display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(280px, 0.8fr)", gap: "18px" }, children: [_jsxs("div", { children: [_jsx("label", { style: labelStyle, children: "Account" }), _jsxs("select", { value: accountId, disabled: loadingAccounts || accounts.length === 0, onChange: (e) => { setAccountId(e.target.value); setCompileResult(null); }, style: inputStyle, children: [accounts.length === 0 && _jsx("option", { value: "", children: "No accounts on this device" }), accounts.map((account) => (_jsxs("option", { value: account.id, children: ["@", account.username, " \u00B7 ", account.platform, " \u00B7 ", account.status] }, account.id)))] }), _jsx("label", { style: { ...labelStyle, marginTop: "14px" }, children: "Instruction" }), _jsx("textarea", { value: intent, onChange: (e) => { setIntent(e.target.value); setCompileResult(null); }, placeholder: "What should this device do?", rows: 6, style: { ...inputStyle, resize: "vertical", lineHeight: 1.45 } }), selectedAccount && (_jsxs("div", { style: { marginTop: "8px", color: "#64748b", fontSize: "12px" }, children: ["Target: @", selectedAccount.username, " on ", selectedAccount.platform] })), error && (_jsx("div", { style: { marginTop: "12px", background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: "6px", padding: "8px 10px", color: "#fca5a5", fontSize: "12px" }, children: error })), _jsxs("div", { style: { display: "flex", gap: "10px", marginTop: "16px" }, children: [_jsx("button", { onClick: compile, disabled: compiling || !accountId || !intent.trim(), style: primaryButtonStyle(compiling || !accountId || !intent.trim() ? "#334155" : "#2563eb"), children: compiling ? "Compiling..." : "Compile" }), _jsx("button", { onClick: run, disabled: !canRun, style: primaryButtonStyle(canRun ? "#16a34a" : "#334155"), children: running ? "Queueing..." : "Run" })] })] }), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "12px" }, children: [_jsx(Panel, { title: "Preview", children: compileResult ? (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }, children: [_jsx(Badge, { label: compileResult.safetyClass, color: safetyColor(compileResult.safetyClass) }), _jsx(Badge, { label: compileResult.cacheHit ? "cache hit" : "compiled", color: "#60a5fa" })] }), _jsx(Metric, { label: "Steps", value: String(planStepCount) }), _jsx(Metric, { label: "Actions", value: String(actionCount) }), _jsx(Metric, { label: "Platform", value: compileResult.platform }), _jsx(Metric, { label: "Request", value: compileResult.requestKey }), compileResult.safetyClass === "destructive" && (_jsx("div", { style: { marginTop: "10px", color: "#fca5a5", fontSize: "12px" }, children: "Destructive plans cannot be launched from the dashboard." }))] })) : (_jsx(EmptyText, { value: "Compile to preview the generated plan." })) }), _jsx(Panel, { title: "Status", children: runResult ? (_jsxs(_Fragment, { children: [_jsx(Metric, { label: "Run", value: runResult.id }), _jsx(Metric, { label: "Task", value: runResult.taskId ?? "pending" }), _jsx(Metric, { label: "Status", value: runStatus?.status ?? runResult.status }), terminalStatus && (_jsx("pre", { style: preStyle, children: JSON.stringify(runStatus?.result ?? runStatus?.error ?? null, null, 2) }))] })) : (_jsx(EmptyText, { value: "Run a compiled plan to start polling status." })) })] })] })] }) }));
+}
+function Panel({ title, children }) {
+    return (_jsxs("section", { style: { border: "1px solid #1e293b", borderRadius: "8px", padding: "12px", background: "#111827" }, children: [_jsx("div", { style: { color: "#94a3b8", fontSize: "11px", textTransform: "uppercase", marginBottom: "10px" }, children: title }), children] }));
+}
+function Badge({ label, color }) {
+    return (_jsx("span", { style: { color, border: `1px solid ${color}55`, background: `${color}16`, borderRadius: "4px", padding: "3px 7px", fontSize: "11px" }, children: label }));
+}
+function Metric({ label, value }) {
+    return (_jsxs("div", { style: { display: "grid", gridTemplateColumns: "84px minmax(0, 1fr)", gap: "8px", marginBottom: "6px", fontSize: "12px" }, children: [_jsx("span", { style: { color: "#64748b" }, children: label }), _jsx("span", { style: { color: "#e2e8f0", overflowWrap: "anywhere" }, children: value })] }));
+}
+function EmptyText({ value }) {
+    return _jsx("div", { style: { color: "#64748b", fontSize: "12px", lineHeight: 1.5 }, children: value });
+}
+function safetyColor(safetyClass) {
+    if (safetyClass === "read_only")
+        return "#22c55e";
+    if (safetyClass === "standard")
+        return "#f59e0b";
+    return "#ef4444";
+}
+const labelStyle = {
+    display: "block",
+    marginBottom: "6px",
+    color: "#94a3b8",
+    fontSize: "12px",
+};
+const inputStyle = {
+    width: "100%",
+    boxSizing: "border-box",
+    background: "#1e293b",
+    border: "1px solid #334155",
+    borderRadius: "6px",
+    color: "#e2e8f0",
+    fontFamily: "monospace",
+    fontSize: "13px",
+    padding: "9px 10px",
+};
+const ghostButtonStyle = {
+    background: "transparent",
+    border: "1px solid #334155",
+    borderRadius: "6px",
+    color: "#94a3b8",
+    cursor: "pointer",
+    fontFamily: "monospace",
+    fontSize: "12px",
+    padding: "7px 12px",
+    height: "32px",
+};
+const preStyle = {
+    margin: "10px 0 0",
+    maxHeight: "180px",
+    overflow: "auto",
+    background: "#020617",
+    border: "1px solid #1e293b",
+    borderRadius: "6px",
+    color: "#cbd5e1",
+    fontSize: "11px",
+    padding: "8px",
+};
+function primaryButtonStyle(background) {
+    return {
+        background,
+        color: "#fff",
+        border: "none",
+        borderRadius: "6px",
+        cursor: background === "#334155" ? "not-allowed" : "pointer",
+        fontFamily: "monospace",
+        fontSize: "12px",
+        fontWeight: "bold",
+        padding: "9px 16px",
+    };
+}

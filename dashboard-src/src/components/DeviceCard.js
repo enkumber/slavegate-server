@@ -20,7 +20,7 @@ const STATUS_LABEL = {
     pending: "Pending",
     maintenance: "Maintenance",
 };
-export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, onRevoke, onDelete, onRenamed, onOtaPush, onAccountsClick }) {
+export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, onHumanWorkflow, onRevoke, onDelete, onRenamed, onOtaPush, onAccountsClick }) {
     const health = device.health;
     const statusColor = STATUS_COLOR[device.status] ?? "#6b7280";
     // ─── Inline rename state ──────────────────────────────────────────────────
@@ -116,7 +116,7 @@ export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, on
                         cursor: "pointer",
                         fontSize: "11px",
                         fontFamily: "monospace",
-                    }, children: ["\uD83D\uDCF1 ", accountsCount ?? 0, " accounts"] }) })), _jsxs("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" }, children: [device.status === "pending" && onApprove && (_jsx("button", { onClick: () => onApprove(device.id), style: btnStyle("#22c55e"), children: "Approve" })), device.status === "online" && onDispatchJob && (_jsx("button", { onClick: () => onDispatchJob(device), style: btnStyle("#3b82f6"), children: "Dispatch Job" })), device.status === "online" && onOtaPush && (_jsx("button", { onClick: () => onOtaPush(device.id), style: btnStyle("#8b5cf6"), children: "\uD83D\uDCE6 OTA" })), device.status !== "maintenance" && onRevoke && (_jsx("button", { onClick: () => { if (confirm(`Revoke ${device.friendlyName}?`))
+                    }, children: ["\uD83D\uDCF1 ", accountsCount ?? 0, " accounts"] }) })), _jsxs("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" }, children: [device.status === "pending" && onApprove && (_jsx("button", { onClick: () => onApprove(device.id), style: btnStyle("#22c55e"), children: "Approve" })), device.status === "online" && onDispatchJob && (_jsx("button", { onClick: () => onDispatchJob(device), style: btnStyle("#3b82f6"), children: "Dispatch Job" })), device.status === "online" && onHumanWorkflow && (_jsx("button", { onClick: () => onHumanWorkflow(device), style: btnStyle("#0ea5e9"), children: "AI Workflow" })), device.status === "online" && onOtaPush && (_jsx("button", { onClick: () => onOtaPush(device.id), style: btnStyle("#8b5cf6"), children: "\uD83D\uDCE6 OTA" })), device.status !== "maintenance" && onRevoke && (_jsx("button", { onClick: () => { if (confirm(`Revoke ${device.friendlyName}?`))
                             onRevoke(device.id); }, style: btnStyle("#ef4444"), children: "Revoke" })), onDelete && (_jsx("button", { onClick: () => {
                             if (confirm(`⚠️ DELETE ${device.friendlyName ?? device.model}?\n\nThis will permanently remove the device and all its job history. This action cannot be undone.`)) {
                                 onDelete(device.id);

@@ -88,9 +88,80 @@ export interface AgencyStats {
   materials: { total: number; used: number; unused: number };
 }
 
+export interface HumanWorkflowCompileRequest {
+  device_id: string;
+  account_id: string;
+  intent: string;
+}
+
+export interface HumanWorkflowTarget {
+  device_id: string;
+  device_model: string | null;
+  device_name: string | null;
+  account_id: string;
+  account_username: string;
+  account_platform: string;
+  client_id: string | null;
+}
+
+export interface HumanWorkflowCompileResult {
+  requestKey: string;
+  cacheHit: boolean;
+  cacheKey: string;
+  plan: {
+    templateId?: string;
+    version?: string;
+    steps?: unknown[];
+    actions?: unknown[];
+    compiledPlan?: {
+      steps?: unknown[];
+      llmBudget?: Record<string, unknown>;
+    };
+  };
+  safetyClass: "read_only" | "standard" | "destructive";
+  platform: string;
+  target: HumanWorkflowTarget;
+  llmBudget?: Record<string, unknown>;
+}
+
+export interface HumanWorkflowRunResult {
+  id: string;
+  status: "queued" | "compiling" | "running" | "completed" | "failed" | "paused";
+  taskId?: string;
+  requestKey?: string;
+  cacheKey?: string;
+}
+
+export interface AgencyWorkflowRun {
+  id: string;
+  client_id: string;
+  account_id: string | null;
+  device_id: string | null;
+  platform: string;
+  intent: string;
+  safety_class: string;
+  request_key: string;
+  cache_key: string | null;
+  status: "queued" | "compiling" | "running" | "completed" | "failed" | "cancelled";
+  task_id: string | null;
+  error: string | null;
+  result: unknown;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
 // ─── API ──────────────────────────────────────────────────────────────────────
 
 export const agencyApi = {
+  humanWorkflow: {
+    compile: (data: HumanWorkflowCompileRequest) =>
+      api.post<HumanWorkflowCompileResult>("/workflows/human/compile", data),
+    run: (data: HumanWorkflowCompileRequest & { requestKey?: string; cacheKey?: string }) =>
+      api.post<HumanWorkflowRunResult>("/workflows/human/run", data),
+    getRun: (id: string) => api.get<AgencyWorkflowRun>(`/agency/workflow-runs/${id}`),
+  },
+
   // Clients
   clients: {
     list: (params?: { page?: number; pageSize?: number; active?: boolean; type?: 'client' | 'farming' }) => {

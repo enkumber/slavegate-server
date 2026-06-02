@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { DeviceCard } from "../components/DeviceCard";
 import { AccountsModal } from "../components/AccountsModal";
+import { HumanWorkflowModal } from "../components/HumanWorkflowModal";
 import { api } from "../api/client";
 import { accountsApi, Account } from "../api/accounts";
 import type { Device } from "../../../shared/protocol/api-types";
@@ -31,6 +32,7 @@ export function FleetPage() {
   const [approveModal, setApproveModal] = useState<ApproveModal | null>(null);
   const [dispatchModal, setDispatchModal] = useState<JobDispatchModalState | null>(null);
   const [accountsModal, setAccountsModal] = useState<Device | null>(null);
+  const [humanWorkflowDevice, setHumanWorkflowDevice] = useState<Device | null>(null);
   const [accountsCounts, setAccountsCounts] = useState<Record<string, number>>({});
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
 
@@ -256,6 +258,7 @@ export function FleetPage() {
                 if (d) setApproveModal({ device: d });
               }}
               onDispatchJob={(d) => setDispatchModal({ device: d })}
+              onHumanWorkflow={(d) => setHumanWorkflowDevice(d)}
               onRevoke={handleRevoke}
               onDelete={handleDelete}
               onRenamed={fetchAll}
@@ -297,6 +300,14 @@ export function FleetPage() {
           deviceId={accountsModal.id}
           deviceName={accountsModal.friendlyName ?? accountsModal.model ?? "Device"}
           onClose={() => { setAccountsModal(null); fetchAccountsCounts(); }}
+        />
+      )}
+
+      {/* ── Human Workflow Modal ─────────────────────────────────────────────── */}
+      {humanWorkflowDevice && (
+        <HumanWorkflowModal
+          device={humanWorkflowDevice}
+          onClose={() => setHumanWorkflowDevice(null)}
         />
       )}
     </div>
@@ -447,13 +458,14 @@ function ApproveDeviceModal({
 // ─── LocationGroup (unchanged) ────────────────────────────────────────────────
 
 function LocationGroup({
-  locationId, devices, accountsCounts, onApprove, onDispatchJob, onRevoke, onDelete, onRenamed, onOtaPush, onAccountsClick,
+  locationId, devices, accountsCounts, onApprove, onDispatchJob, onHumanWorkflow, onRevoke, onDelete, onRenamed, onOtaPush, onAccountsClick,
 }: {
   locationId: string;
   devices: Device[];
   accountsCounts: Record<string, number>;
   onApprove: (id: string) => void;
   onDispatchJob: (d: Device) => void;
+  onHumanWorkflow: (d: Device) => void;
   onRevoke: (id: string) => void;
   onDelete: (id: string) => void;
   onRenamed: () => void;
@@ -484,6 +496,7 @@ function LocationGroup({
             accountsCount={accountsCounts[device.id] ?? 0}
             onApprove={() => onApprove(device.id)}
             onDispatchJob={() => onDispatchJob(device)}
+            onHumanWorkflow={() => onHumanWorkflow(device)}
             onRevoke={() => onRevoke(device.id)}
             onDelete={() => onDelete(device.id)}
             onRenamed={onRenamed}

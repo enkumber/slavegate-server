@@ -58,6 +58,7 @@ import {
 import { canaryService } from "../modules/canary/canary.service";
 import { alerting, AlertType } from "../modules/observability/alerts";
 import { getDb } from "../db/client";
+import { llmJson } from "../utils/llm";
 import { scalabilityConfig } from "../config/scalability.config";
 import { processSkillUpdateJobs, checkAndRollback } from "../modules/skill-updater";
 import { runNightlyPipeline } from "../modules/nautilus/pipeline";
@@ -69,8 +70,396 @@ import type { WorkflowTemplate } from "../modules/workflows/types";
 
 const router = Router();
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
+const HUMAN_WORKFLOW_DESTRUCTIVE_ACTIONS = new Set(["uninstall", "reboot", "ota_update", "force_clear"]);
+const HUMAN_WORKFLOW_SOCIAL_ACCOUNT_DENY_PATTERNS: RegExp[] = [
+  /\b(post|publish|comment|reply|like|unlike|upvote|downvote|follow|unfollow)\b/i,
+  /\b(subscribe|unsubscribe|join|leave)\b/i,
+  /\b(dm|direct message|private message|send message|send a message)\b/i,
+  /\b(change|reset|update)\s+(my\s+|the\s+)?password\b/i,
+  /\b(password|purchase|buy|checkout|payment|delete account|deactivate account)\b/i,
+];
+const PLATFORM_APP_IDS: Record<string, string> = {
+  reddit: "com.reddit.frontpage",
+  instagram: "com.instagram.android",
+  tiktok: "com.zhiliaoapp.musically",
+  facebook: "com.facebook.katana",
+  twitter: "com.twitter.android",
+};
+
 function generatedWorkflowCacheResult(cacheKey?: string, requestKey?: string): "cache_hit" | "canonical_hit" {
   return requestKey && !cacheKey ? "canonical_hit" : "cache_hit";
+}
+
+function computeHumanWorkflowRequestKey(deviceId: string, accountId: string, intent: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(`${deviceId}:${accountId}:${intent.trim()}`)
+    .digest("hex")
+    .slice(0, 24);
+}
+
+type HumanWorkflowSafetyClass = "read_only" | "standard" | "destructive";
+
+interface HumanWorkflowTarget {
+  device_id: string;
+  device_model: string | null;
+  device_name: string | null;
+  account_id: string;
+  account_username: string;
+  account_platform: string;
+  client_id: string | null;
+}
+
+function humanWorkflowAppId(platform: string): string {
+  return PLATFORM_APP_IDS[platform.toLowerCase()] ?? platform;
+}
+
+function humanWorkflowSafetyClass(template: WorkflowTemplate, compiledPlan: GeneratedWorkflowCompiledPlan): HumanWorkflowSafetyClass {
+  const metadataSafety = compiledPlan.metadata.safetyClass;
+  if (metadataSafety === "read_only") return "read_only";
+
+  const hasDestructiveAction = compiledPlan.steps.some((step) => {
+    const action = typeof step.action === "string" ? step.action : "";
+    return HUMAN_WORKFLOW_DESTRUCTIVE_ACTIONS.has(action);
+  });
+  if (hasDestructiveAction) return "destructive";
+
+  const hasWriteAction = compiledPlan.steps.some((step) => {
+    const action = typeof step.action === "string" ? step.action : "";
+    return ["tap", "type", "swipe", "press_key"].includes(action);
+  });
+  if (hasWriteAction) return "standard";
+  return template.safetyClass === "read_only" ? "read_only" : "standard";
+}
+
+function humanWorkflowContainsDeniedSocialOrAccountChange(value: unknown): boolean {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  if (!text) return false;
+  return HUMAN_WORKFLOW_SOCIAL_ACCOUNT_DENY_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function assertHumanWorkflowIntentAllowed(intent: string): void {
+  if (!humanWorkflowContainsDeniedSocialOrAccountChange(intent)) return;
+  throw Object.assign(new Error("Dashboard human workflows cannot post, message, follow, purchase, or change account state"), {
+    status: 400,
+    code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+  });
+}
+
+function assertHumanWorkflowPlanAllowed(
+  intent: string,
+  template: WorkflowTemplate,
+  compiledPlan: GeneratedWorkflowCompiledPlan
+): HumanWorkflowSafetyClass {
+  const safetyClass = humanWorkflowSafetyClass(template, compiledPlan);
+  if (safetyClass === "destructive") {
+    throw Object.assign(new Error("Destructive dashboard human workflows are not allowed"), {
+      status: 400,
+      code: "HUMAN_WORKFLOW_DESTRUCTIVE_NOT_ALLOWED",
+    });
+  }
+  if (humanWorkflowContainsDeniedSocialOrAccountChange({ intent, template, compiledPlan })) {
+    throw Object.assign(new Error("Dashboard human workflows cannot post, message, follow, purchase, or change account state"), {
+      status: 400,
+      code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+    });
+  }
+  return safetyClass;
+}
+
+function humanWorkflowPlanPreview(template: WorkflowTemplate, compiledPlan: GeneratedWorkflowCompiledPlan): Record<string, unknown> {
+  return {
+    templateId: template.id,
+    version: template.version,
+    steps: template.steps,
+    actions: compiledPlan.steps
+      .filter((step) => step.type === "action")
+      .map((step) => ({
+        id: step.id,
+        action: step.action,
+        path: step.path,
+        target: step.selectorName ?? step.selectorId ?? null,
+        bindingSource: step.bindingSource ?? null,
+        usedAppMap: step.usedAppMap ?? false,
+      })),
+    compiledPlan,
+  };
+}
+
+async function resolveHumanWorkflowTarget(deviceId: string, accountId: string): Promise<HumanWorkflowTarget | null> {
+  const db = getDb();
+  const result = await db.query(
+    `SELECT
+       d.id AS device_id,
+       d.model AS device_model,
+       d.friendly_name AS device_name,
+       a.id AS account_id,
+       a.username AS account_username,
+       a.platform AS account_platform,
+       a.device_id AS account_device_id,
+       a.client_id AS client_id
+     FROM devices d
+     LEFT JOIN accounts a ON a.id = $2
+     WHERE d.id = $1`,
+    [deviceId, accountId],
+  );
+  const row = result.rows[0] as Record<string, unknown> | undefined;
+  if (!row || !row.account_id) return null;
+  if (row.account_device_id !== row.device_id) {
+    throw Object.assign(new Error("Account is not bound to selected device"), { status: 400, code: "ACCOUNT_DEVICE_MISMATCH" });
+  }
+  return {
+    device_id: row.device_id as string,
+    device_model: (row.device_model as string | null) ?? null,
+    device_name: (row.device_name as string | null) ?? null,
+    account_id: row.account_id as string,
+    account_username: row.account_username as string,
+    account_platform: row.account_platform as string,
+    client_id: (row.client_id as string | null) ?? null,
+  };
+}
+
+function cachedWorkflowPreview(cached: GeneratedWorkflowPlanCacheRecord, target: HumanWorkflowTarget, requestKey: string, intent: string): Record<string, unknown> {
+  const safetyClass = assertHumanWorkflowPlanAllowed(intent, cached.workflow, cached.compiledPlan);
+  return {
+    requestKey,
+    cacheHit: true,
+    cacheKey: cached.cacheKey,
+    plan: humanWorkflowPlanPreview(cached.workflow, cached.compiledPlan),
+    safetyClass,
+    platform: target.account_platform,
+    target,
+    llmBudget: cached.compiledPlan.llmBudget,
+  };
+}
+
+async function compileHumanWorkflowPlan(input: {
+  deviceId: string;
+  accountId: string;
+  intent: string;
+}): Promise<Record<string, unknown> & { requestKey: string; cacheKey: string; safetyClass: HumanWorkflowSafetyClass; target: HumanWorkflowTarget }> {
+  const intent = input.intent.trim();
+  assertHumanWorkflowIntentAllowed(intent);
+  const requestKey = computeHumanWorkflowRequestKey(input.deviceId, input.accountId, intent);
+  const target = await resolveHumanWorkflowTarget(input.deviceId, input.accountId);
+  if (!target) {
+    throw Object.assign(new Error("Device or account not found"), { status: 400, code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND" });
+  }
+
+  const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
+  if (cached) {
+    return cachedWorkflowPreview(cached, target, requestKey, intent) as Record<string, unknown> & {
+      requestKey: string;
+      cacheKey: string;
+      safetyClass: HumanWorkflowSafetyClass;
+      target: HumanWorkflowTarget;
+    };
+  }
+
+  const platform = target.account_platform;
+  const packageName = humanWorkflowAppId(platform);
+  const appMap = await loadMap(packageName);
+  const appMapHintSet = appMap ? buildGeneratedWorkflowAppMapHints(appMap) : null;
+  const availableScreens = resolveGeneratedWorkflowScreens(platform);
+  const appMapHints = appMapHintSet?.hints;
+  const goal = intent;
+  const clientContext = [
+    `Dashboard human workflow request.`,
+    `Account @${target.account_username} on ${platform}.`,
+    `Selected device ${target.device_name ?? target.device_model ?? target.device_id}.`,
+    `Compile intent for preview first; do not include secrets.`,
+  ].join(" ");
+  const prompt = buildGeneratedWorkflowPrompt({
+    platform,
+    packageName,
+    goal,
+    clientContext,
+    availableScreens,
+    appMapHints,
+  });
+
+  const rawWorkflow = await llmJson<WorkflowTemplate>(prompt, undefined, {
+    max_tokens: 4096,
+    system: "You are a Phone Network workflow compiler. Return only valid WorkflowTemplate JSON.",
+  });
+  const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
+  if (!validation.template) {
+    throw Object.assign(new Error("workflow failed validation"), {
+      status: 400,
+      code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
+      validationErrors: validation.errors,
+    });
+  }
+
+  const template = validation.template;
+  let compiledPlan = compileGeneratedWorkflowTemplate(template);
+  compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
+  await workflowService.saveTemplate(template);
+  await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+    source: "dashboard_human",
+    intent,
+    deviceId: input.deviceId,
+    accountId: input.accountId,
+    platform,
+    compiledAt: new Date().toISOString(),
+  });
+
+  const safetyClass = assertHumanWorkflowPlanAllowed(intent, template, compiledPlan);
+  return {
+    requestKey,
+    cacheHit: false,
+    cacheKey: compiledPlan.cacheKey,
+    plan: humanWorkflowPlanPreview(template, compiledPlan),
+    safetyClass,
+    platform,
+    target,
+    llmBudget: compiledPlan.llmBudget,
+  };
+}
+
+async function queueHumanAgencyWorkflowRun(input: {
+  requestKey: string;
+  cacheKey?: string;
+  target: HumanWorkflowTarget;
+  intent: string;
+  compiledBy?: unknown;
+}): Promise<Record<string, unknown>> {
+  if (!input.target.client_id) {
+    throw Object.assign(new Error("Account must be linked to a client before running dashboard human workflows"), {
+      status: 400,
+      code: "ACCOUNT_CLIENT_REQUIRED",
+    });
+  }
+
+  const db = getDb();
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`,
+      ["dashboard_human", `${input.target.device_id}:${input.target.account_id}:${input.requestKey}`],
+    );
+    const cacheResult = await client.query<Record<string, unknown>>(
+      input.cacheKey
+        ? `SELECT * FROM generated_workflow_plan_cache WHERE cache_key = $1`
+        : `SELECT * FROM generated_workflow_plan_cache WHERE request_key = $1 ORDER BY updated_at DESC LIMIT 1`,
+      [input.cacheKey ?? input.requestKey],
+    );
+    const cached = cacheResult.rows[0];
+    if (!cached) {
+      await client.query("ROLLBACK");
+      throw Object.assign(new Error("canonical generated workflow artifact not found"), {
+        status: 404,
+        code: "GENERATED_WORKFLOW_CACHE_MISS",
+      });
+    }
+
+    const workflow = cached.workflow as WorkflowTemplate;
+    const compiledPlan = cached.compiled_plan as GeneratedWorkflowCompiledPlan;
+    let safetyClass: HumanWorkflowSafetyClass;
+    try {
+      safetyClass = assertHumanWorkflowPlanAllowed(input.intent, workflow, compiledPlan);
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    }
+
+    const existingRunResult = await client.query<{ id: string; task_id: string | null; status: string }>(
+      `SELECT id, task_id, status
+       FROM agency_workflow_runs
+       WHERE request_key = $1
+         AND device_id = $2
+         AND account_id = $3
+         AND context ->> 'source' = 'dashboard_human'
+       ORDER BY created_at ASC
+       LIMIT 1
+       FOR UPDATE`,
+      [input.requestKey, input.target.device_id, input.target.account_id],
+    );
+    const existingRun = existingRunResult.rows[0];
+    if (existingRun?.task_id) {
+      await client.query("COMMIT");
+      return {
+        id: existingRun.id,
+        status: existingRun.status,
+        taskId: existingRun.task_id,
+        requestKey: input.requestKey,
+        cacheKey: cached.cache_key,
+      };
+    }
+
+    const context = {
+      source: "dashboard_human",
+      intent: input.intent,
+      compiledAt: new Date().toISOString(),
+      compiledBy: input.compiledBy ?? null,
+      clientId: input.target.client_id,
+      accountId: input.target.account_id,
+      deviceId: input.target.device_id,
+      accountUsername: input.target.account_username,
+      accountPlatform: input.target.account_platform,
+    };
+    let runId = existingRun?.id;
+    if (!runId) {
+      const runResult = await client.query<{ id: string }>(
+        `INSERT INTO agency_workflow_runs
+           (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
+            canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, status, context)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, 'queued', $11)
+         RETURNING id`,
+        [
+          input.target.client_id,
+          input.target.account_id,
+          input.target.device_id,
+          input.target.account_platform,
+          input.intent,
+          safetyClass,
+          input.requestKey,
+          cached.canonical_workflow_id,
+          cached.canonical_workflow_version,
+          cached.compiled_plan_hash,
+          JSON.stringify(context),
+        ],
+      );
+      runId = runResult.rows[0].id;
+    }
+    const taskParams = {
+      requestKey: input.requestKey,
+      clientId: input.target.client_id,
+      agencyWorkflowRunId: runId,
+      workflowRunId: runId,
+      intent: input.intent,
+      source: "dashboard_human",
+    };
+    const taskResult = await client.query<{ id: string }>(
+      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
+       VALUES ($1, $2, 'generated_workflow', $3, $4, 'queued')
+       RETURNING id`,
+      [
+        input.target.account_id,
+        input.target.device_id,
+        JSON.stringify(taskParams),
+        new Date().toISOString(),
+      ],
+    );
+    const taskId = taskResult.rows[0].id;
+    await client.query(`UPDATE agency_workflow_runs SET task_id = $1, updated_at = NOW() WHERE id = $2`, [taskId, runId]);
+    await client.query("COMMIT");
+    return {
+      id: runId,
+      status: existingRun?.status ?? "queued",
+      taskId,
+      requestKey: input.requestKey,
+      cacheKey: cached.cache_key,
+    };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 function inferGeneratedWorkflowAppId(template: WorkflowTemplate): string | null {
@@ -446,6 +835,119 @@ router.get("/workflows", requireAuth, async (req, res) => {
   const status   = req.query.status as string | undefined;
   const result = await workflowService.list(deviceId, status as Parameters<typeof workflowService.list>[1], page, pageSize);
   res.json({ ok: true, data: result });
+});
+
+// ─── Dashboard Human Workflow Launcher ────────────────────────────────────────
+
+router.post("/workflows/human/compile", async (req, res) => {
+  try {
+    const { device_id, account_id, intent } = req.body as {
+      device_id?: unknown;
+      account_id?: unknown;
+      intent?: unknown;
+    };
+    if (typeof device_id !== "string" || !UUID_RE.test(device_id)) {
+      return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "device_id must be a UUID" });
+    }
+    if (typeof account_id !== "string" || !UUID_RE.test(account_id)) {
+      return res.status(400).json({ ok: false, code: "ACCOUNT_ID_REQUIRED", error: "account_id must be a UUID" });
+    }
+    if (typeof intent !== "string" || intent.trim().length === 0) {
+      return res.status(400).json({ ok: false, code: "INTENT_REQUIRED", error: "intent required" });
+    }
+    if (intent.trim().length > 2000) {
+      return res.status(400).json({ ok: false, code: "INTENT_TOO_LONG", error: "intent must be at most 2000 characters" });
+    }
+
+    const data = await compileHumanWorkflowPlan({
+      deviceId: device_id,
+      accountId: account_id,
+      intent,
+    });
+    res.json({ ok: true, data });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string; validationErrors?: string[] };
+    res.status(typed.status ?? 500).json({
+      ok: false,
+      code: typed.code,
+      error: typed.message,
+      errors: typed.validationErrors,
+    });
+  }
+});
+
+router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
+  try {
+    const { device_id, account_id, intent, requestKey, cacheKey } = req.body as {
+      device_id?: unknown;
+      account_id?: unknown;
+      intent?: unknown;
+      requestKey?: unknown;
+      cacheKey?: unknown;
+    };
+    if (typeof device_id !== "string" || !UUID_RE.test(device_id)) {
+      return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "device_id must be a UUID" });
+    }
+    if (typeof account_id !== "string" || !UUID_RE.test(account_id)) {
+      return res.status(400).json({ ok: false, code: "ACCOUNT_ID_REQUIRED", error: "account_id must be a UUID" });
+    }
+    if (typeof intent !== "string" || intent.trim().length === 0) {
+      return res.status(400).json({ ok: false, code: "INTENT_REQUIRED", error: "intent required" });
+    }
+    if (intent.trim().length > 2000) {
+      return res.status(400).json({ ok: false, code: "INTENT_TOO_LONG", error: "intent must be at most 2000 characters" });
+    }
+    if (requestKey !== undefined && (typeof requestKey !== "string" || !GENERATED_WORKFLOW_KEY_RE.test(requestKey))) {
+      return res.status(400).json({ ok: false, code: "REQUEST_KEY_INVALID", error: "requestKey must be a 24-character lowercase hex string" });
+    }
+    if (cacheKey !== undefined && (typeof cacheKey !== "string" || !GENERATED_WORKFLOW_KEY_RE.test(cacheKey))) {
+      return res.status(400).json({ ok: false, code: "CACHE_KEY_INVALID", error: "cacheKey must be a 24-character lowercase hex string" });
+    }
+
+    const compiled = await compileHumanWorkflowPlan({
+      deviceId: device_id,
+      accountId: account_id,
+      intent,
+    });
+    const expectedRequestKey = computeHumanWorkflowRequestKey(device_id, account_id, intent);
+    if (typeof requestKey === "string" && requestKey !== expectedRequestKey) {
+      return res.status(400).json({
+        ok: false,
+        code: "REQUEST_KEY_MISMATCH",
+        error: "requestKey does not match device_id, account_id and intent",
+      });
+    }
+    if (compiled.safetyClass === "destructive") {
+      return res.status(400).json({
+        ok: false,
+        code: "HUMAN_WORKFLOW_DESTRUCTIVE_NOT_ALLOWED",
+        error: "Destructive dashboard human workflows are not allowed",
+      });
+    }
+    if (typeof cacheKey === "string" && cacheKey !== compiled.cacheKey) {
+      return res.status(400).json({
+        ok: false,
+        code: "CACHE_KEY_MISMATCH",
+        error: "cacheKey does not match the compiled workflow preview",
+      });
+    }
+    const run = await queueHumanAgencyWorkflowRun({
+      requestKey: expectedRequestKey,
+      cacheKey: typeof cacheKey === "string" ? cacheKey : compiled.cacheKey,
+      target: compiled.target,
+      intent: intent.trim(),
+      compiledBy: (req as any).dashboardUser?.sub ?? (req as any).dashboardUser?.userId ?? (req as any).authPrincipal?.userId,
+    });
+    res.status(201).json({ ok: true, data: run });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string; validationErrors?: string[] };
+    res.status(typed.status ?? 500).json({
+      ok: false,
+      code: typed.code,
+      error: typed.message,
+      errors: typed.validationErrors,
+    });
+  }
 });
 
 router.get("/workflows/:id", requireAuth, async (req, res) => {

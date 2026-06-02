@@ -5,6 +5,11 @@
 import { api } from "./client";
 // ─── API ──────────────────────────────────────────────────────────────────────
 export const agencyApi = {
+    humanWorkflow: {
+        compile: (data) => api.post("/workflows/human/compile", data),
+        run: (data) => api.post("/workflows/human/run", data),
+        getRun: (id) => api.get(`/agency/workflow-runs/${id}`),
+    },
     // Clients
     clients: {
         list: (params) => {

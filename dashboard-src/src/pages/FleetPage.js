@@ -7,6 +7,7 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-run
 import { useState, useEffect, useCallback, useRef } from "react";
 import { DeviceCard } from "../components/DeviceCard";
 import { AccountsModal } from "../components/AccountsModal";
+import { HumanWorkflowModal } from "../components/HumanWorkflowModal";
 import { api } from "../api/client";
 import { accountsApi } from "../api/accounts";
 // ─── Main page ────────────────────────────────────────────────────────────────
@@ -18,6 +19,7 @@ export function FleetPage() {
     const [approveModal, setApproveModal] = useState(null);
     const [dispatchModal, setDispatchModal] = useState(null);
     const [accountsModal, setAccountsModal] = useState(null);
+    const [humanWorkflowDevice, setHumanWorkflowDevice] = useState(null);
     const [accountsCounts, setAccountsCounts] = useState({});
     const [lastRefresh, setLastRefresh] = useState(new Date());
     // ─── Fetch fleet (grouped) ──────────────────────────────────────────────────
@@ -153,7 +155,7 @@ export function FleetPage() {
                             const d = devices.find(x => x.id === id);
                             if (d)
                                 setApproveModal({ device: d });
-                        }, onDispatchJob: (d) => setDispatchModal({ device: d }), onRevoke: handleRevoke, onDelete: handleDelete, onRenamed: fetchAll, onOtaPush: handleOtaPushSingle, onAccountsClick: (d) => setAccountsModal(d) }, locationId))), total === 0 && pending.length === 0 && (_jsxs("div", { style: { color: "#64748b", fontFamily: "monospace", textAlign: "center", marginTop: "60px" }, children: ["No devices yet.", _jsx("br", {}), "Install the agent on a device \u2014 it will appear here automatically."] }))] })), approveModal && (_jsx(ApproveDeviceModal, { device: approveModal.device, onApprove: handleApprove, onClose: () => setApproveModal(null) })), dispatchModal && (_jsx(JobDispatchModal, { device: dispatchModal.device, onClose: () => setDispatchModal(null), onDispatched: fetchAll })), accountsModal && (_jsx(AccountsModal, { deviceId: accountsModal.id, deviceName: accountsModal.friendlyName ?? accountsModal.model ?? "Device", onClose: () => { setAccountsModal(null); fetchAccountsCounts(); } }))] }));
+                        }, onDispatchJob: (d) => setDispatchModal({ device: d }), onHumanWorkflow: (d) => setHumanWorkflowDevice(d), onRevoke: handleRevoke, onDelete: handleDelete, onRenamed: fetchAll, onOtaPush: handleOtaPushSingle, onAccountsClick: (d) => setAccountsModal(d) }, locationId))), total === 0 && pending.length === 0 && (_jsxs("div", { style: { color: "#64748b", fontFamily: "monospace", textAlign: "center", marginTop: "60px" }, children: ["No devices yet.", _jsx("br", {}), "Install the agent on a device \u2014 it will appear here automatically."] }))] })), approveModal && (_jsx(ApproveDeviceModal, { device: approveModal.device, onApprove: handleApprove, onClose: () => setApproveModal(null) })), dispatchModal && (_jsx(JobDispatchModal, { device: dispatchModal.device, onClose: () => setDispatchModal(null), onDispatched: fetchAll })), accountsModal && (_jsx(AccountsModal, { deviceId: accountsModal.id, deviceName: accountsModal.friendlyName ?? accountsModal.model ?? "Device", onClose: () => { setAccountsModal(null); fetchAccountsCounts(); } })), humanWorkflowDevice && (_jsx(HumanWorkflowModal, { device: humanWorkflowDevice, onClose: () => setHumanWorkflowDevice(null) }))] }));
 }
 // ─── PendingDeviceRow ─────────────────────────────────────────────────────────
 function PendingDeviceRow({ device, onApprove, onBlock, }) {
@@ -219,13 +221,13 @@ function ApproveDeviceModal({ device, onApprove, onClose, }) {
                             }, children: busy ? "Approving…" : "Approve" })] })] }) }));
 }
 // ─── LocationGroup (unchanged) ────────────────────────────────────────────────
-function LocationGroup({ locationId, devices, accountsCounts, onApprove, onDispatchJob, onRevoke, onDelete, onRenamed, onOtaPush, onAccountsClick, }) {
+function LocationGroup({ locationId, devices, accountsCounts, onApprove, onDispatchJob, onHumanWorkflow, onRevoke, onDelete, onRenamed, onOtaPush, onAccountsClick, }) {
     const online = devices.filter(d => d.status === "online").length;
     const label = locationId === "unassigned" ? "Unassigned" : locationId.toUpperCase();
     return (_jsxs("div", { style: { marginBottom: "28px" }, children: [_jsxs("div", { style: {
                     display: "flex", alignItems: "center", gap: "10px",
                     marginBottom: "12px", borderBottom: "1px solid #1e293b", paddingBottom: "8px",
-                }, children: [_jsxs("span", { style: { fontFamily: "monospace", fontSize: "13px", color: "#64748b" }, children: ["\uD83D\uDCCD ", label] }), _jsxs("span", { style: { fontSize: "11px", color: "#475569" }, children: [online, "/", devices.length, " online"] })] }), _jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: "12px" }, children: devices.map(device => (_jsx(DeviceCard, { device: device, accountsCount: accountsCounts[device.id] ?? 0, onApprove: () => onApprove(device.id), onDispatchJob: () => onDispatchJob(device), onRevoke: () => onRevoke(device.id), onDelete: () => onDelete(device.id), onRenamed: onRenamed, onOtaPush: () => onOtaPush(device.id), onAccountsClick: () => onAccountsClick(device) }, device.id))) })] }));
+                }, children: [_jsxs("span", { style: { fontFamily: "monospace", fontSize: "13px", color: "#64748b" }, children: ["\uD83D\uDCCD ", label] }), _jsxs("span", { style: { fontSize: "11px", color: "#475569" }, children: [online, "/", devices.length, " online"] })] }), _jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: "12px" }, children: devices.map(device => (_jsx(DeviceCard, { device: device, accountsCount: accountsCounts[device.id] ?? 0, onApprove: () => onApprove(device.id), onDispatchJob: () => onDispatchJob(device), onHumanWorkflow: () => onHumanWorkflow(device), onRevoke: () => onRevoke(device.id), onDelete: () => onDelete(device.id), onRenamed: onRenamed, onOtaPush: () => onOtaPush(device.id), onAccountsClick: () => onAccountsClick(device) }, device.id))) })] }));
 }
 // ─── Badge ────────────────────────────────────────────────────────────────────
 function Badge({ label, value, color }) {

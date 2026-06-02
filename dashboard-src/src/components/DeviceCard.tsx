@@ -8,11 +8,19 @@ import { useState, useRef, useEffect } from "react";
 import { api } from "../api/client";
 import type { Device } from "../../../shared/protocol/api-types";
 
+type DeviceCardHealth = NonNullable<Device["health"]> & {
+  publicIp?: string;
+  connectionType?: "wireguard" | "relay" | string;
+  rustdeskId?: string;
+  rustdeskRunning?: boolean;
+};
+
 interface Props {
   device: Device;
   accountsCount?: number;   // number of accounts on this device
   onApprove?: (id: string) => void;
   onDispatchJob?: (device: Device) => void;
+  onHumanWorkflow?: (device: Device) => void;
   onRevoke?: (id: string) => void;
   onDelete?: (id: string) => void;
   onRenamed?: () => void;   // optional refresh callback after rename
@@ -36,8 +44,8 @@ const STATUS_LABEL: Record<string, string> = {
   maintenance: "Maintenance",
 };
 
-export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, onRevoke, onDelete, onRenamed, onOtaPush, onAccountsClick }: Props) {
-  const health = device.health;
+export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, onHumanWorkflow, onRevoke, onDelete, onRenamed, onOtaPush, onAccountsClick }: Props) {
+  const health = device.health as DeviceCardHealth | undefined;
   const statusColor = STATUS_COLOR[device.status] ?? "#6b7280";
 
   // ─── Inline rename state ──────────────────────────────────────────────────
@@ -227,6 +235,11 @@ export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, on
         {device.status === "online" && onDispatchJob && (
           <button onClick={() => onDispatchJob(device)} style={btnStyle("#3b82f6")}>
             Dispatch Job
+          </button>
+        )}
+        {device.status === "online" && onHumanWorkflow && (
+          <button onClick={() => onHumanWorkflow(device)} style={btnStyle("#0ea5e9")}>
+            AI Workflow
           </button>
         )}
         {device.status === "online" && onOtaPush && (
