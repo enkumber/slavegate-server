@@ -118,9 +118,7 @@ function humanWorkflowAppId(platform: string): string {
 }
 
 function humanWorkflowSafetyClass(template: WorkflowTemplate, compiledPlan: GeneratedWorkflowCompiledPlan): HumanWorkflowSafetyClass {
-  const metadataSafety = compiledPlan.metadata.safetyClass;
-  if (metadataSafety === "read_only") return "read_only";
-
+  // Check actual steps first; do not trust metadata alone.
   const hasDestructiveAction = compiledPlan.steps.some((step) => {
     const action = typeof step.action === "string" ? step.action : "";
     return HUMAN_WORKFLOW_DESTRUCTIVE_ACTIONS.has(action);
@@ -132,6 +130,7 @@ function humanWorkflowSafetyClass(template: WorkflowTemplate, compiledPlan: Gene
     return ["tap", "type", "swipe", "press_key"].includes(action);
   });
   if (hasWriteAction) return "standard";
+
   return template.safetyClass === "read_only" ? "read_only" : "standard";
 }
 

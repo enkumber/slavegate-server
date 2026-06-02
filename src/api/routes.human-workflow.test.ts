@@ -190,6 +190,38 @@ describe("dashboard human workflow routes", () => {
     expect(response.body.data.plan.actions).toHaveLength(2);
   });
 
+  it("rejects tap/type/swipe steps despite read_only metadata", async () => {
+    const base = cachedPlan();
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
+      ...base,
+      workflow: {
+        ...base.workflow,
+        safetyClass: "read_only",
+      },
+      compiledPlan: {
+        ...base.compiledPlan,
+        metadata: { ...base.compiledPlan.metadata, safetyClass: "read_only" },
+        steps: [
+          { id: "tap-screen", type: "action", action: "tap", params: { x: 540, y: 960 } },
+          { id: "type-text", type: "action", action: "type", params: { text: "hello" } },
+          { id: "swipe-up", type: "action", action: "swipe", params: { distancePx: 400 } },
+        ],
+      },
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: INTENT,
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_APPROVAL_REQUIRED",
+    });
+  });
+
   it("rejects compile when the account is bound to another device", async () => {
     mocks.db.query.mockImplementationOnce(async (sql: string) => {
       expect(sql).toContain("LEFT JOIN accounts");
@@ -305,6 +337,43 @@ describe("dashboard human workflow routes", () => {
         ...base.compiledPlan,
         metadata: { ...base.compiledPlan.metadata, safetyClass: null },
         steps: [{ id: "tap-settings", type: "action", action: "tap", path: ["settings"], selectorName: "settings_button", selectorId: null }],
+      },
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: INTENT,
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_APPROVAL_REQUIRED",
+    });
+  });
+
+  it("rejects write actions even when compiled metadata claims read-only safety", async () => {
+    const base = cachedPlan();
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
+      ...base,
+      workflow: {
+        ...base.workflow,
+        safetyClass: "read_only",
+        steps: [
+          { id: "tap-search", type: "action", action: "tap", params: { selectorName: "search_box" } },
+          { id: "type-query", type: "action", action: "type", params: { text: "account health" } },
+          { id: "swipe-feed", type: "action", action: "swipe", params: { direction: "up" } },
+        ],
+      },
+      compiledPlan: {
+        ...base.compiledPlan,
+        metadata: { ...base.compiledPlan.metadata, safetyClass: "read_only" },
+        steps: [
+          { id: "tap-search", type: "action", action: "tap", path: ["search"], selectorName: "search_box", selectorId: null },
+          { id: "type-query", type: "action", action: "type", path: ["search"], selectorName: "search_box", selectorId: null },
+          { id: "swipe-feed", type: "action", action: "swipe", path: ["feed"], selectorName: "feed", selectorId: null },
+        ],
       },
     });
 
