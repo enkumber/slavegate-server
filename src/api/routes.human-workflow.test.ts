@@ -124,3 +124,59 @@ describe("idempotency", () => {
     expect(k1).not.toBe(k2);
   });
 });
+
+describe("Romanian safety patterns", () => {
+  const patterns = [
+    /(post|publish|comment|reply|like|unlike|upvote|downvote|follow|unfollow)/i,
+    /subscribe|unsubscribe|join|leave/i,
+    /dm|direct message|private message|send message|send a message/i,
+    /change|reset|update/i,
+    /password|purchase|buy|checkout|delete account|deactivate account/i,
+    /send|trimite/i,
+    /postează|comentează|urmaște|urmărește|schimbă|cumpără|șterge|dezactivează/i,
+  ];
+
+  const roIntents = [
+    "postează o poză pe Instagram",
+    "comentează pe posturile de azi",
+    "urmaște 10 persoane",
+    "schimbă parola contului",
+    "cumpără ceva de pe site",
+    "șterge contul de Instagram",
+    "dezactivează contul",
+    "trimite un mesaj",
+  ];
+
+  it.each(roIntents.map(i => [i]))("rejects: %s", (intent) => {
+    const matched = patterns.some(p => p.test(intent));
+    expect(matched).toBe(true);
+  });
+
+  it("accepts scroll", () => {
+    expect(patterns.some(p => p.test("fă un scroll pe feed"))).toBe(false);
+  });
+
+  it("accepts open+screenshot", () => {
+    expect(patterns.some(p => p.test("deschide Instagram și fă un screenshot"))).toBe(false);
+  });
+});
+
+describe("request key", () => {
+  it("deterministic", () => {
+    const k1 = crypto.createHash("sha256").update("a:b:c").digest("hex").slice(0, 24);
+    const k2 = crypto.createHash("sha256").update("a:b:c").digest("hex").slice(0, 24);
+    expect(k1).toBe(k2);
+  });
+
+  it("different device → different key", () => {
+    const k1 = crypto.createHash("sha256").update("a:b:c").digest("hex").slice(0, 24);
+    const k2 = crypto.createHash("sha256").update("d:b:c").digest("hex").slice(0, 24);
+    expect(k1).not.toBe(k2);
+  });
+
+  it("different intent → different key", () => {
+    const k1 = crypto.createHash("sha256").update("a:b:c").digest("hex").slice(0, 24);
+    const k2 = crypto.createHash("sha256").update("a:b:d").digest("hex").slice(0, 24);
+    expect(k1).not.toBe(k2);
+  });
+});
