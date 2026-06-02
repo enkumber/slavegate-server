@@ -10,6 +10,7 @@
 
 import { Router, Request, Response, NextFunction } from "express";
 import crypto from "crypto";
+import { requireAdminAuth, requireApiGateAuth, signJwt, verifyJwt } from "./auth.middleware";
 import { devicesService } from "../modules/devices/devices.service";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { authService } from "../modules/auth/auth.service";
@@ -177,71 +178,7 @@ function rateLimit(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
-// ─── Auth middleware ──────────────────────────────────────────────────────────
-
-/**
- * Accepts either:
- * 1. X-Api-Key header (for programmatic/headless access)
- * 2. Authorization: Bearer <jwt> (for dashboard)
- *
- * API_KEY is validated at startup — guaranteed to exist here.
- */
-function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  const apiKey = req.headers["x-api-key"];
-  if (apiKey && apiKey === process.env.API_KEY) return next();
-
-  const authHeader = req.headers["authorization"];
-  if (authHeader?.startsWith("Bearer ")) {
-    const token = authHeader.slice(7);
-    const result = verifyJwt(token);
-    if (result) {
-      (req as any).dashboardUser = result;
-      return next();
-    }
-  }
-
-  res.status(401).json({ ok: false, error: "Unauthorized" });
-}
-
-// ─── JWT helpers (HS256, simple implementation without external lib) ───────────
-
-// JWT_SECRET must be set — no fallback to API_KEY (which is short/guessable).
-// Validated at startup (requiredEnv check in index.ts).
-function getJwtSecret(): string {
-  const secret = process.env.JWT_SECRET;
-  if (!secret) throw new Error("JWT_SECRET not set — server should have refused to start");
-  return secret;
-}
-
-function signJwt(payload: Record<string, unknown>, expiresInMs: number): string {
-  const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
-  const body = Buffer.from(
-    JSON.stringify({ ...payload, exp: Math.floor((Date.now() + expiresInMs) / 1000), iat: Math.floor(Date.now() / 1000) })
-  ).toString("base64url");
-  const sig = crypto
-    .createHmac("sha256", getJwtSecret())
-    .update(`${header}.${body}`)
-    .digest("base64url");
-  return `${header}.${body}.${sig}`;
-}
-
-function verifyJwt(token: string): Record<string, unknown> | null {
-  try {
-    const [header, body, sig] = token.split(".");
-    if (!header || !body || !sig) return null;
-    const expectedSig = crypto
-      .createHmac("sha256", getJwtSecret())
-      .update(`${header}.${body}`)
-      .digest("base64url");
-    // base64url strings always same length — timingSafeEqual safe here
-    if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) return null;
-    const payload = JSON.parse(Buffer.from(body, "base64url").toString());
-    if (payload.exp < Math.floor(Date.now() / 1000)) return null;
-    return payload;
-  } catch {
-    return null;
-  }
-}
+const requireAuth = requireAdminAuth;
 
 // ─── Pagination helper ────────────────────────────────────────────────────────
 
@@ -321,7 +258,7 @@ router.get("/devices/me/model-config", requireDeviceModelConfigAuth, getDeviceMo
 
 // ─── All routes below require auth ───────────────────────────────────────────
 
-router.use(requireAuth);
+router.use(requireApiGateAuth);
 
 // ─── Devices ──────────────────────────────────────────────────────────────────
 

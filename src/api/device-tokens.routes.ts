@@ -5,8 +5,9 @@
  * Tokens are stored as SHA-256 hashes. The raw token is returned ONLY at generation time.
  */
 
-import { Router, Request, Response, NextFunction } from "express";
+import { Router, Request, Response } from "express";
 import crypto from "crypto";
+import { requireAdminAuth } from "./auth.middleware";
 import { getDb } from "../db/client";
 
 const router = Router();
@@ -14,35 +15,7 @@ const router = Router();
 const VALID_PURPOSES = ["openclaw_agent", "admin", "monitoring"] as const;
 type Purpose = (typeof VALID_PURPOSES)[number];
 
-// ─── Auth middleware (same pattern as routes.ts requireAuth) ──────────────────
-
-function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  const apiKey = req.headers["x-api-key"];
-  if (apiKey && apiKey === process.env.API_KEY) return next();
-
-  const authHeader = req.headers["authorization"];
-  if (authHeader?.startsWith("Bearer ")) {
-    const token = authHeader.slice(7);
-    // Verify JWT (same logic as routes.ts)
-    try {
-      const secret = process.env.JWT_SECRET;
-      if (!secret) { res.status(401).json({ ok: false, error: "Unauthorized" }); return; }
-      const parts = token.split(".");
-      if (parts.length !== 3) { res.status(401).json({ ok: false, error: "Unauthorized" }); return; }
-      const sig = crypto.createHmac("sha256", secret).update(`${parts[0]}.${parts[1]}`).digest("base64url");
-      if (sig !== parts[2]) { res.status(401).json({ ok: false, error: "Unauthorized" }); return; }
-      const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
-      if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-        res.status(401).json({ ok: false, error: "Token expired" }); return;
-      }
-      return next();
-    } catch {
-      res.status(401).json({ ok: false, error: "Unauthorized" }); return;
-    }
-  }
-
-  res.status(401).json({ ok: false, error: "Unauthorized" });
-}
+const requireAuth = requireAdminAuth;
 
 // ─── POST /generate — create a new API token ─────────────────────────────────
 

@@ -4,6 +4,7 @@
  */
 
 import { Router, Request, Response } from "express";
+import { requireAdminAuth } from "./auth.middleware";
 import { getDb } from "../db/client";
 import multer from "multer";
 import path from "path";
@@ -711,7 +712,7 @@ router.post("/reddit/account-health-scans", async (req: Request, res: Response) 
   }
 });
 
-router.post("/workflow-runs", async (req: Request, res: Response) => {
+router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
   const body = req.body as {
     clientId?: string;

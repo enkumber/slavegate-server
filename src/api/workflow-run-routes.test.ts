@@ -34,7 +34,7 @@ async function appWithApiAuthGate() {
 
 async function postWorkflowRun(body: Record<string, unknown>) {
   const server = await app();
-  return postJson(server, "/api/workflow-runs", body);
+  return postJson(server, "/api/workflow-runs", body, { "x-api-key": "test-api-key" });
 }
 
 async function postJson(server: express.Express, path: string, body: Record<string, unknown>, headers: Record<string, string> = {}) {
@@ -60,6 +60,8 @@ async function postJson(server: express.Express, path: string, body: Record<stri
 describe("workflow-runs API", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.API_KEY = "test-api-key";
+    process.env.JWT_SECRET = "test-jwt-secret";
   });
 
   it("exposes POST /api/workflow-runs as the unified workflow-run surface", async () => {

@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import express from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -88,11 +89,15 @@ function hydratedRun(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function tokenHash(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
 async function postWorkflowRun(body: Record<string, unknown>) {
   return postAgency("/api/agency/workflow-runs", body);
 }
 
-async function postAgency(path: string, body: Record<string, unknown>) {
+async function postAgency(path: string, body: Record<string, unknown>, headers: Record<string, string> = { "x-api-key": "test-api-key" }) {
   const server = await app();
   const response = await new Promise<{ status: number; body: any }>((resolve, reject) => {
     const listener = server.listen(0, async () => {
@@ -101,7 +106,7 @@ async function postAgency(path: string, body: Record<string, unknown>) {
         if (!address || typeof address === "string") throw new Error("no address");
         const res = await fetch(`http://127.0.0.1:${address.port}${path}`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...headers },
           body: JSON.stringify(body),
         });
         const json = await res.json();
@@ -134,6 +139,8 @@ async function getWorkflowRun(path: string) {
 describe("agency workflow runs API", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.API_KEY = "test-api-key";
+    process.env.JWT_SECRET = "test-jwt-secret";
     mocks.db.connect.mockResolvedValue(mocks.client);
   });
 
@@ -178,6 +185,35 @@ describe("agency workflow runs API", () => {
       intent: "reddit_account_health_scan",
     }));
     expect(JSON.parse(taskInsert![1][2])).not.toHaveProperty("workflow");
+  });
+
+  it("rejects openclaw_agent tokens for POST /api/agency/workflow-runs", async () => {
+    mocks.db.query.mockImplementationOnce(async (_sql: string, params: string[]) => {
+      expect(params).toEqual([tokenHash("agent-token")]);
+      return {
+        rows: [{
+          id: "token-1",
+          purpose: "openclaw_agent",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          revoked_at: null,
+        }],
+      };
+    });
+
+    const response = await postAgency(
+      "/api/agency/workflow-runs",
+      {
+        clientId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        accountId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        deviceId: "11111111-1111-4111-8111-111111111111",
+        intent: "reddit_account_health_scan",
+      },
+      { authorization: "Bearer agent-token" }
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.body).toEqual({ ok: false, error: "Unauthorized" });
+    expect(mocks.db.connect).not.toHaveBeenCalled();
   });
 
   it("creates a product-level Reddit account health scan from the latest cache-safe artifact", async () => {

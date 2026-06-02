@@ -1,9 +1,10 @@
 import { Router } from "express";
+import { requireAdminAuth } from "./auth.middleware";
 import { createWorkflowRun } from "../modules/workflow-runs";
 
 const router = Router();
 
-router.post("/", async (req, res) => {
+router.post("/", requireAdminAuth, async (req, res) => {
   try {
     const result = await createWorkflowRun(req.body ?? {});
     res.status(result.httpStatus).json({
