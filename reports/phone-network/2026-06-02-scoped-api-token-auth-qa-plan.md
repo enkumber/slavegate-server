@@ -4,29 +4,30 @@ Story: `/data/.openclaw/workspace-atlas/stories/STORY-PN-SCOPED-API-TOKEN-AUTH-0
 Repo: `/data/.openclaw/workspace/slavegate/server`
 Date: 2026-06-02
 Owner: LENS
-Status: CHANGES REQUIRED - local QA found a route-level blocker
+Status: PASS - live scoped-token smoke verified by Nox
 
-## Summary
+## Verdict
 
-VOLT's patch is present locally and the shared auth middleware now validates hashed `api_tokens` from the DB. Targeted tests and build pass, but the real `routes.ts` integration still blocks `openclaw_agent` from two required read-only monitoring endpoints.
+Local QA passed and deployed live smoke passed using an `openclaw_agent` bearer token with no `X-API-Key`.
 
-Do not proceed to live smoke yet.
+Raw token material was not printed.
 
-## Evidence Executed
+## Local Evidence
 
 Command:
 
 ```sh
-npm test -- auth.middleware workflow-run-routes agency-workflow-runs
+npm test -- src/api/routes.monitoring-auth.test.ts src/api/auth.middleware.test.ts src/api/workflow-run-routes.test.ts src/api/agency-workflow-runs.test.ts
 ```
 
 Result:
 
 ```text
-PASS src/api/auth.middleware.test.ts        8 tests
-PASS src/api/workflow-run-routes.test.ts    3 tests
-PASS src/api/agency-workflow-runs.test.ts  10 tests
-Total: 3 files, 21 tests passed
+PASS src/api/routes.monitoring-auth.test.ts  3 tests
+PASS src/api/auth.middleware.test.ts        11 tests
+PASS src/api/workflow-run-routes.test.ts     3 tests
+PASS src/api/agency-workflow-runs.test.ts   10 tests
+Total: 4 files, 27 tests passed
 ```
 
 Command:
@@ -41,68 +42,64 @@ Result:
 PASS TypeScript build completed
 ```
 
-## Passing Local Coverage
-
-- `src/api/auth.middleware.ts` validates `Authorization: Bearer <token>` by SHA-256 hash lookup in `api_tokens`.
-- Unknown, expired, and revoked API tokens are rejected by focused middleware tests.
-- `openclaw_agent` is denied on mutating workflow routes in focused middleware tests.
-- `admin` API tokens are allowed on admin-only routes in focused middleware tests.
-- Existing global API key compatibility is covered by focused middleware tests.
-- `POST /api/workflow-runs` is explicitly protected by `requireAdminAuth`.
-- `POST /api/agency/workflow-runs` is explicitly protected by `requireAdminAuth`.
-- Token-management routes now use the shared admin guard.
-
-## Blocker
-
-`openclaw_agent` still cannot satisfy all required read-only monitoring routes in the real router.
-
-Reason:
-
-- `src/api/routes.ts:261` applies `router.use(requireApiGateAuth)`, which correctly treats `GET /debug/connections` and `GET /scalability/status` as monitoring-read paths.
-- But `src/api/routes.ts:181` aliases `requireAuth = requireAdminAuth`.
-- `src/api/routes.ts:2007` still declares `router.get("/debug/connections", requireAuth, ...)`.
-- `src/api/routes.ts:2022` still declares `router.get("/scalability/status", requireAuth, ...)`.
-
-So an `openclaw_agent` token can pass the first monitoring gate, then gets rejected by the second admin-only route guard. This fails the story requirement:
+Local acceptance covered:
 
 ```text
-GET /api/debug/connections       -> 200 with openclaw_agent
-GET /api/scalability/status      -> 200 with openclaw_agent
-```
-
-Likely fix: remove the redundant route-level `requireAuth` on those two GET handlers or replace it with monitoring auth. The top-level gate already protects those paths.
-
-## Current Acceptance Status
-
-- `api_tokens` accepted by real auth layer using hashed token validation: PARTIAL PASS
-- `openclaw_agent` can read `/api/devices`: LIKELY PASS by code path, pending route smoke
-- `openclaw_agent` can read `/api/health`: LIKELY PASS by code path, because it is below `requireApiGateAuth` and has no second admin guard
-- `openclaw_agent` can read `/api/debug/connections`: FAIL by route inspection
-- `openclaw_agent` can read `/api/scalability/status`: FAIL by route inspection
-- `openclaw_agent` denied on mutating workflow/admin routes: PASS locally for workflow routes
-- invalid/expired/revoked tokens rejected: PASS in focused middleware tests
-- global API key compatibility: PASS in focused middleware tests
-- dashboard JWT compatibility: NOT YET EVIDENCED by focused test output
-- live smoke proving monitoring no longer needs global API key: NOT RUN, blocked until local route issue is fixed and ECHO approves
-
-## Required Re-Run After Fix
-
-Run:
-
-```sh
-npm test -- auth.middleware workflow-run-routes agency-workflow-runs
-npm run build
-```
-
-Then perform local route smoke or add an integration test that mounts the real `/api` router and proves:
-
-```text
-GET  /api/devices                 -> 200 with openclaw_agent
 GET  /api/debug/connections       -> 200 with openclaw_agent
 GET  /api/scalability/status      -> 200 with openclaw_agent
-GET  /api/health                  -> 200 with openclaw_agent
-POST /api/agency/workflow-runs    -> 401/403 with openclaw_agent
+POST /api/agency/workflow-runs    -> 401 with openclaw_agent in focused auth coverage
+invalid/expired/revoked tokens    -> 401 in focused auth coverage
+global API key compatibility      -> PASS in focused auth coverage
+dashboard JWT compatibility       -> PASS in focused auth and real-router monitoring coverage
 ```
 
-Only after that should live post-deploy smoke run with the existing `openclaw_agent` token and no global API key.
+## Deployed Build Evidence
 
+Target:
+
+```text
+http://enkzoned.go.ro:3000
+```
+
+Deployed server identity:
+
+```text
+appVersion=3.9.42
+buildCommit=79add12e71201a4db79b8a81ff450e0b3fb4a525
+```
+
+This confirms the deployed server is no longer the old `d2524fe...` build.
+
+Note: raw public manifest branch/CDN views may temporarily show stale `PHONE_NETWORK_APP_VERSION: "3.9.41"`. Live `/api/health` is the release gate evidence here and reports deployed `appVersion=3.9.42` with build commit `79add12e71201a4db79b8a81ff450e0b3fb4a525`.
+
+## Live Smoke Evidence
+
+Nox verified at `2026-06-02T08:50Z` against `http://enkzoned.go.ro:3000`.
+
+Credential handling:
+
+- Used `openclaw_agent` bearer token only.
+- Did not send `X-API-Key`.
+- Raw token was not printed.
+
+Results:
+
+```text
+GET  /api/health                  -> 200, appVersion=3.9.42, buildCommit=79add12e71201a4db79b8a81ff450e0b3fb4a525
+GET  /api/devices                 -> 200
+GET  /api/debug/connections       -> 200
+GET  /api/scalability/status      -> 200
+POST /api/agency/workflow-runs    -> 401
+```
+
+## LENS Credential Note
+
+LENS attempted an independent bearer-only rerun using the local persisted credential file at:
+
+```text
+/data/.openclaw/credentials/phone-network-api-token.json
+```
+
+That local persisted token currently verifies as invalid via `/api/device-tokens/verify`, and bearer-only requests with it returned 401. This appears to be a stale local credential file, not a deployed auth failure, because Nox verified the live smoke with a valid `openclaw_agent` bearer token and the deployed build is `79add12e71201a4db79b8a81ff450e0b3fb4a525`.
+
+Recommended follow-up: update or replace the stale local credential file used by LENS/OpenClaw if it is still intended to be the monitoring token source.
