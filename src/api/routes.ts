@@ -2004,7 +2004,7 @@ router.patch("/tasks/:id", requireAuth, async (req, res) => {
 
 // ─── Debug: WebSocket connections ─────────────────────────────────────────────
 
-router.get("/debug/connections", requireAuth, (_req, res) => {
+router.get("/debug/connections", (_req, res) => {
   // DirectWs only - show connected devices
   const onlineDevices = directWsServer.getConnectedDeviceIds();
   const list = onlineDevices.map((id) => ({
@@ -2019,7 +2019,7 @@ router.get("/debug/connections", requireAuth, (_req, res) => {
 
 // ─── Scalability & Health ─────────────────────────────────────────────────────
 
-router.get("/scalability/status", requireAuth, async (_req, res) => {
+router.get("/scalability/status", async (_req, res) => {
   try {
     const { getPoolStats } = await import("../db/client");
     const poolStats = getPoolStats();
