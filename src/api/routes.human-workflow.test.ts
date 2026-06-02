@@ -51,6 +51,10 @@ function cacheKey(intent = INTENT): string {
   return crypto.createHash("sha256").update(`cache:${requestKey(intent)}`).digest("hex").slice(0, 24);
 }
 
+function tokenHash(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
+}
+
 function cachedPlan(overrides: Record<string, unknown> = {}) {
   const key = requestKey();
   const ck = cacheKey();
@@ -126,7 +130,11 @@ async function app() {
   return app;
 }
 
-async function postJson(path: string, body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+async function postJson(
+  path: string,
+  body: Record<string, unknown>,
+  headers: Record<string, string> = { "x-api-key": "test-api-key" }
+): Promise<{ status: number; body: any }> {
   const server = await app();
   return new Promise((resolve, reject) => {
     const listener = server.listen(0, async () => {
@@ -135,11 +143,12 @@ async function postJson(path: string, body: Record<string, unknown>): Promise<{ 
         if (!address || typeof address === "string") throw new Error("no address");
         const response = await fetch(`http://127.0.0.1:${address.port}${path}`, {
           method: "POST",
-          headers: { "content-type": "application/json", "x-api-key": "test-api-key" },
+          headers: { "content-type": "application/json", ...headers },
           body: JSON.stringify(body),
         });
         const json = await response.json();
-        listener.close(() => resolve({ status: response.status, body: json }));
+        listener.close();
+        resolve({ status: response.status, body: json });
       } catch (err) {
         listener.close(() => reject(err));
       }
@@ -179,6 +188,137 @@ describe("dashboard human workflow routes", () => {
       },
     });
     expect(response.body.data.plan.actions).toHaveLength(2);
+  });
+
+  it("rejects compile when the account is bound to another device", async () => {
+    mocks.db.query.mockImplementationOnce(async (sql: string) => {
+      expect(sql).toContain("LEFT JOIN accounts");
+      return { rows: [targetRow({ account_device_id: "66666666-6666-4666-8666-666666666666" })] };
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: INTENT,
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "ACCOUNT_DEVICE_MISMATCH",
+    });
+  });
+
+  it("rejects social or account-changing human intents before compile", async () => {
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: "Post a comment and follow the first Reddit account",
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+    });
+  });
+
+  it("rejects destructive cached plans during compile preview", async () => {
+    const base = cachedPlan();
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
+      ...base,
+      workflow: {
+        ...base.workflow,
+        safetyClass: "standard",
+      },
+      compiledPlan: {
+        ...base.compiledPlan,
+        metadata: { ...base.compiledPlan.metadata, safetyClass: "standard" },
+        steps: [{ id: "reboot", type: "action", action: "reboot", path: ["reboot"] }],
+      },
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: INTENT,
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_DESTRUCTIVE_NOT_ALLOWED",
+    });
+  });
+
+  it("rejects low-level social mutation plans before run dispatch", async () => {
+    const base = cachedPlan();
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
+      ...base,
+      workflow: {
+        ...base.workflow,
+        safetyClass: "standard",
+        steps: [
+          { id: "tap-comment", type: "action", action: "tap", params: { selectorName: "comment_box" } },
+          { id: "type-reply", type: "action", action: "type", params: { text: "Thanks for sharing" } },
+          { id: "submit", type: "action", action: "tap", params: { selectorName: "post_button" } },
+        ],
+      },
+      compiledPlan: {
+        ...base.compiledPlan,
+        metadata: { ...base.compiledPlan.metadata, safetyClass: null },
+        steps: [
+          { id: "tap-comment", type: "action", action: "tap", path: ["comment_box"], selectorName: "comment_box", selectorId: null },
+          { id: "type-reply", type: "action", action: "type", path: ["comment_box"], selectorName: "comment_box", selectorId: null },
+          { id: "submit", type: "action", action: "tap", path: ["post_button"], selectorName: "post_button", selectorId: null },
+        ],
+      },
+    });
+
+    const response = await postJson("/api/workflows/human/run", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: INTENT,
+      requestKey: requestKey(),
+      cacheKey: cacheKey(),
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+    });
+    expect(mocks.db.connect).not.toHaveBeenCalled();
+    expect(mocks.client.query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO tasks"))).toBe(false);
+  });
+
+  it("rejects standard low-level plans without explicit approval", async () => {
+    const base = cachedPlan();
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
+      ...base,
+      workflow: {
+        ...base.workflow,
+        safetyClass: "standard",
+        steps: [{ id: "tap-settings", type: "action", action: "tap", params: { selectorName: "settings_button" } }],
+      },
+      compiledPlan: {
+        ...base.compiledPlan,
+        metadata: { ...base.compiledPlan.metadata, safetyClass: null },
+        steps: [{ id: "tap-settings", type: "action", action: "tap", path: ["settings"], selectorName: "settings_button", selectorId: null }],
+      },
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: INTENT,
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_APPROVAL_REQUIRED",
+    });
   });
 
   it("queues a run through the generated agency workflow task pipeline", async () => {
@@ -315,6 +455,45 @@ describe("dashboard human workflow routes", () => {
       ok: false,
       code: "CACHE_KEY_MISMATCH",
     });
+    expect(mocks.db.connect).not.toHaveBeenCalled();
+  });
+
+  it("denies monitoring tokens on the admin-only human workflow compile and run endpoints", async () => {
+    mocks.db.query.mockImplementation(async (_sql: string, params: string[]) => {
+      expect(params).toEqual([tokenHash("agent-token")]);
+      return {
+        rows: [{
+          id: "token-openclaw",
+          purpose: "openclaw_agent",
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          revoked_at: null,
+        }],
+      };
+    });
+
+    const compile = await postJson(
+      "/api/workflows/human/compile",
+      {
+        device_id: DEVICE_ID,
+        account_id: ACCOUNT_ID,
+        intent: INTENT,
+      },
+      { authorization: "Bearer agent-token" }
+    );
+    const response = await postJson(
+      "/api/workflows/human/run",
+      {
+        device_id: DEVICE_ID,
+        account_id: ACCOUNT_ID,
+        intent: INTENT,
+      },
+      { authorization: "Bearer agent-token" }
+    );
+
+    expect(compile.status).toBe(401);
+    expect(compile.body).toEqual({ ok: false, error: "Unauthorized" });
+    expect(response.status).toBe(401);
+    expect(response.body).toEqual({ ok: false, error: "Unauthorized" });
     expect(mocks.db.connect).not.toHaveBeenCalled();
   });
 });

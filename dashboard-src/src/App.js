@@ -15,6 +15,8 @@ import { TasksPage } from "./pages/TasksPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TokenManagement } from "./pages/TokenManagement";
+// ModelConfigPage merged into TokenManagement
+// import { ModelConfigPage } from "./pages/ModelConfigPage";
 import { TopNav } from "./components/TopNav";
 import { api } from "./api/client";
 export function App() {
@@ -63,6 +65,11 @@ export function App() {
     }
     else if (route === "#/tokens") {
         page = _jsx(TokenManagement, {});
+    }
+    else if (route === "#/models") {
+        // models tab removed — now inside #/tokens
+        window.location.hash = "#/tokens";
+        return null;
     }
     else {
         // Default: Fleet

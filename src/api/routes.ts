@@ -76,9 +76,10 @@ const HUMAN_WORKFLOW_DESTRUCTIVE_ACTIONS = new Set(["uninstall", "reboot", "ota_
 const HUMAN_WORKFLOW_SOCIAL_ACCOUNT_DENY_PATTERNS: RegExp[] = [
   /\b(post|publish|comment|reply|like|unlike|upvote|downvote|follow|unfollow)\b/i,
   /\b(subscribe|unsubscribe|join|leave)\b/i,
-  /\b(dm|direct message|private message|send message|send a message)\b/i,
-  /\b(change|reset|update)\s+(my\s+|the\s+)?password\b/i,
-  /\b(password|purchase|buy|checkout|payment|delete account|deactivate account)\b/i,
+  /\b(dm|direct message|private message|send message|send a message|postează|comentează|urmărește|dezurmărește|abonează-te|dezabonează-te)\b/i,
+  /\b(change|reset|update|schimbă|resetează|actualizează)\s+(my\s+|the\s+)?password\b/i,
+  /\b(password|parole|purchase|buy|checkout|cumpără|plată|delete account|deletează cont|șterge cont|deactivate account|dezactivează cont)\b/i,
+  /\b(send|trimite)\s+(message|mesaj)\b/i,
 ];
 const PLATFORM_APP_IDS: Record<string, string> = {
   reddit: "com.reddit.frontpage",
@@ -154,16 +155,22 @@ function assertHumanWorkflowPlanAllowed(
   compiledPlan: GeneratedWorkflowCompiledPlan
 ): HumanWorkflowSafetyClass {
   const safetyClass = humanWorkflowSafetyClass(template, compiledPlan);
+  if (humanWorkflowContainsDeniedSocialOrAccountChange({ intent, template, compiledPlan })) {
+    throw Object.assign(new Error("Dashboard human workflows cannot post, message, follow, purchase, or change account state"), {
+      status: 400,
+      code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+    });
+  }
   if (safetyClass === "destructive") {
     throw Object.assign(new Error("Destructive dashboard human workflows are not allowed"), {
       status: 400,
       code: "HUMAN_WORKFLOW_DESTRUCTIVE_NOT_ALLOWED",
     });
   }
-  if (humanWorkflowContainsDeniedSocialOrAccountChange({ intent, template, compiledPlan })) {
-    throw Object.assign(new Error("Dashboard human workflows cannot post, message, follow, purchase, or change account state"), {
+  if (safetyClass !== "read_only") {
+    throw Object.assign(new Error("Dashboard human workflows that can change app state require explicit approval"), {
       status: 400,
-      code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+      code: "HUMAN_WORKFLOW_APPROVAL_REQUIRED",
     });
   }
   return safetyClass;
@@ -372,7 +379,7 @@ async function queueHumanAgencyWorkflowRun(input: {
        WHERE request_key = $1
          AND device_id = $2
          AND account_id = $3
-         AND context ->> 'source' = 'dashboard_human'
+         AND context ->> 'source' = 'dashboard_human' AND status IN ('queued', 'running')
        ORDER BY created_at ASC
        LIMIT 1
        FOR UPDATE`,
@@ -839,7 +846,7 @@ router.get("/workflows", requireAuth, async (req, res) => {
 
 // ─── Dashboard Human Workflow Launcher ────────────────────────────────────────
 
-router.post("/workflows/human/compile", async (req, res) => {
+router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
   try {
     const { device_id, account_id, intent } = req.body as {
       device_id?: unknown;
