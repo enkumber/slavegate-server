@@ -17,7 +17,7 @@ import { modelConfigService } from "../modules/model-config/model-config.service
 export async function llmComplete(
   prompt: string,
   model?: string,
-  options?: { max_tokens?: number; system?: string }
+  options?: { max_tokens?: number; system?: string; timeoutMs?: number }
 ): Promise<string> {
   const config = await modelConfigService.resolve("decision_llm");
   const maxTokens = options?.max_tokens ?? 2048;
@@ -35,6 +35,7 @@ export async function llmComplete(
   const response = await fetch(url, {
     method: "POST",
     headers,
+    signal: options?.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined,
     body: JSON.stringify({
       model: selectedModel,
       messages,
@@ -86,7 +87,7 @@ function normalizeOpenAIProvider(provider: string): string {
 export async function llmJson<T = unknown>(
   prompt: string,
   model?: string,
-  options?: { max_tokens?: number; system?: string }
+  options?: { max_tokens?: number; system?: string; timeoutMs?: number }
 ): Promise<T> {
   const response = await llmComplete(prompt, model, options);
 

@@ -72,6 +72,7 @@ const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
+const DEFAULT_HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = 20_000;
 const HUMAN_WORKFLOW_DESTRUCTIVE_ACTIONS = new Set(["uninstall", "reboot", "ota_update", "force_clear"]);
 const HUMAN_WORKFLOW_SOCIAL_ACCOUNT_DENY_PATTERNS: RegExp[] = [
   /\b(post|publish|comment|reply|like|unlike|upvote|downvote|follow|unfollow)\b/i,
@@ -104,6 +105,46 @@ function computeHumanWorkflowRequestKey(deviceId: string, accountId: string, int
     .update(`${deviceId}:${accountId}:${intent.trim()}`)
     .digest("hex")
     .slice(0, 24);
+}
+
+function humanWorkflowCompileTimeoutMs(): number {
+  const configured = Number.parseInt(process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS ?? "", 10);
+  const headroomMs = 5_000;
+  const minimumTimeoutMs = 1_000;
+  const maxCompileTimeoutMs = scalabilityConfig.requestTimeout > headroomMs + minimumTimeoutMs
+    ? scalabilityConfig.requestTimeout - headroomMs
+    : Math.max(1, scalabilityConfig.requestTimeout - 1);
+  const requestedTimeoutMs = Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
+  return Math.min(requestedTimeoutMs, maxCompileTimeoutMs);
+}
+
+function isLlmTimeoutError(err: unknown): boolean {
+  const typed = err as { name?: string; message?: string; code?: string } | undefined;
+  return typed?.name === "TimeoutError"
+    || typed?.name === "AbortError"
+    || typed?.code === "ABORT_ERR"
+    || /abort|timeout/i.test(typed?.message ?? "");
+}
+
+function humanWorkflowCompileTimeoutError(timeoutMs: number, requestKey: string): Error & {
+  status: number;
+  code: string;
+  requestKey: string;
+  retryable: boolean;
+  nextAction: string;
+} {
+  return Object.assign(
+    new Error(`Human workflow compile exceeded ${timeoutMs}ms. Retry after the compiler is less busy or when a cached plan is available.`),
+    {
+      status: 503,
+      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
+      requestKey,
+      retryable: true,
+      nextAction: "retry_compile",
+    },
+  );
 }
 
 type HumanWorkflowSafetyClass = "read_only" | "standard" | "destructive";
@@ -291,10 +332,18 @@ async function compileHumanWorkflowPlan(input: {
     appMapHints,
   });
 
-  const rawWorkflow = await llmJson<WorkflowTemplate>(prompt, undefined, {
-    max_tokens: 4096,
-    system: "You are a Phone Network workflow compiler. Return only valid WorkflowTemplate JSON.",
-  });
+  const compileTimeoutMs = humanWorkflowCompileTimeoutMs();
+  let rawWorkflow: WorkflowTemplate;
+  try {
+    rawWorkflow = await llmJson<WorkflowTemplate>(prompt, undefined, {
+      max_tokens: 4096,
+      system: "You are a Phone Network workflow compiler. Return only valid WorkflowTemplate JSON.",
+      timeoutMs: compileTimeoutMs,
+    });
+  } catch (err) {
+    if (isLlmTimeoutError(err)) throw humanWorkflowCompileTimeoutError(compileTimeoutMs, requestKey);
+    throw err;
+  }
   const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
   if (!validation.template) {
     throw Object.assign(new Error("workflow failed validation"), {
@@ -877,12 +926,22 @@ router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
     });
     res.json({ ok: true, data });
   } catch (err) {
-    const typed = err as Error & { status?: number; code?: string; validationErrors?: string[] };
+    const typed = err as Error & {
+      status?: number;
+      code?: string;
+      validationErrors?: string[];
+      requestKey?: string;
+      retryable?: boolean;
+      nextAction?: string;
+    };
     res.status(typed.status ?? 500).json({
       ok: false,
       code: typed.code,
       error: typed.message,
       errors: typed.validationErrors,
+      requestKey: typed.requestKey,
+      retryable: typed.retryable,
+      nextAction: typed.nextAction,
     });
   }
 });

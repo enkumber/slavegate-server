@@ -8,6 +8,7 @@ const CLIENT_ID = "33333333-3333-4333-8333-333333333333";
 const RUN_ID = "44444444-4444-4444-8444-444444444444";
 const TASK_ID = "55555555-5555-4555-8555-555555555555";
 const INTENT = "Open Reddit and collect an account health screenshot";
+const SAFE_TIMEOUT_INTENT = "derulează feed-ul Reddit și fă un screenshot";
 
 const mocks = vi.hoisted(() => ({
   db: {
@@ -23,6 +24,8 @@ const mocks = vi.hoisted(() => ({
     saveTemplate: vi.fn(),
     saveGeneratedPlanCache: vi.fn(),
   },
+  llmJson: vi.fn(),
+  loadMap: vi.fn(),
 }));
 
 vi.mock("../db/client", () => ({
@@ -32,6 +35,14 @@ vi.mock("../db/client", () => ({
 
 vi.mock("../modules/workflows/workflow.service", () => ({
   workflowService: mocks.workflowService,
+}));
+
+vi.mock("../modules/app-mapping/recorder.service", () => ({
+  loadMap: mocks.loadMap,
+}));
+
+vi.mock("../utils/llm", () => ({
+  llmJson: mocks.llmJson,
 }));
 
 vi.mock("../ws/direct-ws.server", () => ({
@@ -162,9 +173,14 @@ describe("dashboard human workflow routes", () => {
     vi.resetModules();
     process.env.API_KEY = "test-api-key";
     process.env.JWT_SECRET = "test-jwt-secret";
+    delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
     mocks.db.connect.mockResolvedValue(mocks.client);
     mocks.db.query.mockResolvedValue({ rows: [targetRow()] });
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cachedPlan());
+    mocks.workflowService.saveTemplate.mockResolvedValue(undefined);
+    mocks.workflowService.saveGeneratedPlanCache.mockResolvedValue(undefined);
+    mocks.loadMap.mockResolvedValue(null);
+    mocks.llmJson.mockResolvedValue(cachedPlan().workflow);
   });
 
   it("compiles a valid cached human workflow preview", async () => {
@@ -253,6 +269,107 @@ describe("dashboard human workflow routes", () => {
       ok: false,
       code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
     });
+    expect(mocks.llmJson).not.toHaveBeenCalled();
+  });
+
+  it("returns a bounded compile timeout on safe cache misses instead of global request timeout", async () => {
+    process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "25";
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    const timeoutError = new Error("The operation was aborted due to timeout");
+    timeoutError.name = "TimeoutError";
+    mocks.llmJson.mockRejectedValueOnce(timeoutError);
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: SAFE_TIMEOUT_INTENT,
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
+      requestKey: requestKey(SAFE_TIMEOUT_INTENT),
+      retryable: true,
+      nextAction: "retry_compile",
+    });
+    expect(response.body.error).not.toBe("Request timeout");
+    expect(mocks.llmJson).toHaveBeenCalledWith(
+      expect.any(String),
+      undefined,
+      expect.objectContaining({ timeoutMs: 25 }),
+    );
+    expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
+    delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
+  });
+
+  it("caps oversized compile timeout env overrides below the global request timeout", async () => {
+    process.env.REQUEST_TIMEOUT_MS = "30000";
+    process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "60000";
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    const timeoutError = new Error("The operation was aborted due to timeout");
+    timeoutError.name = "TimeoutError";
+    mocks.llmJson.mockRejectedValueOnce(timeoutError);
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: SAFE_TIMEOUT_INTENT,
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
+      requestKey: requestKey(SAFE_TIMEOUT_INTENT),
+      retryable: true,
+      nextAction: "retry_compile",
+    });
+    expect(response.body.error).toContain("25000ms");
+    expect(response.body.error).not.toBe("Request timeout");
+    expect(mocks.llmJson).toHaveBeenCalledWith(
+      expect.any(String),
+      undefined,
+      expect.objectContaining({ timeoutMs: 25_000 }),
+    );
+    expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
+    delete process.env.REQUEST_TIMEOUT_MS;
+    delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
+  });
+
+  it("returns the same bounded timeout response on safe cache-miss retry", async () => {
+    process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "25";
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValue(null);
+    const timeoutError = new Error("The operation was aborted due to timeout");
+    timeoutError.name = "TimeoutError";
+    mocks.llmJson.mockRejectedValue(timeoutError);
+    const body = {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: SAFE_TIMEOUT_INTENT,
+    };
+
+    const first = await postJson("/api/workflows/human/compile", body);
+    const second = await postJson("/api/workflows/human/compile", body);
+
+    expect(first.status).toBe(503);
+    expect(second.status).toBe(503);
+    expect(first.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
+      requestKey: requestKey(SAFE_TIMEOUT_INTENT),
+      retryable: true,
+      nextAction: "retry_compile",
+    });
+    expect(second.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
+      requestKey: requestKey(SAFE_TIMEOUT_INTENT),
+      retryable: true,
+      nextAction: "retry_compile",
+    });
+    expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
+    delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
   });
 
   it("rejects destructive cached plans during compile preview", async () => {
