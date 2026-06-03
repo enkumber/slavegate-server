@@ -149,21 +149,6 @@ function humanWorkflowAppId(platform: string): string {
   return PLATFORM_APP_IDS[platform.toLowerCase()] ?? platform;
 }
 
-function assertHumanWorkflowIntentAllowed(intent: string): void {
-  void intent;
-}
-
-function assertHumanWorkflowPlanAllowed(
-  intent: string,
-  template: WorkflowTemplate,
-  compiledPlan: GeneratedWorkflowCompiledPlan
-): HumanWorkflowSafetyClass {
-  void intent;
-  void template;
-  void compiledPlan;
-  return "read_only";
-}
-
 function humanWorkflowPlanPreview(template: WorkflowTemplate, compiledPlan: GeneratedWorkflowCompiledPlan): Record<string, unknown> {
   return {
     templateId: template.id,
@@ -217,13 +202,12 @@ async function resolveHumanWorkflowTarget(deviceId: string, accountId: string): 
 }
 
 function cachedWorkflowPreview(cached: GeneratedWorkflowPlanCacheRecord, target: HumanWorkflowTarget, requestKey: string, intent: string): Record<string, unknown> {
-  const safetyClass = assertHumanWorkflowPlanAllowed(intent, cached.workflow, cached.compiledPlan);
   return {
     requestKey,
     cacheHit: true,
     cacheKey: cached.cacheKey,
     plan: humanWorkflowPlanPreview(cached.workflow, cached.compiledPlan),
-    safetyClass,
+    safetyClass: "read_only" satisfies HumanWorkflowSafetyClass,
     platform: target.account_platform,
     target,
     llmBudget: cached.compiledPlan.llmBudget,
@@ -236,7 +220,6 @@ async function compileHumanWorkflowPlan(input: {
   intent: string;
 }): Promise<Record<string, unknown> & { requestKey: string; cacheKey: string; safetyClass: HumanWorkflowSafetyClass; target: HumanWorkflowTarget }> {
   const intent = input.intent.trim();
-  assertHumanWorkflowIntentAllowed(intent);
   const requestKey = computeHumanWorkflowRequestKey(input.deviceId, input.accountId, intent);
   const target = await resolveHumanWorkflowTarget(input.deviceId, input.accountId);
   if (!target) {
@@ -309,13 +292,12 @@ async function compileHumanWorkflowPlan(input: {
     compiledAt: new Date().toISOString(),
   });
 
-  const safetyClass = assertHumanWorkflowPlanAllowed(intent, template, compiledPlan);
   return {
     requestKey,
     cacheHit: false,
     cacheKey: compiledPlan.cacheKey,
     plan: humanWorkflowPlanPreview(template, compiledPlan),
-    safetyClass,
+    safetyClass: "read_only",
     platform,
     target,
     llmBudget: compiledPlan.llmBudget,
@@ -359,15 +341,7 @@ async function queueHumanAgencyWorkflowRun(input: {
       });
     }
 
-    const workflow = cached.workflow as WorkflowTemplate;
-    const compiledPlan = cached.compiled_plan as GeneratedWorkflowCompiledPlan;
-    let safetyClass: HumanWorkflowSafetyClass;
-    try {
-      safetyClass = assertHumanWorkflowPlanAllowed(input.intent, workflow, compiledPlan);
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    }
+    const safetyClass: HumanWorkflowSafetyClass = "read_only";
 
     const existingRunResult = await client.query<{ id: string; task_id: string | null; status: string }>(
       `SELECT id, task_id, status
