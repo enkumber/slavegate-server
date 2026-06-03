@@ -162,6 +162,10 @@ function isAskRedditFirstHotReadIntent(intent: string, platform: string): boolea
   if (platform.toLowerCase() !== "reddit") return false;
   const normalized = normalizeHumanWorkflowShortcutText(intent);
   const compact = normalized.replace(/\s+/g, "");
+  // Match any read/browse/scroll on AskReddit or Reddit hot/top
+  const asksRedditRead = /\b(?:read|citeste|priveste|vezi)\b/.test(normalized) && (compact.includes("askreddit") || compact.includes("reddit"));
+  const asksRedditBrowse = /\b(?:browse|scroll|deruleaza)\b/.test(normalized) && (compact.includes("reddit"));
+  if (asksRedditRead || asksRedditBrowse) return true;
   if (!/\bask\s*reddit\b/.test(normalized) && !compact.includes("askreddit")) return false;
   const asksToRead = /\b(?:read|citeste)\b/.test(normalized);
   const asksForFirstPost = /\bfirst\s+(?:post|thread|item)\b/.test(normalized)
@@ -324,7 +328,9 @@ async function compileHumanWorkflowPlan(input: {
 
   const platform = target.account_platform;
   const packageName = humanWorkflowAppId(platform);
-  if (isAskRedditFirstHotReadIntent(intent, platform)) {
+  const matched = isAskRedditFirstHotReadIntent(intent, platform);
+  if (matched) {
+    console.log(`[human-workflow] deterministic template matched: platform=${platform} intent="${intent}"`);
     const rawWorkflow = buildAskRedditFirstHotReadTemplate(packageName);
     const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
     if (!validation.template) {

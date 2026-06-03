@@ -8,7 +8,7 @@ const CLIENT_ID = "33333333-3333-4333-8333-333333333333";
 const RUN_ID = "44444444-4444-4444-8444-444444444444";
 const TASK_ID = "55555555-5555-4555-8555-555555555555";
 const INTENT = "Open Reddit and collect an account health screenshot";
-const SAFE_TIMEOUT_INTENT = "derulează feed-ul Reddit și fă un screenshot";
+const SAFE_TIMEOUT_INTENT = "derulează feed-ul Instagram și fă un screenshot";
 const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottest";
 const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
 
