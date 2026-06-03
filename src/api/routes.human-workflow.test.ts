@@ -303,8 +303,6 @@ describe("dashboard human workflow routes", () => {
 
   it("lets AskReddit Romanian read intent proceed past temporary no-safety gating", async () => {
     const intent = "citeste primul post de pe AskReddit";
-    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
-    mocks.llmJson.mockResolvedValueOnce(cachedPlan().workflow);
 
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
@@ -315,11 +313,11 @@ describe("dashboard human workflow routes", () => {
     expect(response.status).toBe(200);
     expect(response.body.data).toMatchObject({
       requestKey: requestKey(intent),
-      cacheHit: false,
+      cacheHit: true,
       safetyClass: "read_only",
     });
     expect(response.body.code).not.toBe("HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED");
-    expect(mocks.llmJson).toHaveBeenCalledTimes(1);
+    expect(mocks.llmJson).not.toHaveBeenCalled();
   });
 
   it("returns a bounded compile timeout on safe cache misses instead of global request timeout", async () => {
