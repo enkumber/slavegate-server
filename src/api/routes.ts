@@ -439,13 +439,6 @@ async function queueHumanAgencyWorkflowRun(input: {
   intent: string;
   compiledBy?: unknown;
 }): Promise<Record<string, unknown>> {
-  if (!input.target.client_id) {
-    throw Object.assign(new Error("Account must be linked to a client before running dashboard human workflows"), {
-      status: 400,
-      code: "ACCOUNT_CLIENT_REQUIRED",
-    });
-  }
-
   const db = getDb();
   const client = await db.connect();
   try {

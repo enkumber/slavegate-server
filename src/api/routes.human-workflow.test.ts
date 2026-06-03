@@ -729,6 +729,61 @@ describe("dashboard human workflow routes", () => {
     ]);
   });
 
+  it("queues a dashboard human run for an account without a linked client", async () => {
+    mocks.db.query.mockResolvedValueOnce({ rows: [targetRow({ client_id: null })] });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [cachedPlanRow()] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: RUN_ID }] })
+      .mockResolvedValueOnce({ rows: [{ id: TASK_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await postJson("/api/workflows/human/run", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: INTENT,
+      requestKey: requestKey(),
+      cacheKey: cacheKey(),
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      id: RUN_ID,
+      status: "queued",
+      taskId: TASK_ID,
+      requestKey: requestKey(),
+      cacheKey: cacheKey(),
+    });
+
+    const taskInsert = mocks.client.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO tasks"));
+    expect(taskInsert?.[1][2]).toBe(JSON.stringify({
+      requestKey: requestKey(),
+      clientId: null,
+      agencyWorkflowRunId: RUN_ID,
+      workflowRunId: RUN_ID,
+      intent: INTENT,
+      source: "dashboard_human",
+    }));
+
+    const runInsert = mocks.client.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO agency_workflow_runs"));
+    expect(runInsert?.[1]).toEqual([
+      null,
+      ACCOUNT_ID,
+      DEVICE_ID,
+      "reddit",
+      INTENT,
+      "read_only",
+      requestKey(),
+      "dashboard_human_reddit_preview_v1",
+      "1.0.0",
+      "a".repeat(64),
+      expect.any(String),
+    ]);
+  });
+
   it("reuses an existing dashboard human run and task for identical request keys", async () => {
     let existingRun: { id: string; task_id: string | null; status: string } | null = null;
     let runInserts = 0;
