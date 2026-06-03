@@ -81,11 +81,10 @@ const HUMAN_WORKFLOW_SOCIAL_ACCOUNT_DENY_PATTERNS: RegExp[] = [
   /\b(change|reset|update)\s+(my\s+|the\s+)?password\b/i,
   /\b(password|purchase|buy|checkout|delete account|deactivate account)\b/i,
   /\b(send|trimite)\s+(message|mesaj)\b/i,
-  /postează|comentează|urmărește|dezurmărește|abonează-te|dezabonează-te/iu,
-  /cumpără|plată|parolă|parola|parole/iu,
-  /(?:șterge|deletează|dezactivează)\s+cont(?:ul)?/iu,
-  /trimite\s+(?:un\s+)?mesaj/iu,
-  /(?:schimbă|resetează|actualizează)\s+(?:parola|parolă|contul|profilul|datele)/iu,
+  /\b(posteaza|comenteaza|urmareste|dezurmareste|cumpara|schimba|sterge|dezactiveaza)\b/i,
+  /\btrimite\b/i,
+  /\b(plata|parola|parole)\b/i,
+  /\b(?:aboneaza-te|dezaboneaza-te|deleteaza|reseteaza|actualizeaza)\b/i,
 ];
 const PLATFORM_APP_IDS: Record<string, string> = {
   reddit: "com.reddit.frontpage",
@@ -180,8 +179,21 @@ function humanWorkflowSafetyClass(template: WorkflowTemplate, compiledPlan: Gene
   return template.safetyClass === "read_only" ? "read_only" : "standard";
 }
 
-function humanWorkflowContainsDeniedSocialOrAccountChange(value: unknown): boolean {
+function normalizeHumanWorkflowSafetyText(value: unknown): string {
   const text = typeof value === "string" ? value : JSON.stringify(value);
+  if (!text) return "";
+  return text
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[ăâ]/gi, "a")
+    .replace(/[î]/gi, "i")
+    .replace(/[șş]/gi, "s")
+    .replace(/[țţ]/gi, "t")
+    .toLowerCase();
+}
+
+function humanWorkflowContainsDeniedSocialOrAccountChange(value: unknown): boolean {
+  const text = normalizeHumanWorkflowSafetyText(value);
   if (!text) return false;
   return HUMAN_WORKFLOW_SOCIAL_ACCOUNT_DENY_PATTERNS.some((pattern) => pattern.test(text));
 }

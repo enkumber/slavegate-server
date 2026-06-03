@@ -272,6 +272,40 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.llmJson).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["postează o poză pe Instagram"],
+    ["comentează pe posturile de azi"],
+    ["urmărește 10 persoane"],
+    ["dezurmărește contul acesta"],
+    ["schimbă parola contului"],
+    ["cumpără ceva de pe site"],
+    ["șterge contul de Instagram"],
+    ["dezactivează contul"],
+    ["trimite un mesaj"],
+    ["posteaza o poza pe Instagram"],
+    ["comenteaza pe posturile de azi"],
+    ["urmareste 10 persoane"],
+    ["dezurmareste contul acesta"],
+    ["schimba parola contului"],
+    ["cumpara ceva de pe site"],
+    ["sterge contul de Instagram"],
+    ["dezactiveaza contul"],
+    ["trimite mesaj"],
+  ])("rejects Romanian social/account-changing intents before LLM: %s", async (intent) => {
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent,
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+    });
+    expect(mocks.llmJson).not.toHaveBeenCalled();
+  });
+
   it("returns a bounded compile timeout on safe cache misses instead of global request timeout", async () => {
     process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "25";
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
@@ -681,41 +715,6 @@ describe("dashboard human workflow routes", () => {
     expect(response.status).toBe(401);
     expect(response.body).toEqual({ ok: false, error: "Unauthorized" });
     expect(mocks.db.connect).not.toHaveBeenCalled();
-  });
-});
-
-describe("Romanian safety patterns", () => {
-  const patterns = [
-    /(post|publish|comment|reply|like|unlike|upvote|downvote|follow|unfollow)/i,
-    /subscribe|unsubscribe|join|leave/i,
-    /dm|direct message|private message|send message|send a message/i,
-    /change|reset|update/i,
-    /password|purchase|buy|checkout|delete account|deactivate account/i,
-    /send|trimite/i,
-    /postează|comentează|urmaște|urmărește|schimbă|cumpără|șterge|dezactivează/i,
-  ];
-
-  const roIntents = [
-    "postează o poză pe Instagram",
-    "comentează pe posturile de azi",
-    "urmaște 10 persoane",
-    "schimbă parola contului",
-    "cumpără ceva de pe site",
-    "șterge contul de Instagram",
-    "dezactivează contul",
-    "trimite un mesaj",
-  ];
-
-  it.each(roIntents.map(i => [i]))("rejects: %s", (intent) => {
-    expect(patterns.some(p => p.test(intent))).toBe(true);
-  });
-
-  it("accepts scroll", () => {
-    expect(patterns.some(p => p.test("fă un scroll pe feed"))).toBe(false);
-  });
-
-  it("accepts open+screenshot", () => {
-    expect(patterns.some(p => p.test("deschide Instagram și fă un screenshot"))).toBe(false);
   });
 });
 
