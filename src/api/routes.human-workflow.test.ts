@@ -303,6 +303,10 @@ describe("dashboard human workflow routes", () => {
 
   it("lets AskReddit Romanian read intent proceed past temporary no-safety gating", async () => {
     const intent = "citeste primul post de pe AskReddit";
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(cachedPlan({
+      requestKey: requestKey(intent),
+      cacheKey: cacheKey(intent),
+    }));
 
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
@@ -313,6 +317,7 @@ describe("dashboard human workflow routes", () => {
     expect(response.status).toBe(200);
     expect(response.body.data).toMatchObject({
       requestKey: requestKey(intent),
+      cacheKey: cacheKey(intent),
       cacheHit: true,
       safetyClass: "read_only",
     });
