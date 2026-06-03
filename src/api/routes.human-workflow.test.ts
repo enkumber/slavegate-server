@@ -206,7 +206,7 @@ describe("dashboard human workflow routes", () => {
     expect(response.body.data.plan.actions).toHaveLength(2);
   });
 
-  it("rejects tap/type/swipe steps despite read_only metadata", async () => {
+  it("allows tap/type/swipe steps during temporary no-safety mode", async () => {
     const base = cachedPlan();
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
       ...base,
@@ -231,11 +231,8 @@ describe("dashboard human workflow routes", () => {
       intent: INTENT,
     });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_APPROVAL_REQUIRED",
-    });
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveProperty("requestKey", requestKey());
   });
 
   it("rejects compile when the account is bound to another device", async () => {
@@ -257,17 +254,16 @@ describe("dashboard human workflow routes", () => {
     });
   });
 
-  it("rejects social or account-changing human intents before compile", async () => {
+  it("allows social or account-changing human intents through the temporary no-safety compile gate", async () => {
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
       account_id: ACCOUNT_ID,
       intent: "Post a comment and follow the first Reddit account",
     });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      safetyClass: "read_only",
     });
     expect(mocks.llmJson).not.toHaveBeenCalled();
   });
@@ -291,19 +287,39 @@ describe("dashboard human workflow routes", () => {
     ["sterge contul de Instagram"],
     ["dezactiveaza contul"],
     ["trimite mesaj"],
-  ])("rejects Romanian social/account-changing intents before LLM: %s", async (intent) => {
+  ])("allows Romanian social/account-changing intents through the temporary no-safety compile gate: %s", async (intent) => {
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
       account_id: ACCOUNT_ID,
       intent,
     });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      safetyClass: "read_only",
     });
     expect(mocks.llmJson).not.toHaveBeenCalled();
+  });
+
+  it("lets AskReddit Romanian read intent proceed past temporary no-safety gating", async () => {
+    const intent = "citeste primul post de pe AskReddit";
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.llmJson.mockResolvedValueOnce(cachedPlan().workflow);
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      requestKey: requestKey(intent),
+      cacheHit: false,
+      safetyClass: "read_only",
+    });
+    expect(response.body.code).not.toBe("HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED");
+    expect(mocks.llmJson).toHaveBeenCalledTimes(1);
   });
 
   it("returns a bounded compile timeout on safe cache misses instead of global request timeout", async () => {
@@ -438,7 +454,7 @@ describe("dashboard human workflow routes", () => {
     delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
   });
 
-  it("rejects destructive cached plans during compile preview", async () => {
+  it("allows destructive cached plans through the temporary no-safety compile gate", async () => {
     const base = cachedPlan();
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
       ...base,
@@ -459,15 +475,40 @@ describe("dashboard human workflow routes", () => {
       intent: INTENT,
     });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_DESTRUCTIVE_NOT_ALLOWED",
-    });
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveProperty("requestKey", requestKey());
   });
 
-  it("rejects low-level social mutation plans before run dispatch", async () => {
+  it("queues low-level social mutation plans during temporary no-safety mode", async () => {
     const base = cachedPlan();
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [cachedPlanRow({
+        workflow: {
+          ...base.workflow,
+          safetyClass: "standard",
+          steps: [
+            { id: "tap-comment", type: "action", action: "tap", params: { selectorName: "comment_box" } },
+            { id: "type-reply", type: "action", action: "type", params: { text: "Thanks for sharing" } },
+            { id: "submit", type: "action", action: "tap", params: { selectorName: "post_button" } },
+          ],
+        },
+        compiledPlan: {
+          ...base.compiledPlan,
+          metadata: { ...base.compiledPlan.metadata, safetyClass: null },
+          steps: [
+            { id: "tap-comment", type: "action", action: "tap", path: ["comment_box"], selectorName: "comment_box", selectorId: null },
+            { id: "type-reply", type: "action", action: "type", path: ["comment_box"], selectorName: "comment_box", selectorId: null },
+            { id: "submit", type: "action", action: "tap", path: ["post_button"], selectorName: "post_button", selectorId: null },
+          ],
+        },
+      })] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: RUN_ID }] })
+      .mockResolvedValueOnce({ rows: [{ id: TASK_ID }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
       ...base,
       workflow: {
@@ -498,16 +539,16 @@ describe("dashboard human workflow routes", () => {
       cacheKey: cacheKey(),
     });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED",
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      id: RUN_ID,
+      taskId: TASK_ID,
+      status: "queued",
     });
-    expect(mocks.db.connect).not.toHaveBeenCalled();
-    expect(mocks.client.query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO tasks"))).toBe(false);
+    expect(mocks.client.query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO tasks"))).toBe(true);
   });
 
-  it("rejects standard low-level plans without explicit approval", async () => {
+  it("allows standard low-level plans through the temporary no-safety compile gate", async () => {
     const base = cachedPlan();
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
       ...base,
@@ -529,14 +570,11 @@ describe("dashboard human workflow routes", () => {
       intent: INTENT,
     });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_APPROVAL_REQUIRED",
-    });
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveProperty("requestKey", requestKey());
   });
 
-  it("rejects write actions even when compiled metadata claims read-only safety", async () => {
+  it("allows write actions through the temporary no-safety compile gate even when metadata claims read-only safety", async () => {
     const base = cachedPlan();
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
       ...base,
@@ -566,11 +604,8 @@ describe("dashboard human workflow routes", () => {
       intent: INTENT,
     });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_APPROVAL_REQUIRED",
-    });
+    expect(response.status).toBe(200);
+    expect(response.body.data).toHaveProperty("requestKey", requestKey());
   });
 
   it("queues a run through the generated agency workflow task pipeline", async () => {
