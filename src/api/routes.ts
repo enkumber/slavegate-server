@@ -73,18 +73,6 @@ const router = Router();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
 const DEFAULT_HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = 20_000;
-const HUMAN_WORKFLOW_DESTRUCTIVE_ACTIONS = new Set(["uninstall", "reboot", "ota_update", "force_clear"]);
-const HUMAN_WORKFLOW_SOCIAL_ACCOUNT_DENY_PATTERNS: RegExp[] = [
-  /\b(post|publish|comment|reply|like|unlike|upvote|downvote|follow|unfollow)\b/i,
-  /\b(subscribe|unsubscribe|join|leave)\b/i,
-  /\b(dm|direct message|private message|send message|send a message)\b/i,
-  /\b(change|reset|update)\s+(my\s+|the\s+)?password\b/i,
-  /\b(password|purchase|buy|checkout|delete account|deactivate account)\b/i,
-  /\b(?:send\s+(?:a\s+)?message|trimite\s+(?:un\s+)?mesaj)\b/i,
-  /\b(posteaza|comenteaza|urmareste|dezurmareste|cumpara|schimba|sterge|dezactiveaza)\b/i,
-  /\b(plata|parola|parole)\b/i,
-  /\b(?:aboneaza-te|dezaboneaza-te|deleteaza|reseteaza|actualizeaza)\b/i,
-];
 const PLATFORM_APP_IDS: Record<string, string> = {
   reddit: "com.reddit.frontpage",
   instagram: "com.instagram.android",
@@ -159,41 +147,6 @@ interface HumanWorkflowTarget {
 
 function humanWorkflowAppId(platform: string): string {
   return PLATFORM_APP_IDS[platform.toLowerCase()] ?? platform;
-}
-
-function humanWorkflowSafetyClass(template: WorkflowTemplate, compiledPlan: GeneratedWorkflowCompiledPlan): HumanWorkflowSafetyClass {
-  // Check actual steps first; do not trust metadata alone.
-  const hasDestructiveAction = compiledPlan.steps.some((step) => {
-    const action = typeof step.action === "string" ? step.action : "";
-    return HUMAN_WORKFLOW_DESTRUCTIVE_ACTIONS.has(action);
-  });
-  if (hasDestructiveAction) return "destructive";
-
-  const hasWriteAction = compiledPlan.steps.some((step) => {
-    const action = typeof step.action === "string" ? step.action : "";
-    return ["tap", "type", "swipe", "press_key"].includes(action);
-  });
-  if (hasWriteAction) return "standard";
-
-  return template.safetyClass === "read_only" ? "read_only" : "standard";
-}
-
-function normalizeHumanWorkflowSafetyText(value: unknown): string {
-  const text = typeof value === "string" ? value : JSON.stringify(value);
-  if (!text) return "";
-  return text
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[ăâ]/gi, "a")
-    .replace(/[î]/gi, "i")
-    .replace(/[șş]/gi, "s")
-    .replace(/[țţ]/gi, "t")
-    .toLowerCase();
-}
-
-function humanWorkflowContainsDeniedSocialOrAccountChange(value: unknown): boolean {
-  void value;
-  return false;
 }
 
 function assertHumanWorkflowIntentAllowed(intent: string): void {

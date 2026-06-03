@@ -321,7 +321,6 @@ describe("dashboard human workflow routes", () => {
       cacheHit: true,
       safetyClass: "read_only",
     });
-    expect(response.body.code).not.toBe("HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED");
     expect(mocks.llmJson).not.toHaveBeenCalled();
   });
 
@@ -378,7 +377,6 @@ describe("dashboard human workflow routes", () => {
       retryable: true,
       nextAction: "retry_compile",
     });
-    expect(response.body.code).not.toBe("HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED");
     expect(mocks.llmJson).toHaveBeenCalledWith(
       expect.any(String),
       undefined,
