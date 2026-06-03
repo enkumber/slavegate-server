@@ -337,6 +337,38 @@ describe("dashboard human workflow routes", () => {
     delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
   });
 
+  it("does not deny safe non-message Romanian intents only because they contain trimite", async () => {
+    const intent = "trimite fluxul in jos si fa un screenshot";
+    process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "25";
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    const timeoutError = new Error("The operation was aborted due to timeout");
+    timeoutError.name = "TimeoutError";
+    mocks.llmJson.mockRejectedValueOnce(timeoutError);
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent,
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
+      requestKey: requestKey(intent),
+      retryable: true,
+      nextAction: "retry_compile",
+    });
+    expect(response.body.code).not.toBe("HUMAN_WORKFLOW_SOCIAL_ACCOUNT_CHANGE_NOT_ALLOWED");
+    expect(mocks.llmJson).toHaveBeenCalledWith(
+      expect.any(String),
+      undefined,
+      expect.objectContaining({ timeoutMs: 25 }),
+    );
+    expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
+    delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
+  });
+
   it("caps oversized compile timeout env overrides below the global request timeout", async () => {
     process.env.REQUEST_TIMEOUT_MS = "30000";
     process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "60000";

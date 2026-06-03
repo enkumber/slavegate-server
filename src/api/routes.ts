@@ -80,9 +80,8 @@ const HUMAN_WORKFLOW_SOCIAL_ACCOUNT_DENY_PATTERNS: RegExp[] = [
   /\b(dm|direct message|private message|send message|send a message)\b/i,
   /\b(change|reset|update)\s+(my\s+|the\s+)?password\b/i,
   /\b(password|purchase|buy|checkout|delete account|deactivate account)\b/i,
-  /\b(send|trimite)\s+(message|mesaj)\b/i,
+  /\b(?:send\s+(?:a\s+)?message|trimite\s+(?:un\s+)?mesaj)\b/i,
   /\b(posteaza|comenteaza|urmareste|dezurmareste|cumpara|schimba|sterge|dezactiveaza)\b/i,
-  /\btrimite\b/i,
   /\b(plata|parola|parole)\b/i,
   /\b(?:aboneaza-te|dezaboneaza-te|deleteaza|reseteaza|actualizeaza)\b/i,
 ];
