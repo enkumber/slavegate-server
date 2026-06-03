@@ -9,6 +9,8 @@ const RUN_ID = "44444444-4444-4444-8444-444444444444";
 const TASK_ID = "55555555-5555-4555-8555-555555555555";
 const INTENT = "Open Reddit and collect an account health screenshot";
 const SAFE_TIMEOUT_INTENT = "derulează feed-ul Reddit și fă un screenshot";
+const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottest";
+const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
 
 const mocks = vi.hoisted(() => ({
   db: {
@@ -301,27 +303,90 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.llmJson).not.toHaveBeenCalled();
   });
 
-  it("lets AskReddit Romanian read intent proceed past temporary no-safety gating", async () => {
-    const intent = "citeste primul post de pe AskReddit";
-    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(cachedPlan({
-      requestKey: requestKey(intent),
-      cacheKey: cacheKey(intent),
-    }));
+  it("compiles the AskReddit hottest first post read shortcut without LLM on cache miss", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
 
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
       account_id: ACCOUNT_ID,
-      intent,
+      intent: ASKREDDIT_HOT_INTENT,
     });
 
     expect(response.status).toBe(200);
     expect(response.body.data).toMatchObject({
-      requestKey: requestKey(intent),
-      cacheKey: cacheKey(intent),
-      cacheHit: true,
+      requestKey: requestKey(ASKREDDIT_HOT_INTENT),
+      cacheHit: false,
       safetyClass: "read_only",
+      platform: "reddit",
+    });
+    expect(response.body.data.cacheKey).toMatch(/^[a-f0-9]{24}$/);
+    expect(response.body.data.plan).toMatchObject({
+      templateId: "dashboard_human_reddit_askreddit_hot_first_item_v1",
+      version: "1.0.0",
+    });
+    expect(response.body.data.plan.actions.map((action: { action: string }) => action.action)).toEqual([
+      "open_app",
+      "wait_for_idle",
+      "get_screen_state",
+      "ui_tree_dump",
+      "screenshot",
+    ]);
+    expect(mocks.llmJson).not.toHaveBeenCalled();
+    expect(mocks.loadMap).not.toHaveBeenCalled();
+    expect(mocks.workflowService.saveTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "dashboard_human_reddit_askreddit_hot_first_item_v1",
+        platform: "reddit",
+      }),
+    );
+    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "dashboard_human_reddit_askreddit_hot_first_item_v1" }),
+      expect.objectContaining({
+        templateId: "dashboard_human_reddit_askreddit_hot_first_item_v1",
+        llmBudget: { happyPathRequests: 0, recoveryRequests: "only_on_failure" },
+      }),
+      requestKey(ASKREDDIT_HOT_INTENT),
+      expect.objectContaining({
+        source: "dashboard_human",
+        shortcut: "askreddit_first_hot_read",
+        intent: ASKREDDIT_HOT_INTENT,
+      }),
+    );
+  });
+
+  it("compiles the Romanian AskReddit first post shortcut without LLM on cache miss", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: ASKREDDIT_RO_INTENT,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      requestKey: requestKey(ASKREDDIT_RO_INTENT),
+      cacheHit: false,
+      safetyClass: "read_only",
+      platform: "reddit",
+    });
+    expect(response.body.data.cacheKey).toMatch(/^[a-f0-9]{24}$/);
+    expect(response.body.data.plan).toMatchObject({
+      templateId: "dashboard_human_reddit_askreddit_hot_first_item_v1",
+      version: "1.0.0",
     });
     expect(mocks.llmJson).not.toHaveBeenCalled();
+    expect(mocks.loadMap).not.toHaveBeenCalled();
+    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "dashboard_human_reddit_askreddit_hot_first_item_v1" }),
+      expect.any(Object),
+      requestKey(ASKREDDIT_RO_INTENT),
+      expect.objectContaining({
+        source: "dashboard_human",
+        shortcut: "askreddit_first_hot_read",
+        intent: ASKREDDIT_RO_INTENT,
+      }),
+    );
   });
 
   it("returns a bounded compile timeout on safe cache misses instead of global request timeout", async () => {

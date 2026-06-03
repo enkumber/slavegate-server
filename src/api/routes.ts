@@ -73,6 +73,92 @@ const router = Router();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
 const DEFAULT_HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = 20_000;
+
+// Deterministic templates for common Reddit read workflows.
+// Matched BEFORE LLM compile — returns immediately, zero latency.
+const REDDIT_READ_TEMPLATES: { patterns: RegExp[]; template: WorkflowTemplate }[] = [
+  {
+    patterns: [
+      /read.*(first|top|hot|hottest|popular).*post.*askreddit/i,
+      /citeste.*post.*askreddit/i,
+      /askreddit.*(first|top|hot|hottest|popular)/i,
+      /read.*reddit.*(hottest|hot|top|popular)/i,
+    ],
+    template: {
+      id: "reddit_read_hot_post_v1",
+      version: "1.0.0",
+      platform: "reddit",
+      safetyClass: "read_only",
+      intent: "Read the first post on AskReddit, sorted by hottest",
+      steps: [
+        { id: "open", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+        { id: "wait_home", type: "action", action: "wait_for", params: { selectorName: "home_feed", timeoutSeconds: 5 } },
+        { id: "scroll_to_askreddit", type: "action", action: "scroll_down", params: { times: 3, pauseMs: 500 } },
+        { id: "tap_askreddit", type: "action", action: "tap", params: { selectorName: "askreddit_link", timeoutSeconds: 10 } },
+        { id: "wait_askreddit", type: "action", action: "wait_for", params: { selectorName: "post_list", timeoutSeconds: 8 } },
+        { id: "tap_first_post", type: "action", action: "tap", params: { selectorName: "first_post", timeoutSeconds: 5 } },
+        { id: "wait_post", type: "action", action: "wait_for", params: { selectorName: "post_content", timeoutSeconds: 8 } },
+        { id: "read_content", type: "action", action: "screenshot", params: { quality: 80 } },
+      ],
+    },
+  },
+  {
+    patterns: [
+      /read.*(first|top).*comment/i,
+      /citeste.*comentariu/i,
+      /read.*comment/i,
+    ],
+    template: {
+      id: "reddit_read_comment_v1",
+      version: "1.0.0",
+      platform: "reddit",
+      safetyClass: "read_only",
+      intent: "Read the first comment on Reddit",
+      steps: [
+        { id: "open", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+        { id: "wait_home", type: "action", action: "wait_for", params: { selectorName: "home_feed", timeoutSeconds: 5 } },
+        { id: "tap_first_post", type: "action", action: "tap", params: { selectorName: "first_post", timeoutSeconds: 5 } },
+        { id: "wait_post", type: "action", action: "wait_for", params: { selectorName: "post_content", timeoutSeconds: 8 } },
+        { id: "scroll_comments", type: "action", action: "scroll_down", params: { times: 2, pauseMs: 300 } },
+        { id: "read_comments", type: "action", action: "screenshot", params: { quality: 80 } },
+      ],
+    },
+  },
+  {
+    patterns: [
+      /read.*feed.*reddit/i,
+      /citeste.*feed.*reddit/i,
+      /scroll.*reddit.*feed/i,
+      /browse.*reddit/i,
+    ],
+    template: {
+      id: "reddit_browse_feed_v1",
+      version: "1.0.0",
+      platform: "reddit",
+      safetyClass: "read_only",
+      intent: "Browse Reddit feed",
+      steps: [
+        { id: "open", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+        { id: "wait_home", type: "action", action: "wait_for", params: { selectorName: "home_feed", timeoutSeconds: 5 } },
+        { id: "scroll_1", type: "action", action: "scroll_down", params: { times: 5, pauseMs: 600 } },
+        { id: "screenshot", type: "action", action: "screenshot", params: { quality: 80 } },
+      ],
+    },
+  },
+];
+
+function matchDeterministicTemplate(intent: string): { template: WorkflowTemplate; requestKey: string } | null {
+  const normalized = intent.toLowerCase().trim();
+  for (const entry of REDDIT_READ_TEMPLATES) {
+    for (const pattern of entry.patterns) {
+      if (pattern.test(normalized)) {
+        return { template: entry.template, requestKey: "canonical" };
+      }
+    }
+  }
+  return null;
+}
+
 const PLATFORM_APP_IDS: Record<string, string> = {
   reddit: "com.reddit.frontpage",
   instagram: "com.instagram.android",
@@ -147,6 +233,91 @@ interface HumanWorkflowTarget {
 
 function humanWorkflowAppId(platform: string): string {
   return PLATFORM_APP_IDS[platform.toLowerCase()] ?? platform;
+}
+
+function normalizeHumanWorkflowShortcutText(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[ăâ]/gi, "a")
+    .replace(/[î]/gi, "i")
+    .replace(/[șş]/gi, "s")
+    .replace(/[țţ]/gi, "t")
+    .toLowerCase();
+}
+
+function isAskRedditFirstHotReadIntent(intent: string, platform: string): boolean {
+  if (platform.toLowerCase() !== "reddit") return false;
+  const normalized = normalizeHumanWorkflowShortcutText(intent);
+  if (!normalized.includes("askreddit")) return false;
+  const asksToRead = /\bread\b/.test(normalized) || /\bciteste\b/.test(normalized);
+  const asksForFirstPost = /\bfirst\s+post\b/.test(normalized) || /\bprimul\s+post\b/.test(normalized);
+  const asksForHotSort = /\bhot\b/.test(normalized) || /\bhottest\b/.test(normalized) || /\bhot\b/.test(normalized.replace(/\s+/g, ""));
+  return asksToRead && asksForFirstPost && (asksForHotSort || /\baskreddit\b/.test(normalized));
+}
+
+function buildAskRedditFirstHotReadTemplate(packageName: string): WorkflowTemplate {
+  return {
+    id: "dashboard_human_reddit_askreddit_hot_first_item_v1",
+    name: "AskReddit hot first item reader",
+    platform: "reddit",
+    description: "Open r/AskReddit hot feed and capture the first visible item for dashboard review.",
+    version: "1.0.0",
+    defaultVerificationStrategy: "local_with_screenshot",
+    dataRetentionDays: 7,
+    steps: [
+      {
+        id: "open_askreddit_hot",
+        type: "action",
+        action: "open_app",
+        params: {
+          packageName,
+          uri: "https://www.reddit.com/r/AskReddit/hot/",
+        },
+      },
+      {
+        id: "wait_for_reddit",
+        type: "wait",
+        condition: "app_launched",
+        timeoutMs: 10_000,
+      },
+      {
+        id: "settle_hot_feed",
+        type: "action",
+        action: "wait_for_idle",
+        params: { timeoutMs: 3_000 },
+      },
+      {
+        id: "capture_visible_state",
+        type: "action",
+        action: "get_screen_state",
+        params: {
+          scope: "askreddit_hot_first_visible_item",
+        },
+      },
+      {
+        id: "dump_visible_content",
+        type: "action",
+        action: "ui_tree_dump",
+        params: {
+          scope: "askreddit_hot_first_visible_item",
+        },
+      },
+      {
+        id: "capture_visible_item",
+        type: "action",
+        action: "screenshot",
+        params: {
+          quality: 85,
+        },
+      },
+      {
+        id: "visible_item_ready",
+        type: "checkpoint",
+        reason: "AskReddit hot first visible item captured for reading",
+      },
+    ],
+  };
 }
 
 function humanWorkflowPlanPreview(template: WorkflowTemplate, compiledPlan: GeneratedWorkflowCompiledPlan): Record<string, unknown> {
@@ -238,6 +409,42 @@ async function compileHumanWorkflowPlan(input: {
 
   const platform = target.account_platform;
   const packageName = humanWorkflowAppId(platform);
+  if (isAskRedditFirstHotReadIntent(intent, platform)) {
+    const rawWorkflow = buildAskRedditFirstHotReadTemplate(packageName);
+    const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
+    if (!validation.template) {
+      throw Object.assign(new Error("workflow failed validation"), {
+        status: 400,
+        code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
+        validationErrors: validation.errors,
+      });
+    }
+    const template = validation.template;
+    let compiledPlan = compileGeneratedWorkflowTemplate(template);
+    compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
+    await workflowService.saveTemplate(template);
+    await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+      source: "dashboard_human",
+      shortcut: "askreddit_first_hot_read",
+      intent,
+      deviceId: input.deviceId,
+      accountId: input.accountId,
+      platform,
+      compiledAt: new Date().toISOString(),
+    });
+
+    return {
+      requestKey,
+      cacheHit: false,
+      cacheKey: compiledPlan.cacheKey,
+      plan: humanWorkflowPlanPreview(template, compiledPlan),
+      safetyClass: "read_only",
+      platform,
+      target,
+      llmBudget: compiledPlan.llmBudget,
+    };
+  }
+
   const appMap = await loadMap(packageName);
   const appMapHintSet = appMap ? buildGeneratedWorkflowAppMapHints(appMap) : null;
   const availableScreens = resolveGeneratedWorkflowScreens(platform);
