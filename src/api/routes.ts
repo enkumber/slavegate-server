@@ -57,6 +57,7 @@ import {
 } from "../modules/observability/metrics";
 import { canaryService } from "../modules/canary/canary.service";
 import { alerting, AlertType } from "../modules/observability/alerts";
+import { taskRunnerService } from "../modules/task-runner";
 import { getDb } from "../db/client";
 import { llmJson } from "../utils/llm";
 import { scalabilityConfig } from "../config/scalability.config";
@@ -196,6 +197,18 @@ function buildOpenAppTemplate(platform: string, packageName: string): WorkflowTe
     defaultVerificationStrategy: "local_only",
     dataRetentionDays: 7,
     steps: [
+      {
+        id: "wake_screen",
+        type: "action",
+        action: "screen_wake",
+        params: {},
+      },
+      {
+        id: "unlock_device",
+        type: "action",
+        action: "unlock",
+        params: {},
+      },
       {
         id: "open_app",
         type: "action",
@@ -629,6 +642,7 @@ async function queueHumanAgencyWorkflowRun(input: {
     const taskId = taskResult.rows[0].id;
     await client.query(`UPDATE agency_workflow_runs SET task_id = $1, updated_at = NOW() WHERE id = $2`, [taskId, runId]);
     await client.query("COMMIT");
+    taskRunnerService.pollNow().catch((err) => console.error("[human-workflow] immediate task runner poll failed:", err));
     return {
       id: runId,
       status: existingRun?.status ?? "queued",

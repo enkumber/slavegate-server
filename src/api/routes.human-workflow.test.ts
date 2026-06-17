@@ -383,13 +383,15 @@ describe("dashboard human workflow routes", () => {
       version: "1.0.0",
     });
     expect(response.body.data.plan.actions.map((action: { action: string }) => action.action)).toEqual([
+      "screen_wake",
+      "unlock",
       "open_app",
       "wait_for_idle",
     ]);
-    expect(response.body.data.plan.actions[0]).toMatchObject({
+    expect(response.body.data.plan.actions[2]).toMatchObject({
       action: "open_app",
     });
-    expect(response.body.data.plan.steps[0].params).toMatchObject({
+    expect(response.body.data.plan.steps[2].params).toMatchObject({
       packageName: "com.instagram.android",
     });
     expect(mocks.llmJson).not.toHaveBeenCalled();

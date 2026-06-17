@@ -365,6 +365,10 @@ export function getTaskRunnerStatus(): {
   };
 }
 
+export async function pollTaskRunnerNow(): Promise<void> {
+  await runPollCycle();
+}
+
 // ─── Poll Cycle ───────────────────────────────────────────────────────────────
 
 async function runPollCycle(): Promise<void> {
@@ -1069,6 +1073,7 @@ export const taskRunnerService = {
   start: startTaskRunner,
   stop: stopTaskRunner,
   status: getTaskRunnerStatus,
+  pollNow: pollTaskRunnerNow,
   executeNow: executeTaskNow,
   retryFailed: retryFailedTasks,
   getFailedStats: getFailedTasksStats,
