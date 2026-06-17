@@ -226,6 +226,7 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "classify_reddit_health_scan",
   "set_variable",
   "swipe",
+  "tap",
   "ui_tree_dump",
   "unlock",
   "wait_for_idle",

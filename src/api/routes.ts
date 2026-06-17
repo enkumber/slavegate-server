@@ -184,6 +184,8 @@ function isOpenAppIntent(intent: string, platform: string): boolean {
   const platformName = platform.toLowerCase();
   const openVerb = /\b(?:open|launch|start|deschide|porneste|pornește)\b/.test(normalized);
   if (!openVerb) return false;
+  const followUpAction = /\b(?:apasa|apasă|click|tap|comment|comenteaza|comentează|comentezi|posteaza|postează|trimite|scrie|type|like|follow|urmareste|urmărește|prima|primul|postare|post|thread)\b/.test(normalized);
+  if (followUpAction) return false;
   return compact.includes(platformName) || /\b(?:app|aplicatia|aplicatie)\b/.test(normalized);
 }
 

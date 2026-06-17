@@ -10,6 +10,7 @@ const TASK_ID = "55555555-5555-4555-8555-555555555555";
 const INTENT = "Open Reddit and collect an account health screenshot";
 const SAFE_TIMEOUT_INTENT = "derulează feed-ul Instagram și fă un screenshot";
 const OPEN_INSTAGRAM_INTENT = "deschide Instagram";
+const REDDIT_COMMENT_INTENT = "deschide app reddit, intra pe prima postare si apasa butonul de comment sa comentezi";
 const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottest";
 const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
 
@@ -415,6 +416,40 @@ describe("dashboard human workflow routes", () => {
         intent: OPEN_INSTAGRAM_INTENT,
       }),
     );
+  });
+
+  it("does not classify multi-step Reddit comment intents as simple open-app shortcuts", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.llmJson.mockResolvedValueOnce({
+      id: "dashboard_human_reddit_comment_entry_v1",
+      name: "Reddit comment entry",
+      platform: "reddit",
+      description: "Open Reddit, enter the first visible item, and focus the reply entry surface.",
+      version: "1.0.0",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [
+        { id: "open_reddit", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+        { id: "wait_feed", type: "action", action: "wait_for_idle", params: { timeoutMs: 2000 } },
+        { id: "open_first_post", type: "action", action: "tap", params: { selectorName: "first_post" } },
+      ],
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: REDDIT_COMMENT_INTENT,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      requestKey: requestKey(REDDIT_COMMENT_INTENT),
+      cacheHit: false,
+      safetyClass: "read_only",
+      platform: "reddit",
+    });
+    expect(response.body.data.plan.templateId).not.toBe("dashboard_human_reddit_open_app_v1");
+    expect(mocks.llmJson).toHaveBeenCalled();
   });
 
   it("compiles the Romanian AskReddit first post shortcut without LLM on cache miss", async () => {
