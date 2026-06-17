@@ -15,6 +15,14 @@ interface StrategyEditorProps {
 }
 
 function StrategyEditor({ strategy, onChange }: StrategyEditorProps) {
+  const linkFields = [
+    { key: "website", label: "Website", placeholder: "https://example.com" },
+    { key: "instagram", label: "Instagram", placeholder: "https://instagram.com/brand or @brand" },
+    { key: "facebook", label: "Facebook", placeholder: "https://facebook.com/brand" },
+    { key: "linkedin", label: "LinkedIn", placeholder: "https://linkedin.com/company/brand" },
+    { key: "tiktok", label: "TikTok", placeholder: "https://tiktok.com/@brand or @brand" },
+  ];
+
   const fields = [
     { key: "goal", label: "Goal", type: "text" },
     { key: "target_audience", label: "Target Audience", type: "textarea" },
@@ -27,6 +35,38 @@ function StrategyEditor({ strategy, onChange }: StrategyEditorProps) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+      <div>
+        <h5 style={{ color: "#aaa", fontSize: "12px", margin: "0 0 10px" }}>Links</h5>
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {linkFields.map((field) => (
+            <div key={field.key}>
+              <label style={{ display: "block", color: "#888", fontSize: "12px", marginBottom: "4px" }}>
+                {field.label}
+              </label>
+              <input
+                type="text"
+                value={(strategy[field.key] as string) ?? ""}
+                onChange={(e) => onChange({ ...strategy, [field.key]: e.target.value })}
+                placeholder={field.placeholder}
+                style={{
+                  width: "100%",
+                  padding: "8px 10px",
+                  background: "#1a1a1a",
+                  border: "1px solid #333",
+                  borderRadius: "4px",
+                  color: "#fff",
+                  fontSize: "13px",
+                }}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ borderTop: "1px solid #222", paddingTop: "12px" }}>
+        <h5 style={{ color: "#aaa", fontSize: "12px", margin: "0 0 10px" }}>Positioning</h5>
+      </div>
+
       {fields.map((field) => (
         <div key={field.key}>
           <label style={{ display: "block", color: "#888", fontSize: "12px", marginBottom: "4px" }}>
@@ -378,6 +418,21 @@ export function ClientsPage() {
                 {typeof client.strategy.budget_level === "string" && client.strategy.budget_level && (
                   <div style={{ color: "#888", fontSize: "12px" }}>
                     <strong>Budget:</strong> {client.strategy.budget_level}
+                  </div>
+                )}
+                {typeof client.strategy.website === "string" && client.strategy.website && (
+                  <div style={{ color: "#888", fontSize: "12px", marginTop: "4px" }}>
+                    <strong>Website:</strong> {client.strategy.website}
+                  </div>
+                )}
+                {typeof client.strategy.instagram === "string" && client.strategy.instagram && (
+                  <div style={{ color: "#888", fontSize: "12px", marginTop: "4px" }}>
+                    <strong>Instagram:</strong> {client.strategy.instagram}
+                  </div>
+                )}
+                {typeof client.strategy.facebook === "string" && client.strategy.facebook && (
+                  <div style={{ color: "#888", fontSize: "12px", marginTop: "4px" }}>
+                    <strong>Facebook:</strong> {client.strategy.facebook}
                   </div>
                 )}
               </div>

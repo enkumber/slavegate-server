@@ -7,6 +7,13 @@ import { useState, useEffect, useCallback } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
 import { agencyApi } from "../api/agency";
 function StrategyEditor({ strategy, onChange }) {
+    const linkFields = [
+        { key: "website", label: "Website", placeholder: "https://example.com" },
+        { key: "instagram", label: "Instagram", placeholder: "https://instagram.com/brand or @brand" },
+        { key: "facebook", label: "Facebook", placeholder: "https://facebook.com/brand" },
+        { key: "linkedin", label: "LinkedIn", placeholder: "https://linkedin.com/company/brand" },
+        { key: "tiktok", label: "TikTok", placeholder: "https://tiktok.com/@brand or @brand" },
+    ];
     const fields = [
         { key: "goal", label: "Goal", type: "text" },
         { key: "target_audience", label: "Target Audience", type: "textarea" },
@@ -16,33 +23,41 @@ function StrategyEditor({ strategy, onChange }) {
         { key: "competitors", label: "Competitors", type: "text" },
         { key: "budget_level", label: "Budget Level", type: "select", options: ["low", "medium", "high"] },
     ];
-    return (_jsx("div", { style: { display: "flex", flexDirection: "column", gap: "12px" }, children: fields.map((field) => (_jsxs("div", { children: [_jsx("label", { style: { display: "block", color: "#888", fontSize: "12px", marginBottom: "4px" }, children: field.label }), field.type === "textarea" ? (_jsx("textarea", { value: strategy[field.key] ?? "", onChange: (e) => onChange({ ...strategy, [field.key]: e.target.value }), style: {
-                        width: "100%",
-                        padding: "8px 10px",
-                        background: "#1a1a1a",
-                        border: "1px solid #333",
-                        borderRadius: "4px",
-                        color: "#fff",
-                        fontSize: "13px",
-                        minHeight: "60px",
-                        resize: "vertical",
-                    } })) : field.type === "select" ? (_jsxs("select", { value: strategy[field.key] ?? "", onChange: (e) => onChange({ ...strategy, [field.key]: e.target.value }), style: {
-                        width: "100%",
-                        padding: "8px 10px",
-                        background: "#1a1a1a",
-                        border: "1px solid #333",
-                        borderRadius: "4px",
-                        color: "#fff",
-                        fontSize: "13px",
-                    }, children: [_jsx("option", { value: "", children: "Select..." }), field.options?.map((opt) => (_jsx("option", { value: opt, children: opt }, opt)))] })) : (_jsx("input", { type: "text", value: strategy[field.key] ?? "", onChange: (e) => onChange({ ...strategy, [field.key]: e.target.value }), style: {
-                        width: "100%",
-                        padding: "8px 10px",
-                        background: "#1a1a1a",
-                        border: "1px solid #333",
-                        borderRadius: "4px",
-                        color: "#fff",
-                        fontSize: "13px",
-                    } }))] }, field.key))) }));
+    return (_jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "12px" }, children: [_jsxs("div", { children: [_jsx("h5", { style: { color: "#aaa", fontSize: "12px", margin: "0 0 10px" }, children: "Links" }), _jsx("div", { style: { display: "flex", flexDirection: "column", gap: "10px" }, children: linkFields.map((field) => (_jsxs("div", { children: [_jsx("label", { style: { display: "block", color: "#888", fontSize: "12px", marginBottom: "4px" }, children: field.label }), _jsx("input", { type: "text", value: strategy[field.key] ?? "", onChange: (e) => onChange({ ...strategy, [field.key]: e.target.value }), placeholder: field.placeholder, style: {
+                                        width: "100%",
+                                        padding: "8px 10px",
+                                        background: "#1a1a1a",
+                                        border: "1px solid #333",
+                                        borderRadius: "4px",
+                                        color: "#fff",
+                                        fontSize: "13px",
+                                    } })] }, field.key))) })] }), _jsx("div", { style: { borderTop: "1px solid #222", paddingTop: "12px" }, children: _jsx("h5", { style: { color: "#aaa", fontSize: "12px", margin: "0 0 10px" }, children: "Positioning" }) }), fields.map((field) => (_jsxs("div", { children: [_jsx("label", { style: { display: "block", color: "#888", fontSize: "12px", marginBottom: "4px" }, children: field.label }), field.type === "textarea" ? (_jsx("textarea", { value: strategy[field.key] ?? "", onChange: (e) => onChange({ ...strategy, [field.key]: e.target.value }), style: {
+                            width: "100%",
+                            padding: "8px 10px",
+                            background: "#1a1a1a",
+                            border: "1px solid #333",
+                            borderRadius: "4px",
+                            color: "#fff",
+                            fontSize: "13px",
+                            minHeight: "60px",
+                            resize: "vertical",
+                        } })) : field.type === "select" ? (_jsxs("select", { value: strategy[field.key] ?? "", onChange: (e) => onChange({ ...strategy, [field.key]: e.target.value }), style: {
+                            width: "100%",
+                            padding: "8px 10px",
+                            background: "#1a1a1a",
+                            border: "1px solid #333",
+                            borderRadius: "4px",
+                            color: "#fff",
+                            fontSize: "13px",
+                        }, children: [_jsx("option", { value: "", children: "Select..." }), field.options?.map((opt) => (_jsx("option", { value: opt, children: opt }, opt)))] })) : (_jsx("input", { type: "text", value: strategy[field.key] ?? "", onChange: (e) => onChange({ ...strategy, [field.key]: e.target.value }), style: {
+                            width: "100%",
+                            padding: "8px 10px",
+                            background: "#1a1a1a",
+                            border: "1px solid #333",
+                            borderRadius: "4px",
+                            color: "#fff",
+                            fontSize: "13px",
+                        } }))] }, field.key)))] }));
 }
 function ClientModal({ client, isNew, onClose, onSave }) {
     const [name, setName] = useState(client?.name ?? "");
@@ -174,5 +189,5 @@ export function ClientsPage() {
                                         fontSize: "11px",
                                         background: client.active ? "#0d3320" : "#2a1515",
                                         color: client.active ? "#4ade80" : "#f88",
-                                    }, children: client.active ? "Active" : "Inactive" })] }), _jsxs("div", { style: { marginTop: "12px" }, children: [typeof client.strategy.goal === "string" && client.strategy.goal && (_jsxs("div", { style: { color: "#888", fontSize: "12px", marginBottom: "4px" }, children: [_jsx("strong", { children: "Goal:" }), " ", client.strategy.goal.slice(0, 60), client.strategy.goal.length > 60 ? "..." : ""] })), typeof client.strategy.budget_level === "string" && client.strategy.budget_level && (_jsxs("div", { style: { color: "#888", fontSize: "12px" }, children: [_jsx("strong", { children: "Budget:" }), " ", client.strategy.budget_level] }))] }), _jsxs("div", { style: { marginTop: "12px", color: "#555", fontSize: "11px" }, children: ["Created ", new Date(client.created_at).toLocaleDateString()] })] }, client.id))) })), modalState.open && (_jsx(ClientModal, { client: modalState.client, isNew: modalState.isNew, onClose: () => setModalState({ open: false, client: null, isNew: false }), onSave: fetchClients }))] }));
+                                    }, children: client.active ? "Active" : "Inactive" })] }), _jsxs("div", { style: { marginTop: "12px" }, children: [typeof client.strategy.goal === "string" && client.strategy.goal && (_jsxs("div", { style: { color: "#888", fontSize: "12px", marginBottom: "4px" }, children: [_jsx("strong", { children: "Goal:" }), " ", client.strategy.goal.slice(0, 60), client.strategy.goal.length > 60 ? "..." : ""] })), typeof client.strategy.budget_level === "string" && client.strategy.budget_level && (_jsxs("div", { style: { color: "#888", fontSize: "12px" }, children: [_jsx("strong", { children: "Budget:" }), " ", client.strategy.budget_level] })), typeof client.strategy.website === "string" && client.strategy.website && (_jsxs("div", { style: { color: "#888", fontSize: "12px", marginTop: "4px" }, children: [_jsx("strong", { children: "Website:" }), " ", client.strategy.website] })), typeof client.strategy.instagram === "string" && client.strategy.instagram && (_jsxs("div", { style: { color: "#888", fontSize: "12px", marginTop: "4px" }, children: [_jsx("strong", { children: "Instagram:" }), " ", client.strategy.instagram] }))] }), _jsxs("div", { style: { marginTop: "12px", color: "#555", fontSize: "11px" }, children: ["Created ", new Date(client.created_at).toLocaleDateString()] })] }, client.id))) })), modalState.open && (_jsx(ClientModal, { client: modalState.client, isNew: false, onClose: () => setModalState({ open: false, client: null, isNew: false }), onSave: fetchClients }))] }));
 }
