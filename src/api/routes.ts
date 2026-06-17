@@ -80,6 +80,7 @@ const PLATFORM_APP_IDS: Record<string, string> = {
   facebook: "com.facebook.katana",
   twitter: "com.twitter.android",
 };
+const HUMAN_WORKFLOW_OPEN_APP_SHORTCUT_PLATFORMS = new Set(["instagram", "reddit", "threads", "tiktok", "twitter", "youtube"]);
 
 function generatedWorkflowCacheResult(cacheKey?: string, requestKey?: string): "cache_hit" | "canonical_hit" {
   return requestKey && !cacheKey ? "canonical_hit" : "cache_hit";
@@ -173,6 +174,51 @@ function isAskRedditFirstHotReadIntent(intent: string, platform: string): boolea
   const asksForHotSort = /\b(?:hot|hottest)\b/.test(normalized)
     || /\bsorted\s+by\s+hot(?:test)?\b/.test(normalized);
   return asksToRead && asksForFirstPost && (asksForHotSort || /\baskreddit\b/.test(normalized));
+}
+
+function isOpenAppIntent(intent: string, platform: string): boolean {
+  if (!HUMAN_WORKFLOW_OPEN_APP_SHORTCUT_PLATFORMS.has(platform.toLowerCase())) return false;
+  const normalized = normalizeHumanWorkflowShortcutText(intent);
+  const compact = normalized.replace(/\s+/g, "");
+  const platformName = platform.toLowerCase();
+  const openVerb = /\b(?:open|launch|start|deschide|porneste|pornește)\b/.test(normalized);
+  if (!openVerb) return false;
+  return compact.includes(platformName) || /\b(?:app|aplicatia|aplicatie)\b/.test(normalized);
+}
+
+function buildOpenAppTemplate(platform: string, packageName: string): WorkflowTemplate {
+  return {
+    id: `dashboard_human_${platform.toLowerCase()}_open_app_v1`,
+    name: `Open ${platform} app`,
+    platform: platform.toLowerCase(),
+    description: `Open the ${platform} app and wait briefly for the first screen to settle.`,
+    version: "1.0.0",
+    defaultVerificationStrategy: "local_only",
+    dataRetentionDays: 7,
+    steps: [
+      {
+        id: "open_app",
+        type: "action",
+        action: "open_app",
+        params: {
+          packageName,
+        },
+      },
+      {
+        id: "settle_app",
+        type: "action",
+        action: "wait_for_idle",
+        params: {
+          timeoutMs: 2_000,
+        },
+      },
+      {
+        id: "app_opened",
+        type: "checkpoint",
+        reason: `${platform} opened from dashboard human workflow`,
+      },
+    ],
+  };
 }
 
 function buildAskRedditFirstHotReadTemplate(packageName: string): WorkflowTemplate {
@@ -328,9 +374,47 @@ async function compileHumanWorkflowPlan(input: {
 
   const platform = target.account_platform;
   const packageName = humanWorkflowAppId(platform);
+  const matchedOpenApp = isOpenAppIntent(intent, platform);
+  if (matchedOpenApp) {
+    console.log(`[human-workflow] deterministic template matched: shortcut=open_app platform=${platform} intent="${intent}"`);
+    const rawWorkflow = buildOpenAppTemplate(platform, packageName);
+    const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
+    if (!validation.template) {
+      throw Object.assign(new Error("workflow failed validation"), {
+        status: 400,
+        code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
+        validationErrors: validation.errors,
+      });
+    }
+    const template = validation.template;
+    let compiledPlan = compileGeneratedWorkflowTemplate(template);
+    compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
+    await workflowService.saveTemplate(template);
+    await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+      source: "dashboard_human",
+      shortcut: "open_app",
+      intent,
+      deviceId: input.deviceId,
+      accountId: input.accountId,
+      platform,
+      compiledAt: new Date().toISOString(),
+    });
+
+    return {
+      requestKey,
+      cacheHit: false,
+      cacheKey: compiledPlan.cacheKey,
+      plan: humanWorkflowPlanPreview(template, compiledPlan),
+      safetyClass: "read_only",
+      platform,
+      target,
+      llmBudget: compiledPlan.llmBudget,
+    };
+  }
+
   const matched = isAskRedditFirstHotReadIntent(intent, platform);
   if (matched) {
-    console.log(`[human-workflow] deterministic template matched: platform=${platform} intent="${intent}"`);
+    console.log(`[human-workflow] deterministic template matched: shortcut=askreddit_first_hot_read platform=${platform} intent="${intent}"`);
     const rawWorkflow = buildAskRedditFirstHotReadTemplate(packageName);
     const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
     if (!validation.template) {

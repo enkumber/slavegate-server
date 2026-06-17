@@ -9,6 +9,7 @@ const RUN_ID = "44444444-4444-4444-8444-444444444444";
 const TASK_ID = "55555555-5555-4555-8555-555555555555";
 const INTENT = "Open Reddit and collect an account health screenshot";
 const SAFE_TIMEOUT_INTENT = "derulează feed-ul Instagram și fă un screenshot";
+const OPEN_INSTAGRAM_INTENT = "deschide Instagram";
 const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottest";
 const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
 
@@ -350,6 +351,66 @@ describe("dashboard human workflow routes", () => {
         source: "dashboard_human",
         shortcut: "askreddit_first_hot_read",
         intent: ASKREDDIT_HOT_INTENT,
+      }),
+    );
+  });
+
+  it("compiles a simple Instagram open-app shortcut without LLM on cache miss", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [targetRow({
+        account_username: "insta_user",
+        account_platform: "instagram",
+      })],
+    });
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: OPEN_INSTAGRAM_INTENT,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      requestKey: requestKey(OPEN_INSTAGRAM_INTENT),
+      cacheHit: false,
+      safetyClass: "read_only",
+      platform: "instagram",
+    });
+    expect(response.body.data.cacheKey).toMatch(/^[a-f0-9]{24}$/);
+    expect(response.body.data.plan).toMatchObject({
+      templateId: "dashboard_human_instagram_open_app_v1",
+      version: "1.0.0",
+    });
+    expect(response.body.data.plan.actions.map((action: { action: string }) => action.action)).toEqual([
+      "open_app",
+      "wait_for_idle",
+    ]);
+    expect(response.body.data.plan.actions[0]).toMatchObject({
+      action: "open_app",
+    });
+    expect(response.body.data.plan.steps[0].params).toMatchObject({
+      packageName: "com.instagram.android",
+    });
+    expect(mocks.llmJson).not.toHaveBeenCalled();
+    expect(mocks.loadMap).not.toHaveBeenCalled();
+    expect(mocks.workflowService.saveTemplate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "dashboard_human_instagram_open_app_v1",
+        platform: "instagram",
+      }),
+    );
+    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "dashboard_human_instagram_open_app_v1" }),
+      expect.objectContaining({
+        templateId: "dashboard_human_instagram_open_app_v1",
+        llmBudget: { happyPathRequests: 0, recoveryRequests: "only_on_failure" },
+      }),
+      requestKey(OPEN_INSTAGRAM_INTENT),
+      expect.objectContaining({
+        source: "dashboard_human",
+        shortcut: "open_app",
+        intent: OPEN_INSTAGRAM_INTENT,
       }),
     );
   });
