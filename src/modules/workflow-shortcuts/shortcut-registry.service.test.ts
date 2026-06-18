@@ -104,6 +104,10 @@ describe("shortcutRegistryService", () => {
       terms: ["reddit", "primul post", "comentarii", "apasa"],
     },
     {
+      intent: "pe reddit, apasa butonul de comment la prima postare care apare in app",
+      terms: ["reddit", "prima postare", "comment", "apasa"],
+    },
+    {
       intent: "tap the comments button on the first post on reddit",
       terms: ["reddit", "first post", "comments", "tap"],
     },

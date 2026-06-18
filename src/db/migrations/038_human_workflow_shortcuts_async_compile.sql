@@ -57,8 +57,10 @@ VALUES
     20,
     '[
       {"type":"contains_all","locale":"ro","terms":["reddit","prima postare","comentarii","apasa"]},
+      {"type":"contains_all","locale":"ro","terms":["reddit","prima postare","comment","apasa"]},
       {"type":"contains_all","locale":"ro","terms":["reddit","prima postare","comantarii","apasa"]},
       {"type":"contains_all","locale":"ro","terms":["reddit","primul post","comentarii","apasa"]},
+      {"type":"contains_all","locale":"ro","terms":["reddit","primul post","comment","apasa"]},
       {"type":"contains_all","locale":"ro","terms":["reddit","primul post","comantarii","apasa"]},
       {"type":"contains_all","terms":["reddit","first post","comments","tap"]}
     ]'::jsonb,

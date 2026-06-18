@@ -15,6 +15,7 @@ const SAFE_TIMEOUT_INTENT = "derulează feed-ul Instagram și fă un screenshot"
 const OPEN_INSTAGRAM_INTENT = "deschide Instagram";
 const REDDIT_COMMENT_INTENT = "deschide app reddit, intra pe prima postare si apasa butonul de comment sa comentezi";
 const REDDIT_FIRST_POST_COMMENTS_INTENT = "intra pe reddit si apasa pe butonul de comantarii de prima postare";
+const REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT = "pe reddit, apasa butonul de comment la prima postare care apare in app";
 const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottest";
 const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
 
@@ -773,6 +774,38 @@ describe("dashboard human workflow routes", () => {
         source: "dashboard_human",
         shortcut: "reddit_first_post_comments",
         intent: REDDIT_FIRST_POST_COMMENTS_INTENT,
+      }),
+    );
+  });
+
+  it("compiles Dan's Reddit first-post comment button phrasing without LLM", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(
+      shortcutMatch("reddit_first_post_comments", redditCommentsShortcutTemplate()),
+    );
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      requestKey: requestKey(REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT),
+      source: "shortcut",
+      cacheHit: false,
+      platform: "reddit",
+    });
+    expect(mocks.llmJson).not.toHaveBeenCalled();
+    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "dashboard_human_reddit_first_post_comments_v1" }),
+      expect.any(Object),
+      requestKey(REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT),
+      expect.objectContaining({
+        source: "dashboard_human",
+        shortcut: "reddit_first_post_comments",
+        intent: REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT,
       }),
     );
   });
