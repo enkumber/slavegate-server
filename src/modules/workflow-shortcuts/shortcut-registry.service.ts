@@ -37,7 +37,7 @@ function rowToShortcut(row: Record<string, unknown>): WorkflowShortcutRecord {
 }
 
 function hasMutationTerms(normalizedIntent: string): boolean {
-  return /\b(?:autentifica|cumpara|delete|dezactiveaza|dezurmareste|follow|join|like|login|mesaj|parola|posteaza|post|reply|schimba|scrie|send|sterge|trimite|type|unfollow|upvote|vote|urmareste|comenteaza|comentezi)\b/.test(normalizedIntent);
+  return /\b(?:autentifica|cumpara|delete|dezactiveaza|dezurmareste|follow|join|like|login|mesaj|parola|posteaza|publish|reply|schimba|scrie|send|sterge|trimite|type|unfollow|upvote|vote|urmareste|comenteaza|comentezi)\b/.test(normalizedIntent);
 }
 
 function hasRejectedTerms(matchConfig: Record<string, unknown>, normalizedIntent: string): boolean {
@@ -75,7 +75,7 @@ export class ShortcutRegistryService {
       `SELECT *
        FROM workflow_shortcuts
        WHERE platform = $1 AND status = 'active'
-       ORDER BY priority ASC, updated_at DESC`,
+       ORDER BY priority ASC, updated_at DESC, key ASC`,
       [platform],
     );
 

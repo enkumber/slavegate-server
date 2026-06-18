@@ -97,4 +97,33 @@ describe("shortcutRegistryService", () => {
 
     expect(match).toBeNull();
   });
+
+  it.each([
+    {
+      intent: "intra pe reddit si apasa pe butonul de comentarii de primul post",
+      terms: ["reddit", "primul post", "comentarii", "apasa"],
+    },
+    {
+      intent: "tap the comments button on the first post on reddit",
+      terms: ["reddit", "first post", "comments", "tap"],
+    },
+  ])("allows read-only first-post navigation shortcuts: $intent", async ({ intent, terms }) => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [
+        shortcutRow({
+          key: "reddit_first_post_comments",
+          platform: "reddit",
+          intent_patterns: [{ type: "contains_all", terms }],
+          match_config: { readOnlyOnly: true },
+        }),
+      ],
+    });
+
+    const match = await shortcutRegistryService.lookupActiveShortcut({
+      platform: "reddit",
+      intent,
+    });
+
+    expect(match?.shortcut.key).toBe("reddit_first_post_comments");
+  });
 });

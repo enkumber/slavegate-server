@@ -16,9 +16,17 @@ export interface HumanWorkflowCompileJobRecord {
   shortcutId: string | null;
   error: string | null;
   result: Record<string, unknown> | null;
+  llmStartedAt: string | null;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+}
+
+const DEFAULT_STALE_RUNNING_JOB_MS = 150_000;
+
+function staleRunningJobMs(): number {
+  const configured = Number.parseInt(process.env.HUMAN_WORKFLOW_COMPILE_JOB_STALE_MS ?? "", 10);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_STALE_RUNNING_JOB_MS;
 }
 
 function rowToJob(row: Record<string, unknown>): HumanWorkflowCompileJobRecord {
@@ -35,10 +43,17 @@ function rowToJob(row: Record<string, unknown>): HumanWorkflowCompileJobRecord {
     shortcutId: (row.shortcut_id as string | null) ?? null,
     error: (row.error as string | null) ?? null,
     result: (row.result as Record<string, unknown> | null) ?? null,
+    llmStartedAt: (row.llm_started_at as string | null) ?? null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     completedAt: (row.completed_at as string | null) ?? null,
   };
+}
+
+function isStaleRunningJob(row: Record<string, unknown>): boolean {
+  if (row.status !== "running" || !row.llm_started_at) return false;
+  const startedAt = new Date(row.llm_started_at as string).getTime();
+  return Number.isFinite(startedAt) && Date.now() - startedAt > staleRunningJobMs();
 }
 
 export class HumanWorkflowCompileJobService {
@@ -65,12 +80,29 @@ export class HumanWorkflowCompileJobService {
   async getById(id: string): Promise<HumanWorkflowCompileJobRecord | null> {
     const result = await getDb().query(`SELECT * FROM human_workflow_compile_jobs WHERE id = $1`, [id]);
     if (result.rows.length === 0) return null;
+    if (isStaleRunningJob(result.rows[0])) return this.markStaleRunningFailed(id);
     return rowToJob(result.rows[0]);
   }
 
   async getByRequestKey(requestKey: string): Promise<HumanWorkflowCompileJobRecord | null> {
     const result = await getDb().query(`SELECT * FROM human_workflow_compile_jobs WHERE request_key = $1`, [requestKey]);
     if (result.rows.length === 0) return null;
+    if (isStaleRunningJob(result.rows[0])) return this.markStaleRunningFailed(result.rows[0].id as string);
+    return rowToJob(result.rows[0]);
+  }
+
+  private async markStaleRunningFailed(id: string): Promise<HumanWorkflowCompileJobRecord> {
+    const result = await getDb().query(
+      `UPDATE human_workflow_compile_jobs
+       SET status = 'failed',
+           error = 'compile job worker expired; retry compile',
+           llm_completed_at = NOW(),
+           completed_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1 AND status = 'running'
+       RETURNING *`,
+      [id],
+    );
     return rowToJob(result.rows[0]);
   }
 
@@ -82,9 +114,12 @@ export class HumanWorkflowCompileJobService {
         const claimed = await getDb().query(
           `UPDATE human_workflow_compile_jobs
            SET status = 'running', llm_started_at = NOW(), updated_at = NOW()
-           WHERE id = $1 AND status IN ('queued', 'failed')
+           WHERE id = $1 AND (
+             status IN ('queued', 'failed')
+             OR (status = 'running' AND llm_started_at < NOW() - ($2::int * INTERVAL '1 millisecond'))
+           )
            RETURNING *`,
-          [jobId],
+          [jobId, staleRunningJobMs()],
         );
         if (claimed.rows.length === 0) return;
         const result = await runner();
