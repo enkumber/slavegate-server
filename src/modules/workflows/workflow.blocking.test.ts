@@ -627,6 +627,21 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("shortDeviceId: id.slice(0, 8)");
     expect(source).not.toContain("deviceId: id.slice(0, 8)");
   });
+
+  it("invalidates stale cached Reddit comments plans after shortcut shape changes", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const source = fs.readFileSync(
+      path.join(__dirname, "..", "..", "db", "migrations", "042_invalidate_stale_reddit_comments_cache.sql"),
+      "utf8"
+    );
+
+    expect(source).toContain("DELETE FROM generated_workflow_plan_cache");
+    expect(source).toContain("dashboard_human_reddit_first_post_comments_v1");
+    expect(source).toContain("tap_first_post_comments");
+    expect(source).toContain("post.comments");
+    expect(source).toContain("a72b2ed5edde9bc384738b5b");
+  });
 });
 
 describe("Generated workflow validator module", () => {
