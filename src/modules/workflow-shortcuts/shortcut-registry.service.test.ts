@@ -130,4 +130,28 @@ describe("shortcutRegistryService", () => {
 
     expect(match?.shortcut.key).toBe("reddit_first_post_comments");
   });
+
+  it.each([
+    "pe reddit, scrie un comment la prima postare care apare in app",
+    "pe reddit, posteaza un comment la prima postare care apare in app",
+    "pe reddit, apasa butonul de comment si scrie ceva la prima postare",
+  ])("does not match mutating first-post comment-writing intents: %s", async (intent) => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [
+        shortcutRow({
+          key: "reddit_first_post_comments",
+          platform: "reddit",
+          intent_patterns: [{ type: "contains_all", terms: ["reddit", "prima postare", "comment"] }],
+          match_config: { readOnlyOnly: true },
+        }),
+      ],
+    });
+
+    const match = await shortcutRegistryService.lookupActiveShortcut({
+      platform: "reddit",
+      intent,
+    });
+
+    expect(match).toBeNull();
+  });
 });
