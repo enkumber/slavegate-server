@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { accountsApi, type Account } from "../api/accounts";
-import { agencyApi, type AgencyWorkflowRun, type HumanWorkflowCompileResult, type HumanWorkflowRunResult } from "../api/agency";
+import {
+  agencyApi,
+  type AgencyWorkflowRun,
+  type HumanWorkflowCompileCompilingResult,
+  type HumanWorkflowCompileJobFailedResult,
+  type HumanWorkflowCompileJobPendingResult,
+  type HumanWorkflowCompileReadyResult,
+  type HumanWorkflowCompileResult,
+  type HumanWorkflowRunResult,
+} from "../api/agency";
 import type { Device } from "../../../shared/protocol/api-types";
 
 interface Props {
@@ -12,7 +21,10 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountId, setAccountId] = useState("");
   const [intent, setIntent] = useState("");
-  const [compileResult, setCompileResult] = useState<HumanWorkflowCompileResult | null>(null);
+  const [compileResult, setCompileResult] = useState<HumanWorkflowCompileReadyResult | null>(null);
+  const [compileJob, setCompileJob] = useState<HumanWorkflowCompileCompilingResult | HumanWorkflowCompileJobPendingResult | null>(null);
+  const [compileFailure, setCompileFailure] = useState<HumanWorkflowCompileJobFailedResult | null>(null);
+  const [readyCompileJobId, setReadyCompileJobId] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<HumanWorkflowRunResult | null>(null);
   const [runStatus, setRunStatus] = useState<AgencyWorkflowRun | null>(null);
   const [loadingAccounts, setLoadingAccounts] = useState(true);
@@ -57,6 +69,13 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
     return () => clearInterval(timer);
   }, [refreshRun, runResult?.id]);
 
+  const resetCompileState = useCallback(() => {
+    setCompileResult(null);
+    setCompileJob(null);
+    setCompileFailure(null);
+    setReadyCompileJobId(null);
+  }, []);
+
   const compile = async () => {
     if (!accountId || !intent.trim()) {
       setError("Select an account and enter an instruction.");
@@ -64,6 +83,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
     }
     setCompiling(true);
     setError(null);
+    resetCompileState();
     setRunResult(null);
     setRunStatus(null);
     try {
@@ -72,14 +92,49 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
         account_id: accountId,
         intent: intent.trim(),
       });
-      setCompileResult(data);
+      if (isCompileReady(data)) {
+        setCompileResult(data);
+      } else {
+        setReadyCompileJobId(data.compileJobId);
+        setCompileJob(data);
+      }
     } catch (err) {
-      setCompileResult(null);
+      resetCompileState();
       setError((err as Error).message);
     } finally {
       setCompiling(false);
     }
   };
+
+  useEffect(() => {
+    if (!compileJob?.compileJobId) return;
+    let cancelled = false;
+    const delayMs = pollingDelayMs(compileJob.retryAfterMs, 2_000);
+    const timer = setTimeout(async () => {
+      try {
+        const data = await agencyApi.humanWorkflow.getCompileJob(compileJob.compileJobId);
+        if (cancelled) return;
+        if (data.status === "ready") {
+          setCompileResult(data);
+          setReadyCompileJobId(data.compileJobId ?? compileJob.compileJobId);
+          setCompileJob(null);
+          setCompileFailure(null);
+        } else if (data.status === "failed") {
+          setCompileResult(null);
+          setCompileJob(null);
+          setCompileFailure(data);
+        } else {
+          setCompileJob(data);
+        }
+      } catch (err) {
+        if (!cancelled) setError((err as Error).message);
+      }
+    }, delayMs);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [compileJob]);
 
   const run = async () => {
     if (!compileResult || compileResult.safetyClass === "destructive") return;
@@ -92,6 +147,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
         intent: intent.trim(),
         requestKey: compileResult.requestKey,
         cacheKey: compileResult.cacheKey,
+        compileJobId: readyCompileJobId ?? undefined,
       });
       setRunResult(data);
     } catch (err) {
@@ -105,6 +161,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
   const actionCount = compileResult?.plan.actions?.length ?? 0;
   const canRun = !!compileResult && compileResult.safetyClass !== "destructive" && !running;
   const terminalStatus = runStatus?.status === "completed" || runStatus?.status === "failed" || runStatus?.status === "cancelled";
+  const compilePending = compiling || !!compileJob;
 
   return (
     <div
@@ -136,7 +193,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
             <select
               value={accountId}
               disabled={loadingAccounts || accounts.length === 0}
-              onChange={(e) => { setAccountId(e.target.value); setCompileResult(null); }}
+              onChange={(e) => { setAccountId(e.target.value); resetCompileState(); }}
               style={inputStyle}
             >
               {accounts.length === 0 && <option value="">No accounts on this device</option>}
@@ -150,7 +207,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
             <label style={{ ...labelStyle, marginTop: "14px" }}>Instruction</label>
             <textarea
               value={intent}
-              onChange={(e) => { setIntent(e.target.value); setCompileResult(null); }}
+              onChange={(e) => { setIntent(e.target.value); resetCompileState(); }}
               placeholder="What should this device do?"
               rows={6}
               style={{ ...inputStyle, resize: "vertical", lineHeight: 1.45 }}
@@ -171,10 +228,10 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
             <div style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
               <button
                 onClick={compile}
-                disabled={compiling || !accountId || !intent.trim()}
-                style={primaryButtonStyle(compiling || !accountId || !intent.trim() ? "#334155" : "#2563eb")}
+                disabled={compilePending || !accountId || !intent.trim()}
+                style={primaryButtonStyle(compilePending || !accountId || !intent.trim() ? "#334155" : "#2563eb")}
               >
-                {compiling ? "Compiling..." : "Compile"}
+                {compilePending ? "Compiling..." : "Compile"}
               </button>
               <button
                 onClick={run}
@@ -198,11 +255,40 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
                   <Metric label="Actions" value={String(actionCount)} />
                   <Metric label="Platform" value={compileResult.platform} />
                   <Metric label="Request" value={compileResult.requestKey} />
+                  {compileResult.source && <Metric label="Source" value={compileResult.source} />}
                   {compileResult.safetyClass === "destructive" && (
                     <div style={{ marginTop: "10px", color: "#fca5a5", fontSize: "12px" }}>
                       Destructive plans cannot be launched from the dashboard.
                     </div>
                   )}
+                </>
+              ) : compileJob ? (
+                <>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }}>
+                    <Badge label={compileJob.status} color="#f59e0b" />
+                    <Badge label="polling" color="#60a5fa" />
+                  </div>
+                  <Metric label="Job" value={compileJob.compileJobId} />
+                  <Metric label="Request" value={compileJob.requestKey} />
+                </>
+              ) : compileFailure ? (
+                <>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }}>
+                    <Badge label="failed" color="#ef4444" />
+                    {compileFailure.retryable && <Badge label="retryable" color="#f59e0b" />}
+                  </div>
+                  <Metric label="Job" value={compileFailure.compileJobId} />
+                  <Metric label="Request" value={compileFailure.requestKey} />
+                  <div style={{ marginTop: "10px", color: "#fca5a5", fontSize: "12px", lineHeight: 1.45 }}>
+                    {compileFailure.error}
+                  </div>
+                  <button
+                    onClick={compile}
+                    disabled={compiling}
+                    style={{ ...primaryButtonStyle(compiling ? "#334155" : "#2563eb"), marginTop: "12px" }}
+                  >
+                    Retry compile
+                  </button>
                 </>
               ) : (
                 <EmptyText value="Compile to preview the generated plan." />
@@ -260,7 +346,16 @@ function EmptyText({ value }: { value: string }) {
   return <div style={{ color: "#64748b", fontSize: "12px", lineHeight: 1.5 }}>{value}</div>;
 }
 
-function safetyColor(safetyClass: HumanWorkflowCompileResult["safetyClass"]): string {
+function isCompileReady(result: HumanWorkflowCompileResult): result is HumanWorkflowCompileReadyResult {
+  return result.status === undefined || result.status === "ready";
+}
+
+function pollingDelayMs(value: number | undefined, fallback: number): number {
+  if (!Number.isFinite(value) || !value || value <= 0) return fallback;
+  return Math.min(Math.max(value, 1_000), 30_000);
+}
+
+function safetyColor(safetyClass: HumanWorkflowCompileReadyResult["safetyClass"]): string {
   if (safetyClass === "read_only") return "#22c55e";
   if (safetyClass === "standard") return "#f59e0b";
   return "#ef4444";

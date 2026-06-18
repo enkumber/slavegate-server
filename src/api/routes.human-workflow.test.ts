@@ -1,5 +1,7 @@
 import crypto from "crypto";
 import express from "express";
+import fs from "fs";
+import path from "path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
@@ -7,6 +9,7 @@ const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
 const CLIENT_ID = "33333333-3333-4333-8333-333333333333";
 const RUN_ID = "44444444-4444-4444-8444-444444444444";
 const TASK_ID = "55555555-5555-4555-8555-555555555555";
+const COMPILE_JOB_ID = "66666666-6666-4666-8666-666666666666";
 const INTENT = "Open Reddit and collect an account health screenshot";
 const SAFE_TIMEOUT_INTENT = "derulează feed-ul Instagram și fă un screenshot";
 const OPEN_INSTAGRAM_INTENT = "deschide Instagram";
@@ -31,6 +34,17 @@ const mocks = vi.hoisted(() => ({
   },
   llmJson: vi.fn(),
   loadMap: vi.fn(),
+  shortcutRegistryService: {
+    lookupActiveShortcut: vi.fn(),
+    recordHit: vi.fn(),
+    recordRunResult: vi.fn(),
+  },
+  compileJobService: {
+    createOrGet: vi.fn(),
+    getById: vi.fn(),
+    getByRequestKey: vi.fn(),
+    runInProcess: vi.fn(),
+  },
 }));
 
 vi.mock("../db/client", () => ({
@@ -48,6 +62,14 @@ vi.mock("../modules/app-mapping/recorder.service", () => ({
 
 vi.mock("../utils/llm", () => ({
   llmJson: mocks.llmJson,
+}));
+
+vi.mock("../modules/workflow-shortcuts/shortcut-registry.service", () => ({
+  shortcutRegistryService: mocks.shortcutRegistryService,
+}));
+
+vi.mock("../modules/human-workflow/compile-job.service", () => ({
+  humanWorkflowCompileJobService: mocks.compileJobService,
 }));
 
 vi.mock("../ws/direct-ws.server", () => ({
@@ -124,6 +146,79 @@ function cachedPlanRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function shortcutRecord(key: string, workflowTemplate: Record<string, unknown>) {
+  return {
+    shortcut: {
+      id: "77777777-7777-4777-8777-777777777777",
+      key,
+      workflowTemplate,
+    },
+    normalizedIntent: "",
+    matchedPattern: null,
+  };
+}
+
+function redditFirstPostCommentsTemplate() {
+  return {
+    id: "dashboard_human_reddit_first_post_comments_v1",
+    name: "Reddit first post comments opener",
+    platform: "reddit",
+    description: "Open Reddit and tap the comments button on the first visible post.",
+    version: "1.0.0",
+    defaultVerificationStrategy: "local_only",
+    dataRetentionDays: 7,
+    steps: [
+      { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
+      { id: "unlock_device", type: "action", action: "unlock", params: {} },
+      { id: "open_reddit", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+      { id: "settle_feed", type: "action", action: "wait_for_idle", params: { timeoutMs: 3000 } },
+      { id: "tap_first_post_comments", type: "action", action: "tap", target: "post.comments", params: { selectorName: "post.comments", bindingSource: "ui_tree_selector", ordinal: 1 } },
+      { id: "settle_comments", type: "action", action: "wait_for_idle", params: { timeoutMs: 2000 } },
+      { id: "comments_opened", type: "checkpoint", reason: "Reddit first visible post comments opened from dashboard human workflow" },
+    ],
+  };
+}
+
+function askRedditTemplate() {
+  return {
+    id: "dashboard_human_reddit_askreddit_hot_first_item_v1",
+    name: "AskReddit hot first item reader",
+    platform: "reddit",
+    description: "Open r/AskReddit hot feed and capture the first visible item for dashboard review.",
+    version: "1.0.0",
+    defaultVerificationStrategy: "local_with_screenshot",
+    dataRetentionDays: 7,
+    steps: [
+      { id: "open_askreddit_hot", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage", uri: "https://www.reddit.com/r/AskReddit/hot/" } },
+      { id: "wait_for_reddit", type: "wait", condition: "app_launched", timeoutMs: 10000 },
+      { id: "settle_hot_feed", type: "action", action: "wait_for_idle", params: { timeoutMs: 3000 } },
+      { id: "capture_visible_state", type: "action", action: "get_screen_state", params: { scope: "askreddit_hot_first_visible_item" } },
+      { id: "dump_visible_content", type: "action", action: "ui_tree_dump", params: { scope: "askreddit_hot_first_visible_item" } },
+      { id: "capture_visible_item", type: "action", action: "screenshot", params: { quality: 85 } },
+      { id: "visible_item_ready", type: "checkpoint", reason: "AskReddit hot first visible item captured for reading" },
+    ],
+  };
+}
+
+function openAppTemplate(platform = "instagram", packageName = "com.instagram.android") {
+  return {
+    id: `dashboard_human_${platform}_open_app_v1`,
+    name: `Open ${platform} app`,
+    platform,
+    description: `Open the ${platform} app and wait briefly for the first screen to settle.`,
+    version: "1.0.0",
+    defaultVerificationStrategy: "local_only",
+    dataRetentionDays: 7,
+    steps: [
+      { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
+      { id: "unlock_device", type: "action", action: "unlock", params: {} },
+      { id: "open_app", type: "action", action: "open_app", params: { packageName } },
+      { id: "settle_app", type: "action", action: "wait_for_idle", params: { timeoutMs: 2000 } },
+      { id: "app_opened", type: "checkpoint", reason: `${platform} opened from dashboard human workflow` },
+    ],
+  };
+}
+
 function targetRow(overrides: Record<string, unknown> = {}) {
   return {
     device_id: DEVICE_ID,
@@ -138,10 +233,145 @@ function targetRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function openAppShortcutTemplate(platform = "instagram", packageName = "com.instagram.android") {
+  return {
+    id: `dashboard_human_${platform}_open_app_v1`,
+    name: `Open ${platform} app`,
+    platform,
+    description: `Open the ${platform} app and wait briefly for the first screen to settle.`,
+    version: "1.0.0",
+    defaultVerificationStrategy: "local_only",
+    dataRetentionDays: 7,
+    steps: [
+      { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
+      { id: "unlock_device", type: "action", action: "unlock", params: {} },
+      { id: "open_app", type: "action", action: "open_app", params: { packageName } },
+      { id: "settle_app", type: "action", action: "wait_for_idle", params: { timeoutMs: 2000 } },
+    ],
+  };
+}
+
+function askRedditShortcutTemplate() {
+  return {
+    id: "dashboard_human_reddit_askreddit_hot_first_item_v1",
+    name: "AskReddit hot first item reader",
+    platform: "reddit",
+    description: "Open r/AskReddit hot feed and capture the first visible item for dashboard review.",
+    version: "1.0.0",
+    defaultVerificationStrategy: "local_with_screenshot",
+    dataRetentionDays: 7,
+    steps: [
+      { id: "open_askreddit_hot", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage", uri: "https://www.reddit.com/r/AskReddit/hot/" } },
+      { id: "settle_hot_feed", type: "action", action: "wait_for_idle", params: { timeoutMs: 3000 } },
+      { id: "capture_visible_state", type: "action", action: "get_screen_state", params: { scope: "askreddit_hot_first_visible_item" } },
+      { id: "dump_visible_content", type: "action", action: "ui_tree_dump", params: { scope: "askreddit_hot_first_visible_item" } },
+      { id: "capture_visible_item", type: "action", action: "screenshot", params: { quality: 85 } },
+    ],
+  };
+}
+
+function redditCommentsShortcutTemplate() {
+  return {
+    id: "dashboard_human_reddit_first_post_comments_v1",
+    name: "Reddit first post comments opener",
+    platform: "reddit",
+    description: "Open Reddit and tap the comments button on the first visible post.",
+    version: "1.0.0",
+    defaultVerificationStrategy: "local_only",
+    dataRetentionDays: 7,
+    steps: [
+      { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
+      { id: "unlock_device", type: "action", action: "unlock", params: {} },
+      { id: "open_reddit", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+      { id: "settle_feed", type: "action", action: "wait_for_idle", params: { timeoutMs: 3000 } },
+      { id: "tap_first_post_comments", type: "action", action: "tap", target: "post.comments", params: { selectorName: "post.comments", bindingSource: "ui_tree_selector", ordinal: 1 } },
+      { id: "settle_comments", type: "action", action: "wait_for_idle", params: { timeoutMs: 2000 } },
+    ],
+  };
+}
+
+function shortcutMatch(key: string, workflowTemplate: Record<string, unknown>) {
+  return {
+    shortcut: {
+      id: `shortcut-${key}`,
+      key,
+      platform: workflowTemplate.platform,
+      name: workflowTemplate.name,
+      description: workflowTemplate.description,
+      status: "active",
+      priority: 10,
+      intentPatterns: [],
+      aliases: [],
+      matchConfig: {},
+      workflowTemplate,
+      compatibility: {},
+      metadata: {},
+      usageCount: 0,
+      successCount: 0,
+      failureCount: 0,
+      lastUsedAt: null,
+    },
+    normalizedIntent: "",
+    matchedPattern: null,
+  };
+}
+
+function readyCompilePayload(intent = INTENT) {
+  const cached = cachedPlan();
+  return {
+    status: "ready",
+    requestKey: requestKey(intent),
+    cacheHit: false,
+    cacheKey: cacheKey(),
+    source: "llm",
+    plan: {
+      templateId: cached.workflow.id,
+      version: cached.workflow.version,
+      steps: cached.workflow.steps,
+      actions: cached.compiledPlan.steps,
+      compiledPlan: cached.compiledPlan,
+    },
+    safetyClass: "read_only",
+    platform: "reddit",
+    target: {
+      device_id: DEVICE_ID,
+      device_model: "Pixel 7",
+      device_name: "Pixel Lab",
+      account_id: ACCOUNT_ID,
+      account_username: "reddit_user",
+      account_platform: "reddit",
+      client_id: CLIENT_ID,
+    },
+    llmBudget: cached.compiledPlan.llmBudget,
+  };
+}
+
+function compileJobRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: COMPILE_JOB_ID,
+    requestKey: requestKey(),
+    deviceId: DEVICE_ID,
+    accountId: ACCOUNT_ID,
+    intent: INTENT,
+    platform: "reddit",
+    status: "queued",
+    cacheKey: null,
+    source: "llm",
+    shortcutId: null,
+    error: null,
+    result: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    completedAt: null,
+    ...overrides,
+  };
+}
+
 async function app() {
   const app = express();
   app.use(express.json());
-  const { default: apiRouter } = await import("./routes");
+  const imported = await import("./routes");
+  const apiRouter = imported.default ?? (imported as unknown as { default: express.Router }).default;
   app.use("/api", apiRouter);
   return app;
 }
@@ -172,6 +402,30 @@ async function postJson(
   });
 }
 
+async function getJson(
+  path: string,
+  headers: Record<string, string> = { "x-api-key": "test-api-key" }
+): Promise<{ status: number; body: any }> {
+  const server = await app();
+  return new Promise((resolve, reject) => {
+    const listener = server.listen(0, async () => {
+      try {
+        const address = listener.address();
+        if (!address || typeof address === "string") throw new Error("no address");
+        const response = await fetch(`http://127.0.0.1:${address.port}${path}`, {
+          method: "GET",
+          headers,
+        });
+        const json = await response.json();
+        listener.close();
+        resolve({ status: response.status, body: json });
+      } catch (err) {
+        listener.close(() => reject(err));
+      }
+    });
+  });
+}
+
 describe("dashboard human workflow routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -186,6 +440,13 @@ describe("dashboard human workflow routes", () => {
     mocks.workflowService.saveGeneratedPlanCache.mockResolvedValue(undefined);
     mocks.loadMap.mockResolvedValue(null);
     mocks.llmJson.mockResolvedValue(cachedPlan().workflow);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValue(null);
+    mocks.shortcutRegistryService.recordHit.mockResolvedValue(undefined);
+    mocks.shortcutRegistryService.recordRunResult.mockResolvedValue(undefined);
+    mocks.compileJobService.getByRequestKey.mockResolvedValue(null);
+    mocks.compileJobService.createOrGet.mockResolvedValue(compileJobRecord({ requestKey: requestKey(SAFE_TIMEOUT_INTENT), intent: SAFE_TIMEOUT_INTENT }));
+    mocks.compileJobService.getById.mockResolvedValue(null);
+    mocks.compileJobService.runInProcess.mockImplementation(() => undefined);
   });
 
   it("compiles a valid cached human workflow preview", async () => {
@@ -308,6 +569,9 @@ describe("dashboard human workflow routes", () => {
 
   it("compiles the AskReddit hottest first post read shortcut without LLM on cache miss", async () => {
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(
+      shortcutMatch("askreddit_first_hot_read", askRedditShortcutTemplate()),
+    );
 
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
@@ -365,6 +629,9 @@ describe("dashboard human workflow routes", () => {
       })],
     });
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(
+      shortcutMatch("open_app", openAppShortcutTemplate("instagram", "com.instagram.android")),
+    );
 
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
@@ -442,19 +709,25 @@ describe("dashboard human workflow routes", () => {
       intent: REDDIT_COMMENT_INTENT,
     });
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(response.body.data).toMatchObject({
+      status: "compiling",
       requestKey: requestKey(REDDIT_COMMENT_INTENT),
-      cacheHit: false,
-      safetyClass: "read_only",
-      platform: "reddit",
+      compileJobId: COMPILE_JOB_ID,
+      retryAfterMs: 2000,
+      source: "llm",
     });
-    expect(response.body.data.plan.templateId).not.toBe("dashboard_human_reddit_open_app_v1");
-    expect(mocks.llmJson).toHaveBeenCalled();
+    expect(mocks.shortcutRegistryService.lookupActiveShortcut).toHaveBeenCalledWith(
+      expect.objectContaining({ platform: "reddit", intent: REDDIT_COMMENT_INTENT }),
+    );
+    expect(mocks.llmJson).not.toHaveBeenCalled();
   });
 
   it("compiles the Romanian Reddit first post comments shortcut without LLM on cache miss", async () => {
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(
+      shortcutMatch("reddit_first_post_comments", redditCommentsShortcutTemplate()),
+    );
 
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
@@ -504,8 +777,22 @@ describe("dashboard human workflow routes", () => {
     );
   });
 
+  it("keeps the Reddit first-post comments shortcut in the DB seed instead of routes.ts", () => {
+    const routesSource = fs.readFileSync(path.join(__dirname, "routes.ts"), "utf8");
+    const migrationSource = fs.readFileSync(
+      path.join(__dirname, "..", "db", "migrations", "038_human_workflow_shortcuts_async_compile.sql"),
+      "utf8",
+    );
+
+    expect(routesSource).not.toContain("reddit_first_post_comments");
+    expect(migrationSource).toContain("reddit_first_post_comments");
+  });
+
   it("compiles the Romanian AskReddit first post shortcut without LLM on cache miss", async () => {
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(
+      shortcutMatch("askreddit_first_hot_read", askRedditShortcutTemplate()),
+    );
 
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
@@ -539,7 +826,7 @@ describe("dashboard human workflow routes", () => {
     );
   });
 
-  it("returns a bounded compile timeout on safe cache misses instead of global request timeout", async () => {
+  it("returns an async compile job on safe cache misses instead of waiting for LLM timeout", async () => {
     process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "25";
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
     const timeoutError = new Error("The operation was aborted due to timeout");
@@ -552,25 +839,24 @@ describe("dashboard human workflow routes", () => {
       intent: SAFE_TIMEOUT_INTENT,
     });
 
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(202);
     expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
-      requestKey: requestKey(SAFE_TIMEOUT_INTENT),
-      retryable: true,
-      nextAction: "retry_compile",
+      ok: true,
+      data: {
+        status: "compiling",
+        requestKey: requestKey(SAFE_TIMEOUT_INTENT),
+        compileJobId: COMPILE_JOB_ID,
+        retryAfterMs: 2000,
+        source: "llm",
+      },
     });
-    expect(response.body.error).not.toBe("Request timeout");
-    expect(mocks.llmJson).toHaveBeenCalledWith(
-      expect.any(String),
-      undefined,
-      expect.objectContaining({ timeoutMs: 25 }),
-    );
+    expect(mocks.compileJobService.runInProcess).toHaveBeenCalled();
+    expect(mocks.llmJson).not.toHaveBeenCalled();
     expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
     delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
   });
 
-  it("does not deny safe non-message Romanian intents only because they contain trimite", async () => {
+  it("queues safe non-message Romanian intents even when they contain trimite", async () => {
     const intent = "trimite fluxul in jos si fa un screenshot";
     process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "25";
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
@@ -584,24 +870,24 @@ describe("dashboard human workflow routes", () => {
       intent,
     });
 
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(202);
     expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
-      requestKey: requestKey(intent),
-      retryable: true,
-      nextAction: "retry_compile",
+      ok: true,
+      data: {
+        status: "compiling",
+        requestKey: requestKey(intent),
+        compileJobId: COMPILE_JOB_ID,
+        retryAfterMs: 2000,
+        source: "llm",
+      },
     });
-    expect(mocks.llmJson).toHaveBeenCalledWith(
-      expect.any(String),
-      undefined,
-      expect.objectContaining({ timeoutMs: 25 }),
-    );
+    expect(mocks.compileJobService.runInProcess).toHaveBeenCalled();
+    expect(mocks.llmJson).not.toHaveBeenCalled();
     expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
     delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
   });
 
-  it("caps oversized compile timeout env overrides below the global request timeout", async () => {
+  it("does not block on oversized compile timeout env overrides", async () => {
     process.env.REQUEST_TIMEOUT_MS = "30000";
     process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "60000";
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
@@ -615,27 +901,25 @@ describe("dashboard human workflow routes", () => {
       intent: SAFE_TIMEOUT_INTENT,
     });
 
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(202);
     expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
-      requestKey: requestKey(SAFE_TIMEOUT_INTENT),
-      retryable: true,
-      nextAction: "retry_compile",
+      ok: true,
+      data: {
+        status: "compiling",
+        requestKey: requestKey(SAFE_TIMEOUT_INTENT),
+        compileJobId: COMPILE_JOB_ID,
+        retryAfterMs: 2000,
+        source: "llm",
+      },
     });
-    expect(response.body.error).toContain("25000ms");
-    expect(response.body.error).not.toBe("Request timeout");
-    expect(mocks.llmJson).toHaveBeenCalledWith(
-      expect.any(String),
-      undefined,
-      expect.objectContaining({ timeoutMs: 25_000 }),
-    );
+    expect(mocks.compileJobService.runInProcess).toHaveBeenCalled();
+    expect(mocks.llmJson).not.toHaveBeenCalled();
     expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
     delete process.env.REQUEST_TIMEOUT_MS;
     delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
   });
 
-  it("returns the same bounded timeout response on safe cache-miss retry", async () => {
+  it("returns the same compile job response on safe cache-miss retry", async () => {
     process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "25";
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValue(null);
     const timeoutError = new Error("The operation was aborted due to timeout");
@@ -650,24 +934,138 @@ describe("dashboard human workflow routes", () => {
     const first = await postJson("/api/workflows/human/compile", body);
     const second = await postJson("/api/workflows/human/compile", body);
 
-    expect(first.status).toBe(503);
-    expect(second.status).toBe(503);
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
     expect(first.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
-      requestKey: requestKey(SAFE_TIMEOUT_INTENT),
-      retryable: true,
-      nextAction: "retry_compile",
+      ok: true,
+      data: {
+        status: "compiling",
+        requestKey: requestKey(SAFE_TIMEOUT_INTENT),
+        compileJobId: COMPILE_JOB_ID,
+        retryAfterMs: 2000,
+        source: "llm",
+      },
     });
     expect(second.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
-      requestKey: requestKey(SAFE_TIMEOUT_INTENT),
+      ok: true,
+      data: {
+        status: "compiling",
+        requestKey: requestKey(SAFE_TIMEOUT_INTENT),
+        compileJobId: COMPILE_JOB_ID,
+        retryAfterMs: 2000,
+        source: "llm",
+      },
+    });
+    expect(mocks.compileJobService.runInProcess).toHaveBeenCalledTimes(2);
+    expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
+    delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
+  });
+
+  it("returns compact queued compile job status for polling", async () => {
+    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({ status: "running" }));
+
+    const response = await getJson(`/api/workflows/human/compile-jobs/${COMPILE_JOB_ID}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      status: "running",
+      requestKey: requestKey(),
+      compileJobId: COMPILE_JOB_ID,
+      retryAfterMs: 2000,
+    });
+  });
+
+  it("returns ready compile job payload for polling", async () => {
+    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
+      status: "ready",
+      result: readyCompilePayload(),
+      cacheKey: cacheKey(),
+    }));
+
+    const response = await getJson(`/api/workflows/human/compile-jobs/${COMPILE_JOB_ID}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      status: "ready",
+      requestKey: requestKey(),
+      compileJobId: COMPILE_JOB_ID,
+      cacheKey: cacheKey(),
+      safetyClass: "read_only",
+    });
+  });
+
+  it("returns failed compile job payload with retry guidance", async () => {
+    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
+      status: "failed",
+      error: "planner unavailable",
+    }));
+
+    const response = await getJson(`/api/workflows/human/compile-jobs/${COMPILE_JOB_ID}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      status: "failed",
+      requestKey: requestKey(),
+      compileJobId: COMPILE_JOB_ID,
+      error: "planner unavailable",
       retryable: true,
       nextAction: "retry_compile",
     });
-    expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
-    delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
+  });
+
+  it("rejects run with compileJobId while compile job is not ready", async () => {
+    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({ status: "running" }));
+
+    const response = await postJson("/api/workflows/human/run", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: INTENT,
+      requestKey: requestKey(),
+      compileJobId: COMPILE_JOB_ID,
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "COMPILE_NOT_READY",
+      compileJobId: COMPILE_JOB_ID,
+      requestKey: requestKey(),
+      nextAction: "poll_compile_job",
+    });
+    expect(mocks.db.connect).not.toHaveBeenCalled();
+  });
+
+  it("queues run with compileJobId when compile job is ready", async () => {
+    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
+      status: "ready",
+      result: readyCompilePayload(),
+      cacheKey: cacheKey(),
+    }));
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [cachedPlanRow()] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: RUN_ID }] })
+      .mockResolvedValueOnce({ rows: [{ id: TASK_ID }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await postJson("/api/workflows/human/run", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: INTENT,
+      requestKey: requestKey(),
+      compileJobId: COMPILE_JOB_ID,
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      id: RUN_ID,
+      status: "queued",
+      taskId: TASK_ID,
+      requestKey: requestKey(),
+      cacheKey: cacheKey(),
+    });
   });
 
   it("allows destructive cached plans through the temporary no-safety compile gate", async () => {

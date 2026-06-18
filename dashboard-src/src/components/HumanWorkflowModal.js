@@ -1,12 +1,15 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { accountsApi } from "../api/accounts";
-import { agencyApi } from "../api/agency";
+import { agencyApi, } from "../api/agency";
 export function HumanWorkflowModal({ device, onClose }) {
     const [accounts, setAccounts] = useState([]);
     const [accountId, setAccountId] = useState("");
     const [intent, setIntent] = useState("");
     const [compileResult, setCompileResult] = useState(null);
+    const [compileJob, setCompileJob] = useState(null);
+    const [compileFailure, setCompileFailure] = useState(null);
+    const [readyCompileJobId, setReadyCompileJobId] = useState(null);
     const [runResult, setRunResult] = useState(null);
     const [runStatus, setRunStatus] = useState(null);
     const [loadingAccounts, setLoadingAccounts] = useState(true);
@@ -47,6 +50,12 @@ export function HumanWorkflowModal({ device, onClose }) {
         }, 5000);
         return () => clearInterval(timer);
     }, [refreshRun, runResult?.id]);
+    const resetCompileState = useCallback(() => {
+        setCompileResult(null);
+        setCompileJob(null);
+        setCompileFailure(null);
+        setReadyCompileJobId(null);
+    }, []);
     const compile = async () => {
         if (!accountId || !intent.trim()) {
             setError("Select an account and enter an instruction.");
@@ -54,6 +63,7 @@ export function HumanWorkflowModal({ device, onClose }) {
         }
         setCompiling(true);
         setError(null);
+        resetCompileState();
         setRunResult(null);
         setRunStatus(null);
         try {
@@ -62,16 +72,57 @@ export function HumanWorkflowModal({ device, onClose }) {
                 account_id: accountId,
                 intent: intent.trim(),
             });
-            setCompileResult(data);
+            if (isCompileReady(data)) {
+                setCompileResult(data);
+            }
+            else {
+                setReadyCompileJobId(data.compileJobId);
+                setCompileJob(data);
+            }
         }
         catch (err) {
-            setCompileResult(null);
+            resetCompileState();
             setError(err.message);
         }
         finally {
             setCompiling(false);
         }
     };
+    useEffect(() => {
+        if (!compileJob?.compileJobId)
+            return;
+        let cancelled = false;
+        const delayMs = pollingDelayMs(compileJob.retryAfterMs, 2_000);
+        const timer = setTimeout(async () => {
+            try {
+                const data = await agencyApi.humanWorkflow.getCompileJob(compileJob.compileJobId);
+                if (cancelled)
+                    return;
+                if (data.status === "ready") {
+                    setCompileResult(data);
+                    setReadyCompileJobId(data.compileJobId ?? compileJob.compileJobId);
+                    setCompileJob(null);
+                    setCompileFailure(null);
+                }
+                else if (data.status === "failed") {
+                    setCompileResult(null);
+                    setCompileJob(null);
+                    setCompileFailure(data);
+                }
+                else {
+                    setCompileJob(data);
+                }
+            }
+            catch (err) {
+                if (!cancelled)
+                    setError(err.message);
+            }
+        }, delayMs);
+        return () => {
+            cancelled = true;
+            clearTimeout(timer);
+        };
+    }, [compileJob]);
     const run = async () => {
         if (!compileResult || compileResult.safetyClass === "destructive")
             return;
@@ -84,6 +135,7 @@ export function HumanWorkflowModal({ device, onClose }) {
                 intent: intent.trim(),
                 requestKey: compileResult.requestKey,
                 cacheKey: compileResult.cacheKey,
+                compileJobId: readyCompileJobId ?? undefined,
             });
             setRunResult(data);
         }
@@ -98,6 +150,7 @@ export function HumanWorkflowModal({ device, onClose }) {
     const actionCount = compileResult?.plan.actions?.length ?? 0;
     const canRun = !!compileResult && compileResult.safetyClass !== "destructive" && !running;
     const terminalStatus = runStatus?.status === "completed" || runStatus?.status === "failed" || runStatus?.status === "cancelled";
+    const compilePending = compiling || !!compileJob;
     return (_jsx("div", { style: {
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.72)",
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
@@ -107,7 +160,7 @@ export function HumanWorkflowModal({ device, onClose }) {
                 width: "min(860px, 100%)", maxHeight: "92vh", overflow: "auto",
                 background: "#0f172a", border: "1px solid #1e3a5f", borderRadius: "8px",
                 color: "#e2e8f0", fontFamily: "monospace",
-            }, children: [_jsxs("div", { style: { padding: "18px 20px", borderBottom: "1px solid #1e293b", display: "flex", justifyContent: "space-between", gap: "16px" }, children: [_jsxs("div", { children: [_jsx("h3", { style: { margin: 0, fontSize: "16px" }, children: "AI Workflow" }), _jsxs("div", { style: { marginTop: "4px", fontSize: "12px", color: "#64748b" }, children: [device.friendlyName ?? device.model ?? device.id, " \u00B7 ", device.status] })] }), _jsx("button", { onClick: onClose, style: ghostButtonStyle, children: "Close" })] }), _jsxs("div", { style: { padding: "18px 20px", display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(280px, 0.8fr)", gap: "18px" }, children: [_jsxs("div", { children: [_jsx("label", { style: labelStyle, children: "Account" }), _jsxs("select", { value: accountId, disabled: loadingAccounts || accounts.length === 0, onChange: (e) => { setAccountId(e.target.value); setCompileResult(null); }, style: inputStyle, children: [accounts.length === 0 && _jsx("option", { value: "", children: "No accounts on this device" }), accounts.map((account) => (_jsxs("option", { value: account.id, children: ["@", account.username, " \u00B7 ", account.platform, " \u00B7 ", account.status] }, account.id)))] }), _jsx("label", { style: { ...labelStyle, marginTop: "14px" }, children: "Instruction" }), _jsx("textarea", { value: intent, onChange: (e) => { setIntent(e.target.value); setCompileResult(null); }, placeholder: "What should this device do?", rows: 6, style: { ...inputStyle, resize: "vertical", lineHeight: 1.45 } }), selectedAccount && (_jsxs("div", { style: { marginTop: "8px", color: "#64748b", fontSize: "12px" }, children: ["Target: @", selectedAccount.username, " on ", selectedAccount.platform] })), error && (_jsx("div", { style: { marginTop: "12px", background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: "6px", padding: "8px 10px", color: "#fca5a5", fontSize: "12px" }, children: error })), _jsxs("div", { style: { display: "flex", gap: "10px", marginTop: "16px" }, children: [_jsx("button", { onClick: compile, disabled: compiling || !accountId || !intent.trim(), style: primaryButtonStyle(compiling || !accountId || !intent.trim() ? "#334155" : "#2563eb"), children: compiling ? "Compiling..." : "Compile" }), _jsx("button", { onClick: run, disabled: !canRun, style: primaryButtonStyle(canRun ? "#16a34a" : "#334155"), children: running ? "Queueing..." : "Run" })] })] }), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "12px" }, children: [_jsx(Panel, { title: "Preview", children: compileResult ? (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }, children: [_jsx(Badge, { label: compileResult.safetyClass, color: safetyColor(compileResult.safetyClass) }), _jsx(Badge, { label: compileResult.cacheHit ? "cache hit" : "compiled", color: "#60a5fa" })] }), _jsx(Metric, { label: "Steps", value: String(planStepCount) }), _jsx(Metric, { label: "Actions", value: String(actionCount) }), _jsx(Metric, { label: "Platform", value: compileResult.platform }), _jsx(Metric, { label: "Request", value: compileResult.requestKey }), compileResult.safetyClass === "destructive" && (_jsx("div", { style: { marginTop: "10px", color: "#fca5a5", fontSize: "12px" }, children: "Destructive plans cannot be launched from the dashboard." }))] })) : (_jsx(EmptyText, { value: "Compile to preview the generated plan." })) }), _jsx(Panel, { title: "Status", children: runResult ? (_jsxs(_Fragment, { children: [_jsx(Metric, { label: "Run", value: runResult.id }), _jsx(Metric, { label: "Task", value: runResult.taskId ?? "pending" }), _jsx(Metric, { label: "Status", value: runStatus?.status ?? runResult.status }), terminalStatus && (_jsx("pre", { style: preStyle, children: JSON.stringify(runStatus?.result ?? runStatus?.error ?? null, null, 2) }))] })) : (_jsx(EmptyText, { value: "Run a compiled plan to start polling status." })) })] })] })] }) }));
+            }, children: [_jsxs("div", { style: { padding: "18px 20px", borderBottom: "1px solid #1e293b", display: "flex", justifyContent: "space-between", gap: "16px" }, children: [_jsxs("div", { children: [_jsx("h3", { style: { margin: 0, fontSize: "16px" }, children: "AI Workflow" }), _jsxs("div", { style: { marginTop: "4px", fontSize: "12px", color: "#64748b" }, children: [device.friendlyName ?? device.model ?? device.id, " \u00B7 ", device.status] })] }), _jsx("button", { onClick: onClose, style: ghostButtonStyle, children: "Close" })] }), _jsxs("div", { style: { padding: "18px 20px", display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(280px, 0.8fr)", gap: "18px" }, children: [_jsxs("div", { children: [_jsx("label", { style: labelStyle, children: "Account" }), _jsxs("select", { value: accountId, disabled: loadingAccounts || accounts.length === 0, onChange: (e) => { setAccountId(e.target.value); resetCompileState(); }, style: inputStyle, children: [accounts.length === 0 && _jsx("option", { value: "", children: "No accounts on this device" }), accounts.map((account) => (_jsxs("option", { value: account.id, children: ["@", account.username, " \u00B7 ", account.platform, " \u00B7 ", account.status] }, account.id)))] }), _jsx("label", { style: { ...labelStyle, marginTop: "14px" }, children: "Instruction" }), _jsx("textarea", { value: intent, onChange: (e) => { setIntent(e.target.value); resetCompileState(); }, placeholder: "What should this device do?", rows: 6, style: { ...inputStyle, resize: "vertical", lineHeight: 1.45 } }), selectedAccount && (_jsxs("div", { style: { marginTop: "8px", color: "#64748b", fontSize: "12px" }, children: ["Target: @", selectedAccount.username, " on ", selectedAccount.platform] })), error && (_jsx("div", { style: { marginTop: "12px", background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: "6px", padding: "8px 10px", color: "#fca5a5", fontSize: "12px" }, children: error })), _jsxs("div", { style: { display: "flex", gap: "10px", marginTop: "16px" }, children: [_jsx("button", { onClick: compile, disabled: compilePending || !accountId || !intent.trim(), style: primaryButtonStyle(compilePending || !accountId || !intent.trim() ? "#334155" : "#2563eb"), children: compilePending ? "Compiling..." : "Compile" }), _jsx("button", { onClick: run, disabled: !canRun, style: primaryButtonStyle(canRun ? "#16a34a" : "#334155"), children: running ? "Queueing..." : "Run" })] })] }), _jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "12px" }, children: [_jsx(Panel, { title: "Preview", children: compileResult ? (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }, children: [_jsx(Badge, { label: compileResult.safetyClass, color: safetyColor(compileResult.safetyClass) }), _jsx(Badge, { label: compileResult.cacheHit ? "cache hit" : "compiled", color: "#60a5fa" })] }), _jsx(Metric, { label: "Steps", value: String(planStepCount) }), _jsx(Metric, { label: "Actions", value: String(actionCount) }), _jsx(Metric, { label: "Platform", value: compileResult.platform }), _jsx(Metric, { label: "Request", value: compileResult.requestKey }), compileResult.source && _jsx(Metric, { label: "Source", value: compileResult.source }), compileResult.safetyClass === "destructive" && (_jsx("div", { style: { marginTop: "10px", color: "#fca5a5", fontSize: "12px" }, children: "Destructive plans cannot be launched from the dashboard." }))] })) : compileJob ? (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }, children: [_jsx(Badge, { label: compileJob.status, color: "#f59e0b" }), _jsx(Badge, { label: "polling", color: "#60a5fa" })] }), _jsx(Metric, { label: "Job", value: compileJob.compileJobId }), _jsx(Metric, { label: "Request", value: compileJob.requestKey })] })) : compileFailure ? (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }, children: [_jsx(Badge, { label: "failed", color: "#ef4444" }), compileFailure.retryable && _jsx(Badge, { label: "retryable", color: "#f59e0b" })] }), _jsx(Metric, { label: "Job", value: compileFailure.compileJobId }), _jsx(Metric, { label: "Request", value: compileFailure.requestKey }), _jsx("div", { style: { marginTop: "10px", color: "#fca5a5", fontSize: "12px", lineHeight: 1.45 }, children: compileFailure.error }), _jsx("button", { onClick: compile, disabled: compiling, style: { ...primaryButtonStyle(compiling ? "#334155" : "#2563eb"), marginTop: "12px" }, children: "Retry compile" })] })) : (_jsx(EmptyText, { value: "Compile to preview the generated plan." })) }), _jsx(Panel, { title: "Status", children: runResult ? (_jsxs(_Fragment, { children: [_jsx(Metric, { label: "Run", value: runResult.id }), _jsx(Metric, { label: "Task", value: runResult.taskId ?? "pending" }), _jsx(Metric, { label: "Status", value: runStatus?.status ?? runResult.status }), terminalStatus && (_jsx("pre", { style: preStyle, children: JSON.stringify(runStatus?.result ?? runStatus?.error ?? null, null, 2) }))] })) : (_jsx(EmptyText, { value: "Run a compiled plan to start polling status." })) })] })] })] }) }));
 }
 function Panel({ title, children }) {
     return (_jsxs("section", { style: { border: "1px solid #1e293b", borderRadius: "8px", padding: "12px", background: "#111827" }, children: [_jsx("div", { style: { color: "#94a3b8", fontSize: "11px", textTransform: "uppercase", marginBottom: "10px" }, children: title }), children] }));
@@ -120,6 +173,14 @@ function Metric({ label, value }) {
 }
 function EmptyText({ value }) {
     return _jsx("div", { style: { color: "#64748b", fontSize: "12px", lineHeight: 1.5 }, children: value });
+}
+function isCompileReady(result) {
+    return result.status === undefined || result.status === "ready";
+}
+function pollingDelayMs(value, fallback) {
+    if (!Number.isFinite(value) || !value || value <= 0)
+        return fallback;
+    return Math.min(Math.max(value, 1_000), 30_000);
 }
 function safetyColor(safetyClass) {
     if (safetyClass === "read_only")

@@ -104,10 +104,12 @@ export interface HumanWorkflowTarget {
   client_id: string | null;
 }
 
-export interface HumanWorkflowCompileResult {
+export interface HumanWorkflowCompileReadyResult {
+  status?: "ready";
   requestKey: string;
   cacheHit: boolean;
-  cacheKey: string;
+  cacheKey?: string;
+  source?: "cache" | "shortcut" | "llm";
   plan: {
     templateId?: string;
     version?: string;
@@ -123,6 +125,39 @@ export interface HumanWorkflowCompileResult {
   target: HumanWorkflowTarget;
   llmBudget?: Record<string, unknown>;
 }
+
+export interface HumanWorkflowCompileCompilingResult {
+  status: "compiling";
+  requestKey: string;
+  compileJobId: string;
+  retryAfterMs?: number;
+  source: "llm";
+}
+
+export type HumanWorkflowCompileResult =
+  | HumanWorkflowCompileReadyResult
+  | HumanWorkflowCompileCompilingResult;
+
+export interface HumanWorkflowCompileJobPendingResult {
+  status: "queued" | "running";
+  requestKey: string;
+  compileJobId: string;
+  retryAfterMs?: number;
+}
+
+export interface HumanWorkflowCompileJobFailedResult {
+  status: "failed";
+  requestKey: string;
+  compileJobId: string;
+  error: string;
+  retryable: boolean;
+  nextAction?: string;
+}
+
+export type HumanWorkflowCompileJobResult =
+  | (HumanWorkflowCompileReadyResult & { status: "ready"; compileJobId?: string; retryAfterMs?: number })
+  | HumanWorkflowCompileJobPendingResult
+  | HumanWorkflowCompileJobFailedResult;
 
 export interface HumanWorkflowRunResult {
   id: string;
@@ -157,7 +192,9 @@ export const agencyApi = {
   humanWorkflow: {
     compile: (data: HumanWorkflowCompileRequest) =>
       api.post<HumanWorkflowCompileResult>("/workflows/human/compile", data),
-    run: (data: HumanWorkflowCompileRequest & { requestKey?: string; cacheKey?: string }) =>
+    getCompileJob: (id: string) =>
+      api.get<HumanWorkflowCompileJobResult>(`/workflows/human/compile-jobs/${id}`),
+    run: (data: HumanWorkflowCompileRequest & { requestKey?: string; cacheKey?: string; compileJobId?: string }) =>
       api.post<HumanWorkflowRunResult>("/workflows/human/run", data),
     getRun: (id: string) => api.get<AgencyWorkflowRun>(`/agency/workflow-runs/${id}`),
   },

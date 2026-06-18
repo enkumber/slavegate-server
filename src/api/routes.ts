@@ -59,7 +59,6 @@ import { canaryService } from "../modules/canary/canary.service";
 import { alerting, AlertType } from "../modules/observability/alerts";
 import { taskRunnerService } from "../modules/task-runner";
 import { getDb } from "../db/client";
-import { llmJson } from "../utils/llm";
 import { scalabilityConfig } from "../config/scalability.config";
 import { processSkillUpdateJobs, checkAndRollback } from "../modules/skill-updater";
 import { runNightlyPipeline } from "../modules/nautilus/pipeline";
@@ -68,584 +67,20 @@ import type {
   UpdateDeviceRequest,
 } from "../../shared/protocol/api-types";
 import type { WorkflowTemplate } from "../modules/workflows/types";
+import {
+  computeHumanWorkflowRequestKey,
+  humanWorkflowCompilerService,
+  type HumanWorkflowCompileReady,
+  type HumanWorkflowSafetyClass,
+  type HumanWorkflowTarget,
+} from "../modules/human-workflow/human-workflow-compiler.service";
 
 const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
-const DEFAULT_HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = 20_000;
-const PLATFORM_APP_IDS: Record<string, string> = {
-  reddit: "com.reddit.frontpage",
-  instagram: "com.instagram.android",
-  tiktok: "com.zhiliaoapp.musically",
-  facebook: "com.facebook.katana",
-  twitter: "com.twitter.android",
-};
-const HUMAN_WORKFLOW_OPEN_APP_SHORTCUT_PLATFORMS = new Set(["instagram", "reddit", "threads", "tiktok", "twitter", "youtube"]);
-
 function generatedWorkflowCacheResult(cacheKey?: string, requestKey?: string): "cache_hit" | "canonical_hit" {
   return requestKey && !cacheKey ? "canonical_hit" : "cache_hit";
-}
-
-function computeHumanWorkflowRequestKey(deviceId: string, accountId: string, intent: string): string {
-  return crypto
-    .createHash("sha256")
-    .update(`${deviceId}:${accountId}:${intent.trim()}`)
-    .digest("hex")
-    .slice(0, 24);
-}
-
-function humanWorkflowCompileTimeoutMs(): number {
-  const configured = Number.parseInt(process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS ?? "", 10);
-  const headroomMs = 5_000;
-  const minimumTimeoutMs = 1_000;
-  const maxCompileTimeoutMs = scalabilityConfig.requestTimeout > headroomMs + minimumTimeoutMs
-    ? scalabilityConfig.requestTimeout - headroomMs
-    : Math.max(1, scalabilityConfig.requestTimeout - 1);
-  const requestedTimeoutMs = Number.isFinite(configured) && configured > 0
-    ? configured
-    : DEFAULT_HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
-  return Math.min(requestedTimeoutMs, maxCompileTimeoutMs);
-}
-
-function isLlmTimeoutError(err: unknown): boolean {
-  const typed = err as { name?: string; message?: string; code?: string } | undefined;
-  return typed?.name === "TimeoutError"
-    || typed?.name === "AbortError"
-    || typed?.code === "ABORT_ERR"
-    || /abort|timeout/i.test(typed?.message ?? "");
-}
-
-function humanWorkflowCompileTimeoutError(timeoutMs: number, requestKey: string): Error & {
-  status: number;
-  code: string;
-  requestKey: string;
-  retryable: boolean;
-  nextAction: string;
-} {
-  return Object.assign(
-    new Error(`Human workflow compile exceeded ${timeoutMs}ms. Retry after the compiler is less busy or when a cached plan is available.`),
-    {
-      status: 503,
-      code: "HUMAN_WORKFLOW_COMPILE_TIMEOUT",
-      requestKey,
-      retryable: true,
-      nextAction: "retry_compile",
-    },
-  );
-}
-
-type HumanWorkflowSafetyClass = "read_only" | "standard" | "destructive";
-
-interface HumanWorkflowTarget {
-  device_id: string;
-  device_model: string | null;
-  device_name: string | null;
-  account_id: string;
-  account_username: string;
-  account_platform: string;
-  client_id: string | null;
-}
-
-function humanWorkflowAppId(platform: string): string {
-  return PLATFORM_APP_IDS[platform.toLowerCase()] ?? platform;
-}
-
-function normalizeHumanWorkflowShortcutText(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isAskRedditFirstHotReadIntent(intent: string, platform: string): boolean {
-  if (platform.toLowerCase() !== "reddit") return false;
-  const normalized = normalizeHumanWorkflowShortcutText(intent);
-  const compact = normalized.replace(/\s+/g, "");
-  // Match any read/browse/scroll on AskReddit or Reddit hot/top
-  const asksRedditRead = /\b(?:read|citeste|priveste|vezi)\b/.test(normalized) && (compact.includes("askreddit") || compact.includes("reddit"));
-  const asksRedditBrowse = /\b(?:browse|scroll|deruleaza)\b/.test(normalized) && (compact.includes("reddit"));
-  if (asksRedditRead || asksRedditBrowse) return true;
-  if (!/\bask\s*reddit\b/.test(normalized) && !compact.includes("askreddit")) return false;
-  const asksToRead = /\b(?:read|citeste)\b/.test(normalized);
-  const asksForFirstPost = /\bfirst\s+(?:post|thread|item)\b/.test(normalized)
-    || /\bprimul\s+(?:post|thread|fir)\b/.test(normalized);
-  const asksForHotSort = /\b(?:hot|hottest)\b/.test(normalized)
-    || /\bsorted\s+by\s+hot(?:test)?\b/.test(normalized);
-  return asksToRead && asksForFirstPost && (asksForHotSort || /\baskreddit\b/.test(normalized));
-}
-
-function isOpenAppIntent(intent: string, platform: string): boolean {
-  if (!HUMAN_WORKFLOW_OPEN_APP_SHORTCUT_PLATFORMS.has(platform.toLowerCase())) return false;
-  const normalized = normalizeHumanWorkflowShortcutText(intent);
-  const compact = normalized.replace(/\s+/g, "");
-  const platformName = platform.toLowerCase();
-  const openVerb = /\b(?:open|launch|start|deschide|porneste|pornește)\b/.test(normalized);
-  if (!openVerb) return false;
-  const followUpAction = /\b(?:apasa|apasă|click|tap|comment|comenteaza|comentează|comentezi|posteaza|postează|trimite|scrie|type|like|follow|urmareste|urmărește|prima|primul|postare|post|thread)\b/.test(normalized);
-  if (followUpAction) return false;
-  return compact.includes(platformName) || /\b(?:app|aplicatia|aplicatie)\b/.test(normalized);
-}
-
-function isRedditFirstPostCommentsIntent(intent: string, platform: string): boolean {
-  if (platform.toLowerCase() !== "reddit") return false;
-  const normalized = normalizeHumanWorkflowShortcutText(intent);
-  const compact = normalized.replace(/\s+/g, "");
-  const referencesReddit = compact.includes("reddit");
-  const asksForFirstPost = /\b(?:first|prima|primul|prima)\s+(?:post|postare|thread|fir)\b/.test(normalized)
-    || /\b(?:post|postare|thread|fir)\s+(?:first|prima|primul)\b/.test(normalized);
-  const asksForCommentsButton = /\b(?:comment|comments|comentariu|comentarii|comantarii|comentariilor|comantariilor)\b/.test(normalized);
-  const asksToTap = /\b(?:apasa|apasati|apasă|click|tap|intra|intră|open|deschide)\b/.test(normalized);
-  const asksToWrite = /\b(?:scrie|type|posteaza|postează|trimite|comenteaza|comentează|comentezi)\b/.test(normalized);
-  return referencesReddit && asksForFirstPost && asksForCommentsButton && asksToTap && !asksToWrite;
-}
-
-function buildOpenAppTemplate(platform: string, packageName: string): WorkflowTemplate {
-  return {
-    id: `dashboard_human_${platform.toLowerCase()}_open_app_v1`,
-    name: `Open ${platform} app`,
-    platform: platform.toLowerCase(),
-    description: `Open the ${platform} app and wait briefly for the first screen to settle.`,
-    version: "1.0.0",
-    defaultVerificationStrategy: "local_only",
-    dataRetentionDays: 7,
-    steps: [
-      {
-        id: "wake_screen",
-        type: "action",
-        action: "screen_wake",
-        params: {},
-      },
-      {
-        id: "unlock_device",
-        type: "action",
-        action: "unlock",
-        params: {},
-      },
-      {
-        id: "open_app",
-        type: "action",
-        action: "open_app",
-        params: {
-          packageName,
-        },
-      },
-      {
-        id: "settle_app",
-        type: "action",
-        action: "wait_for_idle",
-        params: {
-          timeoutMs: 2_000,
-        },
-      },
-      {
-        id: "app_opened",
-        type: "checkpoint",
-        reason: `${platform} opened from dashboard human workflow`,
-      },
-    ],
-  };
-}
-
-function buildRedditFirstPostCommentsTemplate(packageName: string): WorkflowTemplate {
-  return {
-    id: "dashboard_human_reddit_first_post_comments_v1",
-    name: "Reddit first post comments opener",
-    platform: "reddit",
-    description: "Open Reddit and tap the comments button on the first visible post.",
-    version: "1.0.0",
-    defaultVerificationStrategy: "local_only",
-    dataRetentionDays: 7,
-    steps: [
-      {
-        id: "wake_screen",
-        type: "action",
-        action: "screen_wake",
-        params: {},
-      },
-      {
-        id: "unlock_device",
-        type: "action",
-        action: "unlock",
-        params: {},
-      },
-      {
-        id: "open_reddit",
-        type: "action",
-        action: "open_app",
-        params: {
-          packageName,
-        },
-      },
-      {
-        id: "settle_feed",
-        type: "action",
-        action: "wait_for_idle",
-        params: {
-          timeoutMs: 3_000,
-        },
-      },
-      {
-        id: "tap_first_post_comments",
-        type: "action",
-        action: "tap",
-        target: "post.comments",
-        params: {
-          selectorName: "post.comments",
-          bindingSource: "ui_tree_selector",
-          ordinal: 1,
-        },
-      },
-      {
-        id: "settle_comments",
-        type: "action",
-        action: "wait_for_idle",
-        params: {
-          timeoutMs: 2_000,
-        },
-      },
-      {
-        id: "comments_opened",
-        type: "checkpoint",
-        reason: "Reddit first visible post comments opened from dashboard human workflow",
-      },
-    ],
-  };
-}
-
-function buildAskRedditFirstHotReadTemplate(packageName: string): WorkflowTemplate {
-  return {
-    id: "dashboard_human_reddit_askreddit_hot_first_item_v1",
-    name: "AskReddit hot first item reader",
-    platform: "reddit",
-    description: "Open r/AskReddit hot feed and capture the first visible item for dashboard review.",
-    version: "1.0.0",
-    defaultVerificationStrategy: "local_with_screenshot",
-    dataRetentionDays: 7,
-    steps: [
-      {
-        id: "open_askreddit_hot",
-        type: "action",
-        action: "open_app",
-        params: {
-          packageName,
-          uri: "https://www.reddit.com/r/AskReddit/hot/",
-        },
-      },
-      {
-        id: "wait_for_reddit",
-        type: "wait",
-        condition: "app_launched",
-        timeoutMs: 10_000,
-      },
-      {
-        id: "settle_hot_feed",
-        type: "action",
-        action: "wait_for_idle",
-        params: { timeoutMs: 3_000 },
-      },
-      {
-        id: "capture_visible_state",
-        type: "action",
-        action: "get_screen_state",
-        params: {
-          scope: "askreddit_hot_first_visible_item",
-        },
-      },
-      {
-        id: "dump_visible_content",
-        type: "action",
-        action: "ui_tree_dump",
-        params: {
-          scope: "askreddit_hot_first_visible_item",
-        },
-      },
-      {
-        id: "capture_visible_item",
-        type: "action",
-        action: "screenshot",
-        params: {
-          quality: 85,
-        },
-      },
-      {
-        id: "visible_item_ready",
-        type: "checkpoint",
-        reason: "AskReddit hot first visible item captured for reading",
-      },
-    ],
-  };
-}
-
-function humanWorkflowPlanPreview(template: WorkflowTemplate, compiledPlan: GeneratedWorkflowCompiledPlan): Record<string, unknown> {
-  return {
-    templateId: template.id,
-    version: template.version,
-    steps: template.steps,
-    actions: compiledPlan.steps
-      .filter((step) => step.type === "action")
-      .map((step) => ({
-        id: step.id,
-        action: step.action,
-        path: step.path,
-        target: step.selectorName ?? step.selectorId ?? null,
-        bindingSource: step.bindingSource ?? null,
-        usedAppMap: step.usedAppMap ?? false,
-      })),
-    compiledPlan,
-  };
-}
-
-async function resolveHumanWorkflowTarget(deviceId: string, accountId: string): Promise<HumanWorkflowTarget | null> {
-  const db = getDb();
-  const result = await db.query(
-    `SELECT
-       d.id AS device_id,
-       d.model AS device_model,
-       d.friendly_name AS device_name,
-       a.id AS account_id,
-       a.username AS account_username,
-       a.platform AS account_platform,
-       a.device_id AS account_device_id,
-       a.client_id AS client_id
-     FROM devices d
-     LEFT JOIN accounts a ON a.id = $2
-     WHERE d.id = $1`,
-    [deviceId, accountId],
-  );
-  const row = result.rows[0] as Record<string, unknown> | undefined;
-  if (!row || !row.account_id) return null;
-  if (row.account_device_id !== row.device_id) {
-    throw Object.assign(new Error("Account is not bound to selected device"), { status: 400, code: "ACCOUNT_DEVICE_MISMATCH" });
-  }
-  return {
-    device_id: row.device_id as string,
-    device_model: (row.device_model as string | null) ?? null,
-    device_name: (row.device_name as string | null) ?? null,
-    account_id: row.account_id as string,
-    account_username: row.account_username as string,
-    account_platform: row.account_platform as string,
-    client_id: (row.client_id as string | null) ?? null,
-  };
-}
-
-function cachedWorkflowPreview(cached: GeneratedWorkflowPlanCacheRecord, target: HumanWorkflowTarget, requestKey: string, intent: string): Record<string, unknown> {
-  return {
-    requestKey,
-    cacheHit: true,
-    cacheKey: cached.cacheKey,
-    plan: humanWorkflowPlanPreview(cached.workflow, cached.compiledPlan),
-    safetyClass: "read_only" satisfies HumanWorkflowSafetyClass,
-    platform: target.account_platform,
-    target,
-    llmBudget: cached.compiledPlan.llmBudget,
-  };
-}
-
-async function compileHumanWorkflowPlan(input: {
-  deviceId: string;
-  accountId: string;
-  intent: string;
-}): Promise<Record<string, unknown> & { requestKey: string; cacheKey: string; safetyClass: HumanWorkflowSafetyClass; target: HumanWorkflowTarget }> {
-  const intent = input.intent.trim();
-  const requestKey = computeHumanWorkflowRequestKey(input.deviceId, input.accountId, intent);
-  const target = await resolveHumanWorkflowTarget(input.deviceId, input.accountId);
-  if (!target) {
-    throw Object.assign(new Error("Device or account not found"), { status: 400, code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND" });
-  }
-
-  const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
-  if (cached) {
-    return cachedWorkflowPreview(cached, target, requestKey, intent) as Record<string, unknown> & {
-      requestKey: string;
-      cacheKey: string;
-      safetyClass: HumanWorkflowSafetyClass;
-      target: HumanWorkflowTarget;
-    };
-  }
-
-  const platform = target.account_platform;
-  const packageName = humanWorkflowAppId(platform);
-  const matchedOpenApp = isOpenAppIntent(intent, platform);
-  if (matchedOpenApp) {
-    console.log(`[human-workflow] deterministic template matched: shortcut=open_app platform=${platform} intent="${intent}"`);
-    const rawWorkflow = buildOpenAppTemplate(platform, packageName);
-    const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
-    if (!validation.template) {
-      throw Object.assign(new Error("workflow failed validation"), {
-        status: 400,
-        code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
-        validationErrors: validation.errors,
-      });
-    }
-    const template = validation.template;
-    let compiledPlan = compileGeneratedWorkflowTemplate(template);
-    compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
-    await workflowService.saveTemplate(template);
-    await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
-      source: "dashboard_human",
-      shortcut: "open_app",
-      intent,
-      deviceId: input.deviceId,
-      accountId: input.accountId,
-      platform,
-      compiledAt: new Date().toISOString(),
-    });
-
-    return {
-      requestKey,
-      cacheHit: false,
-      cacheKey: compiledPlan.cacheKey,
-      plan: humanWorkflowPlanPreview(template, compiledPlan),
-      safetyClass: "read_only",
-      platform,
-      target,
-      llmBudget: compiledPlan.llmBudget,
-    };
-  }
-
-  const matchedRedditFirstPostComments = isRedditFirstPostCommentsIntent(intent, platform);
-  if (matchedRedditFirstPostComments) {
-    console.log(`[human-workflow] deterministic template matched: shortcut=reddit_first_post_comments platform=${platform} intent="${intent}"`);
-    const rawWorkflow = buildRedditFirstPostCommentsTemplate(packageName);
-    const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
-    if (!validation.template) {
-      throw Object.assign(new Error("workflow failed validation"), {
-        status: 400,
-        code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
-        validationErrors: validation.errors,
-      });
-    }
-    const template = validation.template;
-    let compiledPlan = compileGeneratedWorkflowTemplate(template);
-    compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
-    await workflowService.saveTemplate(template);
-    await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
-      source: "dashboard_human",
-      shortcut: "reddit_first_post_comments",
-      intent,
-      deviceId: input.deviceId,
-      accountId: input.accountId,
-      platform,
-      compiledAt: new Date().toISOString(),
-    });
-
-    return {
-      requestKey,
-      cacheHit: false,
-      cacheKey: compiledPlan.cacheKey,
-      plan: humanWorkflowPlanPreview(template, compiledPlan),
-      safetyClass: "read_only",
-      platform,
-      target,
-      llmBudget: compiledPlan.llmBudget,
-    };
-  }
-
-  const matched = isAskRedditFirstHotReadIntent(intent, platform);
-  if (matched) {
-    console.log(`[human-workflow] deterministic template matched: shortcut=askreddit_first_hot_read platform=${platform} intent="${intent}"`);
-    const rawWorkflow = buildAskRedditFirstHotReadTemplate(packageName);
-    const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
-    if (!validation.template) {
-      throw Object.assign(new Error("workflow failed validation"), {
-        status: 400,
-        code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
-        validationErrors: validation.errors,
-      });
-    }
-    const template = validation.template;
-    let compiledPlan = compileGeneratedWorkflowTemplate(template);
-    compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
-    await workflowService.saveTemplate(template);
-    await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
-      source: "dashboard_human",
-      shortcut: "askreddit_first_hot_read",
-      intent,
-      deviceId: input.deviceId,
-      accountId: input.accountId,
-      platform,
-      compiledAt: new Date().toISOString(),
-    });
-
-    return {
-      requestKey,
-      cacheHit: false,
-      cacheKey: compiledPlan.cacheKey,
-      plan: humanWorkflowPlanPreview(template, compiledPlan),
-      safetyClass: "read_only",
-      platform,
-      target,
-      llmBudget: compiledPlan.llmBudget,
-    };
-  }
-
-  const appMap = await loadMap(packageName);
-  const appMapHintSet = appMap ? buildGeneratedWorkflowAppMapHints(appMap) : null;
-  const availableScreens = resolveGeneratedWorkflowScreens(platform);
-  const appMapHints = appMapHintSet?.hints;
-  const goal = intent;
-  const clientContext = [
-    `Dashboard human workflow request.`,
-    `Account @${target.account_username} on ${platform}.`,
-    `Selected device ${target.device_name ?? target.device_model ?? target.device_id}.`,
-    `Compile intent for preview first; do not include secrets.`,
-  ].join(" ");
-  const prompt = buildGeneratedWorkflowPrompt({
-    platform,
-    packageName,
-    goal,
-    clientContext,
-    availableScreens,
-    appMapHints,
-  });
-
-  const compileTimeoutMs = humanWorkflowCompileTimeoutMs();
-  let rawWorkflow: WorkflowTemplate;
-  try {
-    rawWorkflow = await llmJson<WorkflowTemplate>(prompt, undefined, {
-      max_tokens: 4096,
-      system: "You are a Phone Network workflow compiler. Return only valid WorkflowTemplate JSON.",
-      timeoutMs: compileTimeoutMs,
-    });
-  } catch (err) {
-    if (isLlmTimeoutError(err)) throw humanWorkflowCompileTimeoutError(compileTimeoutMs, requestKey);
-    throw err;
-  }
-  const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
-  if (!validation.template) {
-    throw Object.assign(new Error("workflow failed validation"), {
-      status: 400,
-      code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
-      validationErrors: validation.errors,
-    });
-  }
-
-  const template = validation.template;
-  let compiledPlan = compileGeneratedWorkflowTemplate(template);
-  compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
-  await workflowService.saveTemplate(template);
-  await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
-    source: "dashboard_human",
-    intent,
-    deviceId: input.deviceId,
-    accountId: input.accountId,
-    platform,
-    compiledAt: new Date().toISOString(),
-  });
-
-  return {
-    requestKey,
-    cacheHit: false,
-    cacheKey: compiledPlan.cacheKey,
-    plan: humanWorkflowPlanPreview(template, compiledPlan),
-    safetyClass: "read_only",
-    platform,
-    target,
-    llmBudget: compiledPlan.llmBudget,
-  };
 }
 
 async function queueHumanAgencyWorkflowRun(input: {
@@ -1174,11 +609,14 @@ router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
       return res.status(400).json({ ok: false, code: "INTENT_TOO_LONG", error: "intent must be at most 2000 characters" });
     }
 
-    const data = await compileHumanWorkflowPlan({
+    const data = await humanWorkflowCompilerService.compile({
       deviceId: device_id,
       accountId: account_id,
       intent,
     });
+    if (data.status === "compiling") {
+      return res.status(202).json({ ok: true, data });
+    }
     res.json({ ok: true, data });
   } catch (err) {
     const typed = err as Error & {
@@ -1201,14 +639,40 @@ router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
   }
 });
 
+router.get("/workflows/human/compile-jobs/:id", requireAdminAuth, async (req, res) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) {
+      return res.status(400).json({ ok: false, code: "COMPILE_JOB_ID_INVALID", error: "compile job id must be a UUID" });
+    }
+    const job = await humanWorkflowCompilerService.getCompileJob(req.params.id);
+    if (!job) return res.status(404).json({ ok: false, code: "COMPILE_JOB_NOT_FOUND", error: "compile job not found" });
+    const data = job.status === "ready" && job.result
+      ? { ...job.result, compileJobId: job.id }
+      : {
+          compileJobId: job.id,
+          status: job.status,
+          requestKey: job.requestKey,
+          retryAfterMs: job.status === "queued" || job.status === "running" ? 2_000 : undefined,
+          error: job.error,
+          retryable: job.status === "failed",
+          nextAction: job.status === "failed" ? "retry_compile" : undefined,
+        };
+    res.json({ ok: true, data });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string };
+    res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
+  }
+});
+
 router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
   try {
-    const { device_id, account_id, intent, requestKey, cacheKey } = req.body as {
+    const { device_id, account_id, intent, requestKey, cacheKey, compileJobId } = req.body as {
       device_id?: unknown;
       account_id?: unknown;
       intent?: unknown;
       requestKey?: unknown;
       cacheKey?: unknown;
+      compileJobId?: unknown;
     };
     if (typeof device_id !== "string" || !UUID_RE.test(device_id)) {
       return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "device_id must be a UUID" });
@@ -1228,12 +692,10 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
     if (cacheKey !== undefined && (typeof cacheKey !== "string" || !GENERATED_WORKFLOW_KEY_RE.test(cacheKey))) {
       return res.status(400).json({ ok: false, code: "CACHE_KEY_INVALID", error: "cacheKey must be a 24-character lowercase hex string" });
     }
+    if (compileJobId !== undefined && (typeof compileJobId !== "string" || !UUID_RE.test(compileJobId))) {
+      return res.status(400).json({ ok: false, code: "COMPILE_JOB_ID_INVALID", error: "compileJobId must be a UUID" });
+    }
 
-    const compiled = await compileHumanWorkflowPlan({
-      deviceId: device_id,
-      accountId: account_id,
-      intent,
-    });
     const expectedRequestKey = computeHumanWorkflowRequestKey(device_id, account_id, intent);
     if (typeof requestKey === "string" && requestKey !== expectedRequestKey) {
       return res.status(400).json({
@@ -1242,6 +704,43 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
         error: "requestKey does not match device_id, account_id and intent",
       });
     }
+
+    let compiled: HumanWorkflowCompileReady | null = null;
+    if (typeof compileJobId === "string") {
+      const job = await humanWorkflowCompilerService.getCompileJob(compileJobId);
+      if (!job || job.requestKey !== expectedRequestKey || job.deviceId !== device_id || job.accountId !== account_id) {
+        return res.status(404).json({ ok: false, code: "COMPILE_JOB_NOT_FOUND", error: "compile job not found for request" });
+      }
+      if (job.status !== "ready" || !job.result) {
+        return res.status(409).json({
+          ok: false,
+          code: "COMPILE_NOT_READY",
+          error: "compile job is not ready",
+          compileJobId,
+          requestKey: expectedRequestKey,
+          nextAction: "poll_compile_job",
+        });
+      }
+      compiled = job.result as HumanWorkflowCompileReady;
+    } else {
+      const ready = await humanWorkflowCompilerService.compile({
+        deviceId: device_id,
+        accountId: account_id,
+        intent,
+      });
+      if (ready.status !== "ready") {
+        return res.status(409).json({
+          ok: false,
+          code: "COMPILE_NOT_READY",
+          error: "compiled workflow is not ready",
+          compileJobId: ready.compileJobId,
+          requestKey: expectedRequestKey,
+          nextAction: "poll_compile_job",
+        });
+      }
+      compiled = ready;
+    }
+
     if (typeof cacheKey === "string" && cacheKey !== compiled.cacheKey) {
       return res.status(400).json({
         ok: false,
