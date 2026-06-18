@@ -299,16 +299,16 @@ describe("Generated workflow contract validation", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors).toContain(
-      "workflow.steps[0].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
+      "workflow.steps[0].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, a11y_find_tap, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
     );
     expect(result.errors).toContain(
-      "workflow.steps[1].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
+      "workflow.steps[1].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, a11y_find_tap, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
     );
     expect(result.errors).toContain(
-      "workflow.steps[2].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
+      "workflow.steps[2].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, a11y_find_tap, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
     );
     expect(result.errors).toContain(
-      "workflow.steps[3].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
+      "workflow.steps[3].action must be one of: close_app, get_screen_state, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, a11y_find_tap, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
     );
   });
 

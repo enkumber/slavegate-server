@@ -173,7 +173,7 @@ function redditFirstPostCommentsTemplate() {
       { id: "unlock_device", type: "action", action: "unlock", params: {} },
       { id: "open_reddit", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
       { id: "settle_feed", type: "action", action: "wait_for_idle", params: { timeoutMs: 3000 } },
-      { id: "tap_first_post_comments", type: "action", action: "tap", target: "post.comments", params: { selectorName: "post.comments", bindingSource: "ui_tree_selector", ordinal: 1 } },
+      { id: "tap_first_post_comments", type: "action", action: "a11y_find_tap", params: { resourceId: "com.reddit.frontpage:id/comments_stub", partialMatch: false } },
       { id: "settle_comments", type: "action", action: "wait_for_idle", params: { timeoutMs: 2000 } },
       { id: "comments_opened", type: "checkpoint", reason: "Reddit first visible post comments opened from dashboard human workflow" },
     ],
@@ -285,7 +285,7 @@ function redditCommentsShortcutTemplate() {
       { id: "unlock_device", type: "action", action: "unlock", params: {} },
       { id: "open_reddit", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
       { id: "settle_feed", type: "action", action: "wait_for_idle", params: { timeoutMs: 3000 } },
-      { id: "tap_first_post_comments", type: "action", action: "tap", target: "post.comments", params: { selectorName: "post.comments", bindingSource: "ui_tree_selector", ordinal: 1 } },
+      { id: "tap_first_post_comments", type: "action", action: "a11y_find_tap", params: { resourceId: "com.reddit.frontpage:id/comments_stub", partialMatch: false } },
       { id: "settle_comments", type: "action", action: "wait_for_idle", params: { timeoutMs: 2000 } },
     ],
   };
@@ -753,13 +753,17 @@ describe("dashboard human workflow routes", () => {
       "unlock",
       "open_app",
       "wait_for_idle",
-      "tap",
+      "a11y_find_tap",
       "wait_for_idle",
     ]);
     expect(response.body.data.plan.actions[4]).toMatchObject({
-      action: "tap",
-      target: "post.comments",
-      bindingSource: "ui_tree_selector",
+      action: "a11y_find_tap",
+      target: null,
+      path: "workflow.steps[4]",
+    });
+    expect(response.body.data.plan.steps[4]).toMatchObject({
+      action: "a11y_find_tap",
+      params: { resourceId: "com.reddit.frontpage:id/comments_stub", partialMatch: false },
     });
     expect(mocks.llmJson).not.toHaveBeenCalled();
     expect(mocks.loadMap).not.toHaveBeenCalled();
