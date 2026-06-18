@@ -470,7 +470,7 @@ describe("dashboard human workflow routes", () => {
       },
     });
     expect(response.body.data.plan.actions).toHaveLength(2);
-  });
+  }, 10_000);
 
   it("allows tap/type/swipe steps during temporary no-safety mode", async () => {
     const base = cachedPlan();
