@@ -37,7 +37,15 @@ function rowToShortcut(row: Record<string, unknown>): WorkflowShortcutRecord {
 }
 
 function hasMutationTerms(normalizedIntent: string): boolean {
-  return /\b(?:scrie|type|posteaza|postează|post|trimite|send|comenteaza|comentează|comentezi|comment\s+on|reply|like|follow|urmareste|urmărește|delete|sterge|șterge|cumpara|cumpără)\b/.test(normalizedIntent);
+  return /\b(?:autentifica|cumpara|delete|dezactiveaza|dezurmareste|follow|join|like|login|mesaj|parola|posteaza|post|reply|schimba|scrie|send|sterge|trimite|type|unfollow|upvote|vote|urmareste|comenteaza|comentezi)\b/.test(normalizedIntent);
+}
+
+function hasRejectedTerms(matchConfig: Record<string, unknown>, normalizedIntent: string): boolean {
+  const rejectTerms = matchConfig.rejectTerms;
+  if (!Array.isArray(rejectTerms)) return false;
+  return rejectTerms.some((term) => (
+    typeof term === "string" && normalizedIntent.includes(normalizeShortcutText(term))
+  ));
 }
 
 function patternMatches(pattern: WorkflowShortcutIntentPattern, normalizedIntent: string): boolean {
@@ -74,6 +82,7 @@ export class ShortcutRegistryService {
     for (const row of result.rows as Record<string, unknown>[]) {
       const shortcut = rowToShortcut(row);
       if (shortcut.matchConfig.readOnlyOnly === true && hasMutationTerms(normalizedIntent)) continue;
+      if (hasRejectedTerms(shortcut.matchConfig, normalizedIntent)) continue;
       const patterns = shortcut.intentPatterns.length > 0
         ? shortcut.intentPatterns
         : shortcut.aliases.map((alias) => ({ type: "exact", pattern: alias }) as WorkflowShortcutIntentPattern);

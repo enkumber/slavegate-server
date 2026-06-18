@@ -137,10 +137,35 @@ SELECT
   'Open the app and wait briefly for the first screen to settle.',
   100,
   jsonb_build_array(
-    jsonb_build_object('type', 'contains_all', 'terms', jsonb_build_array(platform)),
-    jsonb_build_object('type', 'contains_all', 'locale', 'ro', 'terms', jsonb_build_array('deschide', platform))
+    jsonb_build_object('type', 'contains_all', 'terms', jsonb_build_array('open', platform)),
+    jsonb_build_object('type', 'contains_all', 'terms', jsonb_build_array('launch', platform)),
+    jsonb_build_object('type', 'contains_all', 'terms', jsonb_build_array('start', platform)),
+    jsonb_build_object('type', 'contains_all', 'locale', 'ro', 'terms', jsonb_build_array('deschide', platform)),
+    jsonb_build_object('type', 'contains_all', 'locale', 'ro', 'terms', jsonb_build_array('porneste', platform))
   ),
-  '{"readOnlyOnly":true}'::jsonb,
+  jsonb_build_object(
+    'readOnlyOnly', true,
+    'rejectTerms', jsonb_build_array(
+      'apasa',
+      'buton',
+      'capture',
+      'citeste',
+      'comment',
+      'comentarii',
+      'deruleaza',
+      'fa screenshot',
+      'first post',
+      'intra pe',
+      'notifications',
+      'notificari',
+      'postare',
+      'prima postare',
+      'read',
+      'screenshot',
+      'scroll',
+      'tap'
+    )
+  ),
   jsonb_build_object(
     'id', 'dashboard_human_' || platform || '_open_app_v1',
     'name', 'Open ' || platform || ' app',
