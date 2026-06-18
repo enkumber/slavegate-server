@@ -189,6 +189,19 @@ function isOpenAppIntent(intent: string, platform: string): boolean {
   return compact.includes(platformName) || /\b(?:app|aplicatia|aplicatie)\b/.test(normalized);
 }
 
+function isRedditFirstPostCommentsIntent(intent: string, platform: string): boolean {
+  if (platform.toLowerCase() !== "reddit") return false;
+  const normalized = normalizeHumanWorkflowShortcutText(intent);
+  const compact = normalized.replace(/\s+/g, "");
+  const referencesReddit = compact.includes("reddit");
+  const asksForFirstPost = /\b(?:first|prima|primul|prima)\s+(?:post|postare|thread|fir)\b/.test(normalized)
+    || /\b(?:post|postare|thread|fir)\s+(?:first|prima|primul)\b/.test(normalized);
+  const asksForCommentsButton = /\b(?:comment|comments|comentariu|comentarii|comantarii|comentariilor|comantariilor)\b/.test(normalized);
+  const asksToTap = /\b(?:apasa|apasati|apasă|click|tap|intra|intră|open|deschide)\b/.test(normalized);
+  const asksToWrite = /\b(?:scrie|type|posteaza|postează|trimite|comenteaza|comentează|comentezi)\b/.test(normalized);
+  return referencesReddit && asksForFirstPost && asksForCommentsButton && asksToTap && !asksToWrite;
+}
+
 function buildOpenAppTemplate(platform: string, packageName: string): WorkflowTemplate {
   return {
     id: `dashboard_human_${platform.toLowerCase()}_open_app_v1`,
@@ -231,6 +244,72 @@ function buildOpenAppTemplate(platform: string, packageName: string): WorkflowTe
         id: "app_opened",
         type: "checkpoint",
         reason: `${platform} opened from dashboard human workflow`,
+      },
+    ],
+  };
+}
+
+function buildRedditFirstPostCommentsTemplate(packageName: string): WorkflowTemplate {
+  return {
+    id: "dashboard_human_reddit_first_post_comments_v1",
+    name: "Reddit first post comments opener",
+    platform: "reddit",
+    description: "Open Reddit and tap the comments button on the first visible post.",
+    version: "1.0.0",
+    defaultVerificationStrategy: "local_only",
+    dataRetentionDays: 7,
+    steps: [
+      {
+        id: "wake_screen",
+        type: "action",
+        action: "screen_wake",
+        params: {},
+      },
+      {
+        id: "unlock_device",
+        type: "action",
+        action: "unlock",
+        params: {},
+      },
+      {
+        id: "open_reddit",
+        type: "action",
+        action: "open_app",
+        params: {
+          packageName,
+        },
+      },
+      {
+        id: "settle_feed",
+        type: "action",
+        action: "wait_for_idle",
+        params: {
+          timeoutMs: 3_000,
+        },
+      },
+      {
+        id: "tap_first_post_comments",
+        type: "action",
+        action: "tap",
+        target: "post.comments",
+        params: {
+          selectorName: "post.comments",
+          bindingSource: "ui_tree_selector",
+          ordinal: 1,
+        },
+      },
+      {
+        id: "settle_comments",
+        type: "action",
+        action: "wait_for_idle",
+        params: {
+          timeoutMs: 2_000,
+        },
+      },
+      {
+        id: "comments_opened",
+        type: "checkpoint",
+        reason: "Reddit first visible post comments opened from dashboard human workflow",
       },
     ],
   };
@@ -408,6 +487,44 @@ async function compileHumanWorkflowPlan(input: {
     await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
       source: "dashboard_human",
       shortcut: "open_app",
+      intent,
+      deviceId: input.deviceId,
+      accountId: input.accountId,
+      platform,
+      compiledAt: new Date().toISOString(),
+    });
+
+    return {
+      requestKey,
+      cacheHit: false,
+      cacheKey: compiledPlan.cacheKey,
+      plan: humanWorkflowPlanPreview(template, compiledPlan),
+      safetyClass: "read_only",
+      platform,
+      target,
+      llmBudget: compiledPlan.llmBudget,
+    };
+  }
+
+  const matchedRedditFirstPostComments = isRedditFirstPostCommentsIntent(intent, platform);
+  if (matchedRedditFirstPostComments) {
+    console.log(`[human-workflow] deterministic template matched: shortcut=reddit_first_post_comments platform=${platform} intent="${intent}"`);
+    const rawWorkflow = buildRedditFirstPostCommentsTemplate(packageName);
+    const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
+    if (!validation.template) {
+      throw Object.assign(new Error("workflow failed validation"), {
+        status: 400,
+        code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
+        validationErrors: validation.errors,
+      });
+    }
+    const template = validation.template;
+    let compiledPlan = compileGeneratedWorkflowTemplate(template);
+    compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
+    await workflowService.saveTemplate(template);
+    await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+      source: "dashboard_human",
+      shortcut: "reddit_first_post_comments",
       intent,
       deviceId: input.deviceId,
       accountId: input.accountId,

@@ -11,6 +11,7 @@ const INTENT = "Open Reddit and collect an account health screenshot";
 const SAFE_TIMEOUT_INTENT = "derulează feed-ul Instagram și fă un screenshot";
 const OPEN_INSTAGRAM_INTENT = "deschide Instagram";
 const REDDIT_COMMENT_INTENT = "deschide app reddit, intra pe prima postare si apasa butonul de comment sa comentezi";
+const REDDIT_FIRST_POST_COMMENTS_INTENT = "intra pe reddit si apasa pe butonul de comantarii de prima postare";
 const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottest";
 const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
 
@@ -450,6 +451,57 @@ describe("dashboard human workflow routes", () => {
     });
     expect(response.body.data.plan.templateId).not.toBe("dashboard_human_reddit_open_app_v1");
     expect(mocks.llmJson).toHaveBeenCalled();
+  });
+
+  it("compiles the Romanian Reddit first post comments shortcut without LLM on cache miss", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: REDDIT_FIRST_POST_COMMENTS_INTENT,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      requestKey: requestKey(REDDIT_FIRST_POST_COMMENTS_INTENT),
+      cacheHit: false,
+      safetyClass: "read_only",
+      platform: "reddit",
+    });
+    expect(response.body.data.cacheKey).toMatch(/^[a-f0-9]{24}$/);
+    expect(response.body.data.plan).toMatchObject({
+      templateId: "dashboard_human_reddit_first_post_comments_v1",
+      version: "1.0.0",
+    });
+    expect(response.body.data.plan.actions.map((action: { action: string }) => action.action)).toEqual([
+      "screen_wake",
+      "unlock",
+      "open_app",
+      "wait_for_idle",
+      "tap",
+      "wait_for_idle",
+    ]);
+    expect(response.body.data.plan.actions[4]).toMatchObject({
+      action: "tap",
+      target: "post.comments",
+      bindingSource: "ui_tree_selector",
+    });
+    expect(mocks.llmJson).not.toHaveBeenCalled();
+    expect(mocks.loadMap).not.toHaveBeenCalled();
+    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "dashboard_human_reddit_first_post_comments_v1" }),
+      expect.objectContaining({
+        templateId: "dashboard_human_reddit_first_post_comments_v1",
+        llmBudget: { happyPathRequests: 0, recoveryRequests: "only_on_failure" },
+      }),
+      requestKey(REDDIT_FIRST_POST_COMMENTS_INTENT),
+      expect.objectContaining({
+        source: "dashboard_human",
+        shortcut: "reddit_first_post_comments",
+        intent: REDDIT_FIRST_POST_COMMENTS_INTENT,
+      }),
+    );
   });
 
   it("compiles the Romanian AskReddit first post shortcut without LLM on cache miss", async () => {
