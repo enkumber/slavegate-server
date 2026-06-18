@@ -26,6 +26,10 @@ function jobRow(overrides: Record<string, unknown> = {}) {
     error: null,
     result: null,
     llm_started_at: new Date(Date.now() - 10_000).toISOString(),
+    llm_completed_at: null,
+    retry_count: 0,
+    last_retried_at: null,
+    timeout_ms: 120000,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     completed_at: null,
@@ -55,6 +59,7 @@ describe("humanWorkflowCompileJobService", () => {
 
     expect(job?.status).toBe("failed");
     expect(job?.error).toBe("compile job worker expired; retry compile");
+    expect(job?.errorClass).toBe("timeout");
     expect(mocks.db.query.mock.calls[1][0]).toContain("status = 'failed'");
   });
 
@@ -67,5 +72,44 @@ describe("humanWorkflowCompileJobService", () => {
 
     expect(job?.status).toBe("running");
     expect(mocks.db.query).toHaveBeenCalledTimes(1);
+  });
+
+  it("stores configured timeout when creating compile jobs", async () => {
+    process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "90000";
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [jobRow({ status: "queued", llm_started_at: null, timeout_ms: 90000 })],
+    });
+
+    const job = await humanWorkflowCompileJobService.createOrGet({
+      requestKey: "requestkey00000000000001",
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      accountId: "22222222-2222-4222-8222-222222222222",
+      intent: "open reddit",
+      platform: "reddit",
+    });
+
+    expect(job.timeoutMs).toBe(90000);
+    expect(mocks.db.query.mock.calls[0][1]).toContain(90000);
+    delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
+  });
+
+  it("requeues failed jobs and increments retry metadata", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [jobRow({
+        status: "queued",
+        error: null,
+        retry_count: 2,
+        last_retried_at: "2026-06-18T10:01:00.000Z",
+        llm_completed_at: null,
+        completed_at: null,
+      })],
+    });
+
+    const job = await humanWorkflowCompileJobService.requeueFailed("66666666-6666-4666-8666-666666666666");
+
+    expect(job?.status).toBe("queued");
+    expect(job?.retryCount).toBe(2);
+    expect(job?.lastRetriedAt).toBe("2026-06-18T10:01:00.000Z");
+    expect(mocks.db.query.mock.calls[0][0]).toContain("retry_count = COALESCE(retry_count, 0) + 1");
   });
 });

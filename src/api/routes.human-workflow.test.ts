@@ -44,6 +44,7 @@ const mocks = vi.hoisted(() => ({
     createOrGet: vi.fn(),
     getById: vi.fn(),
     getByRequestKey: vi.fn(),
+    requeueFailed: vi.fn(),
     runInProcess: vi.fn(),
   },
 }));
@@ -360,7 +361,14 @@ function compileJobRecord(overrides: Record<string, unknown> = {}) {
     source: "llm",
     shortcutId: null,
     error: null,
+    errorClass: null,
+    providerErrorCode: null,
     result: null,
+    llmStartedAt: null,
+    llmCompletedAt: null,
+    retryCount: 0,
+    lastRetriedAt: null,
+    timeoutMs: 120000,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     completedAt: null,
@@ -447,6 +455,7 @@ describe("dashboard human workflow routes", () => {
     mocks.compileJobService.getByRequestKey.mockResolvedValue(null);
     mocks.compileJobService.createOrGet.mockResolvedValue(compileJobRecord({ requestKey: requestKey(SAFE_TIMEOUT_INTENT), intent: SAFE_TIMEOUT_INTENT }));
     mocks.compileJobService.getById.mockResolvedValue(null);
+    mocks.compileJobService.requeueFailed.mockResolvedValue(null);
     mocks.compileJobService.runInProcess.mockImplementation(() => undefined);
   });
 
@@ -998,8 +1007,14 @@ describe("dashboard human workflow routes", () => {
     delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
   });
 
-  it("returns compact queued compile job status for polling", async () => {
-    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({ status: "running" }));
+  it("returns compile job support metadata for running polling", async () => {
+    process.env.AGENT_PLANNER_MODEL = "anthropic/claude-sonnet-4-6";
+    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
+      status: "running",
+      intent: "open reddit with token: abcdef123456 and admin@example.com +40722123456",
+      llmStartedAt: "2026-06-18T10:00:00.000Z",
+      timeoutMs: 60000,
+    }));
 
     const response = await getJson(`/api/workflows/human/compile-jobs/${COMPILE_JOB_ID}`);
 
@@ -1008,15 +1023,41 @@ describe("dashboard human workflow routes", () => {
       status: "running",
       requestKey: requestKey(),
       compileJobId: COMPILE_JOB_ID,
+      durationMs: null,
+      timeoutMs: 60000,
+      startedAt: "2026-06-18T10:00:00.000Z",
+      completedAt: null,
+      retryCount: 0,
+      lastRetriedAt: null,
+      retryable: false,
+      nextAction: "poll_compile_job",
+      source: "llm",
+      shortcutKey: null,
+      platform: "reddit",
+      errorClass: null,
+      providerErrorCode: null,
+      modelRole: "planner",
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
       retryAfterMs: 2000,
     });
+    expect(response.body.data.intentPreview).toContain("[redacted-token]");
+    expect(response.body.data.intentPreview).toContain("[redacted-email]");
+    expect(response.body.data.intentPreview).toContain("[redacted-phone]");
+    delete process.env.AGENT_PLANNER_MODEL;
   });
 
-  it("returns ready compile job payload for polling", async () => {
+  it("returns ready compile job payload with duration and shortcut key for polling", async () => {
+    mocks.db.query.mockResolvedValueOnce({ rows: [{ key: "reddit_first_post_comments" }] });
     mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
       status: "ready",
       result: readyCompilePayload(),
       cacheKey: cacheKey(),
+      shortcutId: "77777777-7777-4777-8777-777777777777",
+      source: "shortcut",
+      llmStartedAt: "2026-06-18T10:00:00.000Z",
+      llmCompletedAt: "2026-06-18T10:00:03.250Z",
+      completedAt: "2026-06-18T10:00:03.250Z",
     }));
 
     const response = await getJson(`/api/workflows/human/compile-jobs/${COMPILE_JOB_ID}`);
@@ -1028,13 +1069,22 @@ describe("dashboard human workflow routes", () => {
       compileJobId: COMPILE_JOB_ID,
       cacheKey: cacheKey(),
       safetyClass: "read_only",
+      durationMs: 3250,
+      shortcutKey: "reddit_first_post_comments",
+      retryable: false,
     });
   });
 
-  it("returns failed compile job payload with retry guidance", async () => {
+  it("returns failed compile job payload with retry guidance and timeout classification", async () => {
     mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
       status: "failed",
-      error: "planner unavailable",
+      error: "The operation was aborted due to timeout",
+      errorClass: "timeout",
+      retryCount: 2,
+      lastRetriedAt: "2026-06-18T10:01:00.000Z",
+      llmStartedAt: "2026-06-18T10:00:00.000Z",
+      llmCompletedAt: "2026-06-18T10:02:00.000Z",
+      completedAt: "2026-06-18T10:02:00.000Z",
     }));
 
     const response = await getJson(`/api/workflows/human/compile-jobs/${COMPILE_JOB_ID}`);
@@ -1044,10 +1094,61 @@ describe("dashboard human workflow routes", () => {
       status: "failed",
       requestKey: requestKey(),
       compileJobId: COMPILE_JOB_ID,
-      error: "planner unavailable",
+      durationMs: 120000,
+      error: "The operation was aborted due to timeout",
+      errorClass: "timeout",
+      retryCount: 2,
+      lastRetriedAt: "2026-06-18T10:01:00.000Z",
       retryable: true,
       nextAction: "retry_compile",
     });
+  });
+
+  it("requeues failed compile job on retry and increments retry count", async () => {
+    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
+      status: "failed",
+      error: "The operation was aborted due to timeout",
+    }));
+    mocks.compileJobService.requeueFailed.mockResolvedValueOnce(compileJobRecord({
+      status: "queued",
+      retryCount: 1,
+      lastRetriedAt: "2026-06-18T10:01:00.000Z",
+    }));
+
+    const response = await postJson(`/api/workflows/human/compile-jobs/${COMPILE_JOB_ID}/retry`, {});
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      status: "queued",
+      compileJobId: COMPILE_JOB_ID,
+      requestKey: requestKey(),
+      retryCount: 1,
+      retryAfterMs: 2000,
+      nextAction: "poll_compile_job",
+    });
+    expect(mocks.compileJobService.requeueFailed).toHaveBeenCalledWith(COMPILE_JOB_ID);
+    expect(mocks.compileJobService.runInProcess).toHaveBeenCalled();
+  });
+
+  it("returns existing queued compile job on retry without reclaiming it", async () => {
+    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
+      status: "queued",
+      retryCount: 3,
+    }));
+
+    const response = await postJson(`/api/workflows/human/compile-jobs/${COMPILE_JOB_ID}/retry`, {});
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      status: "queued",
+      compileJobId: COMPILE_JOB_ID,
+      requestKey: requestKey(),
+      retryCount: 3,
+      retryAfterMs: 2000,
+      nextAction: "poll_compile_job",
+    });
+    expect(mocks.compileJobService.requeueFailed).not.toHaveBeenCalled();
+    expect(mocks.compileJobService.runInProcess).not.toHaveBeenCalled();
   });
 
   it("rejects run with compileJobId while compile job is not ready", async () => {

@@ -262,6 +262,26 @@ export class HumanWorkflowCompilerService {
     return humanWorkflowCompileJobService.getById(id);
   }
 
+  async retryCompileJob(id: string): Promise<HumanWorkflowCompileJobRecord | null> {
+    const existing = await humanWorkflowCompileJobService.getById(id);
+    if (!existing) return null;
+    if (existing.status === "queued" || existing.status === "running") return existing;
+    if (existing.status !== "failed") return existing;
+
+    const target = await this.resolveTarget(existing.deviceId, existing.accountId);
+    if (!target) {
+      throw Object.assign(new Error("Device or account not found"), { status: 400, code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND" });
+    }
+    const job = await humanWorkflowCompileJobService.requeueFailed(id);
+    if (!job) return existing;
+    humanWorkflowCompileJobService.runInProcess(job.id, () => this.compileWithLlm({
+      requestKey: job.requestKey,
+      intent: job.intent,
+      target,
+    }));
+    return job;
+  }
+
   async compileShortcut(
     shortcutId: string,
     shortcutKey: string,

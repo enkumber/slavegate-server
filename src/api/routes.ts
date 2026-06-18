@@ -74,11 +74,82 @@ import {
   type HumanWorkflowSafetyClass,
   type HumanWorkflowTarget,
 } from "../modules/human-workflow/human-workflow-compiler.service";
+import type { HumanWorkflowCompileJobRecord } from "../modules/human-workflow/compile-job.service";
+import { agentConfig } from "../config/agents.config";
 
 const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
+const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
+
+function plannerModelMetadata(): { modelRole: "planner"; provider: string; model: string } {
+  const configured = process.env.AGENT_PLANNER_MODEL || agentConfig.planner.model;
+  const separator = configured.indexOf("/");
+  if (separator === -1) return { modelRole: "planner", provider: "unknown", model: configured };
+  return {
+    modelRole: "planner",
+    provider: configured.slice(0, separator),
+    model: configured.slice(separator + 1),
+  };
+}
+
+function intentPreview(intent: string): string {
+  return intent
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]")
+    .replace(/\b(?:\+?\d[\d .()/-]{7,}\d)\b/g, "[redacted-phone]")
+    .replace(/\b(?:token|api[_ -]?key|secret|password|parola)\s*[:=]?\s*[A-Za-z0-9._~+/=-]{6,}/gi, "$1 [redacted-token]")
+    .slice(0, 160);
+}
+
+function compileDurationMs(job: HumanWorkflowCompileJobRecord): number | null {
+  if (!job.llmStartedAt || !job.llmCompletedAt) return null;
+  const started = new Date(job.llmStartedAt).getTime();
+  const completed = new Date(job.llmCompletedAt).getTime();
+  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) return null;
+  return completed - started;
+}
+
+async function shortcutKeyForJob(job: HumanWorkflowCompileJobRecord): Promise<string | null> {
+  if (!job.shortcutId) return null;
+  const result = await getDb().query("SELECT key FROM workflow_shortcuts WHERE id = $1", [job.shortcutId]);
+  const key = result.rows[0]?.key;
+  return typeof key === "string" ? key : null;
+}
+
+async function compileJobResponse(job: HumanWorkflowCompileJobRecord): Promise<Record<string, unknown>> {
+  const nextAction = job.status === "failed"
+    ? "retry_compile"
+    : job.status === "queued" || job.status === "running"
+      ? "poll_compile_job"
+      : undefined;
+  const metadata = {
+    compileJobId: job.id,
+    status: job.status,
+    requestKey: job.requestKey,
+    durationMs: compileDurationMs(job),
+    timeoutMs: job.timeoutMs,
+    startedAt: job.llmStartedAt,
+    completedAt: job.completedAt,
+    createdAt: job.createdAt,
+    retryCount: job.retryCount,
+    lastRetriedAt: job.lastRetriedAt,
+    retryable: job.status === "failed",
+    nextAction,
+    source: job.source,
+    shortcutKey: await shortcutKeyForJob(job),
+    platform: job.platform,
+    error: job.error,
+    errorClass: job.errorClass,
+    providerErrorCode: job.providerErrorCode,
+    ...plannerModelMetadata(),
+    intentPreview: intentPreview(job.intent),
+    retryAfterMs: job.status === "queued" || job.status === "running" ? ASYNC_COMPILE_RETRY_AFTER_MS : undefined,
+  };
+  if (job.status === "ready" && job.result) return { ...job.result, ...metadata };
+  return metadata;
+}
+
 function generatedWorkflowCacheResult(cacheKey?: string, requestKey?: string): "cache_hit" | "canonical_hit" {
   return requestKey && !cacheKey ? "canonical_hit" : "cache_hit";
 }
@@ -646,18 +717,33 @@ router.get("/workflows/human/compile-jobs/:id", requireAdminAuth, async (req, re
     }
     const job = await humanWorkflowCompilerService.getCompileJob(req.params.id);
     if (!job) return res.status(404).json({ ok: false, code: "COMPILE_JOB_NOT_FOUND", error: "compile job not found" });
-    const data = job.status === "ready" && job.result
-      ? { ...job.result, compileJobId: job.id }
-      : {
-          compileJobId: job.id,
-          status: job.status,
-          requestKey: job.requestKey,
-          retryAfterMs: job.status === "queued" || job.status === "running" ? 2_000 : undefined,
-          error: job.error,
-          retryable: job.status === "failed",
-          nextAction: job.status === "failed" ? "retry_compile" : undefined,
-        };
+    const data = await compileJobResponse(job);
     res.json({ ok: true, data });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string };
+    res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
+  }
+});
+
+router.post("/workflows/human/compile-jobs/:id/retry", requireAdminAuth, async (req, res) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) {
+      return res.status(400).json({ ok: false, code: "COMPILE_JOB_ID_INVALID", error: "compile job id must be a UUID" });
+    }
+    const job = await humanWorkflowCompilerService.retryCompileJob(req.params.id);
+    if (!job) return res.status(404).json({ ok: false, code: "COMPILE_JOB_NOT_FOUND", error: "compile job not found" });
+    const nextAction = job.status === "queued" || job.status === "running" ? "poll_compile_job" : job.status === "failed" ? "retry_compile" : undefined;
+    res.json({
+      ok: true,
+      data: {
+        status: job.status,
+        compileJobId: job.id,
+        requestKey: job.requestKey,
+        retryCount: job.retryCount,
+        retryAfterMs: job.status === "queued" || job.status === "running" ? ASYNC_COMPILE_RETRY_AFTER_MS : undefined,
+        nextAction,
+      },
+    });
   } catch (err) {
     const typed = err as Error & { status?: number; code?: string };
     res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
