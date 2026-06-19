@@ -173,7 +173,7 @@ function redditFirstPostCommentsTemplate() {
       { id: "unlock_device", type: "action", action: "unlock", params: {} },
       { id: "open_reddit", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
       { id: "settle_feed", type: "action", action: "wait_for_idle", params: { timeoutMs: 3000 } },
-      { id: "tap_first_post_comments", type: "action", action: "a11y_find_tap", params: { resourceId: "com.reddit.frontpage:id/comments_stub", partialMatch: false } },
+      { id: "tap_first_post_comments", type: "action", action: "a11y_find_tap", params: { contentDescription: "comments", partialMatch: true } },
       { id: "settle_comments", type: "action", action: "wait_for_idle", params: { timeoutMs: 2000 } },
       { id: "comments_opened", type: "checkpoint", reason: "Reddit first visible post comments opened from dashboard human workflow" },
     ],
@@ -277,7 +277,7 @@ function redditCommentsShortcutTemplate() {
     name: "Reddit first post comments opener",
     platform: "reddit",
     description: "Open Reddit and tap the comments button on the first visible post.",
-    version: "1.0.0",
+    version: "1.0.1",
     defaultVerificationStrategy: "local_only",
     dataRetentionDays: 7,
     steps: [
@@ -285,7 +285,7 @@ function redditCommentsShortcutTemplate() {
       { id: "unlock_device", type: "action", action: "unlock", params: {} },
       { id: "open_reddit", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
       { id: "settle_feed", type: "action", action: "wait_for_idle", params: { timeoutMs: 3000 } },
-      { id: "tap_first_post_comments", type: "action", action: "a11y_find_tap", params: { resourceId: "com.reddit.frontpage:id/comments_stub", partialMatch: false } },
+      { id: "tap_first_post_comments", type: "action", action: "a11y_find_tap", params: { contentDescription: "comments", partialMatch: true } },
       { id: "settle_comments", type: "action", action: "wait_for_idle", params: { timeoutMs: 2000 } },
     ],
   };
@@ -746,7 +746,7 @@ describe("dashboard human workflow routes", () => {
     expect(response.body.data.cacheKey).toMatch(/^[a-f0-9]{24}$/);
     expect(response.body.data.plan).toMatchObject({
       templateId: "dashboard_human_reddit_first_post_comments_v1",
-      version: "1.0.0",
+      version: "1.0.1",
     });
     expect(response.body.data.plan.actions.map((action: { action: string }) => action.action)).toEqual([
       "screen_wake",
@@ -763,7 +763,7 @@ describe("dashboard human workflow routes", () => {
     });
     expect(response.body.data.plan.steps[4]).toMatchObject({
       action: "a11y_find_tap",
-      params: { resourceId: "com.reddit.frontpage:id/comments_stub", partialMatch: false },
+      params: { contentDescription: "comments", partialMatch: true },
     });
     expect(mocks.llmJson).not.toHaveBeenCalled();
     expect(mocks.loadMap).not.toHaveBeenCalled();

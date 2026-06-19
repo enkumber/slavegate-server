@@ -511,7 +511,7 @@ resource_ids:
   
   # Post footer (din merge_link_footer.xml)
   post_footer: "com.reddit.frontpage:id/link_footer_root"
-  comments_stub: "com.reddit.frontpage:id/comments_stub"
+  comments_stub: "com.reddit.frontpage:id/comments_stub"  # legacy; not present in current Compose feed UI
   extra_action: "com.reddit.frontpage:id/extra_action"
   award_cta_icon: "com.reddit.frontpage:id/award_cta_icon"
   
@@ -630,8 +630,8 @@ button_map:
     comments:
       selector: { contentDescription_contains: "comment" }
       alt_selectors:
-        - { resourceId: "com.reddit.frontpage:id/comments_stub" }
         - { resourceId_contains: "comment" }
+        - { resourceId: "com.reddit.frontpage:id/comments_stub" }
       contextual: true
       hint: "Buton comentarii pe post"
       
@@ -1003,5 +1003,4 @@ timing:
   scroll_delay_ms: 1500
   between_posts_delay_ms: 2000
   rate_limit_backoff_minutes: 10
-
 
