@@ -65,7 +65,7 @@ vi.mock("../../../modules/app-mapping/recorder.service", () => ({ loadMap: mocks
 vi.mock("../../../modules/workflows/workflow.service", () => ({
   workflowService: mocks.workflowService,
 }));
-vi.mock("../../../modules/workflows/workflow.executor", () => ({ startWorkflow: vi.fn() }));
+vi.mock("../../../modules/workflows/workflow.executor", () => ({ startWorkflow: vi.fn(() => Promise.resolve()) }));
 vi.mock("../../../modules/hbe/hbe.service", () => ({ hbeService: mocks.hbeService }));
 vi.mock("../../../modules/accounts/accounts.service", () => ({ accountsService: {} }));
 vi.mock("../../../modules/data-pipeline/data-pipeline.service", () => ({ dataPipelineService: {} }));
@@ -365,6 +365,41 @@ describe("generated workflow cache-only execution route", () => {
     await vi.advanceTimersByTimeAsync(6);
 
     expect(mocks.workflowService.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("runs semantic workflows server-side so semantic targets resolve from live UI tree", async () => {
+    const cached = cacheRecord();
+    cached.workflow.steps = [
+      {
+        type: "action",
+        id: "open_reddit",
+        action: "open_app",
+        params: { packageName: "com.reddit.frontpage" },
+      },
+      {
+        type: "action",
+        id: "tap_first_post_comments",
+        action: "semantic_tap",
+        params: { target: "reddit.first_visible_post.open_comments", waitMs: 2000 },
+      },
+    ];
+    const { dispatchGeneratedWorkflowTemplate } = await import("../generated-workflow-execution.service");
+
+    const result = await dispatchGeneratedWorkflowTemplate({
+      templateId: cached.workflow.id,
+      template: cached.workflow,
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      variables: { generatedWorkflow: true },
+      logPrefix: "test",
+    });
+
+    expect(result).toMatchObject({
+      workflowId: "wf-cache-smoke",
+      status: "queued",
+      mode: "server",
+    });
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
   });
 
   it("accepts cacheKey-only execution and records low-cardinality smoke metrics", async () => {

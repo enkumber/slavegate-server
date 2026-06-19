@@ -225,6 +225,7 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "detect_current_screen",
   "classify_reddit_health_scan",
   "a11y_find_tap",
+  "semantic_tap",
   "set_variable",
   "swipe",
   "tap",

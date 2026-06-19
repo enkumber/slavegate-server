@@ -93,6 +93,16 @@ function createGeneratedWorkflowCheckpoint(
   };
 }
 
+function requiresServerSemanticResolution(template: WorkflowTemplate): boolean {
+  const visit = (steps: WorkflowTemplate["steps"]): boolean => steps.some((step) => {
+    if (step.type === "action" && step.action === "semantic_tap") return true;
+    if (step.type === "condition") return visit(step.if_true) || visit(step.if_false ?? []);
+    if (step.type === "loop") return visit(step.steps);
+    return false;
+  });
+  return visit(template.steps);
+}
+
 export interface GeneratedWorkflowControlPlaneContext {
   accountId?: string;
   clientId?: string;
@@ -164,7 +174,8 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     ? { ...(variables ?? {}), controlPlaneContext }
     : variables;
 
-  if (directWsServer.supportsEdgeExecution(deviceId)) {
+  const requiresServerMode = requiresServerSemanticResolution(template);
+  if (directWsServer.supportsEdgeExecution(deviceId) && !requiresServerMode) {
     const wf = await workflowService.create({
       templateId,
       deviceId,
@@ -209,6 +220,8 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
 
     await workflowService.markFailed(wf.id, "Edge dispatch failed");
     console.warn(`[${logPrefix}] Edge dispatch failed for ${deviceId} — falling back to server execution`);
+  } else if (requiresServerMode) {
+    console.log(`[${logPrefix}] semantic resolution required — using server execution`);
   }
 
   const checkpoint = createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "server");

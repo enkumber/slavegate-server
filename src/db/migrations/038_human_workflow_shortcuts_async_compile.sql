@@ -70,7 +70,7 @@ VALUES
       "name":"Reddit first post comments opener",
       "platform":"reddit",
       "description":"Open Reddit and tap the comments button on the first visible post.",
-      "version":"1.0.1",
+      "version":"1.1.0",
       "defaultVerificationStrategy":"local_only",
       "dataRetentionDays":7,
       "steps":[
@@ -78,7 +78,7 @@ VALUES
         {"id":"unlock_device","type":"action","action":"unlock","params":{}},
         {"id":"open_reddit","type":"action","action":"open_app","params":{"packageName":"com.reddit.frontpage"}},
         {"id":"settle_feed","type":"action","action":"wait_for_idle","params":{"timeoutMs":3000}},
-        {"id":"tap_first_post_comments","type":"action","action":"a11y_find_tap","params":{"contentDescription":"comments","partialMatch":true}},
+        {"id":"tap_first_post_comments","type":"action","action":"semantic_tap","params":{"target":"reddit.first_visible_post.open_comments","waitMs":2000}},
         {"id":"settle_comments","type":"action","action":"wait_for_idle","params":{"timeoutMs":2000}},
         {"id":"comments_opened","type":"checkpoint","reason":"Reddit first visible post comments opened from dashboard human workflow"}
       ]

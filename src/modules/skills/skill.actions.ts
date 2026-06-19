@@ -37,6 +37,7 @@ export const SKILL_ACTION_NAMES = new Set<string>([
   'vlm_extract_following_list',
   'ensure_on_screen',
   'hydra_cascade_tap',
+  'semantic_tap',
   'evaluate_criteria',
   'checkpoint_save',
   'track_empty_scroll',
@@ -120,6 +121,7 @@ export async function executeSkillAction(
     case 'vlm_extract_following_list':      return handleVlmExtractFollowingList(params, ctx);
     case 'ensure_on_screen':               return handleEnsureOnScreen(params, ctx);
     case 'hydra_cascade_tap':              return handleHydraCascadeTap(params, ctx);
+    case 'semantic_tap':                   return handleSemanticTap(params, ctx);
     case 'evaluate_criteria':               return handleEvaluateCriteria(params, ctx);
     case 'checkpoint_save':                 return handleCheckpointSave(params, ctx);
     case 'track_empty_scroll':              return handleTrackEmptyScroll(params, ctx);
@@ -922,6 +924,127 @@ async function handleHydraCascadeTap(
 
   // All retries exhausted — log but don't throw (workflow continues)
   warn(ctx, `hydra_cascade_tap: all ${retries + 1} attempts failed: ${lastError}`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SEMANTIC_TAP — resolve a product intent from live UI tree, then tap coordinates
+// ═══════════════════════════════════════════════════════════════════════════════
+
+interface UiNode {
+  resourceId?: string;
+  text?: string;
+  contentDescription?: string;
+  visible?: boolean;
+  bounds?: { left: number; top: number; right: number; bottom: number };
+  children?: UiNode[];
+}
+
+function parseUiTreeOutput(output: unknown): UiNode {
+  const record = output as Record<string, unknown> | undefined;
+  const rawTree = record?.uiTree ?? record?.tree ?? record?.root;
+  if (typeof rawTree === 'string') return JSON.parse(rawTree) as UiNode;
+  if (rawTree && typeof rawTree === 'object') return rawTree as UiNode;
+  if (output && typeof output === 'object') return output as UiNode;
+  throw new Error('ui_tree_dump returned no parseable ui tree');
+}
+
+function walkUiTree(node: UiNode, visit: (node: UiNode) => void): void {
+  visit(node);
+  for (const child of node.children ?? []) walkUiTree(child, visit);
+}
+
+function nodeCenter(node: UiNode, root: UiNode): { x: number; y: number; bounds: NonNullable<UiNode['bounds']> } | null {
+  if (!node.bounds || !root.bounds) return null;
+  const width = root.bounds.right - root.bounds.left;
+  const height = root.bounds.bottom - root.bounds.top;
+  if (width <= 0 || height <= 0) return null;
+  return {
+    x: ((node.bounds.left + node.bounds.right) / 2 - root.bounds.left) / width,
+    y: ((node.bounds.top + node.bounds.bottom) / 2 - root.bounds.top) / height,
+    bounds: node.bounds,
+  };
+}
+
+function resolveRedditFirstVisiblePostComments(root: UiNode): { x: number; y: number; bounds: NonNullable<UiNode['bounds']>; matchedText: string } | null {
+  const candidates: Array<{ node: UiNode; score: number; top: number; matchedText: string }> = [];
+
+  walkUiTree(root, (node) => {
+    if (node.visible === false || !node.bounds) return;
+    const cd = node.contentDescription?.trim() ?? '';
+    const text = node.text?.trim() ?? '';
+    const rid = node.resourceId?.trim() ?? '';
+    const haystack = `${cd} ${text} ${rid}`;
+    const hasCommentSignal = /\b\d+\s+comments?\b/i.test(haystack) || /\bcomments?\b/i.test(haystack);
+    if (!hasCommentSignal) return;
+
+    const isPostContainer = /^From\s+/i.test(cd) || /post_unit|promoted_post_unit|post_footer/i.test(rid);
+    const isCommentDetail = /comment_layout|comment_header|fbp_comment_footer|reply_text_view|search comments|sort comments/i.test(haystack);
+    if (isCommentDetail) return;
+
+    const bounds = node.bounds;
+    if (bounds.bottom <= 0 || bounds.top < 0) return;
+    const score =
+      (isPostContainer ? 100 : 0) +
+      (cd ? 20 : 0) +
+      (rid.includes('post') ? 10 : 0) -
+      bounds.top / 10;
+
+    candidates.push({ node, score, top: bounds.top, matchedText: cd || text || rid });
+  });
+
+  candidates.sort((a, b) => b.score - a.score || a.top - b.top);
+  for (const candidate of candidates) {
+    const center = nodeCenter(candidate.node, root);
+    if (center) return { ...center, matchedText: candidate.matchedText };
+  }
+  return null;
+}
+
+async function handleSemanticTap(
+  params: Record<string, unknown>,
+  ctx:    SkillActionContext,
+): Promise<void> {
+  const target = params.target as string | undefined;
+  if (!target) throw new Error('semantic_tap requires params.target');
+
+  const waitMs = (params.waitMs as number) ?? 1500;
+  info(ctx, `semantic_tap: resolving "${target}" from live ui_tree`);
+
+  const dump = await ctx.dispatchAndWait('ui_tree_dump', {}, 15_000);
+  if (dump.status === 'failed' || dump.status === 'timeout') {
+    throw new Error(`semantic_tap ui_tree_dump failed: ${dump.error ?? dump.status}`);
+  }
+
+  const root = parseUiTreeOutput(dump.output);
+  let resolved: { x: number; y: number; bounds: NonNullable<UiNode['bounds']>; matchedText: string } | null = null;
+
+  switch (target) {
+    case 'reddit.first_visible_post.open_comments':
+      resolved = resolveRedditFirstVisiblePostComments(root);
+      break;
+    default:
+      throw new Error(`semantic_tap unknown target: ${target}`);
+  }
+
+  if (!resolved) {
+    throw new Error(`semantic_tap could not resolve target: ${target}`);
+  }
+
+  ctx.checkpoint.variables['_last_semantic_tap'] = {
+    target,
+    x: resolved.x,
+    y: resolved.y,
+    bounds: resolved.bounds,
+    matchedText: resolved.matchedText,
+    resolvedAt: new Date().toISOString(),
+  };
+
+  const tap = await ctx.dispatchAndWait('tap', { x: resolved.x, y: resolved.y }, 15_000);
+  if (tap.status === 'failed' || tap.status === 'timeout') {
+    throw new Error(`semantic_tap tap failed: ${tap.error ?? tap.status}`);
+  }
+
+  if (waitMs > 0) await ctx.sleep(waitMs);
 }
 
 // ─── Minimal HTTP POST helper (avoids axios/node-fetch dep) ──────────────────

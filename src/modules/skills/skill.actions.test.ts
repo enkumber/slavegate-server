@@ -118,6 +118,78 @@ describe('set_variable', () => {
   });
 });
 
+describe('semantic_tap', () => {
+  function context(uiTree: Record<string, unknown>): SkillActionContext {
+    const dispatchAndWait = vi.fn()
+      .mockResolvedValueOnce({
+        status: 'completed',
+        output: { uiTree: JSON.stringify(uiTree) },
+        durationMs: 25,
+      })
+      .mockResolvedValueOnce({
+        status: 'completed',
+        output: { tapped: true },
+        durationMs: 10,
+      });
+
+    return {
+      workflowId: 'wf-semantic',
+      deviceId: 'device-test',
+      platform: 'reddit',
+      checkpoint: {
+        stepIndex: 0,
+        loopStack: [],
+        variables: {},
+        hbeParams: {},
+        checkpointAt: new Date().toISOString(),
+      },
+      stepIndex: 0,
+      dispatchAndWait,
+      cascadeTap: vi.fn(),
+      executeSteps: vi.fn(),
+      persistCheckpoint: vi.fn(),
+      sleep: vi.fn(),
+    };
+  }
+
+  it('resolves Reddit first visible post comments from live ui tree and taps normalized center', async () => {
+    const uiTree = {
+      bounds: { left: 0, top: 0, right: 1080, bottom: 2160 },
+      children: [
+        {
+          resourceId: 'feed_lazy_column',
+          bounds: { left: 0, top: 220, right: 1080, bottom: 2160 },
+          children: [
+            {
+              resourceId: 'post_unit',
+              contentDescription: 'From brasov, Posted 2 hours ago, Bar with rock, 1 upvote, 10 comments, 0 awards',
+              visible: true,
+              bounds: { left: 0, top: 326, right: 1080, bottom: 646 },
+            },
+          ],
+        },
+      ],
+    };
+    const ctx = context(uiTree);
+
+    await executeSkillAction('semantic_tap', {
+      target: 'reddit.first_visible_post.open_comments',
+      waitMs: 0,
+    }, ctx);
+
+    expect(ctx.dispatchAndWait).toHaveBeenNthCalledWith(1, 'ui_tree_dump', {}, 15_000);
+    expect(ctx.dispatchAndWait).toHaveBeenNthCalledWith(2, 'tap', {
+      x: 0.5,
+      y: 486 / 2160,
+    }, 15_000);
+    expect(ctx.checkpoint.variables._last_semantic_tap).toMatchObject({
+      target: 'reddit.first_visible_post.open_comments',
+      matchedText: expect.stringContaining('10 comments'),
+      bounds: { left: 0, top: 326, right: 1080, bottom: 646 },
+    });
+  });
+});
+
 describe('classify_reddit_health_scan', () => {
   function context(uiTree: string): SkillActionContext {
     return {
