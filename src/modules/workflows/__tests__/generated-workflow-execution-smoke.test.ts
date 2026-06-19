@@ -289,6 +289,82 @@ describe("generated workflow cache-only execution route", () => {
 
   afterEach(() => {
     delete process.env.API_KEY;
+    delete process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS;
+    vi.useRealTimers();
+  });
+
+  it("fails an edge workflow when the device never acknowledges WORKFLOW_START", async () => {
+    vi.useFakeTimers();
+    process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS = "5";
+    const cached = cacheRecord();
+    const { dispatchGeneratedWorkflowTemplate } = await import("../generated-workflow-execution.service");
+
+    const result = await dispatchGeneratedWorkflowTemplate({
+      templateId: cached.workflow.id,
+      template: cached.workflow,
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      variables: { generatedWorkflow: true },
+      logPrefix: "test",
+    });
+
+    expect(result).toMatchObject({
+      workflowId: "wf-cache-smoke",
+      status: "running",
+      mode: "edge",
+    });
+    mocks.workflowService.get.mockResolvedValue({
+      id: "wf-cache-smoke",
+      status: "running",
+      currentStep: 0,
+      checkpoint: {
+        stepIndex: 0,
+        loopStack: [],
+        variables: {},
+        hbeParams: {},
+        checkpointAt: "2026-06-19T00:00:00.000Z",
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(6);
+
+    expect(mocks.workflowService.markFailed).toHaveBeenCalledWith(
+      "wf-cache-smoke",
+      expect.stringContaining("Edge workflow did not acknowledge WORKFLOW_START"),
+    );
+  });
+
+  it("does not fail an edge workflow after the device acknowledgement checkpoint arrives", async () => {
+    vi.useFakeTimers();
+    process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS = "5";
+    const cached = cacheRecord();
+    const { dispatchGeneratedWorkflowTemplate } = await import("../generated-workflow-execution.service");
+
+    await dispatchGeneratedWorkflowTemplate({
+      templateId: cached.workflow.id,
+      template: cached.workflow,
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      variables: { generatedWorkflow: true },
+      logPrefix: "test",
+    });
+    mocks.workflowService.get.mockResolvedValue({
+      id: "wf-cache-smoke",
+      status: "running",
+      currentStep: 0,
+      checkpoint: {
+        source: "edge",
+        stepIndex: 0,
+        loopStack: [],
+        variables: {},
+        hbeParams: {},
+        checkpointAt: "2026-06-19T00:00:01.000Z",
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(6);
+
+    expect(mocks.workflowService.markFailed).not.toHaveBeenCalled();
   });
 
   it("accepts cacheKey-only execution and records low-cardinality smoke metrics", async () => {

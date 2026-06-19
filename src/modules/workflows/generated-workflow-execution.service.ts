@@ -8,6 +8,41 @@ import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 import { workflowEvents } from "../workflow-events";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
+const EDGE_WORKFLOW_ACK_TIMEOUT_MS = Number(process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS ?? 20_000);
+const EDGE_WORKFLOW_ACK_TIMEOUT_ERROR = "Edge workflow did not acknowledge WORKFLOW_START";
+
+function scheduleEdgeWorkflowAckWatchdog(workflowId: string, deviceId: string, logPrefix: string): void {
+  const timeout = setTimeout(async () => {
+    try {
+      const latest = await workflowService.get(workflowId);
+      if (!latest || latest.status !== "running" || latest.currentStep !== 0) return;
+      if ((latest.checkpoint as unknown as Record<string, unknown> | undefined)?.source === "edge") return;
+
+      await workflowService.markFailed(
+        workflowId,
+        `${EDGE_WORKFLOW_ACK_TIMEOUT_ERROR} within ${EDGE_WORKFLOW_ACK_TIMEOUT_MS}ms`,
+      );
+      workflowEvents.publish({
+        source: "workflow_executor",
+        event: "failed",
+        workflowId,
+        deviceId,
+        mode: "edge",
+        status: "failed",
+        currentStep: 0,
+        error: EDGE_WORKFLOW_ACK_TIMEOUT_ERROR,
+        details: {
+          reason: "edge_ack_timeout",
+          timeoutMs: EDGE_WORKFLOW_ACK_TIMEOUT_MS,
+        },
+      });
+      console.warn(`[${logPrefix}] Edge workflow ${workflowId} on ${deviceId.slice(0, 8)} did not acknowledge start within ${EDGE_WORKFLOW_ACK_TIMEOUT_MS}ms`);
+    } catch (err) {
+      console.error(`[${logPrefix}] Edge workflow ack watchdog failed for ${workflowId}: ${(err as Error).message}`);
+    }
+  }, EDGE_WORKFLOW_ACK_TIMEOUT_MS);
+  timeout.unref?.();
+}
 
 export function resolveGeneratedWorkflowDeviceId(deviceId: string): string {
   if (UUID_RE.test(deviceId)) return deviceId;
@@ -148,6 +183,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     );
 
     if (sent) {
+      scheduleEdgeWorkflowAckWatchdog(wf.id, deviceId, logPrefix);
       workflowEvents.publish({
         source: "workflow_executor",
         event: "dispatch_running",
