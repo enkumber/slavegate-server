@@ -201,7 +201,7 @@ function buildHumanWorkflowCompilePrompt(input: {
     compactHumanWorkflowAppMapHints(input.appMap, input.goal),
     "Required fields: id,name,platform,description,version,steps,defaultVerificationStrategy,dataRetentionDays.",
     `platform must be exactly ${input.platform}.`,
-    "Every step needs id and type. Step types: action,wait,checkpoint.",
+    "Every step needs id and type. Step types: action,wait,checkpoint. Wait steps must include duration or condition.",
     `safetyClass must be exactly ${safetyClass}.`,
     "Allowed actions: open_app,intent_send,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen,ui_tree_dump,type_text,vlm_generate_comment.",
     ...writeInstructions,
@@ -286,12 +286,48 @@ function normalizeHumanWorkflowTemplateCandidate(
         if (typeof reason === "string" && !normalized.reason) normalized.reason = reason;
         delete normalized.params;
       }
+      if (normalized.type === "wait") {
+        normalizeHumanWorkflowWaitStep(normalized);
+      }
       return normalized;
     });
     workflow.steps = ensureHumanWorkflowPreambleSteps(workflow.steps as unknown[]);
     workflow.steps = ensureHumanWorkflowEvidenceSteps(workflow.steps as unknown[], input);
   }
   return workflow;
+}
+
+function numberFromUnknown(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function normalizeHumanWorkflowWaitStep(step: Record<string, unknown>): void {
+  const params = isRecord(step.params) ? step.params : {};
+  if (typeof step.condition !== "string" && typeof params.condition === "string") {
+    step.condition = params.condition;
+  }
+  if (isRecord(step.duration)) {
+    delete step.params;
+    return;
+  }
+  const explicitDuration =
+    numberFromUnknown(step.duration) ??
+    numberFromUnknown(step.durationMs) ??
+    numberFromUnknown(step.timeoutMs) ??
+    numberFromUnknown(params.durationMs) ??
+    numberFromUnknown(params.timeoutMs) ??
+    numberFromUnknown(params.waitMs) ??
+    numberFromUnknown(params.ms);
+  if (typeof step.condition !== "string") {
+    const durationMs = explicitDuration ?? 1_000;
+    step.duration = { min: durationMs, max: durationMs, distribution: "uniform" };
+  }
+  delete step.params;
 }
 
 function ensureHumanWorkflowPreambleSteps(steps: unknown[]): unknown[] {
