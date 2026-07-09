@@ -153,6 +153,28 @@ export class HumanWorkflowCompileJobService {
     return rowToJob(result.rows[0]);
   }
 
+  async requeueMissingArtifact(id: string): Promise<HumanWorkflowCompileJobRecord | null> {
+    const result = await getDb().query(
+      `UPDATE human_workflow_compile_jobs
+       SET status = 'queued',
+           retry_count = COALESCE(retry_count, 0) + 1,
+           last_retried_at = NOW(),
+           cache_key = NULL,
+           error = NULL,
+           provider_error_code = NULL,
+           result = NULL,
+           llm_started_at = NULL,
+           llm_completed_at = NULL,
+           completed_at = NULL,
+           updated_at = NOW()
+       WHERE id = $1 AND status = 'ready'
+       RETURNING *`,
+      [id],
+    );
+    if (result.rows.length === 0) return null;
+    return rowToJob(result.rows[0]);
+  }
+
   runInProcess(jobId: string, runner: () => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>): void {
     if (this.running.has(jobId)) return;
     this.running.add(jobId);

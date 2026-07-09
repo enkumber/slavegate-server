@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
   },
   workflowService: {
     getGeneratedPlanCacheByRequestKey: vi.fn(),
+    getGeneratedPlanCache: vi.fn(),
     saveTemplate: vi.fn(),
     saveGeneratedPlanCache: vi.fn(),
   },
@@ -46,6 +47,7 @@ const mocks = vi.hoisted(() => ({
     getById: vi.fn(),
     getByRequestKey: vi.fn(),
     requeueFailed: vi.fn(),
+    requeueMissingArtifact: vi.fn(),
     runInProcess: vi.fn(),
   },
 }));
@@ -446,6 +448,7 @@ describe("dashboard human workflow routes", () => {
     mocks.db.connect.mockResolvedValue(mocks.client);
     mocks.db.query.mockResolvedValue({ rows: [targetRow()] });
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cachedPlan());
+    mocks.workflowService.getGeneratedPlanCache.mockResolvedValue(cachedPlan());
     mocks.workflowService.saveTemplate.mockResolvedValue(undefined);
     mocks.workflowService.saveGeneratedPlanCache.mockResolvedValue(undefined);
     mocks.loadMap.mockResolvedValue(null);
@@ -457,6 +460,7 @@ describe("dashboard human workflow routes", () => {
     mocks.compileJobService.createOrGet.mockResolvedValue(compileJobRecord({ requestKey: requestKey(SAFE_TIMEOUT_INTENT), intent: SAFE_TIMEOUT_INTENT }));
     mocks.compileJobService.getById.mockResolvedValue(null);
     mocks.compileJobService.requeueFailed.mockResolvedValue(null);
+    mocks.compileJobService.requeueMissingArtifact.mockResolvedValue(null);
     mocks.compileJobService.runInProcess.mockImplementation(() => undefined);
   });
 
@@ -1038,6 +1042,41 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.compileJobService.runInProcess).toHaveBeenCalledTimes(2);
     expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
     delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
+  });
+
+  it("requeues a ready compile job when its canonical cache artifact was purged", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.workflowService.getGeneratedPlanCache.mockResolvedValueOnce(null);
+    mocks.compileJobService.getByRequestKey.mockResolvedValueOnce(compileJobRecord({
+      status: "ready",
+      result: readyCompilePayload(ASKREDDIT_NAV_INTENT),
+      cacheKey: cacheKey(ASKREDDIT_NAV_INTENT),
+      requestKey: requestKey(ASKREDDIT_NAV_INTENT),
+      intent: ASKREDDIT_NAV_INTENT,
+    }));
+    mocks.compileJobService.requeueMissingArtifact.mockResolvedValueOnce(compileJobRecord({
+      status: "queued",
+      requestKey: requestKey(ASKREDDIT_NAV_INTENT),
+      intent: ASKREDDIT_NAV_INTENT,
+      retryCount: 1,
+    }));
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: ASKREDDIT_NAV_INTENT,
+    });
+
+    expect(response.status).toBe(202);
+    expect(response.body.data).toMatchObject({
+      status: "compiling",
+      requestKey: requestKey(ASKREDDIT_NAV_INTENT),
+      compileJobId: COMPILE_JOB_ID,
+      source: "llm",
+    });
+    expect(mocks.workflowService.getGeneratedPlanCache).toHaveBeenCalledWith(cacheKey(ASKREDDIT_NAV_INTENT));
+    expect(mocks.compileJobService.requeueMissingArtifact).toHaveBeenCalledWith(COMPILE_JOB_ID);
+    expect(mocks.compileJobService.runInProcess).toHaveBeenCalledTimes(1);
   });
 
   it("returns compile job support metadata for running polling", async () => {

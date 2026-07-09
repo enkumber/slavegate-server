@@ -302,6 +302,12 @@ function readyFromCache(
   };
 }
 
+function cacheKeyFromCompileJob(job: HumanWorkflowCompileJobRecord): string | null {
+  if (typeof job.cacheKey === "string" && job.cacheKey.length > 0) return job.cacheKey;
+  const resultCacheKey = job.result?.cacheKey;
+  return typeof resultCacheKey === "string" && resultCacheKey.length > 0 ? resultCacheKey : null;
+}
+
 export class HumanWorkflowCompilerService {
   async resolveTarget(deviceId: string, accountId: string): Promise<HumanWorkflowTarget | null> {
     const result = await getDb().query(
@@ -365,8 +371,14 @@ export class HumanWorkflowCompilerService {
       return ready;
     }
 
-    const existingJob = await humanWorkflowCompileJobService.getByRequestKey(requestKey);
-    if (existingJob?.status === "ready" && existingJob.result) return existingJob.result as HumanWorkflowCompileReady;
+    let existingJob = await humanWorkflowCompileJobService.getByRequestKey(requestKey);
+    if (existingJob?.status === "ready" && existingJob.result) {
+      const jobCacheKey = cacheKeyFromCompileJob(existingJob);
+      const cachedJobArtifact = jobCacheKey ? await workflowService.getGeneratedPlanCache(jobCacheKey) : null;
+      if (cachedJobArtifact) return existingJob.result as HumanWorkflowCompileReady;
+      const requeued = await humanWorkflowCompileJobService.requeueMissingArtifact(existingJob.id);
+      existingJob = requeued ?? { ...existingJob, status: "failed", error: "compile artifact missing; retry compile" };
+    }
     const job = existingJob ?? await humanWorkflowCompileJobService.createOrGet({
       requestKey,
       deviceId: input.deviceId,
