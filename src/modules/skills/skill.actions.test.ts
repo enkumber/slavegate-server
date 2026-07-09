@@ -6,6 +6,11 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { evalConditionExpr, executeSkillAction, type SkillActionContext } from './skill.actions';
+import { llmComplete } from '../../utils/llm';
+
+vi.mock('../../utils/llm', () => ({
+  llmComplete: vi.fn(),
+}));
 
 describe('evalConditionExpr', () => {
   const vars: Record<string, unknown> = {
@@ -223,6 +228,111 @@ describe('semantic_tap', () => {
       matchedText: expect.stringContaining('32 comments'),
       bounds: { left: 0, top: 1378, right: 1080, bottom: 2534 },
     });
+  });
+
+  it('prefers the visible Reddit comments button over the post body when opening comments', async () => {
+    const uiTree = {
+      bounds: { left: 0, top: 0, right: 1080, bottom: 2160 },
+      children: [
+        {
+          resourceId: 'post_unit',
+          contentDescription: 'From FilmmakingintheSouth, Posted 20 days ago, Milos, most beautiful place on Earth, 607 upvotes, 42 comments, Shared 96 times',
+          visible: true,
+          bounds: { left: 0, top: 1378, right: 1080, bottom: 2193 },
+          children: [
+            {
+              resourceId: 'actionBar_comment_button',
+              visible: true,
+              bounds: { left: 377, top: 1897, right: 577, bottom: 2002 },
+              children: [
+                {
+                  resourceId: 'actionBar_comment_icon',
+                  contentDescription: '42 comments',
+                  visible: true,
+                  bounds: { left: 419, top: 1923, right: 472, bottom: 1976 },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const ctx = context(uiTree);
+
+    await executeSkillAction('semantic_tap', {
+      target: 'reddit.first_visible_post.open_comments',
+      waitMs: 0,
+    }, ctx);
+
+    expect(ctx.dispatchAndWait).toHaveBeenNthCalledWith(2, 'tap', {
+      x: expect.closeTo(477 / 1080, 5),
+      y: expect.closeTo(1949.5 / 2160, 5),
+    }, 15_000);
+    expect(ctx.checkpoint.variables._last_semantic_tap).toMatchObject({
+      matchedText: '42 comments',
+      bounds: { left: 377, top: 1897, right: 577, bottom: 2002 },
+    });
+  });
+});
+
+describe('vlm_generate_comment', () => {
+  function context(): SkillActionContext {
+    return {
+      workflowId: 'wf-comment',
+      deviceId: 'device-test',
+      platform: 'reddit',
+      checkpoint: {
+        stepIndex: 0,
+        loopStack: [],
+        variables: {},
+        hbeParams: {},
+        checkpointAt: new Date().toISOString(),
+      },
+      stepIndex: 0,
+      dispatchAndWait: vi.fn(),
+      cascadeTap: vi.fn(),
+      executeSteps: vi.fn(),
+      persistCheckpoint: vi.fn(),
+      sleep: vi.fn(),
+    };
+  }
+
+  it('generates a comment from captured Reddit UI context through llmComplete', async () => {
+    vi.mocked(llmComplete).mockResolvedValueOnce('"Milos looks absolutely magical from that description."');
+    const ctx = context();
+    ctx.checkpoint.variables._postContextUiTree = {
+      uiTree: JSON.stringify({
+        bounds: { left: 0, top: 0, right: 1080, bottom: 2160 },
+        children: [
+          { contentDescription: 'Post title, Milos, most beautiful place on Earth', visible: true },
+          { contentDescription: 'Post body, I try to go to Milos once a year to visit Kleftiko on a boat tour.', visible: true },
+          { contentDescription: '42 comments', visible: true },
+        ],
+      }),
+    };
+
+    await executeSkillAction('vlm_generate_comment', {
+      post_description_var: '_postContextUiTree',
+      target_variable: '_generated_comment',
+      max_chars: 120,
+    }, ctx);
+
+    expect(llmComplete).toHaveBeenCalledWith(
+      expect.stringContaining('Milos, most beautiful place on Earth'),
+      undefined,
+      expect.objectContaining({ disableThinking: true, max_tokens: 96 }),
+    );
+    expect(ctx.checkpoint.variables._generated_comment).toBe('Milos looks absolutely magical from that description.');
+    expect(ctx.checkpoint.variables.vlm_calls_this_run).toBe(1);
+  });
+
+  it('fails instead of silently continuing when no post context is available', async () => {
+    const ctx = context();
+    await expect(executeSkillAction('vlm_generate_comment', {
+      post_description_var: '_missing',
+      target_variable: '_generated_comment',
+    }, ctx)).rejects.toThrow('no post description available');
+    expect(ctx.checkpoint.variables._generated_comment).toBeUndefined();
   });
 });
 

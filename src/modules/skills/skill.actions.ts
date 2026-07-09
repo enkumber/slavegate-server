@@ -23,6 +23,7 @@
 
 import type { WorkflowCheckpoint, WorkflowStep } from '../workflows/types';
 import type { JobStepResult } from '../workflows/workflow.executor';
+import { llmComplete } from '../../utils/llm';
 
 // ─── Recognised action names ──────────────────────────────────────────────────
 
@@ -423,6 +424,11 @@ interface UiNode {
   resId?:              string;
   children?:           UiNode[];
   [key: string]:       unknown;
+}
+
+interface UiNodeWithParent {
+  node: UiNode;
+  parent?: UiNode;
 }
 
 interface ProfileEvalData {
@@ -953,6 +959,11 @@ function walkUiTree(node: UiNode, visit: (node: UiNode) => void): void {
   for (const child of node.children ?? []) walkUiTree(child, visit);
 }
 
+function walkUiTreeWithParent(node: UiNode, visit: (entry: UiNodeWithParent) => void, parent?: UiNode): void {
+  visit({ node, parent });
+  for (const child of node.children ?? []) walkUiTreeWithParent(child, visit, node);
+}
+
 function nodeCenter(node: UiNode, root: UiNode): { x: number; y: number; bounds: NonNullable<UiNode['bounds']> } | null {
   if (!node.bounds || !root.bounds) return null;
   const width = root.bounds.right - root.bounds.left;
@@ -991,9 +1002,9 @@ function redditPostTapPoint(node: UiNode, root: UiNode): { x: number; y: number;
 }
 
 function resolveRedditFirstVisiblePostComments(root: UiNode): { x: number; y: number; bounds: NonNullable<UiNode['bounds']>; matchedText: string } | null {
-  const candidates: Array<{ node: UiNode; score: number; top: number; matchedText: string }> = [];
+  const candidates: Array<{ node: UiNode; score: number; top: number; matchedText: string; exactControl: boolean }> = [];
 
-  walkUiTree(root, (node) => {
+  walkUiTreeWithParent(root, ({ node, parent }) => {
     if (node.visible === false || !node.bounds) return;
     const cd = node.contentDescription?.trim() ?? '';
     const text = node.text?.trim() ?? '';
@@ -1003,23 +1014,29 @@ function resolveRedditFirstVisiblePostComments(root: UiNode): { x: number; y: nu
     if (!hasCommentSignal) return;
 
     const isPostContainer = /^From\s+/i.test(cd) || /post_unit|promoted_post_unit|post_footer/i.test(rid);
+    const isCommentButton = /actionbar_comment|comment_button|comments?/.test(rid.toLowerCase()) || /^\d+\s+comments?$/i.test(cd);
     const isCommentDetail = /comment_layout|comment_header|fbp_comment_footer|reply_text_view|search comments|sort comments/i.test(haystack);
     if (isCommentDetail) return;
 
     const bounds = node.bounds;
     if (bounds.bottom <= 0 || bounds.top < 0) return;
+    const tapNode = isCommentButton && parent?.bounds ? parent : node;
+    const top = tapNode.bounds?.top ?? bounds.top;
     const score =
+      (isCommentButton ? 220 : 0) +
       (isPostContainer ? 100 : 0) +
       (cd ? 20 : 0) +
       (rid.includes('post') ? 10 : 0) -
-      bounds.top / 10;
+      top / 10;
 
-    candidates.push({ node, score, top: bounds.top, matchedText: cd || text || rid });
+    candidates.push({ node: tapNode, score, top, matchedText: cd || text || rid, exactControl: isCommentButton });
   });
 
   candidates.sort((a, b) => b.score - a.score || a.top - b.top);
   for (const candidate of candidates) {
-    const center = redditPostTapPoint(candidate.node, root) ?? nodeCenter(candidate.node, root);
+    const center = candidate.exactControl
+      ? nodeCenter(candidate.node, root)
+      : redditPostTapPoint(candidate.node, root) ?? nodeCenter(candidate.node, root);
     if (center) return { ...center, matchedText: candidate.matchedText };
   }
   return null;
@@ -1893,18 +1910,17 @@ async function handleVlmGenerateComment(
   const maxChars      = (params.max_chars as number)            || 150;
   const tone          = (params.tone as string)                 || 'admirativ, prietenos, natural';
 
-  const postDesc = ctx.checkpoint.variables[descVar] as string;
+  const postDesc = extractCommentGenerationContext(ctx.checkpoint.variables[descVar]);
   if (!postDesc) {
-    warn(ctx, 'vlm_generate_comment: no post description available');
-    ctx.checkpoint.variables[targetVar] = '';
-    return;
+    throw new Error(`vlm_generate_comment: no post description available in ${descVar}`);
   }
 
-  const task = `Generează un comentariu scurt pentru această postare Instagram.
+  const task = `Generează un comentariu scurt, contextual, pentru această postare Reddit.
 
-Descrierea postării: "${postDesc}"
+Context extras din ecran:
+${postDesc}
 
-Context: Comentariul este de la un cont de ${accountCtx} (@incitographer).
+Context cont: ${accountCtx}.
 
 REGULI STRICTE:
 1. Maxim ${maxChars} caractere
@@ -1914,7 +1930,7 @@ REGULI STRICTE:
 5. NU folosi emoji exagerate (maxim 1-2 emoji subtile)
 6. NU folosi întrebări
 7. Sună natural, ca un compliment sincer
-8. Poate fi în română sau engleză, potrivit cu contextul postării
+8. Scrie în engleză dacă postarea este în engleză
 
 Exemple bune:
 - "Ce culori superbe! 💫"
@@ -1924,75 +1940,67 @@ Exemple bune:
 
 Răspunde DOAR cu textul comentariului, fără ghilimele, fără explicații.`;
 
-  info(ctx, 'vlm_generate_comment: generating comment via OpenClaw CLI (no screenshot needed)');
+  info(ctx, 'vlm_generate_comment: generating comment via configured LLM');
 
   try {
-    // Use OpenClaw CLI directly for text generation — no screenshot needed
-    const { spawnSync } = require('child_process');
-    const spawnResult = spawnSync(
-      'openclaw',
-      ['agent', '--agent', 'main', '--local', '--json', '-m', task],
-      {
-        encoding:  'utf8',
-        timeout:   30000,
-        maxBuffer: 5 * 1024 * 1024,
-        cwd:       '/data/.openclaw/workspace',
-      },
-    );
-
-    if (spawnResult.error) {
-      throw spawnResult.error;
-    }
-
-    // OpenClaw CLI writes JSON to stderr; check stdout first for forward-compat
-    const rawStdout = spawnResult.stdout || '';
-    const rawStderr = spawnResult.stderr || '';
-    let vlmResult   = '';
-
-    if (rawStdout.includes('"payloads"')) {
-      vlmResult = rawStdout;
-      info(ctx, 'vlm_generate_comment: JSON found in stdout');
-    } else if (rawStderr.includes('"payloads"')) {
-      const jsonStart = rawStderr.indexOf('{');
-      if (jsonStart !== -1) {
-        vlmResult = rawStderr.slice(jsonStart);
-        info(ctx, 'vlm_generate_comment: JSON found in stderr (expected openclaw CLI behavior)');
-      }
-    }
-
-    if (!vlmResult || vlmResult.trim() === '') {
-      warn(ctx, `vlm_generate_comment: OpenClaw returned empty response. stderr: ${rawStderr.slice(0, 300)}`);
-      ctx.checkpoint.variables[targetVar] = '';
-      return;
-    }
-
-    const parsed  = JSON.parse(vlmResult);
-    let   comment = (parsed?.payloads?.[0]?.text as string || '').trim();
+    let comment = (await llmComplete(task, undefined, {
+      max_tokens: 96,
+      temperature: 0.4,
+      timeoutMs: 30_000,
+      disableThinking: true,
+    })).trim();
 
     // Clean up: remove quotes if wrapped
     if ((comment.startsWith('"') && comment.endsWith('"')) ||
         (comment.startsWith("'") && comment.endsWith("'"))) {
       comment = comment.slice(1, -1);
     }
+    comment = comment.replace(/^```(?:text)?/i, '').replace(/```$/i, '').trim();
 
     // Truncate if too long
     if (comment.length > maxChars) {
       comment = comment.slice(0, maxChars - 3) + '...';
     }
 
-    ctx.checkpoint.variables[targetVar] = comment;
-    if (comment) {
-      info(ctx, `vlm_generate_comment: generated "${comment.slice(0, 50)}..."`);
-    } else {
-      warn(ctx, 'vlm_generate_comment: parsed response but comment is empty');
+    if (!comment) {
+      throw new Error('vlm_generate_comment: LLM returned empty comment');
     }
 
-  } catch (err) {
-    warn(ctx, `vlm_generate_comment: request failed: ${(err as Error).message}`);
-    ctx.checkpoint.variables[targetVar] = '';
-  }
+    ctx.checkpoint.variables[targetVar] = comment;
+    info(ctx, `vlm_generate_comment: generated "${comment.slice(0, 50)}..."`);
 
-  // Track VLM usage
-  const prev = (ctx.checkpoint.variables['vlm_calls_this_run'] as number) ?? 0;
-  ctx.checkpoint.variables['vlm_calls_this_run'] = prev + 1;
+  } catch (err) {
+    ctx.checkpoint.variables[targetVar] = '';
+    throw new Error(`vlm_generate_comment: request failed: ${(err as Error).message}`);
+  } finally {
+    // Track VLM/creative usage even when the generation fails.
+    const prev = (ctx.checkpoint.variables['vlm_calls_this_run'] as number) ?? 0;
+    ctx.checkpoint.variables['vlm_calls_this_run'] = prev + 1;
+  }
+}
+
+function extractCommentGenerationContext(value: unknown): string {
+  if (!value) return '';
+  if (typeof value === 'string') return value.trim();
+  const record = value as Record<string, unknown>;
+  const rawTree = record.uiTree ?? record.tree ?? record.nodes;
+  if (!rawTree) return JSON.stringify(value).slice(0, 2000);
+  const root = typeof rawTree === 'string'
+    ? parseUiTreeOutput({ uiTree: rawTree })
+    : parseUiTreeOutput(rawTree);
+  const snippets: string[] = [];
+  walkUiTree(root, (node) => {
+    const cd = node.contentDescription?.trim();
+    const text = node.text?.trim();
+    const rid = node.resourceId?.trim();
+    const candidate = cd || text || '';
+    if (!candidate) return;
+    if (
+      /post title|post body|post creator|posted|comments?|upvotes?|r slash|subreddit/i.test(candidate) ||
+      /title|body|author|comment/i.test(rid ?? '')
+    ) {
+      snippets.push(candidate);
+    }
+  });
+  return Array.from(new Set(snippets)).slice(0, 20).join('\n').slice(0, 2500);
 }
