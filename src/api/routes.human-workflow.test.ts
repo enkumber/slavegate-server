@@ -18,6 +18,7 @@ const REDDIT_FIRST_POST_COMMENTS_INTENT = "intra pe reddit si apasa pe butonul d
 const REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT = "pe reddit, apasa butonul de comment la prima postare care apare in app";
 const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottest";
 const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
+const ASKREDDIT_NAV_INTENT = "deschide reddit si mergi pe /askreddit";
 
 const mocks = vi.hoisted(() => ({
   db: {
@@ -931,6 +932,38 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.llmJson).not.toHaveBeenCalled();
     expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
     delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
+  });
+
+  it("sends unmatched subreddit navigation intents to the AI compiler instead of generic open-app", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);
+    mocks.compileJobService.createOrGet.mockResolvedValueOnce(compileJobRecord({
+      requestKey: requestKey(ASKREDDIT_NAV_INTENT),
+      intent: ASKREDDIT_NAV_INTENT,
+    }));
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: ASKREDDIT_NAV_INTENT,
+    });
+
+    expect(response.status).toBe(202);
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: {
+        status: "compiling",
+        requestKey: requestKey(ASKREDDIT_NAV_INTENT),
+        compileJobId: COMPILE_JOB_ID,
+        retryAfterMs: 2000,
+        source: "llm",
+      },
+    });
+    expect(mocks.shortcutRegistryService.lookupActiveShortcut).toHaveBeenCalledWith(
+      expect.objectContaining({ platform: "reddit", intent: ASKREDDIT_NAV_INTENT }),
+    );
+    expect(mocks.compileJobService.runInProcess).toHaveBeenCalled();
+    expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
   });
 
   it("does not block on oversized compile timeout env overrides", async () => {

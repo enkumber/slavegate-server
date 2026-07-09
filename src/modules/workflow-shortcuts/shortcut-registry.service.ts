@@ -63,6 +63,19 @@ function patternMatches(pattern: WorkflowShortcutIntentPattern, normalizedIntent
   return false;
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isOpenAppOnlyIntent(shortcut: WorkflowShortcutRecord, normalizedIntent: string): boolean {
+  if (!shortcut.key.endsWith("_open_app")) return true;
+  const platform = escapeRegex(normalizeShortcutText(shortcut.platform));
+  return [
+    new RegExp(`^(?:open|launch|start)\\s+(?:the\\s+)?${platform}(?:\\s+(?:app|application))?$`),
+    new RegExp(`^(?:deschide|porneste)\\s+(?:(?:app|aplicatia|aplicatie)\\s+)?${platform}(?:\\s+(?:app|aplicatia|aplicatie))?$`),
+  ].some((pattern) => pattern.test(normalizedIntent));
+}
+
 export class ShortcutRegistryService {
   async lookupActiveShortcut(input: {
     platform: string;
@@ -87,6 +100,7 @@ export class ShortcutRegistryService {
         ? shortcut.intentPatterns
         : shortcut.aliases.map((alias) => ({ type: "exact", pattern: alias }) as WorkflowShortcutIntentPattern);
       const matchedPattern = patterns.find((pattern) => patternMatches(pattern, normalizedIntent)) ?? null;
+      if (matchedPattern && !isOpenAppOnlyIntent(shortcut, normalizedIntent)) continue;
       if (matchedPattern) return { shortcut, normalizedIntent, matchedPattern };
     }
 

@@ -23,6 +23,9 @@ function shortcutRow(overrides: Record<string, unknown> = {}) {
     intent_patterns: [
       { type: "contains_all", terms: ["deschide", "instagram"] },
       { type: "contains_all", terms: ["open", "instagram"] },
+      { type: "contains_all", terms: ["launch", "instagram"] },
+      { type: "contains_all", terms: ["start", "instagram"] },
+      { type: "contains_all", terms: ["porneste", "instagram"] },
     ],
     aliases: [],
     match_config: {
@@ -62,6 +65,20 @@ describe("shortcutRegistryService", () => {
   });
 
   it.each([
+    "open Instagram app",
+    "launch Instagram",
+    "deschide app Instagram",
+    "porneste aplicatia Instagram",
+  ])("matches open-app-only phrasing: %s", async (intent) => {
+    const match = await shortcutRegistryService.lookupActiveShortcut({
+      platform: "instagram",
+      intent,
+    });
+
+    expect(match?.shortcut.key).toBe("instagram_open_app");
+  });
+
+  it.each([
     "deschide Instagram si fa screenshot",
     "deschide Instagram si citeste notificarile",
     "open Instagram and scroll the feed",
@@ -70,6 +87,49 @@ describe("shortcutRegistryService", () => {
     const match = await shortcutRegistryService.lookupActiveShortcut({
       platform: "instagram",
       intent,
+    });
+
+    expect(match).toBeNull();
+  });
+
+  it("does not classify subreddit navigation as a generic Reddit open-app shortcut", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [
+        shortcutRow({
+          key: "reddit_open_app",
+          platform: "reddit",
+          intent_patterns: [{ type: "contains_all", terms: ["deschide", "reddit"] }],
+          match_config: {
+            readOnlyOnly: true,
+            rejectTerms: ["mergi pe", "askreddit", "/askreddit", "r/askreddit"],
+          },
+        }),
+      ],
+    });
+
+    const match = await shortcutRegistryService.lookupActiveShortcut({
+      platform: "reddit",
+      intent: "deschide reddit si mergi pe /askreddit",
+    });
+
+    expect(match).toBeNull();
+  });
+
+  it("does not classify unknown follow-up work as open-app even without explicit reject terms", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [
+        shortcutRow({
+          key: "reddit_open_app",
+          platform: "reddit",
+          intent_patterns: [{ type: "contains_all", terms: ["deschide", "reddit"] }],
+          match_config: { readOnlyOnly: true },
+        }),
+      ],
+    });
+
+    const match = await shortcutRegistryService.lookupActiveShortcut({
+      platform: "reddit",
+      intent: "deschide reddit si mergi la profilul meu",
     });
 
     expect(match).toBeNull();
