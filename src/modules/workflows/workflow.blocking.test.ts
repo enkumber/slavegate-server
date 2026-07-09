@@ -364,6 +364,37 @@ describe("Generated workflow contract validation", () => {
     expect(result.errors).toContain("workflow.platform must be one of: instagram, reddit, threads, tiktok, twitter, youtube");
   });
 
+  it("rejects semantic_tap generated workflow actions without a target before runtime", async () => {
+    const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+
+    const result = validateGeneratedWorkflowTemplate({
+      id: "reddit_invalid_semantic_tap_v1",
+      name: "Invalid semantic tap workflow",
+      platform: "reddit",
+      description: "Should fail during compile validation, not on the device.",
+      version: "1.0.0",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [
+        {
+          type: "action",
+          id: "open_reddit",
+          action: "open_app",
+          params: { packageName: "com.reddit.frontpage" },
+        },
+        {
+          type: "action",
+          id: "tap_missing_target",
+          action: "semantic_tap",
+          params: {},
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain("workflow.steps[1].params.target is required for semantic_tap actions");
+  });
+
   it("accepts read-only Reddit account health generated workflows with canonical output metadata", async () => {
     const { compileGeneratedWorkflowTemplate, validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
 

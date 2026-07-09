@@ -463,6 +463,12 @@ function validateGeneratedWorkflowStepInput(
       if (step.params !== undefined && !isRecord(step.params)) {
         errors.push(`${path}.params must be an object when provided`);
       }
+      if (step.action === "semantic_tap") {
+        const target = isRecord(step.params) ? step.params.target : undefined;
+        if (typeof target !== "string" || target.trim().length === 0) {
+          errors.push(`${path}.params.target is required for semantic_tap actions`);
+        }
+      }
       if (step.x !== undefined && typeof step.x !== "number") {
         errors.push(`${path}.x must be a number when provided`);
       }

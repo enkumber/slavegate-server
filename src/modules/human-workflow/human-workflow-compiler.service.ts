@@ -194,6 +194,8 @@ function buildHumanWorkflowCompilePrompt(input: {
     "Every step needs id and type. Step types: action,wait,checkpoint.",
     "Allowed actions: open_app,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen.",
     `open_app must use params.packageName=${input.packageName}.`,
+    "To open a subreddit, prefer open_app with params.uri=https://www.reddit.com/r/<subreddit>/.",
+    "semantic_tap is only for known product targets and must include params.target, for example reddit.first_visible_post.open_comments.",
     "checkpoint is type checkpoint, never an action.",
     "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
     screens ? `Known screens: ${screens}.` : "Use UNKNOWN if screen is uncertain.",
