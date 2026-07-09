@@ -195,6 +195,35 @@ function extractUiTreeEvidence(value: unknown): string {
   return JSON.stringify(record);
 }
 
+function humanIntentRequestsComments(intent: string, cached: GeneratedWorkflowPlanCacheRecord): boolean {
+  if (/\bcomments?\b|comentarii|sectiunea de comentarii|secțiunea de comentarii/i.test(intent)) return true;
+  return cached.workflow.steps.some((step) =>
+    step.type === "action" &&
+    step.action === "semantic_tap" &&
+    step.params &&
+    (step.params as Record<string, unknown>).target === "reddit.first_visible_post.open_comments"
+  );
+}
+
+function uiTreeLooksLikeRedditComments(uiTreeText: string): boolean {
+  const normalized = uiTreeText.toLowerCase();
+  if (!normalized.includes("com.reddit.frontpage")) return false;
+  if (normalized.includes("inbox_screen") || normalized.includes("activity_title") || normalized.includes("notificationsscreen")) {
+    return false;
+  }
+  return (
+    normalized.includes("comment_list") ||
+    normalized.includes("comments_list") ||
+    normalized.includes("comment_layout") ||
+    normalized.includes("comment_header") ||
+    normalized.includes("search comments") ||
+    normalized.includes("sort comments") ||
+    normalized.includes("add a comment") ||
+    normalized.includes("join the conversation") ||
+    normalized.includes("/comments/")
+  );
+}
+
 function validateHumanWorkflowFinalEvidence(
   cached: GeneratedWorkflowPlanCacheRecord,
   variables: Record<string, unknown>,
@@ -219,6 +248,13 @@ function validateHumanWorkflowFinalEvidence(
     }
     if (!uiTreeText.includes("askreddit") && !uiTreeText.includes("r/askreddit")) {
       return "HUMAN_WORKFLOW_TARGET_NOT_REACHED: AskReddit was not visible in final UI evidence";
+    }
+  }
+
+  if (humanIntentRequestsComments(intent, cached)) {
+    const uiTreeText = extractUiTreeEvidence(variables._finalUiTree);
+    if (!uiTreeLooksLikeRedditComments(uiTreeText)) {
+      return "HUMAN_WORKFLOW_TARGET_NOT_REACHED: Reddit comments were not visible in final UI evidence";
     }
   }
 

@@ -965,6 +965,31 @@ function nodeCenter(node: UiNode, root: UiNode): { x: number; y: number; bounds:
   };
 }
 
+function redditPostTapPoint(node: UiNode, root: UiNode): { x: number; y: number; bounds: NonNullable<UiNode['bounds']> } | null {
+  if (!node.bounds || !root.bounds) return null;
+  const width = root.bounds.right - root.bounds.left;
+  const height = root.bounds.bottom - root.bounds.top;
+  if (width <= 0 || height <= 0) return null;
+
+  const centerX = (node.bounds.left + node.bounds.right) / 2;
+  let centerY = (node.bounds.top + node.bounds.bottom) / 2;
+
+  const safeBottom = root.bounds.top + height * 0.82;
+  const visibleTop = Math.max(node.bounds.top, root.bounds.top + height * 0.08);
+  const visibleBottom = Math.min(node.bounds.bottom, safeBottom);
+  if (visibleBottom > visibleTop) {
+    centerY = (visibleTop + visibleBottom) / 2;
+  } else {
+    centerY = Math.min(Math.max(centerY, root.bounds.top + height * 0.12), safeBottom);
+  }
+
+  return {
+    x: (centerX - root.bounds.left) / width,
+    y: (centerY - root.bounds.top) / height,
+    bounds: node.bounds,
+  };
+}
+
 function resolveRedditFirstVisiblePostComments(root: UiNode): { x: number; y: number; bounds: NonNullable<UiNode['bounds']>; matchedText: string } | null {
   const candidates: Array<{ node: UiNode; score: number; top: number; matchedText: string }> = [];
 
@@ -994,7 +1019,7 @@ function resolveRedditFirstVisiblePostComments(root: UiNode): { x: number; y: nu
 
   candidates.sort((a, b) => b.score - a.score || a.top - b.top);
   for (const candidate of candidates) {
-    const center = nodeCenter(candidate.node, root);
+    const center = redditPostTapPoint(candidate.node, root) ?? nodeCenter(candidate.node, root);
     if (center) return { ...center, matchedText: candidate.matchedText };
   }
   return null;

@@ -436,6 +436,78 @@ describe("task-runner generated_workflow routine", () => {
     expect(result).toMatchObject({ success: true });
   });
 
+  it("fails dashboard human Reddit comments workflows when final UI evidence is Activity inbox", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "deschide reddit si mergi pe r/GreeceTravel si intra pe sectiunea de comentarii a primului articol afisat",
+      },
+    });
+    cached.workflow.steps = [
+      {
+        type: "action",
+        id: "tap_first_post_comments",
+        action: "semantic_tap",
+        params: { target: "reddit.first_visible_post.open_comments", waitMs: 2000 },
+      },
+      {
+        type: "action",
+        id: "capture_final_ui_tree",
+        action: "ui_tree_dump",
+        params: { packageName: "com.reddit.frontpage", outputVariable: "_finalUiTree" },
+      },
+    ];
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow({
+      ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+      _finalUiTree: { uiTree: "package=com.reddit.frontpage resourceId=inbox_screen text=Activity Notifications Chats" },
+    }));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: false,
+      failReason: expect.stringContaining("HUMAN_WORKFLOW_TARGET_NOT_REACHED"),
+      generatedWorkflow: {
+        failureCode: "HUMAN_WORKFLOW_TARGET_NOT_REACHED",
+      },
+    });
+  });
+
+  it("accepts dashboard human Reddit comments workflows with comments detail evidence", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "deschide reddit si mergi pe r/GreeceTravel si intra pe sectiunea de comentarii a primului articol afisat",
+      },
+    });
+    cached.workflow.steps = [
+      {
+        type: "action",
+        id: "tap_first_post_comments",
+        action: "semantic_tap",
+        params: { target: "reddit.first_visible_post.open_comments", waitMs: 2000 },
+      },
+      {
+        type: "action",
+        id: "capture_final_ui_tree",
+        action: "ui_tree_dump",
+        params: { packageName: "com.reddit.frontpage", outputVariable: "_finalUiTree" },
+      },
+    ];
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow({
+      ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+      _finalUiTree: { uiTree: "package=com.reddit.frontpage resourceId=comment_list text=Sort comments Add a comment" },
+    }));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({ success: true });
+  });
+
   it("dispatches a cached generated workflow by cacheKey", async () => {
     const cached = cacheRecord();
     mockTaskDb(task({ cacheKey: CACHE_KEY }));

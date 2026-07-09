@@ -188,6 +188,42 @@ describe('semantic_tap', () => {
       bounds: { left: 0, top: 326, right: 1080, bottom: 646 },
     });
   });
+
+  it('keeps Reddit first visible post comments taps above bottom navigation for partially visible cards', async () => {
+    const uiTree = {
+      bounds: { left: 0, top: 0, right: 1080, bottom: 2160 },
+      children: [
+        {
+          resourceId: 'feed_lazy_column',
+          bounds: { left: 0, top: 220, right: 1080, bottom: 2160 },
+          children: [
+            {
+              resourceId: '',
+              contentDescription: 'From Gullible-Usual-7952, Posted 23 days ago, The Temple of Poseidon, Image gallery, 1295 upvotes, 32 comments, Shared 123 times',
+              visible: true,
+              bounds: { left: 0, top: 1378, right: 1080, bottom: 2534 },
+            },
+          ],
+        },
+      ],
+    };
+    const ctx = context(uiTree);
+
+    await executeSkillAction('semantic_tap', {
+      target: 'reddit.first_visible_post.open_comments',
+      waitMs: 0,
+    }, ctx);
+
+    expect(ctx.dispatchAndWait).toHaveBeenNthCalledWith(2, 'tap', {
+      x: 0.5,
+      y: expect.closeTo(1574.6 / 2160, 5),
+    }, 15_000);
+    expect(ctx.checkpoint.variables._last_semantic_tap).toMatchObject({
+      target: 'reddit.first_visible_post.open_comments',
+      matchedText: expect.stringContaining('32 comments'),
+      bounds: { left: 0, top: 1378, right: 1080, bottom: 2534 },
+    });
+  });
 });
 
 describe('classify_reddit_health_scan', () => {
