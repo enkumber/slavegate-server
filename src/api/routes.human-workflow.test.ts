@@ -970,6 +970,60 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
   });
 
+  it("adds wake and unlock preamble when an AI navigation workflow omits device readiness steps", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);
+    mocks.compileJobService.createOrGet.mockResolvedValueOnce(compileJobRecord({
+      requestKey: requestKey(ASKREDDIT_NAV_INTENT),
+      intent: ASKREDDIT_NAV_INTENT,
+    }));
+    mocks.llmJson.mockReset();
+    mocks.llmJson.mockResolvedValueOnce({
+      id: "workflow_reddit_askreddit_001",
+      name: "Open Reddit and Navigate to AskReddit",
+      platform: "reddit",
+      description: "Open Reddit and navigate to r/AskReddit.",
+      version: "1.0.0",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [
+        { id: "open_reddit", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+        { id: "navigate_askreddit", type: "action", action: "intent_send", params: { uri: "https://www.reddit.com/r/AskReddit/", packageName: "com.reddit.frontpage" } },
+        { id: "dump_ui", type: "action", action: "ui_tree_dump", params: { outputVariable: "_finalUiTree" } },
+        { id: "checkpoint", type: "checkpoint" },
+      ],
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: ASKREDDIT_NAV_INTENT,
+    });
+
+    expect(response.status).toBe(202);
+    const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
+    await runner();
+
+    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({
+        steps: expect.arrayContaining([
+          expect.objectContaining({ id: "wake_screen", action: "screen_wake" }),
+          expect.objectContaining({ id: "unlock_device", action: "unlock" }),
+          expect.objectContaining({ id: "navigate_askreddit", action: "intent_send" }),
+          expect.objectContaining({ id: "dump_ui", action: "ui_tree_dump" }),
+        ]),
+      }),
+      expect.anything(),
+      requestKey(ASKREDDIT_NAV_INTENT),
+      expect.objectContaining({ source: "dashboard_human", intent: ASKREDDIT_NAV_INTENT }),
+    );
+    const savedTemplate = mocks.workflowService.saveGeneratedPlanCache.mock.calls[0][0];
+    expect(savedTemplate.steps.slice(0, 2).map((step: { action: string }) => step.action)).toEqual([
+      "screen_wake",
+      "unlock",
+    ]);
+  });
+
   it("does not block on oversized compile timeout env overrides", async () => {
     process.env.REQUEST_TIMEOUT_MS = "30000";
     process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "60000";

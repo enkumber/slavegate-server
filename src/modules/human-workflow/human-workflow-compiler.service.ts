@@ -193,6 +193,7 @@ function buildHumanWorkflowCompilePrompt(input: {
     `platform must be exactly ${input.platform}.`,
     "Every step needs id and type. Step types: action,wait,checkpoint.",
     "Allowed actions: open_app,intent_send,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen,ui_tree_dump.",
+    "Start device workflows with action screen_wake, then action unlock, before opening or navigating apps.",
     `open_app must use params.packageName=${input.packageName}.`,
     `To open a subreddit or URL, use intent_send with params.uri=https://www.reddit.com/r/<subreddit>/ and params.packageName=${input.packageName}. Do not put uri on open_app.`,
     "For navigation/read-only goals, include a final ui_tree_dump with params.outputVariable=\"_finalUiTree\" before the checkpoint.",
@@ -268,9 +269,39 @@ function normalizeHumanWorkflowTemplateCandidate(
       }
       return normalized;
     });
+    workflow.steps = ensureHumanWorkflowPreambleSteps(workflow.steps as unknown[]);
     workflow.steps = ensureHumanWorkflowEvidenceSteps(workflow.steps as unknown[], input);
   }
   return workflow;
+}
+
+function ensureHumanWorkflowPreambleSteps(steps: unknown[]): unknown[] {
+  const hasAction = (action: string): boolean => steps.some((step) =>
+    isRecord(step) && step.type === "action" && step.action === action
+  );
+  const normalized = [...steps];
+  if (!hasAction("screen_wake")) {
+    normalized.unshift({
+      id: "wake_screen",
+      type: "action",
+      action: "screen_wake",
+      params: {},
+      timeoutMs: 10_000,
+    });
+  }
+  if (!hasAction("unlock")) {
+    const insertAt = normalized.findIndex((step) =>
+      !(isRecord(step) && step.type === "action" && step.action === "screen_wake")
+    );
+    normalized.splice(insertAt === -1 ? normalized.length : insertAt, 0, {
+      id: "unlock_device",
+      type: "action",
+      action: "unlock",
+      params: {},
+      timeoutMs: 15_000,
+    });
+  }
+  return normalized;
 }
 
 function isHumanNavigationGoal(input: { platform: string; goal: string }): boolean {
