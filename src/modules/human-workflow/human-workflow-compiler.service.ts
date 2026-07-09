@@ -1,10 +1,8 @@
 import crypto from "crypto";
 import { getDb } from "../../db/client";
 import { loadMap } from "../app-mapping/recorder.service";
-import { validateAppMapQuality, type AppMap, type AppMapQualityReport } from "../app-mapping/schema";
+import { validateAppMapQuality, type AppMap, type AppMapQualityReport, type ElementDef } from "../app-mapping/schema";
 import {
-  buildGeneratedWorkflowAppMapHints,
-  buildGeneratedWorkflowPrompt,
   resolveGeneratedWorkflowScreens,
 } from "../workflows/generated-workflow-prompt";
 import {
@@ -129,6 +127,134 @@ function hydrateTemplatePlaceholders(value: unknown, replacements: Record<string
     );
   }
   return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function compactHumanWorkflowAppMapHints(appMap: AppMap | null, goal: string): string {
+  if (!appMap) return "No app map available; use UI-tree semantic targets.";
+  const goalTerms = new Set(
+    goal
+      .toLowerCase()
+      .replace(/[^a-z0-9_/\s]+/g, " ")
+      .split(/\s+/)
+      .filter((term) => term.length >= 3)
+  );
+  const scored: Array<{ score: number; pageId: string; elementId: string; element: ElementDef }> = [];
+  for (const [pageId, page] of Object.entries(appMap.pages)) {
+    for (const [elementId, element] of Object.entries(page.elements)) {
+      const label = [
+        elementId,
+        element.text,
+        element.contentDescription,
+        element.resourceId,
+        element.semanticId,
+      ].filter(Boolean).join(" ").toLowerCase();
+      let score = 0;
+      if (label.includes("search")) score += 5;
+      if (label.includes("tab") || label.includes("nav")) score += 1;
+      for (const term of goalTerms) {
+        if (label.includes(term.replace(/^\//, ""))) score += 3;
+      }
+      if (score > 0) scored.push({ score, pageId, elementId, element });
+    }
+  }
+  const hints = scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 6)
+    .map(({ pageId, elementId, element }) => {
+      const label = element.text || element.contentDescription || element.resourceId || element.semanticId || elementId;
+      return `${pageId}.${elementId}=${label}`;
+    });
+  return hints.length > 0
+    ? `Relevant app map selectors: ${hints.join("; ")}`
+    : `App map ${appMap.appName} has ${appMap.pageCount} pages; no goal-specific selector hints found.`;
+}
+
+function buildHumanWorkflowCompilePrompt(input: {
+  platform: string;
+  packageName: string;
+  goal: string;
+  target: HumanWorkflowTarget;
+  appMap: AppMap | null;
+}): string {
+  const screens = resolveGeneratedWorkflowScreens(input.platform)
+    .filter((screen) => screen === "UNKNOWN" || screen.startsWith(input.platform.toUpperCase()))
+    .slice(0, 8)
+    .join(", ");
+  return [
+    "Return JSON only. Generate one Phone Network WorkflowTemplate.",
+    `Goal: ${input.goal}`,
+    `Context: platform ${input.platform}, package ${input.packageName}, account @${input.target.account_username}, preview compile only.`,
+    compactHumanWorkflowAppMapHints(input.appMap, input.goal),
+    "Required fields: id,name,platform,description,version,steps,defaultVerificationStrategy,dataRetentionDays.",
+    `platform must be exactly ${input.platform}.`,
+    "Every step needs id and type. Step types: action,wait,checkpoint.",
+    "Allowed actions: open_app,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen.",
+    `open_app must use params.packageName=${input.packageName}.`,
+    "checkpoint is type checkpoint, never an action.",
+    "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
+    screens ? `Known screens: ${screens}.` : "Use UNKNOWN if screen is uncertain.",
+    "No safetyClass, intent, outputSchema, credentials, passwords, or private tokens.",
+  ].join("\n");
+}
+
+function normalizeHumanWorkflowTemplateCandidate(
+  rawWorkflow: unknown,
+  input: { platform: string; packageName: string; goal: string }
+): unknown {
+  if (!isRecord(rawWorkflow)) return rawWorkflow;
+  const workflow: Record<string, unknown> = { ...rawWorkflow };
+  workflow.id = typeof workflow.id === "string" && workflow.id.trim()
+    ? workflow.id
+    : `human_${input.platform}_${crypto.createHash("sha1").update(input.goal).digest("hex").slice(0, 10)}`;
+  workflow.name = typeof workflow.name === "string" && workflow.name.trim() ? workflow.name : "Human workflow";
+  workflow.platform = input.platform;
+  workflow.description = typeof workflow.description === "string" && workflow.description.trim()
+    ? workflow.description
+    : input.goal;
+  workflow.version = typeof workflow.version === "string" && workflow.version.trim() ? workflow.version : "1.0.0";
+  workflow.defaultVerificationStrategy = workflow.defaultVerificationStrategy === "local_with_screenshot"
+    ? "local_with_screenshot"
+    : "local_only";
+  workflow.dataRetentionDays = typeof workflow.dataRetentionDays === "number" && workflow.dataRetentionDays >= 0
+    ? workflow.dataRetentionDays
+    : 7;
+  delete workflow.safetyClass;
+  delete workflow.intent;
+  delete workflow.outputSchema;
+  delete workflow.allowedRecoveryRequests;
+
+  if (Array.isArray(workflow.steps)) {
+    workflow.steps = workflow.steps.map((step, index) => {
+      if (!isRecord(step)) return step;
+      const normalized: Record<string, unknown> = { ...step };
+      normalized.id = typeof normalized.id === "string" && normalized.id.trim() ? normalized.id : `step_${index + 1}`;
+      if (normalized.action === "checkpoint") {
+        normalized.type = "checkpoint";
+        delete normalized.action;
+      } else if (!normalized.type && typeof normalized.action === "string") {
+        normalized.type = "action";
+      }
+      if (normalized.type === "action" && (normalized.action === "open_app" || normalized.action === "close_app")) {
+        const params = isRecord(normalized.params) ? { ...normalized.params } : {};
+        if (typeof params.packageName !== "string") {
+          params.packageName = typeof params.app_id === "string" ? params.app_id : input.packageName;
+        }
+        delete params.app_id;
+        normalized.params = params;
+      }
+      if (normalized.type === "checkpoint" && isRecord(normalized.params)) {
+        const reason = normalized.params.reason ?? normalized.params.label ?? normalized.params.expectedScreen;
+        if (typeof reason === "string" && !normalized.reason) normalized.reason = reason;
+        delete normalized.params;
+      }
+      return normalized;
+    });
+  }
+  return workflow;
 }
 
 async function loadGeneratedWorkflowCurrentAppMap(
@@ -336,27 +462,23 @@ export class HumanWorkflowCompilerService {
     const platform = input.target.account_platform;
     const packageName = humanWorkflowAppId(platform);
     const appMap = await loadMap(packageName);
-    const appMapHintSet = appMap ? buildGeneratedWorkflowAppMapHints(appMap) : null;
-    const prompt = buildGeneratedWorkflowPrompt({
+    const prompt = buildHumanWorkflowCompilePrompt({
       platform,
       packageName,
       goal: input.intent,
-      clientContext: [
-        `Dashboard human workflow request.`,
-        `Account @${input.target.account_username} on ${platform}.`,
-        `Selected device ${input.target.device_name ?? input.target.device_model ?? input.target.device_id}.`,
-        `Compile intent for preview first; do not include secrets.`,
-      ].join(" "),
-      availableScreens: resolveGeneratedWorkflowScreens(platform),
-      appMapHints: appMapHintSet?.hints,
+      target: input.target,
+      appMap,
     });
 
     const rawWorkflow = await llmJson<WorkflowTemplate>(prompt, undefined, {
-      max_tokens: 4096,
-      system: "You are a Phone Network workflow compiler. Return only valid WorkflowTemplate JSON.",
+      max_tokens: 1536,
+      system: "You are a Phone Network workflow compiler. Return only valid WorkflowTemplate JSON. No reasoning.",
       timeoutMs: humanWorkflowAsyncCompileTimeoutMs(),
+      temperature: 0,
+      disableThinking: true,
     });
-    const validation = validateGeneratedWorkflowTemplate(rawWorkflow);
+    const normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, { platform, packageName, goal: input.intent });
+    const validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
     if (!validation.template) {
       throw Object.assign(new Error("workflow failed validation"), {
         status: 400,

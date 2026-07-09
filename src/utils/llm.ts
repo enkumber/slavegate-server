@@ -17,30 +17,52 @@ import { modelConfigService } from "../modules/model-config/model-config.service
 export async function llmComplete(
   prompt: string,
   model?: string,
-  options?: { max_tokens?: number; system?: string; timeoutMs?: number }
+  options?: { max_tokens?: number; system?: string; timeoutMs?: number; temperature?: number; disableThinking?: boolean }
 ): Promise<string> {
   const config = await modelConfigService.resolve("decision_llm");
   const maxTokens = options?.max_tokens ?? 2048;
-  const messages: Array<{ role: string; content: string }> = [];
-  if (options?.system) messages.push({ role: "system", content: options.system });
-  messages.push({ role: "user", content: prompt });
-
   const provider = normalizeOpenAIProvider(config.provider);
   const selectedModel = model || config.model;
+  const qwenNoThink = Boolean(
+    options?.disableThinking &&
+    provider !== "openai" &&
+    selectedModel.toLowerCase().includes("qwen")
+  );
+  const noThinkPrefix = "/no_think\n";
+  const messages: Array<{ role: string; content: string }> = [];
+  if (options?.system) {
+    messages.push({
+      role: "system",
+      content: qwenNoThink && !options.system.trimStart().startsWith("/no_think")
+        ? `${noThinkPrefix}${options.system}`
+        : options.system,
+    });
+  }
+  messages.push({
+    role: "user",
+    content: qwenNoThink && !prompt.trimStart().startsWith("/no_think")
+      ? `${noThinkPrefix}${prompt}`
+      : prompt,
+  });
 
   const url = `${endpointBase(config.endpoint, provider)}/chat/completions`;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   headers.Authorization = `Bearer ${config.apiKey}`;
+  const body: Record<string, unknown> = {
+    model: selectedModel,
+    messages,
+    max_tokens: maxTokens,
+  };
+  if (options?.temperature !== undefined) body.temperature = options.temperature;
+  if (qwenNoThink) {
+    body.chat_template_kwargs = { enable_thinking: false };
+  }
 
   const response = await fetch(url, {
     method: "POST",
     headers,
     signal: options?.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined,
-    body: JSON.stringify({
-      model: selectedModel,
-      messages,
-      max_tokens: maxTokens,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -87,9 +109,9 @@ function normalizeOpenAIProvider(provider: string): string {
 export async function llmJson<T = unknown>(
   prompt: string,
   model?: string,
-  options?: { max_tokens?: number; system?: string; timeoutMs?: number }
+  options?: { max_tokens?: number; system?: string; timeoutMs?: number; temperature?: number; disableThinking?: boolean }
 ): Promise<T> {
-  const response = await llmComplete(prompt, model, options);
+  const response = await llmComplete(prompt, model, { ...options, disableThinking: options?.disableThinking ?? true });
 
   let jsonStr = response.trim();
   const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
