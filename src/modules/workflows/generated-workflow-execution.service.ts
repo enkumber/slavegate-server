@@ -96,6 +96,8 @@ function createGeneratedWorkflowCheckpoint(
 function requiresServerSemanticResolution(template: WorkflowTemplate): boolean {
   const visit = (steps: WorkflowTemplate["steps"]): boolean => steps.some((step) => {
     if (step.type === "action" && step.action === "semantic_tap") return true;
+    if (step.type === "action" && step.action === "ui_tree_dump") return true;
+    if (step.type === "action" && step.params && typeof step.params.outputVariable === "string") return true;
     if (step.type === "condition") return visit(step.if_true) || visit(step.if_false ?? []);
     if (step.type === "loop") return visit(step.steps);
     return false;

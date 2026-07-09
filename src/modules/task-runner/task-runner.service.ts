@@ -180,6 +180,51 @@ function generatedWorkflowOutput(cached: GeneratedWorkflowPlanCacheRecord, varia
   return output;
 }
 
+function sourceMetadataValue(cached: GeneratedWorkflowPlanCacheRecord, key: string): unknown {
+  return cached.sourceMetadata && typeof cached.sourceMetadata === "object"
+    ? cached.sourceMetadata[key]
+    : undefined;
+}
+
+function extractUiTreeEvidence(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  const uiTree = record.uiTree ?? record.tree ?? record.nodes;
+  if (typeof uiTree === "string") return uiTree;
+  if (uiTree && typeof uiTree === "object") return JSON.stringify(uiTree);
+  return JSON.stringify(record);
+}
+
+function validateHumanWorkflowFinalEvidence(
+  cached: GeneratedWorkflowPlanCacheRecord,
+  variables: Record<string, unknown>,
+): string | null {
+  if (sourceMetadataValue(cached, "source") !== "dashboard_human") return null;
+  const intent = String(sourceMetadataValue(cached, "intent") ?? "").toLowerCase();
+  if (!intent) return null;
+
+  const needsUiEvidence = cached.workflow.steps.some((step) =>
+    step.type === "action" &&
+    step.params &&
+    typeof step.params.outputVariable === "string"
+  );
+  if (needsUiEvidence && !variables._finalUiTree) {
+    return "HUMAN_WORKFLOW_FINAL_EVIDENCE_MISSING: final UI evidence was not captured";
+  }
+
+  if (intent.includes("askreddit") || intent.includes("/askreddit")) {
+    const uiTreeText = extractUiTreeEvidence(variables._finalUiTree).toLowerCase();
+    if (!uiTreeText.includes("com.reddit.frontpage")) {
+      return "HUMAN_WORKFLOW_TARGET_NOT_REACHED: Reddit was not visible in final UI evidence";
+    }
+    if (!uiTreeText.includes("askreddit") && !uiTreeText.includes("r/askreddit")) {
+      return "HUMAN_WORKFLOW_TARGET_NOT_REACHED: AskReddit was not visible in final UI evidence";
+    }
+  }
+
+  return null;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -840,7 +885,8 @@ async function executeGeneratedWorkflowTask(
     generatedWorkflowExecutions?.labels(cached.platform, "true", `task_runner_${source}`).inc();
     generatedWorkflowLlmAvoided?.labels(cached.platform, "task_runner_cache_hit").inc();
     const finalWorkflow = await waitForGeneratedWorkflowFinal(dispatch.workflowId);
-    const finalOutput = generatedWorkflowOutput(cached, checkpointVariables(finalWorkflow));
+    const finalVariables = checkpointVariables(finalWorkflow);
+    const finalOutput = generatedWorkflowOutput(cached, finalVariables);
 
     const generatedWorkflowResult = {
       workflowId: dispatch.workflowId,
@@ -867,6 +913,23 @@ async function executeGeneratedWorkflowTask(
         durationMs: Date.now() - startedAt,
         failReason: finalWorkflow.error ?? `Generated workflow ended with status ${finalWorkflow.status}`,
         generatedWorkflow: generatedWorkflowResult,
+      };
+    }
+
+    const humanEvidenceError = validateHumanWorkflowFinalEvidence(cached, finalVariables);
+    if (humanEvidenceError) {
+      return {
+        success: false,
+        stepsCompleted: finalWorkflow.currentStep,
+        totalSteps: finalWorkflow.totalSteps ?? cached.workflow.steps.length,
+        output: finalOutput,
+        tokenUsage: zeroTokenUsage(),
+        durationMs: Date.now() - startedAt,
+        failReason: humanEvidenceError,
+        generatedWorkflow: {
+          ...generatedWorkflowResult,
+          failureCode: humanEvidenceError.split(":")[0],
+        },
       };
     }
 

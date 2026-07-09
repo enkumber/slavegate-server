@@ -217,6 +217,7 @@ const GENERATED_WORKFLOW_PLATFORMS = [
 const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "close_app",
   "get_screen_state",
+  "intent_send",
   "open_app",
   "press_key",
   "screen_wake",
@@ -300,6 +301,9 @@ function containsMutationTerm(value: unknown): string | null {
     const compact = normalized.replace(/[^a-z0-9]/g, "");
     return READ_ONLY_MUTATION_TERMS.find((term) => {
       if (term === "login" && (normalized.includes("login state") || compact === "loginwalldetected")) {
+        return false;
+      }
+      if (term === "send" && compact === "intentsend") {
         return false;
       }
       const compactTerm = term.replace(/[^a-z0-9]/g, "");
@@ -493,6 +497,12 @@ function validateGeneratedWorkflowStepInput(
         const packageName = step.params.packageName;
         if (typeof packageName === "string" && isBlockedPackage(packageName)) {
           errors.push(`${path}.params.packageName is blocked for generated workflows: ${packageName}`);
+        }
+      }
+      if (step.action === "intent_send") {
+        const uri = isRecord(step.params) ? step.params.uri : undefined;
+        if (typeof uri !== "string" || uri.trim().length === 0) {
+          errors.push(`${path}.params.uri is required for intent_send actions`);
         }
       }
       if (step.retries !== undefined && (typeof step.retries !== "number" || step.retries < 0)) {

@@ -367,6 +367,75 @@ describe("task-runner generated_workflow routine", () => {
     });
   });
 
+  it("fails dashboard human AskReddit workflows without final UI evidence", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "deschide reddit si mergi pe /askreddit",
+      },
+    });
+    cached.workflow.steps = [
+      {
+        type: "action",
+        id: "open_askreddit",
+        action: "intent_send",
+        params: { uri: "https://www.reddit.com/r/AskReddit/", packageName: "com.reddit.frontpage" },
+      },
+      {
+        type: "action",
+        id: "capture_final_ui_tree",
+        action: "ui_tree_dump",
+        params: { packageName: "com.reddit.frontpage", outputVariable: "_finalUiTree" },
+      },
+    ];
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow({}));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: false,
+      failReason: expect.stringContaining("HUMAN_WORKFLOW_FINAL_EVIDENCE_MISSING"),
+      generatedWorkflow: {
+        failureCode: "HUMAN_WORKFLOW_FINAL_EVIDENCE_MISSING",
+      },
+    });
+  });
+
+  it("accepts dashboard human AskReddit workflows with matching final UI evidence", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "deschide reddit si mergi pe /askreddit",
+      },
+    });
+    cached.workflow.steps = [
+      {
+        type: "action",
+        id: "open_askreddit",
+        action: "intent_send",
+        params: { uri: "https://www.reddit.com/r/AskReddit/", packageName: "com.reddit.frontpage" },
+      },
+      {
+        type: "action",
+        id: "capture_final_ui_tree",
+        action: "ui_tree_dump",
+        params: { packageName: "com.reddit.frontpage", outputVariable: "_finalUiTree" },
+      },
+    ];
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow({
+      ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+      _finalUiTree: { uiTree: "package=com.reddit.frontpage text=r/AskReddit" },
+    }));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({ success: true });
+  });
+
   it("dispatches a cached generated workflow by cacheKey", async () => {
     const cached = cacheRecord();
     mockTaskDb(task({ cacheKey: CACHE_KEY }));

@@ -192,9 +192,10 @@ function buildHumanWorkflowCompilePrompt(input: {
     "Required fields: id,name,platform,description,version,steps,defaultVerificationStrategy,dataRetentionDays.",
     `platform must be exactly ${input.platform}.`,
     "Every step needs id and type. Step types: action,wait,checkpoint.",
-    "Allowed actions: open_app,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen.",
+    "Allowed actions: open_app,intent_send,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen,ui_tree_dump.",
     `open_app must use params.packageName=${input.packageName}.`,
-    "To open a subreddit, prefer open_app with params.uri=https://www.reddit.com/r/<subreddit>/.",
+    `To open a subreddit or URL, use intent_send with params.uri=https://www.reddit.com/r/<subreddit>/ and params.packageName=${input.packageName}. Do not put uri on open_app.`,
+    "For navigation/read-only goals, include a final ui_tree_dump with params.outputVariable=\"_finalUiTree\" before the checkpoint.",
     "semantic_tap is only for known product targets and must include params.target, for example reddit.first_visible_post.open_comments.",
     "checkpoint is type checkpoint, never an action.",
     "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
@@ -248,6 +249,18 @@ function normalizeHumanWorkflowTemplateCandidate(
         delete params.app_id;
         normalized.params = params;
       }
+      if (normalized.type === "action" && normalized.action === "open_app" && isRecord(normalized.params)) {
+        const params = { ...normalized.params };
+        if (typeof params.uri === "string" && params.uri.trim().length > 0) {
+          normalized.action = "intent_send";
+          normalized.id = normalized.id === `step_${index + 1}` ? `step_${index + 1}_intent_send` : normalized.id;
+          normalized.params = {
+            action: "android.intent.action.VIEW",
+            packageName: typeof params.packageName === "string" ? params.packageName : input.packageName,
+            uri: params.uri,
+          };
+        }
+      }
       if (normalized.type === "checkpoint" && isRecord(normalized.params)) {
         const reason = normalized.params.reason ?? normalized.params.label ?? normalized.params.expectedScreen;
         if (typeof reason === "string" && !normalized.reason) normalized.reason = reason;
@@ -255,8 +268,52 @@ function normalizeHumanWorkflowTemplateCandidate(
       }
       return normalized;
     });
+    workflow.steps = ensureHumanWorkflowEvidenceSteps(workflow.steps as unknown[], input);
   }
   return workflow;
+}
+
+function isHumanNavigationGoal(input: { platform: string; goal: string }): boolean {
+  const goal = input.goal.toLowerCase();
+  return input.platform.toLowerCase() === "reddit" && (
+    goal.includes("mergi pe") ||
+    goal.includes("go to") ||
+    goal.includes("navigate") ||
+    goal.includes("/r/") ||
+    goal.includes("/askreddit") ||
+    goal.includes("askreddit")
+  );
+}
+
+function ensureHumanWorkflowEvidenceSteps(
+  steps: unknown[],
+  input: { platform: string; packageName: string; goal: string },
+): unknown[] {
+  if (!isHumanNavigationGoal(input)) return steps;
+  const hasEvidenceDump = steps.some((step) => {
+    if (!isRecord(step) || step.type !== "action" || step.action !== "ui_tree_dump") return false;
+    const params = isRecord(step.params) ? step.params : {};
+    return params.outputVariable === "_finalUiTree";
+  });
+  if (hasEvidenceDump) return steps;
+
+  const evidenceStep = {
+    id: "capture_final_ui_tree",
+    type: "action",
+    action: "ui_tree_dump",
+    params: {
+      packageName: input.packageName,
+      outputVariable: "_finalUiTree",
+    },
+    timeoutMs: 10_000,
+  };
+  const checkpointIndex = steps.findIndex((step) => isRecord(step) && step.type === "checkpoint");
+  if (checkpointIndex === -1) return [...steps, evidenceStep];
+  return [
+    ...steps.slice(0, checkpointIndex),
+    evidenceStep,
+    ...steps.slice(checkpointIndex),
+  ];
 }
 
 async function loadGeneratedWorkflowCurrentAppMap(

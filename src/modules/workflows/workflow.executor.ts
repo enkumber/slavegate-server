@@ -881,8 +881,20 @@ async function executeActionStep(
     throw new Error(`Step ${stepIndex} (${step.action}) failed: ${result.error ?? result.status}`);
   }
 
+  if (step.action === "unlock" && result.output && typeof result.output === "object") {
+    const unlocked = (result.output as Record<string, unknown>).unlocked;
+    if (unlocked === false) {
+      throw new Error(`Step ${stepIndex} (unlock) failed: device remained locked`);
+    }
+  }
+
   if (step.action === "screenshot") {
     materializeScreenshotArtifact(checkpoint, jobId, result);
+  }
+
+  const outputVariable = typeof finalParams.outputVariable === "string" ? finalParams.outputVariable.trim() : "";
+  if (outputVariable) {
+    checkpoint.variables[outputVariable] = result.output ?? null;
   }
 
   // Post-action HBE delay (human settle time after action)
@@ -1458,7 +1470,7 @@ function enforcePhase2Strategy(
 function mapActionToHbeType(action: string): "tap" | "swipe" | "type" | "scroll" | "navigate" | "wait" {
   const map: Record<string, "tap" | "swipe" | "type" | "scroll" | "navigate" | "wait"> = {
     tap: "tap", swipe: "swipe", type_text: "type", scroll: "scroll",
-    open_app: "navigate", close_app: "navigate",
+    open_app: "navigate", close_app: "navigate", intent_send: "navigate",
   };
   return map[action] ?? "tap";
 }
