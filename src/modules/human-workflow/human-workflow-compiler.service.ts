@@ -180,6 +180,16 @@ function buildHumanWorkflowCompilePrompt(input: {
   target: HumanWorkflowTarget;
   appMap: AppMap | null;
 }): string {
+  const safetyClass = inferHumanWorkflowSafetyClass(input.goal);
+  const writeInstructions = safetyClass === "standard"
+    ? [
+        "This is a standard write workflow because the user explicitly asked for a social action.",
+        "For contextual comments, first reach the post detail/comments screen, dump UI into _postContextUiTree, generate the comment with vlm_generate_comment into _generated_comment, tap the add comment input, type_text with params.textFromVariable=\"_generated_comment\", then tap the Post button.",
+        "Use a11y_find_tap for visible labels/resource hints such as Add a comment, Your comment, or Post when no semantic_tap target exists.",
+      ]
+    : [
+        "This is a read-only workflow. Do not like, vote, join, follow, type, post, submit, or comment.",
+      ];
   const screens = resolveGeneratedWorkflowScreens(input.platform)
     .filter((screen) => screen === "UNKNOWN" || screen.startsWith(input.platform.toUpperCase()))
     .slice(0, 8)
@@ -192,7 +202,9 @@ function buildHumanWorkflowCompilePrompt(input: {
     "Required fields: id,name,platform,description,version,steps,defaultVerificationStrategy,dataRetentionDays.",
     `platform must be exactly ${input.platform}.`,
     "Every step needs id and type. Step types: action,wait,checkpoint.",
-    "Allowed actions: open_app,intent_send,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen,ui_tree_dump.",
+    `safetyClass must be exactly ${safetyClass}.`,
+    "Allowed actions: open_app,intent_send,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen,ui_tree_dump,type_text,vlm_generate_comment.",
+    ...writeInstructions,
     "Start device workflows with action screen_wake, then action unlock, before opening or navigating apps.",
     `open_app must use params.packageName=${input.packageName}.`,
     `To open a subreddit or URL, use intent_send with params.uri=https://www.reddit.com/r/<subreddit>/ and params.packageName=${input.packageName}. Do not put uri on open_app.`,
@@ -201,8 +213,15 @@ function buildHumanWorkflowCompilePrompt(input: {
     "checkpoint is type checkpoint, never an action.",
     "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
     screens ? `Known screens: ${screens}.` : "Use UNKNOWN if screen is uncertain.",
-    "No safetyClass, intent, outputSchema, credentials, passwords, or private tokens.",
+    "No intent, outputSchema, credentials, passwords, or private tokens.",
   ].join("\n");
+}
+
+function inferHumanWorkflowSafetyClass(goal: string): HumanWorkflowSafetyClass {
+  const normalized = goal.toLowerCase();
+  return /\b(lasa|lasă|scrie|trimite|posteaza|postează|submit|post|write|leave|send|type)\b.*\b(comment|comentariu|comentarii|reply|raspuns|răspuns)\b|\b(comment|comenteaza|comentează|reply)\b/.test(normalized)
+    ? "standard"
+    : "read_only";
 }
 
 function normalizeHumanWorkflowTemplateCandidate(
@@ -223,10 +242,10 @@ function normalizeHumanWorkflowTemplateCandidate(
   workflow.defaultVerificationStrategy = workflow.defaultVerificationStrategy === "local_with_screenshot"
     ? "local_with_screenshot"
     : "local_only";
+  workflow.safetyClass = inferHumanWorkflowSafetyClass(input.goal);
   workflow.dataRetentionDays = typeof workflow.dataRetentionDays === "number" && workflow.dataRetentionDays >= 0
     ? workflow.dataRetentionDays
     : 7;
-  delete workflow.safetyClass;
   delete workflow.intent;
   delete workflow.outputSchema;
   delete workflow.allowedRecoveryRequests;
@@ -383,7 +402,7 @@ function readyFromCache(
     cacheKey: cached.cacheKey,
     source,
     plan: humanWorkflowPlanPreview(cached.workflow, cached.compiledPlan),
-    safetyClass: "read_only",
+    safetyClass: cached.workflow.safetyClass ?? cached.compiledPlan.metadata.safetyClass ?? "read_only",
     platform: target.account_platform,
     target,
     llmBudget: cached.compiledPlan.llmBudget,
@@ -589,6 +608,7 @@ export class HumanWorkflowCompilerService {
       });
     }
     const template = validation.template;
+    const safetyClass = inferHumanWorkflowSafetyClass(input.intent);
     let compiledPlan = compileGeneratedWorkflowTemplate(template);
     compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
     await workflowService.saveTemplate(template);
@@ -607,7 +627,7 @@ export class HumanWorkflowCompilerService {
       cacheKey: compiledPlan.cacheKey,
       source: "llm",
       plan: humanWorkflowPlanPreview(template, compiledPlan),
-      safetyClass: "read_only",
+      safetyClass,
       platform,
       target: input.target,
       llmBudget: compiledPlan.llmBudget,

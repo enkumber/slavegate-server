@@ -293,23 +293,17 @@ describe("Generated workflow contract validation", () => {
         { type: "action", id: "root_uninstall", action: "pm_uninstall", params: { packageName: "com.example" } },
         { type: "action", id: "vlm_tap", action: "cascade_tap", params: { target: "vote" } },
         { type: "action", id: "delete_file", action: "file_delete", params: { path: "/sdcard/file" } },
-        { type: "action", id: "type_text", action: "type_text", params: { text: "mutating input" } },
+        { type: "action", id: "root_reboot", action: "reboot", params: {} },
       ],
     });
 
     expect(result.ok).toBe(false);
-    expect(result.errors).toContain(
-      "workflow.steps[0].action must be one of: close_app, get_screen_state, intent_send, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, a11y_find_tap, semantic_tap, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
-    );
-    expect(result.errors).toContain(
-      "workflow.steps[1].action must be one of: close_app, get_screen_state, intent_send, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, a11y_find_tap, semantic_tap, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
-    );
-    expect(result.errors).toContain(
-      "workflow.steps[2].action must be one of: close_app, get_screen_state, intent_send, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, a11y_find_tap, semantic_tap, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
-    );
-    expect(result.errors).toContain(
-      "workflow.steps[3].action must be one of: close_app, get_screen_state, intent_send, open_app, press_key, screen_wake, screenshot, scroll, detect_current_screen, classify_reddit_health_scan, a11y_find_tap, semantic_tap, set_variable, swipe, tap, ui_tree_dump, unlock, wait_for_idle"
-    );
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.stringContaining("workflow.steps[0].action must be one of:"),
+      expect.stringContaining("workflow.steps[1].action must be one of:"),
+      expect.stringContaining("workflow.steps[2].action must be one of:"),
+      expect.stringContaining("workflow.steps[3].action must be one of:"),
+    ]));
   });
 
   it("normalizes generated workflow platform labels to a bounded set", async () => {
@@ -533,6 +527,29 @@ describe("Generated workflow contract validation", () => {
       expect(result.ok, term).toBe(false);
       expect(result.errors).toContain(`workflow.safetyClass=read_only cannot include mutating term: ${term}`);
     }
+  });
+
+  it("allows standard generated workflows to create and type contextual comments", async () => {
+    const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+    const result = validateGeneratedWorkflowTemplate({
+      id: "reddit_contextual_comment_v1",
+      name: "Reddit contextual comment",
+      platform: "reddit",
+      description: "Open a Reddit post and leave a contextual comment.",
+      version: "1.0.0",
+      safetyClass: "standard",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [
+        { type: "action", id: "generate_comment", action: "vlm_generate_comment", params: { post_description_var: "_post_description", target_variable: "_generated_comment" } },
+        { type: "action", id: "tap_comment_input", action: "a11y_find_tap", params: { textContains: "Add a comment" } },
+        { type: "action", id: "type_comment", action: "type_text", params: { textFromVariable: "_generated_comment" } },
+        { type: "action", id: "submit_comment", action: "a11y_find_tap", params: { text: "Post" } },
+        { type: "checkpoint", id: "comment_submitted" },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
   });
 });
 

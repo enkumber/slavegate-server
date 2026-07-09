@@ -207,6 +207,10 @@ export class HumanWorkflowCompileJobService {
           [jobId, result.cacheKey ?? null, result.shortcutId ?? null, JSON.stringify(result)],
         );
       } catch (err) {
+        const typed = err as Error & { validationErrors?: string[] };
+        const validationDetail = Array.isArray(typed.validationErrors) && typed.validationErrors.length > 0
+          ? `: ${typed.validationErrors.slice(0, 6).join("; ")}`
+          : "";
         await getDb().query(
           `UPDATE human_workflow_compile_jobs
            SET status = 'failed',
@@ -215,7 +219,7 @@ export class HumanWorkflowCompileJobService {
                completed_at = NOW(),
                updated_at = NOW()
            WHERE id = $1`,
-          [jobId, (err as Error).message],
+          [jobId, `${typed.message}${validationDetail}`],
         ).catch(() => {});
       } finally {
         this.running.delete(jobId);

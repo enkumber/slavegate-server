@@ -230,8 +230,10 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "set_variable",
   "swipe",
   "tap",
+  "type_text",
   "ui_tree_dump",
   "unlock",
+  "vlm_generate_comment",
   "wait_for_idle",
 ] as const;
 
@@ -241,6 +243,7 @@ const GENERATED_WORKFLOW_INTENTS = [
 
 const GENERATED_WORKFLOW_SAFETY_CLASSES = [
   "read_only",
+  "standard",
 ] as const;
 
 const GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS = [
@@ -651,7 +654,7 @@ export interface GeneratedWorkflowCompiledPlan {
   templateVersion: string;
   metadata: {
     intent: string | null;
-    safetyClass: "read_only" | null;
+    safetyClass: "read_only" | "standard" | null;
     outputSchema: WorkflowOutputSchema | null;
     allowedRecoveryRequests: string[];
     appMap?: GeneratedWorkflowAppMapCacheMetadata;

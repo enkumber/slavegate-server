@@ -110,6 +110,17 @@ function compileDurationMs(job: HumanWorkflowCompileJobRecord): number | null {
   return completed - started;
 }
 
+function cachedHumanWorkflowSafetyClass(cached: Record<string, unknown>): HumanWorkflowSafetyClass {
+  const workflow = cached.workflow as { safetyClass?: unknown } | undefined;
+  const compiledPlan = cached.compiled_plan as { metadata?: { safetyClass?: unknown } } | undefined;
+  const camelCompiledPlan = cached.compiledPlan as { metadata?: { safetyClass?: unknown } } | undefined;
+  const value =
+    compiledPlan?.metadata?.safetyClass ??
+    camelCompiledPlan?.metadata?.safetyClass ??
+    workflow?.safetyClass;
+  return value === "standard" || value === "destructive" ? value : "read_only";
+}
+
 async function shortcutKeyForJob(job: HumanWorkflowCompileJobRecord): Promise<string | null> {
   if (!job.shortcutId) return null;
   const result = await getDb().query("SELECT key FROM workflow_shortcuts WHERE id = $1", [job.shortcutId]);
@@ -184,7 +195,7 @@ async function queueHumanAgencyWorkflowRun(input: {
       });
     }
 
-    const safetyClass: HumanWorkflowSafetyClass = "read_only";
+    const safetyClass = cachedHumanWorkflowSafetyClass(cached);
 
     const existingRunResult = await client.query<{ id: string; task_id: string | null; status: string }>(
       `SELECT id, task_id, status

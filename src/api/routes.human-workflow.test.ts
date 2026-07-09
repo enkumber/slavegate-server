@@ -19,6 +19,7 @@ const REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT = "pe reddit, apasa butonul de com
 const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottest";
 const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
 const ASKREDDIT_NAV_INTENT = "deschide reddit si mergi pe /askreddit";
+const REDDIT_CONTEXTUAL_COMMENT_INTENT = "deschide reddit si mergi pe r/GreeceTravel si intra pe sectiunea de comentarii a primului articol afisat. apoi lasa un comentariu contextual legat de subiectul articolului";
 
 const mocks = vi.hoisted(() => ({
   db: {
@@ -1022,6 +1023,60 @@ describe("dashboard human workflow routes", () => {
       "screen_wake",
       "unlock",
     ]);
+  });
+
+  it("compiles explicit Reddit contextual comment workflows as standard write workflows", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);
+    mocks.compileJobService.createOrGet.mockResolvedValueOnce(compileJobRecord({
+      requestKey: requestKey(REDDIT_CONTEXTUAL_COMMENT_INTENT),
+      intent: REDDIT_CONTEXTUAL_COMMENT_INTENT,
+    }));
+    mocks.llmJson.mockReset();
+    mocks.llmJson.mockResolvedValueOnce({
+      id: "workflow_reddit_greece_travel_comment",
+      name: "Reddit GreeceTravel contextual comment",
+      platform: "reddit",
+      description: "Open r/GreeceTravel, enter first post comments, and leave a contextual comment.",
+      version: "1.0.0",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [
+        { id: "open_reddit", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+        { id: "open_subreddit", type: "action", action: "intent_send", params: { uri: "https://www.reddit.com/r/GreeceTravel/", packageName: "com.reddit.frontpage" } },
+        { id: "open_first_post_comments", type: "action", action: "semantic_tap", params: { target: "reddit.first_visible_post.open_comments" } },
+        { id: "dump_post_context", type: "action", action: "ui_tree_dump", params: { outputVariable: "_postContextUiTree" } },
+        { id: "generate_comment", type: "action", action: "vlm_generate_comment", params: { post_description_var: "_postContextUiTree", target_variable: "_generated_comment" } },
+        { id: "tap_comment_input", type: "action", action: "a11y_find_tap", params: { textContains: "Add a comment" } },
+        { id: "type_comment", type: "action", action: "type_text", params: { textFromVariable: "_generated_comment" } },
+        { id: "post_comment", type: "action", action: "a11y_find_tap", params: { text: "Post" } },
+        { id: "checkpoint", type: "checkpoint" },
+      ],
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: REDDIT_CONTEXTUAL_COMMENT_INTENT,
+    });
+
+    expect(response.status).toBe(202);
+    const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
+    const ready = await runner() as { safetyClass: string };
+
+    expect(ready.safetyClass).toBe("standard");
+    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({
+        safetyClass: "standard",
+        steps: expect.arrayContaining([
+          expect.objectContaining({ action: "vlm_generate_comment" }),
+          expect.objectContaining({ action: "type_text" }),
+        ]),
+      }),
+      expect.objectContaining({ metadata: expect.objectContaining({ safetyClass: "standard" }) }),
+      requestKey(REDDIT_CONTEXTUAL_COMMENT_INTENT),
+      expect.objectContaining({ source: "dashboard_human", intent: REDDIT_CONTEXTUAL_COMMENT_INTENT }),
+    );
   });
 
   it("does not block on oversized compile timeout env overrides", async () => {

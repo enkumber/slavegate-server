@@ -167,7 +167,7 @@ export interface WorkflowTemplate {
   /** Business intent for generated/canonical workflows. */
   intent?:      string;
   /** Safety class used by the control plane before task-runner execution. */
-  safetyClass?: "read_only";
+  safetyClass?: "read_only" | "standard";
   /** Structured output contract for read-only marketing workflows. */
   outputSchema?: WorkflowOutputSchema;
   /** Recovery request types the runtime may ask for after deterministic failure. */
