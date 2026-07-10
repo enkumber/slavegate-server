@@ -81,13 +81,7 @@ function humanWorkflowAppId(platform: string): string {
 }
 
 export function isAccountlessHumanWorkflowIntent(goal: string): boolean {
-  const normalized = goal.toLowerCase();
-  const appManagement =
-    /\b(instaleaza|instalează|instalez|instalare|install|download|descarca|descarcă|actualizeaza|actualizează|update)\b/.test(normalized);
-  const knownApp =
-    /\b(reddit|instagram|tiktok|facebook|twitter|x|youtube|threads)\b/.test(normalized) ||
-    /\bcom\.[a-z0-9_.-]+\b/.test(normalized);
-  return appManagement && knownApp;
+  return true;
 }
 
 function inferHumanWorkflowPlatform(goal: string): string {
