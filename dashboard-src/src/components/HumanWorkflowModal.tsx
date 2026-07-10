@@ -77,8 +77,9 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
   }, []);
 
   const compile = async () => {
-    if (!accountId || !intent.trim()) {
-      setError("Select an account and enter an instruction.");
+    const trimmedIntent = intent.trim();
+    if (!trimmedIntent) {
+      setError("Enter an instruction.");
       return;
     }
     setCompiling(true);
@@ -89,8 +90,8 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
     try {
       const data = await agencyApi.humanWorkflow.compile({
         device_id: device.id,
-        account_id: accountId,
-        intent: intent.trim(),
+        account_id: accountId || undefined,
+        intent: trimmedIntent,
       });
       if (isCompileReady(data)) {
         setCompileResult(data);
@@ -218,6 +219,11 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
                 Target: @{selectedAccount.username} on {selectedAccount.platform}
               </div>
             )}
+            {!selectedAccount && !loadingAccounts && (
+              <div style={{ marginTop: "8px", color: "#64748b", fontSize: "12px" }}>
+                Target: device-only workflow. Social-account actions will still require an account.
+              </div>
+            )}
 
             {error && (
               <div style={{ marginTop: "12px", background: "#450a0a", border: "1px solid #7f1d1d", borderRadius: "6px", padding: "8px 10px", color: "#fca5a5", fontSize: "12px" }}>
@@ -228,8 +234,8 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
             <div style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
               <button
                 onClick={compile}
-                disabled={compilePending || !accountId || !intent.trim()}
-                style={primaryButtonStyle(compilePending || !accountId || !intent.trim() ? "#334155" : "#2563eb")}
+                disabled={compilePending || !intent.trim()}
+                style={primaryButtonStyle(compilePending || !intent.trim() ? "#334155" : "#2563eb")}
               >
                 {compilePending ? "Compiling..." : "Compile"}
               </button>

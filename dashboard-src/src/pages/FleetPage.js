@@ -113,9 +113,8 @@ export function FleetPage() {
         try {
             const res = await api.post("/ota/push", {
                 deviceIds,
-                versionCode: 99, // Server uses APK's actual version
             });
-            alert(`✅ OTA pushed to ${res.count} device(s)`);
+            alert(`✅ OTA ${res.version} (${res.versionCode}) pushed to ${res.count} device(s)`);
         }
         catch (e) {
             alert(`OTA failed: ${e.message}`);

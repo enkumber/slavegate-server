@@ -90,7 +90,7 @@ export interface AgencyStats {
 
 export interface HumanWorkflowCompileRequest {
   device_id: string;
-  account_id: string;
+  account_id?: string | null;
   intent: string;
 }
 
@@ -98,8 +98,8 @@ export interface HumanWorkflowTarget {
   device_id: string;
   device_model: string | null;
   device_name: string | null;
-  account_id: string;
-  account_username: string;
+  account_id: string | null;
+  account_username: string | null;
   account_platform: string;
   client_id: string | null;
 }
