@@ -81,6 +81,12 @@ function humanWorkflowAppId(platform: string): string {
 }
 
 export function isAccountlessHumanWorkflowIntent(goal: string): boolean {
+  // Accept ANY intent — no account_id required
+  // This allows device-only workflows like:
+  // - Creating new social accounts (Gmail, etc.)
+  // - Farming operations
+  // - App installation
+  // - Any other device-level action
   return true;
 }
 
