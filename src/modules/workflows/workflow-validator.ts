@@ -6,7 +6,7 @@
 import { z } from "zod";
 import { createHash } from "crypto";
 import type { AppMap, AppMapQualityReport } from "../app-mapping/schema";
-import type { WorkflowOutputSchema, WorkflowStep, WorkflowTemplate } from "./types";
+import type { WorkflowOutputSchema, WorkflowRecoveryPolicy, WorkflowStep, WorkflowTemplate } from "./types";
 import { ALL_SCREEN_IDS } from "../screen-detection/types";
 
 // ── Allowed step types ──────────────────────────────────────────────────────
@@ -248,8 +248,18 @@ const GENERATED_WORKFLOW_SAFETY_CLASSES = [
 
 const GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS = [
   "abort_read_only_scan",
+  "ai_recovery_workflow",
+  "dismiss_transient_ui",
+  "navigate_back_once",
   "refresh_screen_state",
   "retry_current_step",
+  "return_to_anchor",
+  "verify_anchor",
+] as const;
+
+const GENERATED_WORKFLOW_RECOVERY_AUTONOMY = [
+  "bounded",
+  "ai_autopilot",
 ] as const;
 
 const REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT = [
@@ -570,6 +580,55 @@ function validateGeneratedWorkflowStepInput(
   }
 }
 
+function validateGeneratedWorkflowRecoveryPolicy(
+  policy: unknown,
+  path: string,
+  errors: string[],
+): void {
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+    errors.push(`${path} must be an object when provided`);
+    return;
+  }
+
+  const candidate = policy as WorkflowRecoveryPolicy;
+  if (
+    candidate.autonomy !== undefined &&
+    (typeof candidate.autonomy !== "string" || !GENERATED_WORKFLOW_RECOVERY_AUTONOMY.includes(candidate.autonomy as typeof GENERATED_WORKFLOW_RECOVERY_AUTONOMY[number]))
+  ) {
+    errors.push(`${path}.autonomy must be one of: ${GENERATED_WORKFLOW_RECOVERY_AUTONOMY.join(", ")}`);
+  }
+
+  for (const key of ["maxAttemptsPerStep", "maxAttemptsPerWorkflow", "maxRecoveryActionsPerAttempt"] as const) {
+    const value = candidate[key];
+    if (value !== undefined && (!Number.isInteger(value) || value < 0 || value > 20)) {
+      errors.push(`${path}.${key} must be an integer between 0 and 20`);
+    }
+  }
+
+  if (candidate.allowedRecoveryRequests !== undefined) {
+    if (
+      !Array.isArray(candidate.allowedRecoveryRequests) ||
+      candidate.allowedRecoveryRequests.some((item) => typeof item !== "string" || item.length === 0)
+    ) {
+      errors.push(`${path}.allowedRecoveryRequests must be an array of non-empty strings`);
+    } else {
+      for (const recoveryRequest of candidate.allowedRecoveryRequests) {
+        if (!GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS.includes(recoveryRequest as typeof GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS[number])) {
+          errors.push(`${path}.allowedRecoveryRequests must contain only: ${GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS.join(", ")}`);
+          break;
+        }
+      }
+    }
+  }
+
+  for (const key of ["requireStateVerification", "learnFromFailure"] as const) {
+    const value = candidate[key];
+    if (value !== undefined && typeof value !== "boolean") {
+      errors.push(`${path}.${key} must be a boolean when provided`);
+    }
+  }
+}
+
 export interface GeneratedWorkflowTemplateValidationResult {
   ok: boolean;
   errors: string[];
@@ -657,6 +716,7 @@ export interface GeneratedWorkflowCompiledPlan {
     safetyClass: "read_only" | "standard" | null;
     outputSchema: WorkflowOutputSchema | null;
     allowedRecoveryRequests: string[];
+    recoveryPolicy: WorkflowRecoveryPolicy | null;
     appMap?: GeneratedWorkflowAppMapCacheMetadata;
   };
   stepCount: number;
@@ -736,6 +796,9 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
       }
     }
   }
+  if (candidate.recoveryPolicy !== undefined) {
+    validateGeneratedWorkflowRecoveryPolicy(candidate.recoveryPolicy, "workflow.recoveryPolicy", errors);
+  }
   if (
     candidate.defaultVerificationStrategy !== undefined &&
     !GENERATED_WORKFLOW_VERIFICATION_STRATEGIES.includes(candidate.defaultVerificationStrategy as typeof GENERATED_WORKFLOW_VERIFICATION_STRATEGIES[number])
@@ -776,6 +839,7 @@ export function summarizeGeneratedWorkflowTemplate(
     safetyClass: template.safetyClass ?? null,
     outputSchema: template.outputSchema ?? null,
     allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
+    recoveryPolicy: template.recoveryPolicy ?? null,
     stepCount: template.steps.length,
     compiledPlan: options?.compiledPlan ?? compileGeneratedWorkflowTemplate(template),
   };
@@ -836,6 +900,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
     safetyClass: template.safetyClass ?? null,
     outputSchema: template.outputSchema ?? null,
     allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
+    recoveryPolicy: template.recoveryPolicy ?? null,
     defaultVerificationStrategy: template.defaultVerificationStrategy,
     steps: template.steps,
   });
@@ -852,6 +917,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
       safetyClass: template.safetyClass ?? null,
       outputSchema: template.outputSchema ?? null,
       allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
+      recoveryPolicy: template.recoveryPolicy ?? null,
       appMap: undefined,
     },
     stepCount: steps.length,
@@ -1129,11 +1195,12 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
     },
     template: {
       required: ["id", "name", "platform", "description", "version", "steps"],
-      optional: ["intent", "safetyClass", "outputSchema", "allowedRecoveryRequests", "defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
+      optional: ["intent", "safetyClass", "outputSchema", "allowedRecoveryRequests", "recoveryPolicy", "defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
       platforms: GENERATED_WORKFLOW_PLATFORMS,
       intents: GENERATED_WORKFLOW_INTENTS,
       safetyClasses: GENERATED_WORKFLOW_SAFETY_CLASSES,
       allowedRecoveryRequests: GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS,
+      recoveryAutonomy: GENERATED_WORKFLOW_RECOVERY_AUTONOMY,
       defaultVerificationStrategy: GENERATED_WORKFLOW_VERIFICATION_STRATEGIES,
       stepTypes: GENERATED_WORKFLOW_STEP_TYPES,
     },
@@ -1183,6 +1250,15 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
         },
       },
       allowedRecoveryRequests: ["refresh_screen_state"],
+      recoveryPolicy: {
+        autonomy: "ai_autopilot",
+        maxAttemptsPerStep: 3,
+        maxAttemptsPerWorkflow: 6,
+        maxRecoveryActionsPerAttempt: 6,
+        allowedRecoveryRequests: ["ai_recovery_workflow", "refresh_screen_state", "retry_current_step", "return_to_anchor", "verify_anchor"],
+        requireStateVerification: true,
+        learnFromFailure: true,
+      },
       defaultVerificationStrategy: "local_with_screenshot",
       dataRetentionDays: 7,
       steps: exampleSteps,

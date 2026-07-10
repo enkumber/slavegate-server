@@ -81,7 +81,18 @@ function executionStats(checkpoint: WorkflowCheckpoint): WorkflowExecutionStats 
 
 export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED";
 const GENERATED_WORKFLOW_RECOVERY_ATTEMPTS_KEY = "_generatedWorkflowRecoveryAttemptsByStep";
-const GENERATED_WORKFLOW_MAX_RECOVERY_ATTEMPTS_PER_STEP = 1;
+const GENERATED_WORKFLOW_RECOVERY_TOTAL_ATTEMPTS_KEY = "_generatedWorkflowRecoveryTotalAttempts";
+const GENERATED_WORKFLOW_RECOVERY_EVENTS_KEY = "_generatedWorkflowRecoveryEvents";
+
+interface GeneratedWorkflowRuntimeRecoveryPolicy {
+  autonomy: "bounded" | "ai_autopilot";
+  maxAttemptsPerStep: number;
+  maxAttemptsPerWorkflow: number;
+  maxRecoveryActionsPerAttempt: number;
+  allowedRecoveryRequests: string[];
+  requireStateVerification: boolean;
+  learnFromFailure: boolean;
+}
 
 function generatedWorkflowPlatform(template: WorkflowTemplate): string {
   const platform = template.platform.toLowerCase().trim();
@@ -116,6 +127,77 @@ function generatedWorkflowRecoveryAttemptsByStep(checkpoint: WorkflowCheckpoint)
   return created;
 }
 
+function generatedWorkflowRecoveryTotalAttempts(checkpoint: WorkflowCheckpoint): number {
+  const existing = checkpoint.variables[GENERATED_WORKFLOW_RECOVERY_TOTAL_ATTEMPTS_KEY];
+  return typeof existing === "number" && Number.isFinite(existing) && existing >= 0 ? existing : 0;
+}
+
+function setGeneratedWorkflowRecoveryTotalAttempts(checkpoint: WorkflowCheckpoint, attempts: number): void {
+  checkpoint.variables[GENERATED_WORKFLOW_RECOVERY_TOTAL_ATTEMPTS_KEY] = attempts;
+}
+
+function generatedWorkflowRuntimeRecoveryPolicy(template: WorkflowTemplate): GeneratedWorkflowRuntimeRecoveryPolicy {
+  const explicit = template.recoveryPolicy;
+  const safetyClass = template.safetyClass ?? "standard";
+  const stepCount = Math.max(template.steps.length, 1);
+  const isReadOnly = safetyClass === "read_only";
+
+  const defaultAllowedRecoveryRequests = isReadOnly
+    ? ["ai_recovery_workflow", "refresh_screen_state", "retry_current_step", "return_to_anchor", "dismiss_transient_ui", "navigate_back_once", "verify_anchor", "abort_read_only_scan"]
+    : ["ai_recovery_workflow", "refresh_screen_state", "retry_current_step", "return_to_anchor", "dismiss_transient_ui", "navigate_back_once", "verify_anchor"];
+
+  return {
+    autonomy: explicit?.autonomy ?? "ai_autopilot",
+    maxAttemptsPerStep: Math.max(
+      0,
+      explicit?.maxAttemptsPerStep ?? (isReadOnly ? 3 : 2),
+    ),
+    maxAttemptsPerWorkflow: Math.max(
+      0,
+      explicit?.maxAttemptsPerWorkflow ?? (isReadOnly ? Math.max(4, Math.min(8, Math.ceil(stepCount * 0.6))) : 4),
+    ),
+    maxRecoveryActionsPerAttempt: Math.max(1, explicit?.maxRecoveryActionsPerAttempt ?? (isReadOnly ? 6 : 4)),
+    allowedRecoveryRequests: explicit?.allowedRecoveryRequests?.length
+      ? explicit.allowedRecoveryRequests
+      : template.allowedRecoveryRequests?.length
+        ? template.allowedRecoveryRequests
+        : defaultAllowedRecoveryRequests,
+    requireStateVerification: explicit?.requireStateVerification ?? true,
+    learnFromFailure: explicit?.learnFromFailure ?? true,
+  };
+}
+
+function recordGeneratedWorkflowRecoveryEvent(
+  template: WorkflowTemplate,
+  checkpoint: WorkflowCheckpoint,
+  stepIndex: number,
+  err: unknown,
+  policy: GeneratedWorkflowRuntimeRecoveryPolicy,
+  attempts: { stepAttempt: number; workflowAttempt: number },
+): void {
+  if (!policy.learnFromFailure) return;
+
+  const existing = checkpoint.variables[GENERATED_WORKFLOW_RECOVERY_EVENTS_KEY];
+  const events = Array.isArray(existing) ? existing : [];
+  events.push({
+    at: new Date().toISOString(),
+    platform: generatedWorkflowPlatform(template),
+    safetyClass: template.safetyClass ?? null,
+    autonomy: policy.autonomy,
+    stepIndex,
+    reason: recoveryReasonFromError(err),
+    error: err instanceof Error ? err.message : String(err),
+    stepAttempt: attempts.stepAttempt,
+    workflowAttempt: attempts.workflowAttempt,
+    maxAttemptsPerStep: policy.maxAttemptsPerStep,
+    maxAttemptsPerWorkflow: policy.maxAttemptsPerWorkflow,
+    maxRecoveryActionsPerAttempt: policy.maxRecoveryActionsPerAttempt,
+    allowedRecoveryRequests: policy.allowedRecoveryRequests,
+    requireStateVerification: policy.requireStateVerification,
+  });
+  checkpoint.variables[GENERATED_WORKFLOW_RECOVERY_EVENTS_KEY] = events.slice(-20);
+}
+
 function recordGeneratedWorkflowRecoveryFailure(
   template: WorkflowTemplate,
   checkpoint: WorkflowCheckpoint,
@@ -125,20 +207,27 @@ function recordGeneratedWorkflowRecoveryFailure(
   if (!isGeneratedWorkflowTemplate(template)) return null;
 
   const stats = executionStats(checkpoint);
+  const policy = generatedWorkflowRuntimeRecoveryPolicy(template);
   const attemptsByStep = generatedWorkflowRecoveryAttemptsByStep(checkpoint);
   const key = String(stepIndex);
   const priorAttempts = attemptsByStep[key] ?? 0;
+  const priorWorkflowAttempts = generatedWorkflowRecoveryTotalAttempts(checkpoint);
   const platform = generatedWorkflowPlatform(template);
 
-  if (priorAttempts >= GENERATED_WORKFLOW_MAX_RECOVERY_ATTEMPTS_PER_STEP) {
+  if (priorAttempts >= policy.maxAttemptsPerStep || priorWorkflowAttempts >= policy.maxAttemptsPerWorkflow) {
     stats.recoveryBudgetExhausted++;
     generatedWorkflowRecoveryBudgetExhausted?.labels(platform).inc();
     return Object.assign(new Error(RECOVERY_BUDGET_EXCEEDED), { code: RECOVERY_BUDGET_EXCEEDED });
   }
 
   attemptsByStep[key] = priorAttempts + 1;
+  setGeneratedWorkflowRecoveryTotalAttempts(checkpoint, priorWorkflowAttempts + 1);
   stats.recoveryAttempts++;
   generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReasonFromError(err)).inc();
+  recordGeneratedWorkflowRecoveryEvent(template, checkpoint, stepIndex, err, policy, {
+    stepAttempt: attemptsByStep[key],
+    workflowAttempt: priorWorkflowAttempts + 1,
+  });
   return null;
 }
 

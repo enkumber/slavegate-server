@@ -415,6 +415,15 @@ describe("Generated workflow contract validation", () => {
         },
       },
       allowedRecoveryRequests: ["refresh_screen_state"],
+      recoveryPolicy: {
+        autonomy: "ai_autopilot",
+        maxAttemptsPerStep: 3,
+        maxAttemptsPerWorkflow: 6,
+        maxRecoveryActionsPerAttempt: 6,
+        allowedRecoveryRequests: ["ai_recovery_workflow", "refresh_screen_state", "retry_current_step", "return_to_anchor", "verify_anchor"],
+        requireStateVerification: true,
+        learnFromFailure: true,
+      },
       defaultVerificationStrategy: "local_with_screenshot",
       dataRetentionDays: 1,
       steps: [
@@ -435,6 +444,12 @@ describe("Generated workflow contract validation", () => {
       intent: "reddit_account_health_scan",
       safetyClass: "read_only",
       allowedRecoveryRequests: ["refresh_screen_state"],
+      recoveryPolicy: expect.objectContaining({
+        autonomy: "ai_autopilot",
+        maxAttemptsPerStep: 3,
+        maxAttemptsPerWorkflow: 6,
+        learnFromFailure: true,
+      }),
       outputSchema: {
         required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "screenState", "error"],
       },
@@ -455,7 +470,11 @@ describe("Generated workflow contract validation", () => {
     );
 
     expect(executorSource).toContain('export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED"');
-    expect(executorSource).toContain("GENERATED_WORKFLOW_MAX_RECOVERY_ATTEMPTS_PER_STEP = 1");
+    expect(executorSource).toContain("generatedWorkflowRuntimeRecoveryPolicy");
+    expect(executorSource).toContain('autonomy: explicit?.autonomy ?? "ai_autopilot"');
+    expect(executorSource).toContain("explicit?.maxAttemptsPerStep ?? (isReadOnly ? 3 : 2)");
+    expect(executorSource).toContain("GENERATED_WORKFLOW_RECOVERY_TOTAL_ATTEMPTS_KEY");
+    expect(executorSource).toContain("recordGeneratedWorkflowRecoveryEvent");
     expect(executorSource).toContain("recordGeneratedWorkflowRecoveryFailure");
     expect(executorSource).toContain("stats.recoveryAttempts++");
     expect(executorSource).toContain("stats.recoveryBudgetExhausted++");

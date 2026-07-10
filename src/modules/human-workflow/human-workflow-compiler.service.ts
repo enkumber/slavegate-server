@@ -203,6 +203,11 @@ function buildHumanWorkflowCompilePrompt(input: {
     `platform must be exactly ${input.platform}.`,
     "Every step needs id and type. Step types: action,wait,checkpoint. Wait steps must include duration or condition.",
     `safetyClass must be exactly ${safetyClass}.`,
+    "Include recoveryPolicy with autonomy=\"ai_autopilot\", learnFromFailure=true, requireStateVerification=true.",
+    safetyClass === "read_only"
+      ? "For read-only/navigation workflows set recoveryPolicy.maxAttemptsPerStep=3, maxAttemptsPerWorkflow=6, maxRecoveryActionsPerAttempt=6."
+      : "For standard write workflows set recoveryPolicy.maxAttemptsPerStep=2, maxAttemptsPerWorkflow=4, maxRecoveryActionsPerAttempt=4.",
+    "recoveryPolicy.allowedRecoveryRequests may include ai_recovery_workflow, refresh_screen_state, retry_current_step, return_to_anchor, dismiss_transient_ui, navigate_back_once, verify_anchor.",
     "Allowed actions: open_app,intent_send,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen,ui_tree_dump,type_text,vlm_generate_comment.",
     ...writeInstructions,
     "Start device workflows with action screen_wake, then action unlock, before opening or navigating apps.",
@@ -249,6 +254,24 @@ function normalizeHumanWorkflowTemplateCandidate(
   delete workflow.intent;
   delete workflow.outputSchema;
   delete workflow.allowedRecoveryRequests;
+  const isReadOnly = workflow.safetyClass === "read_only";
+  workflow.recoveryPolicy = {
+    autonomy: "ai_autopilot",
+    maxAttemptsPerStep: isReadOnly ? 3 : 2,
+    maxAttemptsPerWorkflow: isReadOnly ? 6 : 4,
+    maxRecoveryActionsPerAttempt: isReadOnly ? 6 : 4,
+    allowedRecoveryRequests: [
+      "ai_recovery_workflow",
+      "refresh_screen_state",
+      "retry_current_step",
+      "return_to_anchor",
+      "dismiss_transient_ui",
+      "navigate_back_once",
+      "verify_anchor",
+    ],
+    requireStateVerification: true,
+    learnFromFailure: true,
+  };
 
   if (Array.isArray(workflow.steps)) {
     workflow.steps = workflow.steps.map((step, index) => {

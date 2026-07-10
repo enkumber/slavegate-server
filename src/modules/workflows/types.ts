@@ -172,6 +172,8 @@ export interface WorkflowTemplate {
   outputSchema?: WorkflowOutputSchema;
   /** Recovery request types the runtime may ask for after deterministic failure. */
   allowedRecoveryRequests?: string[];
+  /** Runtime policy for AI-assisted recovery after deterministic execution fails. */
+  recoveryPolicy?: WorkflowRecoveryPolicy;
   steps:       WorkflowStep[];
   /** Default verification strategy for steps that don't specify one */
   defaultVerificationStrategy: VerificationStrategy;
@@ -179,6 +181,26 @@ export interface WorkflowTemplate {
   dataRetentionDays: number;
   /** Compatible app version patterns (e.g. "300+", "301") */
   compatibleAppVersions?: string[];
+}
+
+export interface WorkflowRecoveryPolicy {
+  /**
+   * bounded: retry within the local executor only.
+   * ai_autopilot: allow a later recovery planner to synthesize a bounded recovery workflow.
+   */
+  autonomy?: "bounded" | "ai_autopilot";
+  /** Maximum failed attempts recorded for the same top-level step before aborting. */
+  maxAttemptsPerStep?: number;
+  /** Maximum failed attempts recorded for the whole workflow before aborting. */
+  maxAttemptsPerWorkflow?: number;
+  /** Future recovery planner limit for nested recovery workflows. */
+  maxRecoveryActionsPerAttempt?: number;
+  /** Recovery request types the planner may use for this workflow. */
+  allowedRecoveryRequests?: string[];
+  /** Require state evidence after recovery actions before resuming the original step. */
+  requireStateVerification?: boolean;
+  /** Persist failure/recovery examples for future playbooks. */
+  learnFromFailure?: boolean;
 }
 
 export interface WorkflowOutputSchema {
