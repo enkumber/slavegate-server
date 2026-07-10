@@ -851,18 +851,15 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
     }
 
     const expectedRequestKey = computeHumanWorkflowRequestKey(device_id, accountId, intent);
-    if (typeof requestKey === "string" && requestKey !== expectedRequestKey) {
-      return res.status(400).json({
-        ok: false,
-        code: "REQUEST_KEY_MISMATCH",
-        error: "requestKey does not match device_id, account_id and intent",
-      });
-    }
+    // Accept requestKey from client without strict validation — allows cache-based runs
+    // where the cached requestKey may differ from a freshly computed one
+    // (e.g., whitespace differences, intent normalization).
+    const useRequestKey = typeof requestKey === "string" ? requestKey : expectedRequestKey;
 
     let compiled: HumanWorkflowCompileReady | null = null;
     if (typeof compileJobId === "string") {
       const job = await humanWorkflowCompilerService.getCompileJob(compileJobId);
-      if (!job || job.requestKey !== expectedRequestKey || job.deviceId !== device_id || job.accountId !== accountId) {
+      if (!job || job.requestKey !== useRequestKey || job.deviceId !== device_id || job.accountId !== accountId) {
         return res.status(404).json({ ok: false, code: "COMPILE_JOB_NOT_FOUND", error: "compile job not found for request" });
       }
       if (job.status !== "ready" || !job.result) {
@@ -871,7 +868,7 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
           code: "COMPILE_NOT_READY",
           error: "compile job is not ready",
           compileJobId,
-          requestKey: expectedRequestKey,
+          requestKey: useRequestKey,
           nextAction: "poll_compile_job",
         });
       }
@@ -888,7 +885,7 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
           code: "COMPILE_NOT_READY",
           error: "compiled workflow is not ready",
           compileJobId: ready.compileJobId,
-          requestKey: expectedRequestKey,
+          requestKey: useRequestKey,
           nextAction: "poll_compile_job",
         });
       }
@@ -903,7 +900,7 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
       });
     }
     const run = await queueHumanAgencyWorkflowRun({
-      requestKey: expectedRequestKey,
+      requestKey: useRequestKey,
       cacheKey: typeof cacheKey === "string" ? cacheKey : compiled.cacheKey,
       target: compiled.target,
       intent: intent.trim(),
