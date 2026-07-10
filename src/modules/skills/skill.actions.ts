@@ -1904,8 +1904,12 @@ async function handleVlmGenerateComment(
   params: Record<string, unknown>,
   ctx:    SkillActionContext,
 ): Promise<void> {
-  const descVar       = (params.post_description_var as string) || '_post_description';
-  const targetVar     = (params.target_variable as string)      || '_generated_comment';
+  const descVar       = (params.sourceVariable as string)
+                     || (params.post_description_var as string)
+                     || '_post_description';
+  const targetVar     = (params.outputVariable as string)
+                     || (params.target_variable as string)
+                     || '_generated_comment';
   const accountCtx    = (params.account_context as string)      || 'fotograf glamour';
   const maxChars      = (params.max_chars as number)            || 150;
   const tone          = (params.tone as string)                 || 'admirativ, prietenos, natural';

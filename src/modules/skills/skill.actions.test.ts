@@ -326,6 +326,26 @@ describe('vlm_generate_comment', () => {
     expect(ctx.checkpoint.variables.vlm_calls_this_run).toBe(1);
   });
 
+  it('accepts generated workflow source/output variable param names', async () => {
+    vi.mocked(llmComplete).mockResolvedValueOnce('That sounds like such a helpful Santorini guide.');
+    const ctx = context();
+    ctx.checkpoint.variables._postContextUiTree = {
+      uiTree: JSON.stringify({
+        children: [
+          { contentDescription: 'Post title, Our Santorini Popular Spot Guide', visible: true },
+          { contentDescription: 'Post body, looking for even more recommendations', visible: true },
+        ],
+      }),
+    };
+
+    await executeSkillAction('vlm_generate_comment', {
+      sourceVariable: '_postContextUiTree',
+      outputVariable: '_generated_comment',
+    }, ctx);
+
+    expect(ctx.checkpoint.variables._generated_comment).toBe('That sounds like such a helpful Santorini guide.');
+  });
+
   it('fails instead of silently continuing when no post context is available', async () => {
     const ctx = context();
     await expect(executeSkillAction('vlm_generate_comment', {

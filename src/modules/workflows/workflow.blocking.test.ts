@@ -459,6 +459,8 @@ describe("Generated workflow contract validation", () => {
     expect(executorSource).toContain("recordGeneratedWorkflowRecoveryFailure");
     expect(executorSource).toContain("stats.recoveryAttempts++");
     expect(executorSource).toContain("stats.recoveryBudgetExhausted++");
+    expect(executorSource).toContain("normalizeA11yFindTapParams(finalParams)");
+    expect(executorSource).toContain('params["resourceId"] = "add_comment_button"');
     expect(executorSource).toContain("generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReasonFromError(err)).inc()");
     expect(executorSource).toContain("generatedWorkflowRecoveryBudgetExhausted?.labels(platform).inc()");
     expect(executorSource).not.toContain("stats.recoveryLlmCalls++");
@@ -541,8 +543,8 @@ describe("Generated workflow contract validation", () => {
       defaultVerificationStrategy: "local_only",
       dataRetentionDays: 7,
       steps: [
-        { type: "action", id: "generate_comment", action: "vlm_generate_comment", params: { post_description_var: "_post_description", target_variable: "_generated_comment" } },
-        { type: "action", id: "tap_comment_input", action: "a11y_find_tap", params: { textContains: "Add a comment" } },
+        { type: "action", id: "generate_comment", action: "vlm_generate_comment", params: { sourceVariable: "_postContextUiTree", outputVariable: "_generated_comment" } },
+        { type: "action", id: "tap_comment_input", action: "a11y_find_tap", params: { label: "Add a comment" } },
         { type: "action", id: "type_comment", action: "type_text", params: { textFromVariable: "_generated_comment" } },
         { type: "action", id: "submit_comment", action: "a11y_find_tap", params: { text: "Post" } },
         { type: "checkpoint", id: "comment_submitted" },

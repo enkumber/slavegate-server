@@ -717,6 +717,10 @@ async function executeActionStep(
     delete finalParams["textFromVariable"]; // Remove meta-param before sending to device
   }
 
+  if (step.action === "a11y_find_tap") {
+    normalizeA11yFindTapParams(finalParams);
+  }
+
   // Resolve packageName for open_app/close_app actions
   if ((step.action === "open_app" || step.action === "close_app") && !finalParams["packageName"]) {
     // template.platform can be "*" (wildcard) — treat as unset and fall through to checkpoint or default
@@ -1396,6 +1400,31 @@ export async function startWorkflow(workflowId: string): Promise<void> {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function normalizeA11yFindTapParams(params: Record<string, unknown>): void {
+  const label = typeof params["label"] === "string" ? params["label"].trim() : "";
+  const textContains = typeof params["textContains"] === "string" ? params["textContains"].trim() : "";
+  const targetText = textContains || label;
+
+  if (targetText && !params["text"] && !params["contentDescription"]) {
+    params["text"] = targetText;
+    params["contentDescription"] = targetText;
+    params["partialMatch"] = true;
+  }
+
+  const normalized = targetText.toLowerCase();
+  if (
+    !params["resourceId"] &&
+    (normalized.includes("add a comment") ||
+      normalized.includes("join the conversation") ||
+      normalized.includes("your comment"))
+  ) {
+    params["resourceId"] = "add_comment_button";
+  }
+
+  delete params["label"];
+  delete params["textContains"];
+}
 
 function buildHbeSession(wf: { checkpoint: WorkflowCheckpoint }): HbeSessionParams {
   // Fresh session — pick mood and drift from account age.
