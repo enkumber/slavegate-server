@@ -52,6 +52,8 @@ import {
   generatedWorkflowRecoveryAttempts,
   generatedWorkflowRecoveryBudgetExhausted,
 } from "../observability/metrics";
+import { llmJson } from "../../utils/llm";
+import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
@@ -92,6 +94,13 @@ interface GeneratedWorkflowRuntimeRecoveryPolicy {
   allowedRecoveryRequests: string[];
   requireStateVerification: boolean;
   learnFromFailure: boolean;
+}
+
+interface GeneratedWorkflowRecoveryPlan {
+  action: "recover" | "retry_only" | "abort";
+  rationale?: string;
+  expectedState?: string;
+  steps?: WorkflowStep[];
 }
 
 function generatedWorkflowPlatform(template: WorkflowTemplate): string {
@@ -229,6 +238,203 @@ function recordGeneratedWorkflowRecoveryFailure(
     workflowAttempt: priorWorkflowAttempts + 1,
   });
   return null;
+}
+
+async function dispatchGeneratedWorkflowProbe(
+  workflowId: string,
+  deviceId: string,
+  stepIndex: number,
+  type: "ui_tree_dump" | "screenshot",
+  timeoutMs: number,
+): Promise<JobStepResult | null> {
+  try {
+    const { jobId } = await dispatcherService.dispatch({
+      deviceId,
+      type,
+      params: {},
+      timeoutMs,
+      workflowId,
+      stepIndex,
+    });
+    const sent = sendJobToDevice(deviceId, { jobId, type, params: {}, timeoutMs });
+    if (!sent) return null;
+    return awaitJobResult(jobId, timeoutMs + 5_000);
+  } catch {
+    return null;
+  }
+}
+
+function summarizeRecoveryOutput(output: unknown, maxLength = 5000): string {
+  if (output === null || output === undefined) return "not available";
+  try {
+    return JSON.stringify(output).slice(0, maxLength);
+  } catch {
+    return String(output).slice(0, maxLength);
+  }
+}
+
+function buildGeneratedWorkflowRecoveryPrompt(input: {
+  template: WorkflowTemplate;
+  step: WorkflowStep;
+  stepIndex: number;
+  err: unknown;
+  policy: GeneratedWorkflowRuntimeRecoveryPolicy;
+  uiState: string;
+}): string {
+  return [
+    "Return JSON only. You are the AI Recovery Autopilot for a Phone Network Android workflow.",
+    "A deterministic generated workflow step failed. Create a bounded recovery plan, then the executor will retry the original failed step.",
+    "",
+    "Workflow:",
+    `- id: ${input.template.id}`,
+    `- platform: ${input.template.platform}`,
+    `- safetyClass: ${input.template.safetyClass ?? "standard"}`,
+    `- intent: ${input.template.intent ?? "unknown"}`,
+    "",
+    "Failed step:",
+    summarizeRecoveryOutput(input.step, 2500),
+    `Step index: ${input.stepIndex}`,
+    `Failure: ${input.err instanceof Error ? input.err.message : String(input.err)}`,
+    "",
+    "Current UI state:",
+    input.uiState,
+    "",
+    "Policy:",
+    `- autonomy: ${input.policy.autonomy}`,
+    `- max recovery actions in this plan: ${input.policy.maxRecoveryActionsPerAttempt}`,
+    `- allowed recovery requests: ${input.policy.allowedRecoveryRequests.join(", ")}`,
+    `- require state verification: ${input.policy.requireStateVerification}`,
+    "",
+    "Respond with one of:",
+    `{"action":"retry_only","rationale":"...","expectedState":"..."}`,
+    `{"action":"abort","rationale":"...","expectedState":"..."}`,
+    `{"action":"recover","rationale":"...","expectedState":"...","steps":[WorkflowStep...]}`,
+    "",
+    "Recovery steps may use normal WorkflowStep JSON. Prefer safe navigation/read actions:",
+    "action steps: ui_tree_dump, screenshot, wait_for_idle, press_key, scroll, swipe, tap, a11y_find_tap, semantic_tap, detect_current_screen, open_app, intent_send",
+    "wait steps with duration are allowed.",
+    "Do not post, submit, send, follow, delete, vote, join, type text, or perform irreversible social actions in recovery.",
+    "If the state already looks recoverable, use retry_only.",
+    "If the UI is ambiguous or the account/app is in a risky state, use abort.",
+  ].join("\n");
+}
+
+function normalizeGeneratedWorkflowRecoveryPlan(raw: unknown): GeneratedWorkflowRecoveryPlan {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { action: "retry_only" };
+  const candidate = raw as Record<string, unknown>;
+  const action = candidate.action === "recover" || candidate.action === "abort" || candidate.action === "retry_only"
+    ? candidate.action
+    : "retry_only";
+  return {
+    action,
+    rationale: typeof candidate.rationale === "string" ? candidate.rationale.slice(0, 1000) : undefined,
+    expectedState: typeof candidate.expectedState === "string" ? candidate.expectedState.slice(0, 1000) : undefined,
+    steps: Array.isArray(candidate.steps) ? candidate.steps as WorkflowStep[] : undefined,
+  };
+}
+
+function validateGeneratedWorkflowRecoverySteps(
+  template: WorkflowTemplate,
+  policy: GeneratedWorkflowRuntimeRecoveryPolicy,
+  steps: WorkflowStep[],
+): { ok: true; steps: WorkflowStep[] } | { ok: false; error: string } {
+  const bounded = steps.slice(0, policy.maxRecoveryActionsPerAttempt).map((step, index) => {
+    if (step && typeof step === "object" && !Array.isArray(step)) {
+      return { id: (step as { id?: string }).id ?? `ai_recovery_step_${index + 1}`, ...step };
+    }
+    return step;
+  });
+  const candidate: WorkflowTemplate = {
+    id: `${template.id}_ai_recovery_plan`,
+    name: `${template.name} AI recovery plan`,
+    platform: template.platform,
+    description: "Bounded AI-generated recovery workflow",
+    version: template.version,
+    safetyClass: template.safetyClass,
+    recoveryPolicy: { autonomy: "bounded", maxAttemptsPerStep: 0, maxAttemptsPerWorkflow: 0 },
+    steps: bounded,
+    defaultVerificationStrategy: "local_only",
+    dataRetentionDays: 0,
+  };
+  const validation = validateGeneratedWorkflowTemplate(candidate);
+  if (!validation.ok) return { ok: false, error: validation.errors.join("; ") };
+  return { ok: true, steps: bounded };
+}
+
+async function attemptGeneratedWorkflowAiRecovery(
+  workflowId: string,
+  deviceId: string,
+  template: WorkflowTemplate,
+  failedStep: WorkflowStep,
+  checkpoint: WorkflowCheckpoint,
+  stepIndex: number,
+  err: unknown,
+  job?: import("bullmq").Job,
+): Promise<boolean> {
+  const policy = generatedWorkflowRuntimeRecoveryPolicy(template);
+  if (policy.autonomy !== "ai_autopilot" || !policy.allowedRecoveryRequests.includes("ai_recovery_workflow")) {
+    return true;
+  }
+
+  const stats = executionStats(checkpoint);
+  stats.recoveryLlmCalls++;
+  stats.runtimeLlmCalls++;
+
+  const uiDump = await dispatchGeneratedWorkflowProbe(workflowId, deviceId, stepIndex, "ui_tree_dump", 10_000);
+  const uiState = summarizeRecoveryOutput(uiDump?.output, 6000);
+  const prompt = buildGeneratedWorkflowRecoveryPrompt({ template, step: failedStep, stepIndex, err, policy, uiState });
+
+  let plan: GeneratedWorkflowRecoveryPlan;
+  try {
+    plan = normalizeGeneratedWorkflowRecoveryPlan(await llmJson<GeneratedWorkflowRecoveryPlan>(prompt, undefined, {
+      max_tokens: 2048,
+      timeoutMs: 20_000,
+      temperature: 0,
+      system: "You are an Android AI recovery planner. Respond ONLY with valid JSON.",
+    }));
+  } catch (plannerErr) {
+    console.warn(`[workflow] ${workflowId} AI recovery planner failed at step ${stepIndex}: ${(plannerErr as Error).message}`);
+    checkpoint.variables._lastAiRecoveryPlannerError = (plannerErr as Error).message;
+    return true;
+  }
+
+  checkpoint.variables._lastAiRecoveryPlan = {
+    at: new Date().toISOString(),
+    stepIndex,
+    action: plan.action,
+    rationale: plan.rationale ?? null,
+    expectedState: plan.expectedState ?? null,
+    stepCount: plan.steps?.length ?? 0,
+  };
+
+  if (plan.action === "abort") {
+    checkpoint.variables._lastAiRecoveryAbort = plan.rationale ?? "AI recovery planner aborted";
+    return false;
+  }
+  if (plan.action === "retry_only") {
+    return true;
+  }
+
+  const steps = Array.isArray(plan.steps) ? plan.steps : [];
+  const validated = validateGeneratedWorkflowRecoverySteps(template, policy, steps);
+  if (!validated.ok) {
+    checkpoint.variables._lastAiRecoveryValidationError = validated.error;
+    console.warn(`[workflow] ${workflowId} AI recovery plan rejected: ${validated.error}`);
+    return true;
+  }
+
+  try {
+    console.log(`[workflow] ${workflowId} executing AI recovery plan (${validated.steps.length} steps) before retrying step ${stepIndex}`);
+    await executeSteps(workflowId, deviceId, template, validated.steps, checkpoint, 0, job, true);
+    if (policy.requireStateVerification) {
+      await dispatchGeneratedWorkflowProbe(workflowId, deviceId, stepIndex, "ui_tree_dump", 10_000);
+    }
+    return true;
+  } catch (recoveryErr) {
+    checkpoint.variables._lastAiRecoveryExecutionError = (recoveryErr as Error).message;
+    console.warn(`[workflow] ${workflowId} AI recovery execution failed at step ${stepIndex}: ${(recoveryErr as Error).message}`);
+    return false;
+  }
 }
 
 // ─── Pending job result registry ─────────────────────────────────────────────
@@ -515,6 +721,8 @@ async function executeSteps(
           executionStats(checkpoint).deterministicSteps++;
         } catch (err) {
           executionStats(checkpoint).failedSteps++;
+          if (isNested) throw err;
+
           const budgetErr = recordGeneratedWorkflowRecoveryFailure(template, checkpoint, segIdx, err);
           if (!isNested) {
             await workflowService.saveCheckpoint(
@@ -524,7 +732,35 @@ async function executeSteps(
               segIdx,
             );
           }
-          throw budgetErr ?? err;
+          if (budgetErr) throw budgetErr;
+
+          const recovered = await attemptGeneratedWorkflowAiRecovery(
+            workflowId,
+            deviceId,
+            template,
+            step,
+            checkpoint,
+            segIdx,
+            err,
+            job,
+          );
+          if (!recovered) throw err;
+
+          try {
+            executionStats(checkpoint).retriedSteps++;
+            await executeStep(workflowId, deviceId, template, step, checkpoint, segIdx, job);
+            executionStats(checkpoint).deterministicSteps++;
+          } catch (retryErr) {
+            if (!isNested) {
+              await workflowService.saveCheckpoint(
+                workflowId,
+                { ...checkpoint, checkpointAt: new Date().toISOString() },
+                segIdx,
+                segIdx,
+              );
+            }
+            throw retryErr;
+          }
         }
 
         // Extend BullMQ lock after each step

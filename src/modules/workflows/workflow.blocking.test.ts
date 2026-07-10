@@ -475,15 +475,19 @@ describe("Generated workflow contract validation", () => {
     expect(executorSource).toContain("explicit?.maxAttemptsPerStep ?? (isReadOnly ? 3 : 2)");
     expect(executorSource).toContain("GENERATED_WORKFLOW_RECOVERY_TOTAL_ATTEMPTS_KEY");
     expect(executorSource).toContain("recordGeneratedWorkflowRecoveryEvent");
+    expect(executorSource).toContain("attemptGeneratedWorkflowAiRecovery");
+    expect(executorSource).toContain("buildGeneratedWorkflowRecoveryPrompt");
+    expect(executorSource).toContain("validateGeneratedWorkflowRecoverySteps");
+    expect(executorSource).toContain("await llmJson<GeneratedWorkflowRecoveryPlan>");
     expect(executorSource).toContain("recordGeneratedWorkflowRecoveryFailure");
     expect(executorSource).toContain("stats.recoveryAttempts++");
     expect(executorSource).toContain("stats.recoveryBudgetExhausted++");
+    expect(executorSource).toContain("stats.recoveryLlmCalls++");
+    expect(executorSource).toContain("stats.runtimeLlmCalls++");
     expect(executorSource).toContain("normalizeA11yFindTapParams(finalParams)");
     expect(executorSource).toContain('params["resourceId"] = "add_comment_button"');
     expect(executorSource).toContain("generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReasonFromError(err)).inc()");
     expect(executorSource).toContain("generatedWorkflowRecoveryBudgetExhausted?.labels(platform).inc()");
-    expect(executorSource).not.toContain("stats.recoveryLlmCalls++");
-    expect(executorSource).not.toContain("stats.runtimeLlmCalls++");
 
     const batchExecutionCatch = executorSource.match(
       /batchResult = await executeBatchSteps[\s\S]*?catch \(err\) \{([\s\S]*?)\n  \}/
