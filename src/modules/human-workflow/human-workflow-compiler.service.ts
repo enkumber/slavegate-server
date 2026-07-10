@@ -307,7 +307,7 @@ function redditInstallWorkflowTemplate(): WorkflowTemplate {
         },
         timeoutMs: 20_000,
       },
-      { id: "wait_for_install_start", type: "action", action: "wait_for_idle", params: { timeoutMs: 5_000 } },
+      { id: "wait_for_install_completion", type: "action", action: "wait_for_idle", params: { timeoutMs: 45_000 } },
       {
         id: "capture_install_state",
         type: "action",
@@ -318,7 +318,7 @@ function redditInstallWorkflowTemplate(): WorkflowTemplate {
         },
         timeoutMs: 10_000,
       },
-      { id: "install_flow_started", type: "checkpoint", reason: "Reddit Play Store install flow opened or started" },
+      { id: "install_verified", type: "checkpoint", reason: "Reddit install state captured for verification" },
     ],
   };
 }

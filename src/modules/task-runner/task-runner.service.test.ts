@@ -508,6 +508,117 @@ describe("task-runner generated_workflow routine", () => {
     expect(result).toMatchObject({ success: true });
   });
 
+  it("fails dashboard human app install workflows when Play Store requires sign-in", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "instaleaza reddit pe acest device",
+      },
+    });
+    cached.workflow.steps = [
+      {
+        type: "action",
+        id: "open_reddit_play_store",
+        action: "intent_send",
+        params: { uri: "market://details?id=com.reddit.frontpage", packageName: "com.android.vending" },
+      },
+      {
+        type: "action",
+        id: "capture_install_state",
+        action: "ui_tree_dump",
+        params: { packageName: "com.android.vending", outputVariable: "_finalUiTree" },
+      },
+    ];
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID, accountId: null }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow({
+      ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+      _finalUiTree: { uiTree: "package=com.android.vending text=Sign in Add account Google account" },
+    }));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: false,
+      failReason: expect.stringContaining("HUMAN_WORKFLOW_APP_INSTALL_BLOCKED"),
+      generatedWorkflow: {
+        failureCode: "HUMAN_WORKFLOW_APP_INSTALL_BLOCKED",
+      },
+    });
+  });
+
+  it("fails dashboard human app install workflows when Reddit is still installable", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "instaleaza reddit pe acest device",
+      },
+    });
+    cached.workflow.steps = [
+      {
+        type: "action",
+        id: "open_reddit_play_store",
+        action: "intent_send",
+        params: { uri: "market://details?id=com.reddit.frontpage", packageName: "com.android.vending" },
+      },
+      {
+        type: "action",
+        id: "capture_install_state",
+        action: "ui_tree_dump",
+        params: { packageName: "com.android.vending", outputVariable: "_finalUiTree" },
+      },
+    ];
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID, accountId: null }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow({
+      ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+      _finalUiTree: { uiTree: "package=com.android.vending text=Reddit Install About this app" },
+    }));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: false,
+      failReason: expect.stringContaining("HUMAN_WORKFLOW_APP_INSTALL_NOT_COMPLETED"),
+      generatedWorkflow: {
+        failureCode: "HUMAN_WORKFLOW_APP_INSTALL_NOT_COMPLETED",
+      },
+    });
+  });
+
+  it("accepts dashboard human app install workflows with installed evidence", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "instaleaza reddit pe acest device",
+      },
+    });
+    cached.workflow.steps = [
+      {
+        type: "action",
+        id: "open_reddit_play_store",
+        action: "intent_send",
+        params: { uri: "market://details?id=com.reddit.frontpage", packageName: "com.android.vending" },
+      },
+      {
+        type: "action",
+        id: "capture_install_state",
+        action: "ui_tree_dump",
+        params: { packageName: "com.android.vending", outputVariable: "_finalUiTree" },
+      },
+    ];
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID, accountId: null }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow({
+      ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+      _finalUiTree: { uiTree: "package=com.android.vending text=Reddit Open Uninstall" },
+    }));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({ success: true });
+  });
+
   it("dispatches a cached generated workflow by cacheKey", async () => {
     const cached = cacheRecord();
     mockTaskDb(task({ cacheKey: CACHE_KEY }));

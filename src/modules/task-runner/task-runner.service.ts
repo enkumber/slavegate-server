@@ -224,6 +224,49 @@ function uiTreeLooksLikeRedditComments(uiTreeText: string): boolean {
   );
 }
 
+function humanIntentRequestsAppInstall(intent: string): boolean {
+  return /\b(instaleaza|instalează|instalez|instalare|install|download|descarca|descarcă|actualizeaza|actualizează|update)\b/.test(intent) &&
+    /\b(reddit|com\.reddit\.frontpage)\b/.test(intent);
+}
+
+function validateRedditInstallEvidence(uiTreeText: string): string | null {
+  const normalized = uiTreeText.toLowerCase();
+  if (!normalized) {
+    return "HUMAN_WORKFLOW_APP_INSTALL_NOT_VERIFIED: final install evidence was empty";
+  }
+  if (
+    normalized.includes("sign in") ||
+    normalized.includes("signin") ||
+    normalized.includes("add account") ||
+    normalized.includes("google account") ||
+    normalized.includes("choose an account") ||
+    normalized.includes("not signed in") ||
+    normalized.includes("conectează-te") ||
+    normalized.includes("conecteaza-te") ||
+    normalized.includes("adaugă un cont") ||
+    normalized.includes("adauga un cont")
+  ) {
+    return "HUMAN_WORKFLOW_APP_INSTALL_BLOCKED: Google Play requires a signed-in Google account";
+  }
+  if (normalized.includes("com.reddit.frontpage")) return null;
+  if (!normalized.includes("com.android.vending")) {
+    return "HUMAN_WORKFLOW_APP_INSTALL_NOT_VERIFIED: Play Store or Reddit was not visible in final evidence";
+  }
+  const hasOpen = /\bopen\b|\bdeschide\b/.test(normalized);
+  const hasUninstall = /\buninstall\b|\bdezinstalează\b|\bdezinstaleaza\b/.test(normalized);
+  const stillInstallable = /\binstall\b|\binstalează\b|\binstaleaza\b/.test(normalized);
+  const updatingOrPending =
+    /\bupdate\b|\bactualizează\b|\bactualizeaza\b|\bpending\b|\bwaiting\b|\binstalling\b|\bse instalează\b|\bse instaleaza\b/.test(normalized);
+  if (hasOpen || hasUninstall) return null;
+  if (stillInstallable) {
+    return "HUMAN_WORKFLOW_APP_INSTALL_NOT_COMPLETED: Reddit is still installable in Play Store";
+  }
+  if (updatingOrPending) {
+    return "HUMAN_WORKFLOW_APP_INSTALL_NOT_COMPLETED: Reddit install did not finish before final verification";
+  }
+  return "HUMAN_WORKFLOW_APP_INSTALL_NOT_VERIFIED: Reddit install success was not visible in final evidence";
+}
+
 function validateHumanWorkflowFinalEvidence(
   cached: GeneratedWorkflowPlanCacheRecord,
   variables: Record<string, unknown>,
@@ -256,6 +299,12 @@ function validateHumanWorkflowFinalEvidence(
     if (!uiTreeLooksLikeRedditComments(uiTreeText)) {
       return "HUMAN_WORKFLOW_TARGET_NOT_REACHED: Reddit comments were not visible in final UI evidence";
     }
+  }
+
+  if (humanIntentRequestsAppInstall(intent)) {
+    const uiTreeText = extractUiTreeEvidence(variables._finalUiTree);
+    const installFailure = validateRedditInstallEvidence(uiTreeText);
+    if (installFailure) return installFailure;
   }
 
   return null;
