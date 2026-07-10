@@ -918,7 +918,7 @@ async function executeSkillActionStep(
     // Dispatch a device job (ui_tree_dump, a11y_find_tap, etc.) and await JOB_RESULT.
     async dispatchAndWait(type, params, timeoutMs = 30_000) {
       const jobType = type as import("../../../shared/protocol/messages").JobType;
-      const { jobId } = await dispatcherService.dispatch({
+      const { jobId, timeoutMs: dispatchedTimeoutMs } = await dispatcherService.dispatch({
         deviceId,
         type:     jobType,
         params:   params as import("../../../shared/protocol/messages").JobParams,
@@ -926,9 +926,9 @@ async function executeSkillActionStep(
         workflowId,
         stepIndex,
       });
-      const sent = sendJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs });
+      const sent = sendJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs });
       if (!sent) throw new Error("Failed to send job to device");
-      return awaitJobResult(jobId, timeoutMs + 5_000);
+      return awaitJobResult(jobId, dispatchedTimeoutMs + 5_000);
     },
 
     // Cascade tap a named element (calls executeCascadeTap from skill.cascade).
@@ -1169,7 +1169,7 @@ async function executeActionStep(
   // action string → JobType (validated by dispatcher whitelist)
   const jobType = step.action as import("../../../shared/protocol/messages").JobType;
 
-  const { jobId } = await dispatcherService.dispatch({
+  const { jobId, timeoutMs: dispatchedTimeoutMs } = await dispatcherService.dispatch({
     deviceId,
     type:        jobType,
     params:      finalParams as import("../../../shared/protocol/messages").JobParams,
@@ -1195,7 +1195,7 @@ async function executeActionStep(
     jobId,
     type:     jobType,
     params:   finalParams as import("../../../shared/protocol/messages").JobParams,
-    timeoutMs,
+    timeoutMs: dispatchedTimeoutMs,
     requiresRoot:         isRootAction(step.action),
     verificationStrategy: strategy,
     l1TimeoutMs:          hbeStep.l1TimeoutMs,
@@ -1208,7 +1208,7 @@ async function executeActionStep(
   // resolveJobResult() will be called by WsServer when JOB_RESULT arrives.
   let result: JobStepResult;
   try {
-    result = await awaitJobResult(jobId, timeoutMs + 5_000 /* grace period */);
+    result = await awaitJobResult(jobId, dispatchedTimeoutMs + 5_000 /* grace period */);
   } catch (err) {
     if (isReadinessAction(step.action) && isJobResultTimeoutError(err) && isDeviceOnline(deviceId)) {
       console.warn(
