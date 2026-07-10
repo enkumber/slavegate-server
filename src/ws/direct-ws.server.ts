@@ -91,6 +91,16 @@ interface PendingBatch {
   timer:   ReturnType<typeof setTimeout>;
 }
 
+interface OtaDeviceStatus {
+  deviceId: string;
+  status: string;
+  version?: string;
+  versionCode?: number;
+  apkSha256?: string;
+  error?: string;
+  updatedAt: string;
+}
+
 interface JobResult {
   jobId:    string;
   success:  boolean;
@@ -131,6 +141,7 @@ export class DirectWsServer {
   private connections = new Map<string, ConnectedDevice>();   // deviceId → conn
   private pendingJobs = new Map<string, PendingJob>();        // jobId → awaiter
   private pendingBatches = new Map<string, PendingBatch>();   // batchId → awaiter
+  private otaStatuses = new Map<string, OtaDeviceStatus>();   // deviceId → last OTA status
   private rateLimiter = new RateLimiter();
   private pingTimer:    ReturnType<typeof setInterval> | null = null;
 
@@ -345,6 +356,21 @@ export class DirectWsServer {
     return this.getConnectedDeviceIds().map(id => ({ deviceId: id }));
   }
 
+  recordOtaStatus(deviceId: string, patch: Omit<Partial<OtaDeviceStatus>, "deviceId" | "updatedAt"> & { status: string }): void {
+    const existing = this.otaStatuses.get(deviceId) ?? { deviceId, status: "unknown", updatedAt: new Date(0).toISOString() };
+    this.otaStatuses.set(deviceId, {
+      ...existing,
+      ...patch,
+      deviceId,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  getOtaStatuses(): OtaDeviceStatus[] {
+    return Array.from(this.otaStatuses.values())
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
   // ─── Connection handler ───────────────────────────────────────────────────
 
   private _onConnection(ws: WebSocket, _req: IncomingMessage): void {
@@ -420,6 +446,7 @@ export class DirectWsServer {
         // ── Edge Workflow Execution (ADR-001) ──
         case "WORKFLOW_STATUS": this._handleWorkflowStatus(deviceConn, msg); break;
         case "LLM_REQUEST":    this._handleLlmRequest(deviceConn, ws, msg); break;
+        case "OTA_RESULT":     this._handleOtaResult(deviceConn, msg); break;
         default:                console.warn(`[direct-ws] Unknown message type: ${type}`); break;
       }
     });
@@ -946,6 +973,20 @@ export class DirectWsServer {
         error: (err as Error).message,
       });
     }
+  }
+
+  private _handleOtaResult(conn: ConnectedDevice, msg: Record<string, unknown>): void {
+    const status = typeof msg.status === "string" ? msg.status : "unknown";
+    const version = typeof msg.version === "string" ? msg.version : undefined;
+    const versionCode = typeof msg.versionCode === "number" ? msg.versionCode : undefined;
+    const apkSha256 = typeof msg.apkSha256 === "string" ? msg.apkSha256 : undefined;
+    const error = typeof msg.error === "string" ? msg.error : undefined;
+    this.recordOtaStatus(conn.deviceId, { status, version, versionCode, apkSha256, error });
+    console.log(
+      `[direct-ws] OTA_RESULT device=${conn.deviceId.slice(0, 8)} status=${status}` +
+      `${version ? ` version=${version}` : ""}${versionCode ? ` code=${versionCode}` : ""}` +
+      `${error ? ` error=${error}` : ""}`
+    );
   }
 
   // ─── Util ─────────────────────────────────────────────────────────────────

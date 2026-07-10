@@ -454,6 +454,30 @@ router.post("/auth/refresh", (req, res) => {
 });
 
 // ─── APK download (public, no auth) ──────────────────────────────────────────
+
+async function readOtaManifest() {
+  const fs = await import("fs/promises");
+  const path = await import("path");
+  const apkPath = path.join(process.cwd(), "apk", "phone-network.apk");
+  const manifestPath = path.join(process.cwd(), "apk", "phone-network.json");
+  const apkBuffer = await fs.readFile(apkPath);
+  const apkSha256 = crypto.createHash("sha256").update(apkBuffer).digest("hex");
+  const stat = await fs.stat(apkPath);
+  let manifest: Record<string, unknown> = {};
+  try {
+    manifest = JSON.parse(await fs.readFile(manifestPath, "utf8")) as Record<string, unknown>;
+  } catch {
+    // Older images may not include a manifest; fall back to conservative values.
+  }
+  return {
+    version: typeof manifest.version === "string" ? manifest.version : "1.0.0",
+    versionCode: typeof manifest.versionCode === "number" ? manifest.versionCode : 1,
+    sha256: apkSha256,
+    size: stat.size,
+    filename: "phone-network.apk",
+  };
+}
+
 router.get("/apk/download", async (_req, res) => {
   const fs = await import("fs/promises");
   const path = await import("path");
@@ -468,6 +492,21 @@ router.get("/apk/download", async (_req, res) => {
     createReadStream(apkPath, { highWaterMark: 1024 * 1024 }).pipe(res);
   } catch {
     res.status(404).json({ ok: false, error: "APK not found" });
+  }
+});
+
+router.get("/ota/manifest", requireAuth, async (_req, res) => {
+  try {
+    const manifest = await readOtaManifest();
+    res.json({
+      ok: true,
+      data: {
+        ...manifest,
+        downloadUrl: "http://enkzoned.go.ro:3000/api/apk/download",
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
 
@@ -1939,27 +1978,17 @@ router.post("/ota/upload", requireAuth, (req, res, next) => {
 // ─── OTA Push ─────────────────────────────────────────────────────────────────
 
 router.post("/ota/push", requireAuth, async (req, res) => {
-  const fs = await import("fs/promises");
-  const crypto = await import("crypto");
-  const path = await import("path");
-
-  const apkPath = path.join(process.cwd(), "apk", "phone-network.apk");
-
-  // Check APK exists
+  let manifest: Awaited<ReturnType<typeof readOtaManifest>>;
   try {
-    await fs.access(apkPath);
-  } catch {
-    return res.status(500).json({ ok: false, error: "APK not found on server. Upload it to /app/apk/phone-network.apk" });
+    manifest = await readOtaManifest();
+  } catch (err) {
+    return res.status(500).json({
+      ok: false,
+      error: `APK manifest unavailable: ${(err as Error).message}`,
+    });
   }
 
-  // Read APK and calculate SHA256
-  const apkBuffer = await fs.readFile(apkPath);
-  const apkSha256 = crypto.createHash("sha256").update(apkBuffer).digest("hex");
-
-  // Get version from request or default
-  const { version = "1.0.0", versionCode = 1, mandatory = false, deviceIds } = req.body as {
-    version?: string;
-    versionCode?: number;
+  const { mandatory = false, deviceIds } = req.body as {
     mandatory?: boolean;
     deviceIds?: string[];
   };
@@ -1978,7 +2007,7 @@ router.post("/ota/push", requireAuth, async (req, res) => {
   const baseUrl = 'http://enkzoned.go.ro:3000';
   for (const device of targets) {
     try {
-      const key = `${device.deviceId}:${versionCode}:${apkSha256}`;
+      const key = `${device.deviceId}:${manifest.versionCode}:${manifest.sha256}`;
       const now = Date.now();
       const last = debounce.get(key) ?? 0;
       if (now - last < 10 * 60 * 1000) {
@@ -1988,11 +2017,17 @@ router.post("/ota/push", requireAuth, async (req, res) => {
       debounce.set(key, now);
       directWsServer.sendToDevice(device.deviceId, {
         type: "OTA_UPDATE",
-        version,
-        versionCode,
+        version: manifest.version,
+        versionCode: manifest.versionCode,
         apkUrl: `${baseUrl}/api/apk/download`,
-        apkSha256,
+        apkSha256: manifest.sha256,
         mandatory,
+      });
+      directWsServer.recordOtaStatus(device.deviceId, {
+        status: "sent",
+        version: manifest.version,
+        versionCode: manifest.versionCode,
+        apkSha256: manifest.sha256,
       });
       sentTo++;
     } catch {}
@@ -2004,10 +2039,20 @@ router.post("/ota/push", requireAuth, async (req, res) => {
     data: {
       count: sentTo,
       skippedDuplicate,
-      version,
-      versionCode,
-      apkSha256,
+      version: manifest.version,
+      versionCode: manifest.versionCode,
+      apkSha256: manifest.sha256,
+      size: manifest.size,
       mandatory,
+    },
+  });
+});
+
+router.get("/ota/status", requireAuth, async (_req, res) => {
+  res.json({
+    ok: true,
+    data: {
+      items: directWsServer.getOtaStatuses(),
     },
   });
 });
