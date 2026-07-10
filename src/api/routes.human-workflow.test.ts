@@ -19,6 +19,7 @@ const REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT = "pe reddit, apasa butonul de com
 const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottest";
 const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
 const ASKREDDIT_NAV_INTENT = "deschide reddit si mergi pe /askreddit";
+const ASKREDDIT_HOT_COMMENT_INTENT = "Intra pe Reddit pe /AskReddit si sorteaza articolele dupa HOT iar la primul articol vreau un comentariu contextual";
 const REDDIT_CONTEXTUAL_COMMENT_INTENT = "vreau sa dschizi reddit si apoi sa intri pe /askreddit si sa lasi un comentariu contextual la primul articol postat";
 const INSTALL_REDDIT_INTENT = "instaleaza reddit pe acest device";
 
@@ -535,18 +536,19 @@ describe("dashboard human workflow routes", () => {
     );
   });
 
-  it("still requires an account for social human workflows", async () => {
+  it("allows social human workflows without account_id during temporary no-safety mode", async () => {
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
       intent: REDDIT_CONTEXTUAL_COMMENT_INTENT,
     });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "ACCOUNT_ID_REQUIRED",
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      target: expect.objectContaining({
+        account_id: null,
+        account_platform: "reddit",
+      }),
     });
-    expect(mocks.db.query).not.toHaveBeenCalled();
   });
 
   it("allows tap/type/swipe steps during temporary no-safety mode", async () => {
@@ -1084,6 +1086,70 @@ describe("dashboard human workflow routes", () => {
       "screen_wake",
       "unlock",
     ]);
+  });
+
+  it("normalizes AI AskReddit hot workflows away from invented sort targets", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);
+    mocks.compileJobService.createOrGet.mockResolvedValueOnce(compileJobRecord({
+      requestKey: requestKey(ASKREDDIT_HOT_COMMENT_INTENT),
+      intent: ASKREDDIT_HOT_COMMENT_INTENT,
+    }));
+    mocks.llmJson.mockReset();
+    mocks.llmJson.mockResolvedValueOnce({
+      id: "workflow_reddit_askreddit_hot_comment",
+      name: "AskReddit hot contextual comment",
+      platform: "reddit",
+      description: "Open AskReddit, sort hot, and comment on the first post.",
+      version: "1.0.0",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [
+        { id: "open_reddit", type: "action", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+        { id: "open_askreddit", type: "action", action: "intent_send", params: { uri: "https://www.reddit.com/r/AskReddit/", packageName: "com.reddit.frontpage" } },
+        { id: "sort_hot", type: "action", action: "semantic_tap", params: { target: "reddit_home_feed.subreddit_toolbar_search_button" } },
+        { id: "open_first_post_comments", type: "action", action: "semantic_tap", params: { target: "reddit.first_visible_post.open_comments" } },
+        { id: "dump_post_context", type: "action", action: "ui_tree_dump", params: { outputVariable: "_postContextUiTree" } },
+        { id: "generate_comment", type: "action", action: "vlm_generate_comment", params: { post_description_var: "_postContextUiTree", target_variable: "_generated_comment" } },
+        { id: "tap_comment_input", type: "action", action: "a11y_find_tap", params: { textContains: "Add a comment" } },
+        { id: "type_comment", type: "action", action: "type_text", params: { textFromVariable: "_generated_comment" } },
+        { id: "post_comment", type: "action", action: "a11y_find_tap", params: { text: "Post" } },
+        { id: "checkpoint", type: "checkpoint" },
+      ],
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: ASKREDDIT_HOT_COMMENT_INTENT,
+    });
+
+    expect(response.status).toBe(202);
+    const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
+    await runner();
+
+    const savedTemplate = mocks.workflowService.saveGeneratedPlanCache.mock.calls[0][0];
+    expect(savedTemplate.steps).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "semantic_tap",
+          params: expect.objectContaining({ target: "reddit_home_feed.subreddit_toolbar_search_button" }),
+        }),
+      ]),
+    );
+    expect(savedTemplate.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "open_askreddit",
+          action: "intent_send",
+          params: expect.objectContaining({ uri: "https://www.reddit.com/r/AskReddit/hot/" }),
+        }),
+        expect.objectContaining({
+          action: "semantic_tap",
+          params: expect.objectContaining({ target: "reddit.first_visible_post.open_comments" }),
+        }),
+      ]),
+    );
   });
 
   it("compiles explicit Reddit contextual comment workflows as standard write workflows", async () => {

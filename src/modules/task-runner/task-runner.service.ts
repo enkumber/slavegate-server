@@ -30,6 +30,7 @@ import {
   type WorkflowRecord,
 } from "../workflows/workflow.service";
 import { workflowEvents } from "../workflow-events";
+import { normalizeCachedHumanWorkflowTemplate } from "../human-workflow/human-workflow-normalization";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -960,9 +961,10 @@ async function executeGeneratedWorkflowTask(
       ...(clientId ? { clientId } : {}),
       ...(campaignId ? { campaignId } : {}),
     };
+    const executableWorkflow = normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata);
     const dispatch = await dispatchGeneratedWorkflowTemplate({
-      templateId: cached.workflow.id,
-      template: cached.workflow,
+      templateId: executableWorkflow.id,
+      template: executableWorkflow,
       deviceId: task.device_id,
       ...(task.account_id ? { accountId: task.account_id } : {}),
       variables,

@@ -341,6 +341,72 @@ describe("task-runner generated_workflow routine", () => {
     expect(result).toMatchObject({ output: REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS });
   });
 
+  it("repairs cached dashboard human AskReddit hot workflows before dispatch", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "Intra pe Reddit pe /AskReddit si sorteaza articolele dupa HOT iar la primul articol vreau un comentariu contextual",
+      },
+    });
+    cached.workflow = {
+      ...cached.workflow,
+      id: "workflow_reddit_askreddit_hot_comment",
+      steps: [
+        {
+          type: "action",
+          id: "open_askreddit",
+          action: "intent_send",
+          params: { uri: "https://www.reddit.com/r/AskReddit/", packageName: "com.reddit.frontpage" },
+        },
+        {
+          type: "action",
+          id: "sort_hot",
+          action: "semantic_tap",
+          params: { target: "reddit_home_feed.subreddit_toolbar_search_button" },
+        },
+        {
+          type: "action",
+          id: "open_first_post_comments",
+          action: "semantic_tap",
+          params: { target: "reddit.first_visible_post.open_comments" },
+        },
+      ],
+    };
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow({
+      ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+      _finalUiTree: { uiTree: "package=com.reddit.frontpage text=r/AskReddit Add a comment Sort comments resourceId=comment_list" },
+    }));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({ success: true });
+    const dispatched = mocks.dispatchGeneratedWorkflowTemplate.mock.calls[0][0];
+    expect(dispatched.template.steps).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "semantic_tap",
+          params: expect.objectContaining({ target: "reddit_home_feed.subreddit_toolbar_search_button" }),
+        }),
+      ]),
+    );
+    expect(dispatched.template.steps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "open_askreddit",
+          action: "intent_send",
+          params: expect.objectContaining({ uri: "https://www.reddit.com/r/AskReddit/hot/" }),
+        }),
+        expect.objectContaining({
+          id: "open_first_post_comments",
+          action: "semantic_tap",
+          params: expect.objectContaining({ target: "reddit.first_visible_post.open_comments" }),
+        }),
+      ]),
+    );
+  });
+
   it("waits for workflow completion and materializes final checkpoint output", async () => {
     const cached = cacheRecord();
     const finalOutput = {

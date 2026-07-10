@@ -18,6 +18,7 @@ import type { WorkflowTemplate } from "../workflows/types";
 import { llmJson } from "../../utils/llm";
 import { shortcutRegistryService } from "../workflow-shortcuts/shortcut-registry.service";
 import { humanWorkflowCompileJobService, type HumanWorkflowCompileJobRecord } from "./compile-job.service";
+import { normalizeHumanWorkflowForKnownRedditTargets } from "./human-workflow-normalization";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
@@ -415,6 +416,10 @@ function normalizeHumanWorkflowTemplateCandidate(
     });
     workflow.steps = ensureHumanWorkflowPreambleSteps(workflow.steps as unknown[]);
     workflow.steps = ensureHumanWorkflowEvidenceSteps(workflow.steps as unknown[], input);
+    return normalizeHumanWorkflowForKnownRedditTargets(workflow, {
+      intent: input.goal,
+      packageName: input.packageName,
+    });
   }
   return workflow;
 }
