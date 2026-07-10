@@ -19,7 +19,7 @@ const REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT = "pe reddit, apasa butonul de com
 const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottest";
 const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
 const ASKREDDIT_NAV_INTENT = "deschide reddit si mergi pe /askreddit";
-const REDDIT_CONTEXTUAL_COMMENT_INTENT = "deschide reddit si mergi pe r/GreeceTravel si intra pe sectiunea de comentarii a primului articol afisat. apoi lasa un comentariu contextual legat de subiectul articolului";
+const REDDIT_CONTEXTUAL_COMMENT_INTENT = "vreau sa dschizi reddit si apoi sa intri pe /askreddit si sa lasi un comentariu contextual la primul articol postat";
 
 const mocks = vi.hoisted(() => ({
   db: {

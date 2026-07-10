@@ -224,7 +224,7 @@ function buildHumanWorkflowCompilePrompt(input: {
 
 function inferHumanWorkflowSafetyClass(goal: string): HumanWorkflowSafetyClass {
   const normalized = goal.toLowerCase();
-  return /\b(lasa|lasă|scrie|trimite|posteaza|postează|submit|post|write|leave|send|type)\b.*\b(comment|comentariu|comentarii|reply|raspuns|răspuns)\b|\b(comment|comenteaza|comentează|reply)\b/.test(normalized)
+  return /\b(las|lasa|lasă|lasi|lași|scrie|trimite|posteaza|postează|submit|post|write|leave|send|type)\b.*\b(comment|comentariu|comentarii|reply|raspuns|răspuns)\b|\b(comment|comenteaza|comentează|comentezi|comentează|reply)\b/.test(normalized)
     ? "standard"
     : "read_only";
 }
