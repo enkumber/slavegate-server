@@ -70,6 +70,7 @@ import type { WorkflowTemplate } from "../modules/workflows/types";
 import {
   computeHumanWorkflowRequestKey,
   humanWorkflowCompilerService,
+  isAccountlessHumanWorkflowIntent,
   type HumanWorkflowCompileReady,
   type HumanWorkflowSafetyClass,
   type HumanWorkflowTarget,
@@ -178,7 +179,7 @@ async function queueHumanAgencyWorkflowRun(input: {
     await client.query("BEGIN");
     await client.query(
       `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`,
-      ["dashboard_human", `${input.target.device_id}:${input.target.account_id}:${input.requestKey}`],
+      ["dashboard_human", `${input.target.device_id}:${input.target.account_id ?? "device"}:${input.requestKey}`],
     );
     const cacheResult = await client.query<Record<string, unknown>>(
       input.cacheKey
@@ -202,7 +203,7 @@ async function queueHumanAgencyWorkflowRun(input: {
        FROM agency_workflow_runs
        WHERE request_key = $1
          AND device_id = $2
-         AND account_id = $3
+         AND account_id IS NOT DISTINCT FROM $3
          AND context ->> 'source' = 'dashboard_human' AND status IN ('queued', 'running')
        ORDER BY created_at ASC
        LIMIT 1
@@ -259,6 +260,7 @@ async function queueHumanAgencyWorkflowRun(input: {
     const taskParams = {
       requestKey: input.requestKey,
       clientId: input.target.client_id,
+      platform: input.target.account_platform,
       agencyWorkflowRunId: runId,
       workflowRunId: runId,
       intent: input.intent,
@@ -720,19 +722,27 @@ router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
     if (typeof device_id !== "string" || !UUID_RE.test(device_id)) {
       return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "device_id must be a UUID" });
     }
-    if (typeof account_id !== "string" || !UUID_RE.test(account_id)) {
-      return res.status(400).json({ ok: false, code: "ACCOUNT_ID_REQUIRED", error: "account_id must be a UUID" });
-    }
     if (typeof intent !== "string" || intent.trim().length === 0) {
       return res.status(400).json({ ok: false, code: "INTENT_REQUIRED", error: "intent required" });
     }
     if (intent.trim().length > 2000) {
       return res.status(400).json({ ok: false, code: "INTENT_TOO_LONG", error: "intent must be at most 2000 characters" });
     }
+    const accountId = typeof account_id === "string" && UUID_RE.test(account_id) ? account_id : null;
+    if (account_id !== undefined && account_id !== null && !accountId) {
+      return res.status(400).json({ ok: false, code: "ACCOUNT_ID_INVALID", error: "account_id must be a UUID when provided" });
+    }
+    if (!accountId && !isAccountlessHumanWorkflowIntent(intent)) {
+      return res.status(400).json({
+        ok: false,
+        code: "ACCOUNT_ID_REQUIRED",
+        error: "account_id is required for social account workflows; device/app management intents may omit it",
+      });
+    }
 
     const data = await humanWorkflowCompilerService.compile({
       deviceId: device_id,
-      accountId: account_id,
+      accountId,
       intent,
     });
     if (data.status === "compiling") {
@@ -813,9 +823,6 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
     if (typeof device_id !== "string" || !UUID_RE.test(device_id)) {
       return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "device_id must be a UUID" });
     }
-    if (typeof account_id !== "string" || !UUID_RE.test(account_id)) {
-      return res.status(400).json({ ok: false, code: "ACCOUNT_ID_REQUIRED", error: "account_id must be a UUID" });
-    }
     if (typeof intent !== "string" || intent.trim().length === 0) {
       return res.status(400).json({ ok: false, code: "INTENT_REQUIRED", error: "intent required" });
     }
@@ -831,8 +838,19 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
     if (compileJobId !== undefined && (typeof compileJobId !== "string" || !UUID_RE.test(compileJobId))) {
       return res.status(400).json({ ok: false, code: "COMPILE_JOB_ID_INVALID", error: "compileJobId must be a UUID" });
     }
+    const accountId = typeof account_id === "string" && UUID_RE.test(account_id) ? account_id : null;
+    if (account_id !== undefined && account_id !== null && !accountId) {
+      return res.status(400).json({ ok: false, code: "ACCOUNT_ID_INVALID", error: "account_id must be a UUID when provided" });
+    }
+    if (!accountId && !isAccountlessHumanWorkflowIntent(intent)) {
+      return res.status(400).json({
+        ok: false,
+        code: "ACCOUNT_ID_REQUIRED",
+        error: "account_id is required for social account workflows; device/app management intents may omit it",
+      });
+    }
 
-    const expectedRequestKey = computeHumanWorkflowRequestKey(device_id, account_id, intent);
+    const expectedRequestKey = computeHumanWorkflowRequestKey(device_id, accountId, intent);
     if (typeof requestKey === "string" && requestKey !== expectedRequestKey) {
       return res.status(400).json({
         ok: false,
@@ -844,7 +862,7 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
     let compiled: HumanWorkflowCompileReady | null = null;
     if (typeof compileJobId === "string") {
       const job = await humanWorkflowCompilerService.getCompileJob(compileJobId);
-      if (!job || job.requestKey !== expectedRequestKey || job.deviceId !== device_id || job.accountId !== account_id) {
+      if (!job || job.requestKey !== expectedRequestKey || job.deviceId !== device_id || job.accountId !== accountId) {
         return res.status(404).json({ ok: false, code: "COMPILE_JOB_NOT_FOUND", error: "compile job not found for request" });
       }
       if (job.status !== "ready" || !job.result) {
@@ -861,7 +879,7 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
     } else {
       const ready = await humanWorkflowCompilerService.compile({
         deviceId: device_id,
-        accountId: account_id,
+        accountId,
         intent,
       });
       if (ready.status !== "ready") {

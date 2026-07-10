@@ -20,6 +20,7 @@ const ASKREDDIT_HOT_INTENT = "Read the first post on AskReddit, sorted by hottes
 const ASKREDDIT_RO_INTENT = "citeste primul post de pe AskReddit";
 const ASKREDDIT_NAV_INTENT = "deschide reddit si mergi pe /askreddit";
 const REDDIT_CONTEXTUAL_COMMENT_INTENT = "vreau sa dschizi reddit si apoi sa intri pe /askreddit si sa lasi un comentariu contextual la primul articol postat";
+const INSTALL_REDDIT_INTENT = "instaleaza reddit pe acest device";
 
 const mocks = vi.hoisted(() => ({
   db: {
@@ -89,6 +90,10 @@ vi.mock("../ws/direct-ws.server", () => ({
 
 function requestKey(intent = INTENT): string {
   return crypto.createHash("sha256").update(`${DEVICE_ID}:${ACCOUNT_ID}:${intent}`).digest("hex").slice(0, 24);
+}
+
+function accountlessRequestKey(intent = INSTALL_REDDIT_INTENT): string {
+  return crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
 }
 
 function cacheKey(intent = INTENT): string {
@@ -487,6 +492,62 @@ describe("dashboard human workflow routes", () => {
     });
     expect(response.body.data.plan.actions).toHaveLength(2);
   }, 10_000);
+
+  it("compiles accountless device app install workflows", async () => {
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{
+        device_id: DEVICE_ID,
+        device_model: "ONEPLUS A6013",
+        device_name: "Mama",
+      }],
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      intent: INSTALL_REDDIT_INTENT,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      status: "ready",
+      requestKey: accountlessRequestKey(),
+      cacheHit: false,
+      source: "shortcut",
+      safetyClass: "standard",
+      platform: "reddit",
+      target: {
+        device_id: DEVICE_ID,
+        account_id: null,
+        account_username: null,
+        account_platform: "reddit",
+      },
+    });
+    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "dashboard_human_android_install_reddit_v1" }),
+      expect.any(Object),
+      accountlessRequestKey(),
+      expect.objectContaining({
+        source: "dashboard_human",
+        accountId: null,
+        platform: "reddit",
+      }),
+    );
+  });
+
+  it("still requires an account for social human workflows", async () => {
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      intent: REDDIT_CONTEXTUAL_COMMENT_INTENT,
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "ACCOUNT_ID_REQUIRED",
+    });
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
 
   it("allows tap/type/swipe steps during temporary no-safety mode", async () => {
     const base = cachedPlan();
@@ -1580,6 +1641,7 @@ describe("dashboard human workflow routes", () => {
     expect(taskInsert?.[1][2]).toBe(JSON.stringify({
       requestKey: requestKey(),
       clientId: CLIENT_ID,
+      platform: "reddit",
       agencyWorkflowRunId: RUN_ID,
       workflowRunId: RUN_ID,
       intent: INTENT,
@@ -1635,6 +1697,7 @@ describe("dashboard human workflow routes", () => {
     expect(taskInsert?.[1][2]).toBe(JSON.stringify({
       requestKey: requestKey(),
       clientId: null,
+      platform: "reddit",
       agencyWorkflowRunId: RUN_ID,
       workflowRunId: RUN_ID,
       intent: INTENT,

@@ -8,7 +8,7 @@ export interface HumanWorkflowCompileJobRecord {
   id: string;
   requestKey: string;
   deviceId: string;
-  accountId: string;
+  accountId: string | null;
   intent: string;
   platform: string;
   status: HumanWorkflowCompileJobStatus;
@@ -57,7 +57,7 @@ function rowToJob(row: Record<string, unknown>): HumanWorkflowCompileJobRecord {
     id: row.id as string,
     requestKey: row.request_key as string,
     deviceId: row.device_id as string,
-    accountId: row.account_id as string,
+    accountId: (row.account_id as string | null) ?? null,
     intent: row.intent as string,
     platform: row.platform as string,
     status: row.status as HumanWorkflowCompileJobStatus,
@@ -91,7 +91,7 @@ export class HumanWorkflowCompileJobService {
   async createOrGet(input: {
     requestKey: string;
     deviceId: string;
-    accountId: string;
+    accountId: string | null;
     intent: string;
     platform: string;
   }): Promise<HumanWorkflowCompileJobRecord> {

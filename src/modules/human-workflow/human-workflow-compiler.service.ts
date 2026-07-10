@@ -36,8 +36,8 @@ export interface HumanWorkflowTarget {
   device_id: string;
   device_model: string | null;
   device_name: string | null;
-  account_id: string;
-  account_username: string;
+  account_id: string | null;
+  account_username: string | null;
   account_platform: string;
   client_id: string | null;
 }
@@ -67,16 +67,39 @@ export type HumanWorkflowCompileAccepted = {
 
 export type HumanWorkflowCompileResult = HumanWorkflowCompileReady | HumanWorkflowCompileAccepted;
 
-export function computeHumanWorkflowRequestKey(deviceId: string, accountId: string, intent: string): string {
+export function computeHumanWorkflowRequestKey(deviceId: string, accountId: string | null | undefined, intent: string): string {
+  const accountKey = accountId && accountId.trim().length > 0 ? accountId : "device";
   return crypto
     .createHash("sha256")
-    .update(`${deviceId}:${accountId}:${intent.trim()}`)
+    .update(`${deviceId}:${accountKey}:${intent.trim()}`)
     .digest("hex")
     .slice(0, 24);
 }
 
 function humanWorkflowAppId(platform: string): string {
   return PLATFORM_APP_IDS[platform.toLowerCase()] ?? platform;
+}
+
+export function isAccountlessHumanWorkflowIntent(goal: string): boolean {
+  const normalized = goal.toLowerCase();
+  const appManagement =
+    /\b(instaleaza|instalează|instalez|instalare|install|download|descarca|descarcă|actualizeaza|actualizează|update)\b/.test(normalized);
+  const knownApp =
+    /\b(reddit|instagram|tiktok|facebook|twitter|x|youtube|threads)\b/.test(normalized) ||
+    /\bcom\.[a-z0-9_.-]+\b/.test(normalized);
+  return appManagement && knownApp;
+}
+
+function inferHumanWorkflowPlatform(goal: string): string {
+  const normalized = goal.toLowerCase();
+  if (normalized.includes("reddit") || normalized.includes("com.reddit.frontpage")) return "reddit";
+  if (normalized.includes("instagram") || normalized.includes("com.instagram.android")) return "instagram";
+  if (normalized.includes("tiktok") || normalized.includes("com.zhiliaoapp.musically")) return "tiktok";
+  if (normalized.includes("facebook") || normalized.includes("com.facebook.katana")) return "facebook";
+  if (normalized.includes("twitter") || normalized.includes(" x ") || normalized.includes("com.twitter.android")) return "twitter";
+  if (normalized.includes("youtube") || normalized.includes("com.google.android.youtube")) return "youtube";
+  if (normalized.includes("threads")) return "threads";
+  return "android";
 }
 
 function humanWorkflowAsyncCompileTimeoutMs(): number {
@@ -197,7 +220,7 @@ function buildHumanWorkflowCompilePrompt(input: {
   return [
     "Return JSON only. Generate one Phone Network WorkflowTemplate.",
     `Goal: ${input.goal}`,
-    `Context: platform ${input.platform}, package ${input.packageName}, account @${input.target.account_username}, preview compile only.`,
+    `Context: platform ${input.platform}, package ${input.packageName}, account ${input.target.account_username ? `@${input.target.account_username}` : "(none; device-management workflow)"}, preview compile only.`,
     compactHumanWorkflowAppMapHints(input.appMap, input.goal),
     "Required fields: id,name,platform,description,version,steps,defaultVerificationStrategy,dataRetentionDays.",
     `platform must be exactly ${input.platform}.`,
@@ -209,6 +232,7 @@ function buildHumanWorkflowCompilePrompt(input: {
       : "For standard write workflows set recoveryPolicy.maxAttemptsPerStep=2, maxAttemptsPerWorkflow=4, maxRecoveryActionsPerAttempt=4.",
     "recoveryPolicy.allowedRecoveryRequests may include ai_recovery_workflow, refresh_screen_state, retry_current_step, return_to_anchor, dismiss_transient_ui, navigate_back_once, verify_anchor.",
     "Allowed actions: open_app,intent_send,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen,ui_tree_dump,type_text,vlm_generate_comment.",
+    "For app install goals, open the Play Store listing with intent_send using packageName=com.android.vending and uri=market://details?id=<targetPackage>, then tap Install if visible.",
     ...writeInstructions,
     "Start device workflows with action screen_wake, then action unlock, before opening or navigating apps.",
     `open_app must use params.packageName=${input.packageName}.`,
@@ -224,9 +248,84 @@ function buildHumanWorkflowCompilePrompt(input: {
 
 function inferHumanWorkflowSafetyClass(goal: string): HumanWorkflowSafetyClass {
   const normalized = goal.toLowerCase();
+  if (isAccountlessHumanWorkflowIntent(goal)) return "standard";
   return /\b(las|lasa|lasă|lasi|lași|scrie|trimite|posteaza|postează|submit|post|write|leave|send|type)\b.*\b(comment|comentariu|comentarii|reply|raspuns|răspuns)\b|\b(comment|comenteaza|comentează|comentezi|comentează|reply)\b/.test(normalized)
     ? "standard"
     : "read_only";
+}
+
+function redditInstallWorkflowTemplate(): WorkflowTemplate {
+  return {
+    id: "dashboard_human_android_install_reddit_v1",
+    name: "Install Reddit from Play Store",
+    platform: "reddit",
+    description: "Open the Reddit Play Store listing and start installation when possible.",
+    version: "1.0.0",
+    safetyClass: "standard",
+    defaultVerificationStrategy: "local_only",
+    dataRetentionDays: 7,
+    recoveryPolicy: {
+      autonomy: "ai_autopilot",
+      maxAttemptsPerStep: 2,
+      maxAttemptsPerWorkflow: 4,
+      maxRecoveryActionsPerAttempt: 4,
+      allowedRecoveryRequests: [
+        "ai_recovery_workflow",
+        "refresh_screen_state",
+        "retry_current_step",
+        "return_to_anchor",
+        "dismiss_transient_ui",
+        "navigate_back_once",
+        "verify_anchor",
+      ],
+      requireStateVerification: true,
+      learnFromFailure: true,
+    },
+    steps: [
+      { id: "wake_screen", type: "action", action: "screen_wake", params: {}, timeoutMs: 10_000 },
+      { id: "unlock_device", type: "action", action: "unlock", params: {}, timeoutMs: 15_000 },
+      {
+        id: "open_reddit_play_store",
+        type: "action",
+        action: "intent_send",
+        params: {
+          action: "android.intent.action.VIEW",
+          packageName: "com.android.vending",
+          uri: "market://details?id=com.reddit.frontpage",
+        },
+        timeoutMs: 15_000,
+      },
+      { id: "settle_play_store", type: "action", action: "wait_for_idle", params: { timeoutMs: 3_000 } },
+      {
+        id: "tap_install",
+        type: "action",
+        action: "a11y_find_tap",
+        params: {
+          text: "Install",
+          textAlternatives: ["Install", "Instalează", "Update", "Open"],
+          optional: true,
+        },
+        timeoutMs: 20_000,
+      },
+      { id: "wait_for_install_start", type: "action", action: "wait_for_idle", params: { timeoutMs: 5_000 } },
+      {
+        id: "capture_install_state",
+        type: "action",
+        action: "ui_tree_dump",
+        params: {
+          packageName: "com.android.vending",
+          outputVariable: "_finalUiTree",
+        },
+        timeoutMs: 10_000,
+      },
+      { id: "install_flow_started", type: "checkpoint", reason: "Reddit Play Store install flow opened or started" },
+    ],
+  };
+}
+
+function accountlessShortcutTemplate(intent: string, platform: string): WorkflowTemplate | null {
+  if (platform === "reddit" && isAccountlessHumanWorkflowIntent(intent)) return redditInstallWorkflowTemplate();
+  return null;
 }
 
 function normalizeHumanWorkflowTemplateCandidate(
@@ -475,7 +574,28 @@ function cacheKeyFromCompileJob(job: HumanWorkflowCompileJobRecord): string | nu
 }
 
 export class HumanWorkflowCompilerService {
-  async resolveTarget(deviceId: string, accountId: string): Promise<HumanWorkflowTarget | null> {
+  async resolveTarget(deviceId: string, accountId: string | null | undefined, intent?: string): Promise<HumanWorkflowTarget | null> {
+    if (!accountId && intent && isAccountlessHumanWorkflowIntent(intent)) {
+      const platform = inferHumanWorkflowPlatform(intent);
+      const result = await getDb().query(
+        `SELECT id AS device_id, model AS device_model, friendly_name AS device_name
+         FROM devices
+         WHERE id = $1`,
+        [deviceId],
+      );
+      const row = result.rows[0] as Record<string, unknown> | undefined;
+      if (!row) return null;
+      return {
+        device_id: row.device_id as string,
+        device_model: (row.device_model as string | null) ?? null,
+        device_name: (row.device_name as string | null) ?? null,
+        account_id: null,
+        account_username: null,
+        account_platform: platform,
+        client_id: null,
+      };
+    }
+    if (!accountId) return null;
     const result = await getDb().query(
       `SELECT
          d.id AS device_id,
@@ -509,12 +629,12 @@ export class HumanWorkflowCompilerService {
 
   async compile(input: {
     deviceId: string;
-    accountId: string;
+    accountId?: string | null;
     intent: string;
   }): Promise<HumanWorkflowCompileResult> {
     const intent = input.intent.trim();
     const requestKey = computeHumanWorkflowRequestKey(input.deviceId, input.accountId, intent);
-    const target = await this.resolveTarget(input.deviceId, input.accountId);
+    const target = await this.resolveTarget(input.deviceId, input.accountId, intent);
     if (!target) {
       throw Object.assign(new Error("Device or account not found"), { status: 400, code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND" });
     }
@@ -522,11 +642,22 @@ export class HumanWorkflowCompilerService {
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
     if (cached) return readyFromCache(cached, target, requestKey, "cache");
 
-    const shortcutMatch = await shortcutRegistryService.lookupActiveShortcut({
-      platform: target.account_platform,
-      intent,
-      target: { ...target },
-    });
+    const accountlessTemplate = !target.account_id ? accountlessShortcutTemplate(intent, target.account_platform) : null;
+    if (accountlessTemplate) {
+      return this.compileShortcut("accountless-device-management", "accountless_device_management", accountlessTemplate, {
+        requestKey,
+        intent,
+        target,
+      });
+    }
+
+    const shortcutMatch = target.account_id
+      ? await shortcutRegistryService.lookupActiveShortcut({
+          platform: target.account_platform,
+          intent,
+          target: { ...target, account_id: target.account_id, account_username: target.account_username ?? "" },
+        })
+      : null;
     if (shortcutMatch) {
       await shortcutRegistryService.recordHit(shortcutMatch.shortcut.id);
       const ready = await this.compileShortcut(shortcutMatch.shortcut.id, shortcutMatch.shortcut.key, shortcutMatch.shortcut.workflowTemplate, {
@@ -548,7 +679,7 @@ export class HumanWorkflowCompilerService {
     const job = existingJob ?? await humanWorkflowCompileJobService.createOrGet({
       requestKey,
       deviceId: input.deviceId,
-      accountId: input.accountId,
+      accountId: input.accountId ?? null,
       intent,
       platform: target.account_platform,
     });
@@ -574,7 +705,7 @@ export class HumanWorkflowCompilerService {
     if (existing.status === "queued" || existing.status === "running") return existing;
     if (existing.status !== "failed") return existing;
 
-    const target = await this.resolveTarget(existing.deviceId, existing.accountId);
+    const target = await this.resolveTarget(existing.deviceId, existing.accountId, existing.intent);
     if (!target) {
       throw Object.assign(new Error("Device or account not found"), { status: 400, code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND" });
     }
@@ -626,7 +757,7 @@ export class HumanWorkflowCompilerService {
       cacheKey: compiledPlan.cacheKey,
       source: "shortcut",
       plan: humanWorkflowPlanPreview(template, compiledPlan),
-      safetyClass: "read_only",
+      safetyClass: template.safetyClass ?? compiledPlan.metadata.safetyClass ?? "read_only",
       platform,
       target: input.target,
       llmBudget: compiledPlan.llmBudget,

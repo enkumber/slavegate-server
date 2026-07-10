@@ -35,7 +35,7 @@ import { workflowEvents } from "../workflow-events";
 
 export interface TaskRow {
   id: string;
-  account_id: string;
+  account_id: string | null;
   device_id: string;
   routine: string;
   params: Record<string, unknown>;
@@ -97,7 +97,7 @@ function publishGeneratedWorkflowTaskEvent(
     taskId: task.id,
     agencyWorkflowRunId,
     clientId,
-    accountId: task.account_id,
+    ...(task.account_id ? { accountId: task.account_id } : {}),
     deviceId: task.device_id,
     status: event.replace("task_", ""),
     details: {
@@ -537,12 +537,15 @@ async function executeTask(task: TaskRow): Promise<void> {
     
     console.log(`[task-runner] Executing task ${taskId.slice(0, 8)} (${task.routine}) on device ${deviceId.slice(0, 8)}`);
     
-    // Get account platform
-    const accountResult = await db.query<{ platform: string; client_id: string | null }>(
-      "SELECT platform, client_id FROM accounts WHERE id = $1",
-      [task.account_id]
-    );
-    const platform = accountResult.rows[0]?.platform || "instagram";
+    // Accountless device-management tasks carry their platform in params.
+    const accountResult = task.account_id
+      ? await db.query<{ platform: string; client_id: string | null }>(
+          "SELECT platform, client_id FROM accounts WHERE id = $1",
+          [task.account_id],
+        )
+      : { rows: [] };
+    const taskPlatform = typeof task.params?.platform === "string" ? task.params.platform : null;
+    const platform = accountResult.rows[0]?.platform || taskPlatform || "instagram";
     const accountClientId = accountResult.rows[0]?.client_id ?? null;
     
     // Route by task type
@@ -901,7 +904,7 @@ async function executeGeneratedWorkflowTask(
       source: "task_runner",
       routine,
       taskId: task.id,
-      accountId: task.account_id,
+      ...(task.account_id ? { accountId: task.account_id } : {}),
       deviceId: task.device_id,
       platform,
       ...(agencyWorkflowRunIdFromTask(task) ? { agencyWorkflowRunId: agencyWorkflowRunIdFromTask(task)! } : {}),
@@ -912,7 +915,7 @@ async function executeGeneratedWorkflowTask(
       templateId: cached.workflow.id,
       template: cached.workflow,
       deviceId: task.device_id,
-      accountId: task.account_id,
+      ...(task.account_id ? { accountId: task.account_id } : {}),
       variables,
       controlPlaneContext,
       logPrefix: "task-runner",
@@ -1028,11 +1031,14 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
   }
   
   // Execute synchronously
-  const accountResult = await db.query<{ platform: string; client_id: string | null }>(
+  const accountResult = task.account_id
+    ? await db.query<{ platform: string; client_id: string | null }>(
     "SELECT platform, client_id FROM accounts WHERE id = $1",
     [task.account_id]
-  );
-  const platform = accountResult.rows[0]?.platform || "instagram";
+      )
+    : { rows: [] };
+  const taskPlatform = typeof task.params?.platform === "string" ? task.params.platform : null;
+  const platform = accountResult.rows[0]?.platform || taskPlatform || "instagram";
   const accountClientId = accountResult.rows[0]?.client_id ?? null;
   
   deviceLocks.set(task.device_id, true);
