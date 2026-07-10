@@ -554,6 +554,38 @@ describe("Generated workflow contract validation", () => {
     }
   });
 
+  it("allows read-only workflows to navigate to Reddit post comments", async () => {
+    const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+    const result = validateGeneratedWorkflowTemplate({
+      id: "reddit_first_visible_post_comments_preview_v1",
+      name: "Reddit first visible post comments preview",
+      platform: "reddit",
+      description: "Open the comments section for the first visible post without writing anything.",
+      version: "1.0.0",
+      safetyClass: "read_only",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      recoveryPolicy: {
+        autonomy: "ai_autopilot",
+        maxAttemptsPerStep: 3,
+        maxAttemptsPerWorkflow: 6,
+        maxRecoveryActionsPerAttempt: 6,
+        allowedRecoveryRequests: ["ai_recovery_workflow", "refresh_screen_state", "retry_current_step"],
+        requireStateVerification: true,
+        learnFromFailure: true,
+      },
+      steps: [
+        { type: "action", id: "open_reddit", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
+        { type: "action", id: "tap_first_visible_post_comments", action: "semantic_tap", params: { target: "reddit.first_visible_post.open_comments" } },
+        { type: "action", id: "capture_comments_screen", action: "ui_tree_dump", params: { outputVariable: "_finalUiTree" } },
+        { type: "checkpoint", id: "comments_opened" },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
   it("allows standard generated workflows to create and type contextual comments", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
     const result = validateGeneratedWorkflowTemplate({

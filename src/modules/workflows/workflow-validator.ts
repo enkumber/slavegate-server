@@ -303,6 +303,49 @@ function normalizeGeneratedWorkflowPlatform(platform: string): string {
   return platform.trim().toLowerCase();
 }
 
+function isReadOnlySafeCommentReference(normalized: string, tokenized: string[], compact: string): boolean {
+  const hasWriteIntent =
+    tokenized.some((token) => ["add", "create", "draft", "leave", "post", "send", "submit", "type", "write"].includes(token)) ||
+    normalized.includes("add a comment");
+  return (
+    (!hasWriteIntent && tokenized.includes("comments")) ||
+    compact.includes("opencomments") ||
+    compact.includes("commentssection") ||
+    compact.includes("commentsection") ||
+    compact.includes("commentscreen") ||
+    compact.includes("commentlist") ||
+    compact.includes("commentspreview") ||
+    compact.includes("commentsopened") ||
+    compact.includes("readcomments") ||
+    compact.includes("viewcomments") ||
+    compact.includes("firstvisiblepostcomments") ||
+    compact.includes("firstvisiblepostopencomments") ||
+    normalized.includes("open comments") ||
+    normalized.includes("comments section") ||
+    normalized.includes("comment section") ||
+    normalized.includes("comments screen") ||
+    normalized.includes("comment list") ||
+    normalized.includes("read comments") ||
+    normalized.includes("view comments") ||
+    normalized.includes("sectiunea de comentarii") ||
+    normalized.includes("secțiunea de comentarii")
+  );
+}
+
+function isReadOnlySafePostReference(normalized: string, compact: string): boolean {
+  return (
+    compact.includes("firstvisiblepost") ||
+    compact.includes("postdetail") ||
+    compact.includes("postcomments") ||
+    compact.includes("openpost") ||
+    normalized.includes("first post") ||
+    normalized.includes("visible post") ||
+    normalized.includes("post detail") ||
+    normalized.includes("post comments") ||
+    normalized.includes("open post")
+  );
+}
+
 function containsMutationTerm(value: unknown): string | null {
   if (typeof value === "string") {
     const normalized = value.trim().toLowerCase();
@@ -317,6 +360,12 @@ function containsMutationTerm(value: unknown): string | null {
         return false;
       }
       if (term === "send" && compact === "intentsend") {
+        return false;
+      }
+      if ((term === "comment" || term === "reply") && isReadOnlySafeCommentReference(normalized, tokenized, compact)) {
+        return false;
+      }
+      if (term === "post" && isReadOnlySafePostReference(normalized, compact)) {
         return false;
       }
       const compactTerm = term.replace(/[^a-z0-9]/g, "");
