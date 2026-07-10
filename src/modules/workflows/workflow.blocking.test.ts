@@ -486,6 +486,8 @@ describe("Generated workflow contract validation", () => {
     expect(executorSource).toContain("stats.runtimeLlmCalls++");
     expect(executorSource).toContain("normalizeA11yFindTapParams(finalParams)");
     expect(executorSource).toContain('params["resourceId"] = "add_comment_button"');
+    expect(executorSource).toContain("function isReadinessAction");
+    expect(executorSource).toContain("continuing because readiness actions are idempotent");
     expect(executorSource).toContain("generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReasonFromError(err)).inc()");
     expect(executorSource).toContain("generatedWorkflowRecoveryBudgetExhausted?.labels(platform).inc()");
 

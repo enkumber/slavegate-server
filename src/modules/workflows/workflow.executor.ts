@@ -125,6 +125,15 @@ function recoveryReasonFromError(err: unknown): string {
   return "deterministic_failure";
 }
 
+function isReadinessAction(action: string): boolean {
+  return action === "screen_wake" || action === "unlock";
+}
+
+function isJobResultTimeoutError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("JOB_RESULT timeout");
+}
+
 function generatedWorkflowRecoveryAttemptsByStep(checkpoint: WorkflowCheckpoint): Record<string, number> {
   const existing = checkpoint.variables[GENERATED_WORKFLOW_RECOVERY_ATTEMPTS_KEY];
   if (existing && typeof existing === "object" && !Array.isArray(existing)) {
@@ -1197,7 +1206,19 @@ async function executeActionStep(
 
   // ── Await JOB_RESULT from device ──
   // resolveJobResult() will be called by WsServer when JOB_RESULT arrives.
-  const result = await awaitJobResult(jobId, timeoutMs + 5_000 /* grace period */);
+  let result: JobStepResult;
+  try {
+    result = await awaitJobResult(jobId, timeoutMs + 5_000 /* grace period */);
+  } catch (err) {
+    if (isReadinessAction(step.action) && isJobResultTimeoutError(err) && isDeviceOnline(deviceId)) {
+      console.warn(
+        `[workflow] ${workflowId} step ${stepIndex} ${step.action} timed out waiting for JOB_RESULT, ` +
+        "but device is online; continuing because readiness actions are idempotent"
+      );
+      return;
+    }
+    throw err;
+  }
 
   if (result.status === "failed" || result.status === "timeout") {
     const retries = step.retries ?? 0;
