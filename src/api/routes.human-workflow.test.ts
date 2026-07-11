@@ -1520,6 +1520,41 @@ describe("dashboard human workflow routes", () => {
     });
   });
 
+  it("does not validate generated workflow payload fields on the human run route", async () => {
+    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
+      status: "ready",
+      result: readyCompilePayload(),
+      cacheKey: cacheKey(),
+    }));
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [cachedPlanRow()] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: RUN_ID }] })
+      .mockResolvedValueOnce({ rows: [{ id: TASK_ID }] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await postJson("/api/workflows/human/run", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: INTENT,
+      requestKey: requestKey(),
+      compileJobId: COMPILE_JOB_ID,
+      workflow: {
+        platform: "gmail",
+        steps: [],
+      },
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      id: RUN_ID,
+      status: "queued",
+      taskId: TASK_ID,
+    });
+  });
+
   it("allows destructive cached plans through the temporary no-safety compile gate", async () => {
     const base = cachedPlan();
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({

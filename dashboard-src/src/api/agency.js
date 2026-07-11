@@ -8,7 +8,17 @@ export const agencyApi = {
     humanWorkflow: {
         compile: (data) => api.post("/workflows/human/compile", data),
         getCompileJob: (id) => api.get(`/workflows/human/compile-jobs/${id}`),
-        run: (data) => api.post("/workflows/human/run", data),
+        run: (data) => {
+            const { device_id, account_id, intent, requestKey, cacheKey, compileJobId } = data;
+            return api.post("/workflows/human/run", {
+                device_id,
+                account_id,
+                intent,
+                requestKey,
+                cacheKey,
+                compileJobId,
+            });
+        },
         getRun: (id) => api.get(`/agency/workflow-runs/${id}`),
     },
     // Clients

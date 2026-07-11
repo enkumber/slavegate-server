@@ -94,6 +94,12 @@ export interface HumanWorkflowCompileRequest {
   intent: string;
 }
 
+export interface HumanWorkflowRunRequest extends HumanWorkflowCompileRequest {
+  requestKey?: string;
+  cacheKey?: string;
+  compileJobId?: string;
+}
+
 export interface HumanWorkflowTarget {
   device_id: string;
   device_model: string | null;
@@ -194,8 +200,17 @@ export const agencyApi = {
       api.post<HumanWorkflowCompileResult>("/workflows/human/compile", data),
     getCompileJob: (id: string) =>
       api.get<HumanWorkflowCompileJobResult>(`/workflows/human/compile-jobs/${id}`),
-    run: (data: HumanWorkflowCompileRequest & { requestKey?: string; cacheKey?: string; compileJobId?: string }) =>
-      api.post<HumanWorkflowRunResult>("/workflows/human/run", data),
+    run: (data: HumanWorkflowRunRequest) => {
+      const { device_id, account_id, intent, requestKey, cacheKey, compileJobId } = data;
+      return api.post<HumanWorkflowRunResult>("/workflows/human/run", {
+        device_id,
+        account_id,
+        intent,
+        requestKey,
+        cacheKey,
+        compileJobId,
+      });
+    },
     getRun: (id: string) => api.get<AgencyWorkflowRun>(`/agency/workflow-runs/${id}`),
   },
 
