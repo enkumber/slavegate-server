@@ -373,6 +373,13 @@ function normalizeHumanWorkflowTemplateCandidate(
     learnFromFailure: true,
   };
 
+  if (!Array.isArray(workflow.steps) || workflow.steps.length === 0) {
+    workflow.steps = [
+      { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
+      { id: "unlock_device", type: "action", action: "unlock", params: {} },
+    ];
+  }
+
   if (Array.isArray(workflow.steps)) {
     workflow.steps = workflow.steps.map((step, index) => {
       if (!isRecord(step)) return step;
