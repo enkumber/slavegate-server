@@ -1088,7 +1088,7 @@ describe("dashboard human workflow routes", () => {
     ]);
   });
 
-  it("accepts android human workflows when the AI returns empty steps", async () => {
+  it("rejects android human workflows when the AI returns empty steps for a real task", async () => {
     const intent = "fa un cont gmail";
     const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
@@ -1125,17 +1125,56 @@ describe("dashboard human workflow routes", () => {
 
     expect(response.status).toBe(202);
     const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
-    await expect(runner()).resolves.toMatchObject({
-      status: "ready",
-      platform: "android",
+    await expect(runner()).rejects.toMatchObject({
+      code: "HUMAN_WORKFLOW_UNDERCOMPILED",
+      retryable: true,
+      nextAction: "retry_compile",
+    });
+    expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
+  });
+
+  it("rejects cached dashboard human workflows that only wake and unlock for a real task", async () => {
+    const intent = "fa un cont nou de gmail si da-mi aici credentialele";
+    const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
+      ...cachedPlan(),
+      requestKey: key,
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent,
+        platform: "android",
+      },
+      workflow: {
+        ...cachedPlan().workflow,
+        id: "step-01-wake-device",
+        platform: "android",
+        safetyClass: "standard",
+        steps: [
+          { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
+          { id: "unlock_device", type: "action", action: "unlock", params: {} },
+        ],
+      },
+    });
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{
+        device_id: DEVICE_ID,
+        device_model: "ONEPLUS A5010",
+        device_name: "Test Phone",
+      }],
     });
 
-    const savedTemplate = mocks.workflowService.saveGeneratedPlanCache.mock.calls[0][0];
-    expect(savedTemplate.platform).toBe("android");
-    expect(savedTemplate.steps.slice(0, 2)).toEqual([
-      expect.objectContaining({ id: "wake_screen", type: "action", action: "screen_wake" }),
-      expect.objectContaining({ id: "unlock_device", type: "action", action: "unlock" }),
-    ]);
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      intent,
+    });
+
+    expect(response.status).toBe(422);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "HUMAN_WORKFLOW_UNDERCOMPILED",
+      retryable: true,
+      nextAction: "retry_compile",
+    });
   });
 
   it("normalizes AI AskReddit hot workflows away from invented sort targets", async () => {
@@ -1919,7 +1958,16 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.client.query.mock.calls.filter(([sql]) => String(sql).includes("pg_advisory_xact_lock"))).toHaveLength(2);
   });
 
-  it("rejects run when requestKey does not match device, account and intent", async () => {
+  it("accepts cached requestKey runs even when the requestKey differs from the freshly computed preview key", async () => {
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [cachedPlanRow()] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: RUN_ID }] })
+      .mockResolvedValueOnce({ rows: [{ id: TASK_ID }] })
+      .mockResolvedValueOnce({ rows: [] });
+
     const response = await postJson("/api/workflows/human/run", {
       device_id: DEVICE_ID,
       account_id: ACCOUNT_ID,
@@ -1928,12 +1976,14 @@ describe("dashboard human workflow routes", () => {
       cacheKey: cacheKey(),
     });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "REQUEST_KEY_MISMATCH",
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      id: RUN_ID,
+      taskId: TASK_ID,
+      requestKey: "f".repeat(24),
+      cacheKey: cacheKey(),
     });
-    expect(mocks.db.connect).not.toHaveBeenCalled();
+    expect(mocks.db.connect).toHaveBeenCalled();
   });
 
   it("rejects run when cacheKey does not match the compiled preview", async () => {

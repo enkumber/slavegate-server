@@ -328,6 +328,44 @@ describe("task-runner generated_workflow routine", () => {
     }));
   });
 
+  it("fails cached dashboard human workflows that only wake and unlock for a real task", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "fa un cont nou de gmail si da-mi aici credentialele",
+        platform: "android",
+      },
+    });
+    cached.workflow = {
+      ...cached.workflow,
+      id: "step-01-wake-device",
+      platform: "android",
+      safetyClass: "standard",
+      steps: [
+        { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
+        { id: "unlock_device", type: "action", action: "unlock", params: {} },
+      ],
+    };
+    mockTaskDb(task({
+      requestKey: REQUEST_KEY,
+      intent: "fa un cont nou de gmail si da-mi aici credentialele",
+      source: "dashboard_human",
+    }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: false,
+      failReason: expect.stringContaining("human workflow undercompiled"),
+      generatedWorkflow: expect.objectContaining({
+        failureCode: "HUMAN_WORKFLOW_UNDERCOMPILED",
+      }),
+    });
+    expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
+    expect(mocks.taskRunnerDispatchLabels).toHaveBeenCalledWith("generated_workflow", "request_key", "dispatch_failed");
+  });
+
   it("materializes output schema defaults so edge checkpoints retain required result fields", async () => {
     const cached = cacheRecord();
     mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));

@@ -157,6 +157,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+const READINESS_ONLY_ACTIONS = new Set([
+  "screen_wake",
+  "unlock",
+  "wait_for_idle",
+  "detect_current_screen",
+  "ui_tree_dump",
+]);
+
+function isReadinessOnlyIntent(goal: string): boolean {
+  const normalized = goal.toLowerCase();
+  const asksForReadiness = /\b(wake|wakeup|unlock|deblocheaza|deblochează|aprinde|trezeste|trezește|screen)\b/.test(normalized);
+  const asksForRealWork = /\b(gmail|cont|account|create|creeaza|creează|fa |fă |install|instaleaza|instalează|open|deschide|navigate|mergi|reddit|instagram|tiktok|facebook|youtube|comment|comentariu|posteaza|postează|type|scrie)\b/.test(normalized);
+  return asksForReadiness && !asksForRealWork;
+}
+
+export function humanWorkflowUndercompiledReason(workflow: WorkflowTemplate, intent: string): string | null {
+  const steps = Array.isArray(workflow.steps) ? workflow.steps : [];
+  if (steps.length === 0) return "workflow has no steps";
+  if (isReadinessOnlyIntent(intent)) return null;
+
+  const actionSteps = steps.filter((step) => step.type === "action");
+  if (actionSteps.length === 0) return "workflow has no executable action steps";
+  const readinessOnly = actionSteps.every((step) => READINESS_ONLY_ACTIONS.has(String(step.action ?? "")));
+  if (readinessOnly) {
+    return "workflow only wakes/unlocks/observes the device and does not perform the requested task";
+  }
+  return null;
+}
+
+export function assertHumanWorkflowMeaningful(workflow: WorkflowTemplate, intent: string): void {
+  const reason = humanWorkflowUndercompiledReason(workflow, intent);
+  if (!reason) return;
+  throw Object.assign(new Error(`human workflow undercompiled: ${reason}`), {
+    status: 422,
+    code: "HUMAN_WORKFLOW_UNDERCOMPILED",
+    retryable: true,
+    nextAction: "retry_compile",
+  });
+}
+
 function compactHumanWorkflowAppMapHints(appMap: AppMap | null, goal: string): string {
   if (!appMap) return "No app map available; use UI-tree semantic targets.";
   const goalTerms = new Set(
@@ -565,6 +605,8 @@ function readyFromCache(
   requestKey: string,
   source: "cache" | "shortcut" = "cache",
 ): HumanWorkflowCompileReady {
+  const cachedIntent = typeof cached.sourceMetadata?.intent === "string" ? cached.sourceMetadata.intent : requestKey;
+  assertHumanWorkflowMeaningful(cached.workflow, cachedIntent);
   return {
     status: "ready",
     requestKey,
@@ -749,6 +791,7 @@ export class HumanWorkflowCompilerService {
       });
     }
     const template = validation.template;
+    assertHumanWorkflowMeaningful(template, input.intent);
     let compiledPlan = compileGeneratedWorkflowTemplate(template);
     compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
     await workflowService.saveTemplate(template);
@@ -810,6 +853,7 @@ export class HumanWorkflowCompilerService {
       });
     }
     const template = validation.template;
+    assertHumanWorkflowMeaningful(template, input.intent);
     const safetyClass = inferHumanWorkflowSafetyClass(input.intent);
     let compiledPlan = compileGeneratedWorkflowTemplate(template);
     compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);

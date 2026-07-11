@@ -30,6 +30,7 @@ import {
   type WorkflowRecord,
 } from "../workflows/workflow.service";
 import { workflowEvents } from "../workflow-events";
+import { assertHumanWorkflowMeaningful } from "../human-workflow/human-workflow-compiler.service";
 import { normalizeCachedHumanWorkflowTemplate } from "../human-workflow/human-workflow-normalization";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -842,6 +843,7 @@ async function executeGeneratedWorkflowTask(
     deviceId?: unknown;
     clientId?: unknown;
     campaignId?: unknown;
+    intent?: unknown;
     workflow?: unknown;
     variables?: unknown;
   };
@@ -923,6 +925,22 @@ async function executeGeneratedWorkflowTask(
   }
 
   generatedWorkflowCacheLookups?.labels("task_runner", generatedWorkflowTaskCacheResult(cacheKey, requestKey)).inc();
+
+  if (cached.sourceMetadata?.source === "dashboard_human") {
+    const intent = typeof cached.sourceMetadata.intent === "string" ? cached.sourceMetadata.intent : String(params.intent ?? requestKey ?? cacheKey);
+    try {
+      assertHumanWorkflowMeaningful(cached.workflow, intent);
+    } catch (err) {
+      const typed = err as Error & { code?: string };
+      generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "dispatch_failed").inc();
+      return generatedWorkflowTaskFailure(
+        typed.code ?? "HUMAN_WORKFLOW_UNDERCOMPILED",
+        typed.message,
+        startedAt,
+        cached,
+      );
+    }
+  }
 
   if (cached.compiledPlan.llmBudget.happyPathRequests !== 0) {
     generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "dispatch_failed").inc();

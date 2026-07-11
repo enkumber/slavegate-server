@@ -68,6 +68,7 @@ import type {
 } from "../../shared/protocol/api-types";
 import type { WorkflowTemplate } from "../modules/workflows/types";
 import {
+  assertHumanWorkflowMeaningful,
   computeHumanWorkflowRequestKey,
   humanWorkflowCompilerService,
   isAccountlessHumanWorkflowIntent,
@@ -197,6 +198,7 @@ async function queueHumanAgencyWorkflowRun(input: {
     }
 
     const safetyClass = cachedHumanWorkflowSafetyClass(cached);
+    assertHumanWorkflowMeaningful(cached.workflow as WorkflowTemplate, input.intent);
 
     const existingRunResult = await client.query<{ id: string; task_id: string | null; status: string }>(
       `SELECT id, task_id, status
