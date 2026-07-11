@@ -355,7 +355,7 @@ describe("Generated workflow contract validation", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.errors).toContain("workflow.platform must be one of: instagram, reddit, threads, tiktok, twitter, youtube");
+    expect(result.errors).toContain("workflow.platform must be one of: android, instagram, reddit, threads, tiktok, twitter, youtube");
   });
 
   it("rejects semantic_tap generated workflow actions without a target before runtime", async () => {

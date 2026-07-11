@@ -206,6 +206,7 @@ const GENERATED_WORKFLOW_VERIFICATION_STRATEGIES = [
 ] as const;
 
 const GENERATED_WORKFLOW_PLATFORMS = [
+  "android",
   "instagram",
   "reddit",
   "threads",
