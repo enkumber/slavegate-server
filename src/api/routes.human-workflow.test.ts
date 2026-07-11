@@ -1177,6 +1177,66 @@ describe("dashboard human workflow routes", () => {
     });
   });
 
+  it("normalizes browser Gmail account workflows away from packageName=android", async () => {
+    const intent = "deschide browserul chrome pe device si deschide un cont nou de gmail pt ioana popescu";
+    const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{
+        device_id: DEVICE_ID,
+        device_model: "ONEPLUS A5010",
+        device_name: "Test Phone",
+      }],
+    });
+    mocks.compileJobService.createOrGet.mockResolvedValueOnce(compileJobRecord({
+      requestKey: key,
+      accountId: null,
+      intent,
+      platform: "android",
+    }));
+    mocks.llmJson.mockReset();
+    mocks.llmJson.mockResolvedValueOnce({
+      id: "gmail_new_account_ioana_popescu",
+      name: "Create Gmail account",
+      platform: "android",
+      description: "Open Chrome and create a Gmail account.",
+      version: "1.0.0",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [
+        { id: "wake", type: "action", action: "screen_wake", params: {} },
+        { id: "unlock", type: "action", action: "unlock", params: {} },
+        { id: "open", type: "action", action: "open_app", params: { packageName: "android" } },
+        { id: "url", type: "action", action: "type_text", params: { text: "https://www.gmail.com" } },
+        { id: "enter", type: "action", action: "press_key", params: { key: "ENTER" } },
+        { id: "done", type: "checkpoint" },
+      ],
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      intent,
+    });
+
+    expect(response.status).toBe(202);
+    const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
+    await runner();
+
+    const savedTemplate = mocks.workflowService.saveGeneratedPlanCache.mock.calls[0][0];
+    expect(savedTemplate.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "open",
+        action: "intent_send",
+        params: expect.objectContaining({
+          packageName: "com.android.chrome",
+          uri: "https://www.gmail.com",
+        }),
+      }),
+    ]));
+    expect(JSON.stringify(savedTemplate.steps)).not.toContain("\"packageName\":\"android\"");
+  });
+
   it("normalizes AI AskReddit hot workflows away from invented sort targets", async () => {
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
     mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);

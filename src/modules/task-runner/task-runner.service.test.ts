@@ -366,6 +366,45 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.taskRunnerDispatchLabels).toHaveBeenCalledWith("generated_workflow", "request_key", "dispatch_failed");
   });
 
+  it("fails cached browser workflows that try to open packageName android", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "deschide browserul chrome pe device si deschide un cont nou de gmail",
+        platform: "android",
+      },
+    });
+    cached.workflow = {
+      ...cached.workflow,
+      id: "gmail_new_account_bad_browser_package",
+      platform: "android",
+      safetyClass: "standard",
+      steps: [
+        { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
+        { id: "unlock_device", type: "action", action: "unlock", params: {} },
+        { id: "open_android", type: "action", action: "open_app", params: { packageName: "android" } },
+        { id: "done", type: "checkpoint" },
+      ],
+    };
+    mockTaskDb(task({
+      requestKey: REQUEST_KEY,
+      intent: "deschide browserul chrome pe device si deschide un cont nou de gmail",
+      source: "dashboard_human",
+    }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: false,
+      failReason: expect.stringContaining("packageName=android"),
+      generatedWorkflow: expect.objectContaining({
+        failureCode: "HUMAN_WORKFLOW_UNDERCOMPILED",
+      }),
+    });
+    expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
+  });
+
   it("materializes output schema defaults so edge checkpoints retain required result fields", async () => {
     const cached = cacheRecord();
     mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
