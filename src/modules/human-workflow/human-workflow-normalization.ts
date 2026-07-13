@@ -17,10 +17,19 @@ function normalizeAskRedditHotUri(uri: string): string {
   return "https://www.reddit.com/r/AskReddit/hot/";
 }
 
-function isBrowserWorkflowIntent(intent: string): boolean {
+function isExplicitBrowserWorkflowIntent(intent: string): boolean {
   const normalized = intent.toLowerCase();
-  return /\b(browser|chrome|gmail\.com)\b/.test(normalized)
-    || (/\bgmail\b/.test(normalized) && /\b(cont|account|create|creeaza|creează|nou|new)\b/.test(normalized));
+  return /\b(browser|chrome|gmail\.com|web)\b/.test(normalized) || /https?:\/\//.test(normalized);
+}
+
+function isGmailAppWorkflowIntent(intent: string): boolean {
+  const normalized = intent.toLowerCase();
+  return (/\bgmail\b/.test(normalized) || normalized.includes("com.google.android.gm"))
+    && !isExplicitBrowserWorkflowIntent(intent);
+}
+
+function isBrowserWorkflowIntent(intent: string): boolean {
+  return isExplicitBrowserWorkflowIntent(intent);
 }
 
 function isBrowserPackageName(value: unknown): boolean {
@@ -50,6 +59,30 @@ function normalizeBrowserWorkflow<T>(workflow: T, intent: string): T {
       }
       return { ...step, params };
     });
+  return { ...workflow, steps } as T;
+}
+
+function isGmailWebUri(value: unknown): boolean {
+  return typeof value === "string" && /https?:\/\/([^/]+\.)?(mail|accounts|workspace)\.google\.com\b/i.test(value.trim());
+}
+
+function normalizeGmailAppWorkflow<T>(workflow: T, intent: string): T {
+  if (!isGmailAppWorkflowIntent(intent) || !isRecord(workflow) || !Array.isArray(workflow.steps)) return workflow;
+  const steps = workflow.steps.map((step) => {
+    if (!isRecord(step) || step.type !== "action") return step;
+    const normalized = { ...step };
+    const params = isRecord(normalized.params) ? { ...normalized.params } : {};
+    if (normalized.action === "open_app" && isBrowserPackageName(params.packageName)) {
+      normalized.params = { ...params, packageName: "com.google.android.gm" };
+      return normalized;
+    }
+    if (normalized.action === "intent_send" && isGmailWebUri(params.uri)) {
+      normalized.action = "open_app";
+      normalized.params = { packageName: "com.google.android.gm" };
+      return normalized;
+    }
+    return normalized;
+  });
   return { ...workflow, steps } as T;
 }
 
@@ -89,6 +122,7 @@ export function normalizeCachedHumanWorkflowTemplate(
   if (sourceMetadata?.source !== "dashboard_human") return workflow;
   const intent = typeof sourceMetadata.intent === "string" ? sourceMetadata.intent : "";
   const packageName = workflow.platform === "reddit" ? "com.reddit.frontpage" : workflow.platform;
-  const browserNormalized = normalizeBrowserWorkflow(workflow, intent);
+  const gmailNormalized = normalizeGmailAppWorkflow(workflow, intent);
+  const browserNormalized = normalizeBrowserWorkflow(gmailNormalized, intent);
   return normalizeHumanWorkflowForKnownRedditTargets(browserNormalized, { intent, packageName });
 }

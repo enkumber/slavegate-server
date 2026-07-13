@@ -405,6 +405,52 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
   });
 
+  it("normalizes cached Gmail app workflows away from web intents before dispatch", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "Deschide gmail si fa un cont nou de email pt mihai pavel",
+        platform: "android",
+      },
+    });
+    cached.workflow = {
+      ...cached.workflow,
+      id: "gmail_new_account_mihai_pavel",
+      platform: "android",
+      safetyClass: "standard",
+      steps: [
+        { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
+        { id: "unlock_device", type: "action", action: "unlock", params: {} },
+        { id: "open_gmail_web", type: "action", action: "intent_send", params: { uri: "https://mail.google.com" } },
+        { id: "done", type: "checkpoint" },
+      ],
+    };
+    mockTaskDb(task({
+      requestKey: REQUEST_KEY,
+      intent: "Deschide gmail si fa un cont nou de email pt mihai pavel",
+      source: "dashboard_human",
+      platform: "android",
+    }), "android");
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result.success).toBe(true);
+    expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      template: expect.objectContaining({
+        steps: expect.arrayContaining([
+          expect.objectContaining({
+            id: "open_gmail_web",
+            action: "open_app",
+            params: expect.objectContaining({ packageName: "com.google.android.gm" }),
+          }),
+        ]),
+      }),
+    }));
+    const dispatched = mocks.dispatchGeneratedWorkflowTemplate.mock.calls[0][0].template;
+    expect(JSON.stringify(dispatched.steps)).not.toContain("mail.google.com");
+  });
+
   it("materializes output schema defaults so edge checkpoints retain required result fields", async () => {
     const cached = cacheRecord();
     mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));

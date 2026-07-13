@@ -26,6 +26,7 @@ const MAX_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 120_000;
 const PLATFORM_APP_IDS: Record<string, string> = {
   browser: "com.android.chrome",
   chrome: "com.android.chrome",
+  gmail: "com.google.android.gm",
   reddit: "com.reddit.frontpage",
   instagram: "com.instagram.android",
   tiktok: "com.zhiliaoapp.musically",
@@ -83,15 +84,27 @@ function humanWorkflowAppId(platform: string): string {
   return PLATFORM_APP_IDS[platform.toLowerCase()] ?? platform;
 }
 
-function isBrowserWorkflowIntent(goal: string): boolean {
+function isExplicitBrowserWorkflowIntent(goal: string): boolean {
   const normalized = goal.toLowerCase();
-  return /\b(browser|chrome|gmail\.com)\b/.test(normalized)
-    || (/\bgmail\b/.test(normalized) && /\b(cont|account|create|creeaza|creează|nou|new)\b/.test(normalized));
+  return /\b(browser|chrome|gmail\.com|web)\b/.test(normalized) || /https?:\/\//.test(normalized);
+}
+
+function isGmailAppWorkflowIntent(goal: string): boolean {
+  const normalized = goal.toLowerCase();
+  return (/\bgmail\b/.test(normalized) || normalized.includes("com.google.android.gm"))
+    && !isExplicitBrowserWorkflowIntent(goal);
+}
+
+function isBrowserWorkflowIntent(goal: string): boolean {
+  return isExplicitBrowserWorkflowIntent(goal);
 }
 
 function humanWorkflowPackageNameForIntent(platform: string, goal: string): string {
   if (platform.toLowerCase() === "android" && isBrowserWorkflowIntent(goal)) {
     return "android";
+  }
+  if (platform.toLowerCase() === "android" && isGmailAppWorkflowIntent(goal)) {
+    return "com.google.android.gm";
   }
   return humanWorkflowAppId(platform);
 }
@@ -100,6 +113,10 @@ function isBrowserPackageName(value: unknown): boolean {
   if (typeof value !== "string") return false;
   const normalized = value.trim().toLowerCase();
   return normalized === "android" || normalized === "browser" || normalized === "chrome" || normalized === "com.android.chrome";
+}
+
+function isGmailWebUri(value: unknown): boolean {
+  return typeof value === "string" && /https?:\/\/([^/]+\.)?(mail|accounts|workspace)\.google\.com\b/i.test(value.trim());
 }
 
 function normalizeBrowserIntentSendParams(params: Record<string, unknown>): Record<string, unknown> {
@@ -330,11 +347,14 @@ function buildHumanWorkflowCompilePrompt(input: {
     "recoveryPolicy.allowedRecoveryRequests may include ai_recovery_workflow, refresh_screen_state, retry_current_step, return_to_anchor, dismiss_transient_ui, navigate_back_once, verify_anchor.",
     "Allowed actions: open_app,intent_send,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen,ui_tree_dump,type_text,vlm_generate_comment.",
     "For app install goals, open the Play Store listing with intent_send using packageName=com.android.vending and uri=market://details?id=<targetPackage>, then tap Install if visible.",
+    "For Gmail app goals, use open_app with params.packageName=com.google.android.gm. Do not open mail.google.com unless the user explicitly asks for browser, Chrome, gmail.com, or a URL.",
     "For web/browser goals, open URLs with intent_send using uri=https://... and no packageName, so Android can choose an installed browser/app instead of assuming Chrome.",
     ...writeInstructions,
     "Start device workflows with action screen_wake, then action unlock, before opening or navigating apps.",
     isBrowserWorkflowIntent(input.goal)
       ? "For browser/Gmail goals, do not use open_app for Chrome; start navigation directly with intent_send and a URL."
+      : isGmailAppWorkflowIntent(input.goal)
+        ? "For Gmail app goals, open the Gmail Android app with open_app params.packageName=com.google.android.gm before tapping account creation UI."
       : `open_app must use params.packageName=${input.packageName}.`,
     isBrowserWorkflowIntent(input.goal)
       ? "For browser/Gmail goals, do not hardcode com.android.chrome in intent_send."
@@ -501,7 +521,11 @@ function normalizeHumanWorkflowTemplateCandidate(
       if (normalized.type === "action" && (normalized.action === "open_app" || normalized.action === "close_app")) {
         const params = isRecord(normalized.params) ? { ...normalized.params } : {};
         const packageName = typeof params.packageName === "string" ? params.packageName.trim().toLowerCase() : "";
-        if (typeof params.packageName !== "string" || (isBrowserWorkflowIntent(input.goal) && packageName === "android")) {
+        if (
+          typeof params.packageName !== "string"
+          || (isBrowserWorkflowIntent(input.goal) && packageName === "android")
+          || (isGmailAppWorkflowIntent(input.goal) && isBrowserPackageName(packageName))
+        ) {
           params.packageName = typeof params.app_id === "string" ? params.app_id : input.packageName;
         }
         delete params.app_id;
@@ -560,6 +584,16 @@ function normalizeHumanWorkflowTemplateCandidate(
         isRecord(normalized.params)
       ) {
         normalized.params = normalizeBrowserIntentSendParams(normalized.params);
+      }
+      if (
+        isGmailAppWorkflowIntent(input.goal) &&
+        normalized.type === "action" &&
+        normalized.action === "intent_send" &&
+        isRecord(normalized.params) &&
+        isGmailWebUri(normalized.params.uri)
+      ) {
+        normalized.action = "open_app";
+        normalized.params = { packageName: input.packageName };
       }
       if (normalized.type === "checkpoint" && isRecord(normalized.params)) {
         const reason = normalized.params.reason ?? normalized.params.label ?? normalized.params.expectedScreen;
