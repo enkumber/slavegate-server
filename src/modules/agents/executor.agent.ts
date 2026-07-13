@@ -80,6 +80,38 @@ export class ExecutorAgent {
       };
     }
 
+    if (step.action === "open_app") {
+      const packageName = step.params?.packageName as string;
+      if (!packageName) {
+        console.warn(`[executor] open_app missing packageName for step ${step.id}, skipping`);
+      }
+      return {
+        output: {
+          action: { type: "open_app", packageName },
+          confidence: packageName ? 1.0 : 0,
+          reasoning: packageName ? `Open app: ${packageName}` : "open_app missing packageName",
+          source: "llm_inferred",
+        },
+        tokens: { input: 0, output: 0 },
+      };
+    }
+
+    if (step.action === "intent_send") {
+      const uri = step.params?.uri as string;
+      if (!uri) {
+        console.warn(`[executor] intent_send missing uri for step ${step.id}, skipping`);
+      }
+      return {
+        output: {
+          action: { type: "intent_send", uri },
+          confidence: uri ? 1.0 : 0,
+          reasoning: uri ? `Intent send: ${uri}` : "intent_send missing uri",
+          source: "llm_inferred",
+        },
+        tokens: { input: 0, output: 0 },
+      };
+    }
+
     // ─── Tap/scroll: try cascade first ─────────────────────────────────────
     if ((step.action === "tap" || step.action === "scroll") && step.target) {
       const cascadeResult = await this.tryCascade(step, deviceId, platform, screenType);

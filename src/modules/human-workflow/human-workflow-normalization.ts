@@ -17,6 +17,42 @@ function normalizeAskRedditHotUri(uri: string): string {
   return "https://www.reddit.com/r/AskReddit/hot/";
 }
 
+function isBrowserWorkflowIntent(intent: string): boolean {
+  const normalized = intent.toLowerCase();
+  return /\b(browser|chrome|gmail\.com)\b/.test(normalized)
+    || (/\bgmail\b/.test(normalized) && /\b(cont|account|create|creeaza|creează|nou|new)\b/.test(normalized));
+}
+
+function isBrowserPackageName(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "android" || normalized === "browser" || normalized === "chrome" || normalized === "com.android.chrome";
+}
+
+function normalizeBrowserWorkflow<T>(workflow: T, intent: string): T {
+  if (!isBrowserWorkflowIntent(intent) || !isRecord(workflow) || !Array.isArray(workflow.steps)) return workflow;
+  const hasWebIntent = workflow.steps.some((step) => {
+    if (!isRecord(step) || step.type !== "action" || step.action !== "intent_send") return false;
+    const params = isRecord(step.params) ? step.params : {};
+    return typeof params.uri === "string" && /^https?:\/\//i.test(params.uri.trim());
+  });
+  const steps = workflow.steps
+    .filter((step) => {
+      if (!hasWebIntent || !isRecord(step) || step.type !== "action" || step.action !== "open_app") return true;
+      const params = isRecord(step.params) ? step.params : {};
+      return !isBrowserPackageName(params.packageName);
+    })
+    .map((step) => {
+      if (!isRecord(step) || step.type !== "action" || step.action !== "intent_send") return step;
+      const params = isRecord(step.params) ? { ...step.params } : {};
+      if (typeof params.uri === "string" && /^https?:\/\//i.test(params.uri.trim())) {
+        delete params.packageName;
+      }
+      return { ...step, params };
+    });
+  return { ...workflow, steps } as T;
+}
+
 export function normalizeHumanWorkflowForKnownRedditTargets<T>(
   workflow: T,
   input: { intent: string; packageName: string },
@@ -53,5 +89,6 @@ export function normalizeCachedHumanWorkflowTemplate(
   if (sourceMetadata?.source !== "dashboard_human") return workflow;
   const intent = typeof sourceMetadata.intent === "string" ? sourceMetadata.intent : "";
   const packageName = workflow.platform === "reddit" ? "com.reddit.frontpage" : workflow.platform;
-  return normalizeHumanWorkflowForKnownRedditTargets(workflow, { intent, packageName });
+  const browserNormalized = normalizeBrowserWorkflow(workflow, intent);
+  return normalizeHumanWorkflowForKnownRedditTargets(browserNormalized, { intent, packageName });
 }

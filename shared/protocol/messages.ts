@@ -307,6 +307,7 @@ export type JobType =
   | "screenshot_for_vlm"  // VLM-optimized screenshot (540x1200, JPEG 85%)
   | "screen_record"
   | "open_app"
+  | "intent_send"
   | "open_app_fresh"
   | "close_app"
   | "ui_tree_dump"
@@ -344,6 +345,7 @@ export type JobParams =
   | ScreenshotParams
   | ScreenRecordParams
   | OpenAppParams
+  | IntentSendParams
   | CloseAppParams
   | UiTreeDumpParams
   | PressKeyParams
@@ -400,6 +402,13 @@ export interface ScreenRecordParams {
 
 export interface OpenAppParams {
   packageName: string;
+}
+
+export interface IntentSendParams {
+  uri: string;
+  action?: string;
+  packageName?: string;
+  flags?: string[];
 }
 
 export interface CloseAppParams {

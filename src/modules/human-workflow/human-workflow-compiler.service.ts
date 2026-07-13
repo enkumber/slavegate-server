@@ -91,9 +91,38 @@ function isBrowserWorkflowIntent(goal: string): boolean {
 
 function humanWorkflowPackageNameForIntent(platform: string, goal: string): string {
   if (platform.toLowerCase() === "android" && isBrowserWorkflowIntent(goal)) {
-    return "com.android.chrome";
+    return "android";
   }
   return humanWorkflowAppId(platform);
+}
+
+function isBrowserPackageName(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "android" || normalized === "browser" || normalized === "chrome" || normalized === "com.android.chrome";
+}
+
+function normalizeBrowserIntentSendParams(params: Record<string, unknown>): Record<string, unknown> {
+  const normalized = { ...params };
+  if (typeof normalized.uri === "string" && /^https?:\/\//i.test(normalized.uri.trim())) {
+    delete normalized.packageName;
+  }
+  return normalized;
+}
+
+function removeRedundantBrowserOpenSteps(steps: unknown[], goal: string): unknown[] {
+  if (!isBrowserWorkflowIntent(goal)) return steps;
+  const hasWebIntent = steps.some((step) => {
+    if (!isRecord(step) || step.type !== "action" || step.action !== "intent_send") return false;
+    const params = isRecord(step.params) ? step.params : {};
+    return typeof params.uri === "string" && /^https?:\/\//i.test(params.uri.trim());
+  });
+  if (!hasWebIntent) return steps;
+  return steps.filter((step) => {
+    if (!isRecord(step) || step.type !== "action" || step.action !== "open_app") return true;
+    const params = isRecord(step.params) ? step.params : {};
+    return !isBrowserPackageName(params.packageName);
+  });
 }
 
 export function isAccountlessHumanWorkflowIntent(goal: string): boolean {
@@ -301,11 +330,15 @@ function buildHumanWorkflowCompilePrompt(input: {
     "recoveryPolicy.allowedRecoveryRequests may include ai_recovery_workflow, refresh_screen_state, retry_current_step, return_to_anchor, dismiss_transient_ui, navigate_back_once, verify_anchor.",
     "Allowed actions: open_app,intent_send,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen,ui_tree_dump,type_text,vlm_generate_comment.",
     "For app install goals, open the Play Store listing with intent_send using packageName=com.android.vending and uri=market://details?id=<targetPackage>, then tap Install if visible.",
-    "For web/browser goals, open URLs with intent_send using packageName=com.android.chrome and uri=https://..., instead of typing URLs into a field.",
+    "For web/browser goals, open URLs with intent_send using uri=https://... and no packageName, so Android can choose an installed browser/app instead of assuming Chrome.",
     ...writeInstructions,
     "Start device workflows with action screen_wake, then action unlock, before opening or navigating apps.",
-    `open_app must use params.packageName=${input.packageName}.`,
-    `To open a subreddit or URL, use intent_send with params.uri=https://www.reddit.com/r/<subreddit>/ and params.packageName=${input.packageName}. Do not put uri on open_app.`,
+    isBrowserWorkflowIntent(input.goal)
+      ? "For browser/Gmail goals, do not use open_app for Chrome; start navigation directly with intent_send and a URL."
+      : `open_app must use params.packageName=${input.packageName}.`,
+    isBrowserWorkflowIntent(input.goal)
+      ? "For browser/Gmail goals, do not hardcode com.android.chrome in intent_send."
+      : `To open a subreddit or URL, use intent_send with params.uri=https://www.reddit.com/r/<subreddit>/ and params.packageName=${input.packageName}. Do not put uri on open_app.`,
     "For navigation/read-only goals, include a final ui_tree_dump with params.outputVariable=\"_finalUiTree\" before the checkpoint.",
     "semantic_tap is only for known product targets and must include params.target, for example reddit.first_visible_post.open_comments.",
     "checkpoint is type checkpoint, never an action.",
@@ -499,9 +532,9 @@ function normalizeHumanWorkflowTemplateCandidate(
           normalized.action = "intent_send";
           normalized.params = {
             action: "android.intent.action.VIEW",
-            packageName: "com.android.chrome",
             uri: maybeUrl,
           };
+          normalized.params = normalizeBrowserIntentSendParams(normalized.params as Record<string, unknown>);
           index += 2;
         }
       }
@@ -515,7 +548,18 @@ function normalizeHumanWorkflowTemplateCandidate(
             packageName: typeof params.packageName === "string" ? params.packageName : input.packageName,
             uri: params.uri,
           };
+          if (isBrowserWorkflowIntent(input.goal)) {
+            normalized.params = normalizeBrowserIntentSendParams(normalized.params as Record<string, unknown>);
+          }
         }
+      }
+      if (
+        isBrowserWorkflowIntent(input.goal) &&
+        normalized.type === "action" &&
+        normalized.action === "intent_send" &&
+        isRecord(normalized.params)
+      ) {
+        normalized.params = normalizeBrowserIntentSendParams(normalized.params);
       }
       if (normalized.type === "checkpoint" && isRecord(normalized.params)) {
         const reason = normalized.params.reason ?? normalized.params.label ?? normalized.params.expectedScreen;
@@ -527,7 +571,7 @@ function normalizeHumanWorkflowTemplateCandidate(
       }
       normalizedSteps.push(normalized);
     }
-    workflow.steps = normalizedSteps;
+    workflow.steps = removeRedundantBrowserOpenSteps(normalizedSteps, input.goal);
     workflow.steps = ensureHumanWorkflowPreambleSteps(workflow.steps as unknown[]);
     workflow.steps = ensureHumanWorkflowEvidenceSteps(workflow.steps as unknown[], input);
     return normalizeHumanWorkflowForKnownRedditTargets(workflow, {

@@ -75,6 +75,7 @@ export type CompiledAction =
   | "press_key"
   | "wait"
   | "open_app"
+  | "intent_send"
   | "screenshot";
 
 export interface StepTarget {

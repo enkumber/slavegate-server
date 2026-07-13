@@ -46,7 +46,7 @@ export interface ExecutorInput {
   lookahead?: number;
 }
 
-export type ActionType = "tap" | "swipe" | "type" | "wait" | "back" | "scroll" | "skip";
+export type ActionType = "tap" | "swipe" | "type" | "wait" | "back" | "scroll" | "skip" | "open_app" | "intent_send";
 
 export interface ExecutorAction {
   type: ActionType;
@@ -61,6 +61,8 @@ export interface ExecutorAction {
   ms?: number;               // For wait action
   direction?: "up" | "down" | "left" | "right";  // For scroll
   reason?: string;           // For skip
+  packageName?: string;      // For open_app
+  uri?: string;              // For intent_send
 }
 
 export interface ExecutorOutput {

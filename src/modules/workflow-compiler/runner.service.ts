@@ -349,6 +349,18 @@ async function executeStepAction(
       break;
     }
 
+    case "intent_send": {
+      const uri = (step.params?.uri as string) || "";
+      const sent = sendJobToDevice(deviceId, {
+        jobId,
+        type: "intent_send",
+        params: { uri },
+        timeoutMs: STEP_TIMEOUT_MS,
+      });
+      if (!sent) return { success: false, error: "Device unreachable" };
+      break;
+    }
+
     case "screenshot": {
       const sent = sendJobToDevice(deviceId, {
         jobId,

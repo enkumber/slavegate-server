@@ -1177,7 +1177,7 @@ describe("dashboard human workflow routes", () => {
     });
   });
 
-  it("normalizes browser Gmail account workflows away from packageName=android", async () => {
+  it("normalizes browser Gmail account workflows away from hardcoded browser packages", async () => {
     const intent = "deschide browserul chrome pe device si deschide un cont nou de gmail pt ioana popescu";
     const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
@@ -1229,12 +1229,13 @@ describe("dashboard human workflow routes", () => {
         id: "open",
         action: "intent_send",
         params: expect.objectContaining({
-          packageName: "com.android.chrome",
           uri: "https://www.gmail.com",
         }),
       }),
     ]));
+    expect(savedTemplate.steps.find((step: { id: string }) => step.id === "open").params.packageName).toBeUndefined();
     expect(JSON.stringify(savedTemplate.steps)).not.toContain("\"packageName\":\"android\"");
+    expect(JSON.stringify(savedTemplate.steps)).not.toContain("com.android.chrome");
   });
 
   it("normalizes AI AskReddit hot workflows away from invented sort targets", async () => {

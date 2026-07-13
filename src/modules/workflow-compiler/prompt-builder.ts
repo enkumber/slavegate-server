@@ -87,7 +87,7 @@ const OUTPUT_FORMAT_SPEC = `Return a JSON object with a single key "steps" — a
   "steps": [
     {
       "id": "s1",
-      "action": "tap" | "type" | "swipe" | "press_key" | "wait" | "open_app" | "screenshot",
+      "action": "tap" | "type" | "swipe" | "press_key" | "wait" | "open_app" | "intent_send" | "screenshot",
       "target": {
         "elementId": "<element-id-from-app-map>",
         "resourceId": "<android-resource-id>",
@@ -109,7 +109,7 @@ Rules for each field:
 - "id": unique step identifier, format "s1", "s2", ...
 - "action": one of the available actions listed above
 - "target": optional — use elementId from app map when available (most reliable), then resourceId, text, coords as fallbacks. Omit for actions like open_app or wait.
-- "params": action-specific parameters (e.g. "text" for type, "direction" for swipe, "key" for press_key, "durationMs" for wait, "packageName" for open_app)
+- "params": action-specific parameters (e.g. "text" for type, "direction" for swipe, "key" for press_key, "durationMs" for wait, "packageName" for open_app, "uri" for intent_send)
 - "expectedPage": the page ID from the app map you expect to be on after this step
 - "expectedPageHash": the signatureHash from the page detection in the app map
 - "retries": number of retry attempts (default: 1)
@@ -124,7 +124,7 @@ const RULES = `1. Use elementId from the app map when available — it is the mo
 4. Start from the app's home/main page (discoveryOrder: 0).
 5. Navigate using the page transitions defined in the app map — do not invent transitions.
 6. For "type" actions, put the text value in params.text.
-7. For "open_app", put the package name in params.packageName.
+7. For "open_app", put the package name in params.packageName. For "intent_send", put the URL/deep link in params.uri.
 8. For "swipe", use params.direction ("up", "down", "left", "right") and optionally params.distance (0.0–1.0).
 9. For "press_key", use params.key (e.g. "back", "enter", "home").
 10. For "wait", use params.durationMs (ms) — use sparingly, only when needed for loading.
@@ -144,6 +144,7 @@ const AVAILABLE_ACTIONS: CompiledAction[] = [
   "press_key",
   "wait",
   "open_app",
+  "intent_send",
   "screenshot",
 ];
 
@@ -155,6 +156,7 @@ function describeAction(action: CompiledAction): string {
     press_key:  "- press_key: Press a hardware/system key. Requires params.key (back, enter, home, tab, etc.).",
     wait:       "- wait: Wait for a duration. Requires params.durationMs (ms). Use only when loading is expected.",
     open_app:   "- open_app: Open an app by package name. Requires params.packageName. No target needed.",
+    intent_send: "- intent_send: Open a URL or deep link through Android intent resolution. Requires params.uri. Optional params.packageName only when a specific installed app is required.",
     screenshot: "- screenshot: Capture current screen. No target or params needed. Used for verification.",
   };
   return descriptions[action];
