@@ -18,11 +18,15 @@ import type { WorkflowTemplate } from "../workflows/types";
 import { llmJson } from "../../utils/llm";
 import { shortcutRegistryService } from "../workflow-shortcuts/shortcut-registry.service";
 import { humanWorkflowCompileJobService, type HumanWorkflowCompileJobRecord } from "./compile-job.service";
-import { normalizeHumanWorkflowForKnownRedditTargets } from "./human-workflow-normalization";
+import {
+  normalizeCachedHumanWorkflowTemplate,
+  normalizeHumanWorkflowForKnownRedditTargets,
+} from "./human-workflow-normalization";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
 const MAX_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 120_000;
+const HUMAN_WORKFLOW_COMPILER_CACHE_VERSION = "2026-07-13-gmail-app-v2";
 const PLATFORM_APP_IDS: Record<string, string> = {
   browser: "com.android.chrome",
   chrome: "com.android.chrome",
@@ -189,6 +193,17 @@ function humanWorkflowPlanPreview(template: WorkflowTemplate, compiledPlan: Gene
       })),
     compiledPlan,
   };
+}
+
+function humanWorkflowCacheCompilerVersion(cached: GeneratedWorkflowPlanCacheRecord): string | null {
+  const version = cached.sourceMetadata?.compilerCacheVersion;
+  return typeof version === "string" && version.length > 0 ? version : null;
+}
+
+function humanWorkflowCacheUsable(cached: GeneratedWorkflowPlanCacheRecord, intent: string): boolean {
+  if (cached.sourceMetadata?.source !== "dashboard_human") return true;
+  if (!isGmailAppWorkflowIntent(intent)) return true;
+  return humanWorkflowCacheCompilerVersion(cached) === HUMAN_WORKFLOW_COMPILER_CACHE_VERSION;
 }
 
 function inferGeneratedWorkflowAppId(template: WorkflowTemplate): string | null {
@@ -751,14 +766,15 @@ function readyFromCache(
   source: "cache" | "shortcut" = "cache",
 ): HumanWorkflowCompileReady {
   const cachedIntent = typeof cached.sourceMetadata?.intent === "string" ? cached.sourceMetadata.intent : requestKey;
-  assertHumanWorkflowMeaningful(cached.workflow, cachedIntent);
+  const workflow = normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata);
+  assertHumanWorkflowMeaningful(workflow, cachedIntent);
   return {
     status: "ready",
     requestKey,
     cacheHit: source === "cache",
     cacheKey: cached.cacheKey,
     source,
-    plan: humanWorkflowPlanPreview(cached.workflow, cached.compiledPlan),
+    plan: humanWorkflowPlanPreview(workflow, cached.compiledPlan),
     safetyClass: cached.workflow.safetyClass ?? cached.compiledPlan.metadata.safetyClass ?? "read_only",
     platform: target.account_platform,
     target,
@@ -839,7 +855,7 @@ export class HumanWorkflowCompilerService {
     }
 
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
-    if (cached) return readyFromCache(cached, target, requestKey, "cache");
+    if (cached && humanWorkflowCacheUsable(cached, intent)) return readyFromCache(cached, target, requestKey, "cache");
 
     const accountlessTemplate = !target.account_id ? accountlessShortcutTemplate(intent, target.account_platform) : null;
     if (accountlessTemplate) {
@@ -871,7 +887,9 @@ export class HumanWorkflowCompilerService {
     if (existingJob?.status === "ready" && existingJob.result) {
       const jobCacheKey = cacheKeyFromCompileJob(existingJob);
       const cachedJobArtifact = jobCacheKey ? await workflowService.getGeneratedPlanCache(jobCacheKey) : null;
-      if (cachedJobArtifact) return existingJob.result as HumanWorkflowCompileReady;
+      if (cachedJobArtifact && humanWorkflowCacheUsable(cachedJobArtifact, intent)) {
+        return readyFromCache(cachedJobArtifact, target, requestKey, "cache");
+      }
       const requeued = await humanWorkflowCompileJobService.requeueMissingArtifact(existingJob.id);
       existingJob = requeued ?? { ...existingJob, status: "failed", error: "compile artifact missing; retry compile" };
     }
@@ -942,6 +960,7 @@ export class HumanWorkflowCompilerService {
     await workflowService.saveTemplate(template);
     await workflowService.saveGeneratedPlanCache(template, compiledPlan, input.requestKey, {
       source: "dashboard_human",
+      compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
       shortcut: shortcutKey,
       shortcutId,
       intent: input.intent,
@@ -1005,6 +1024,7 @@ export class HumanWorkflowCompilerService {
     await workflowService.saveTemplate(template);
     await workflowService.saveGeneratedPlanCache(template, compiledPlan, input.requestKey, {
       source: "dashboard_human",
+      compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
       intent: input.intent,
       deviceId: input.target.device_id,
       accountId: input.target.account_id,

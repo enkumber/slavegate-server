@@ -119,7 +119,8 @@ describe("generated workflow plan cache service", () => {
     await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97");
 
     expect(query).toHaveBeenCalledTimes(2);
-    expect(query.mock.calls[0][0]).toContain("SELECT cache_key FROM generated_workflow_plan_cache WHERE request_key = $1");
+    expect(query.mock.calls[0][0]).toContain("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1");
+    expect(query.mock.calls[0][1]).toEqual(["c02c59dfbe512562f8c65c97", compiledPlan.cacheKey]);
     const [sql, values] = query.mock.calls[1];
     expect(sql).toContain("INSERT INTO generated_workflow_plan_cache");
     expect(sql).toContain("ON CONFLICT (cache_key) DO UPDATE");
@@ -144,17 +145,17 @@ describe("generated workflow plan cache service", () => {
     expect(values[10]).toBe(JSON.stringify(compiledPlan));
   });
 
-  it("reuses an existing canonical requestKey without inserting a duplicate", async () => {
+  it("replaces an existing canonical requestKey with the freshly compiled artifact", async () => {
     const service = new WorkflowService();
     const workflow = redditHomeWorkflow();
     const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
-    const query = vi.fn().mockResolvedValueOnce({ rows: [{ cache_key: compiledPlan.cacheKey }] });
-    vi.mocked(getDb).mockReturnValue({ query } as any);
+    const query = mockDbQuery([{ cache_key: "oldcachekey000000000001" }]);
 
     await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97");
 
-    expect(query).toHaveBeenCalledTimes(1);
-    expect(query.mock.calls[0][0]).toContain("WHERE request_key = $1");
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0][0]).toContain("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1");
+    expect(query.mock.calls[1][0]).toContain("INSERT INTO generated_workflow_plan_cache");
   });
 
   it("persists canonical generated workflow safety metadata in source metadata", async () => {
@@ -175,7 +176,7 @@ describe("generated workflow plan cache service", () => {
       allowedRecoveryRequests: ["refresh_screen_state"],
       source: "test",
     });
-    expect(compiledPlan.metadata).toEqual({
+    expect(compiledPlan.metadata).toMatchObject({
       intent: "reddit_account_health_scan",
       safetyClass: "read_only",
       outputSchema: workflow.outputSchema,

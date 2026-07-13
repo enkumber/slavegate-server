@@ -334,11 +334,10 @@ export class WorkflowService {
       ...sourceMetadata,
     };
     if (requestKey) {
-      const existing = await db.query(
-        "SELECT cache_key FROM generated_workflow_plan_cache WHERE request_key = $1 LIMIT 1",
-        [requestKey]
-      );
-      if (existing.rows.length > 0) return;
+      await db.query("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1 AND cache_key <> $2", [
+        requestKey,
+        compiledPlan.cacheKey,
+      ]);
     }
     await db.query(
       `INSERT INTO generated_workflow_plan_cache

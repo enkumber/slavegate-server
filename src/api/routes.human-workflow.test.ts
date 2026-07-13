@@ -1141,6 +1141,7 @@ describe("dashboard human workflow routes", () => {
       requestKey: key,
       sourceMetadata: {
         source: "dashboard_human",
+        compilerCacheVersion: "2026-07-13-gmail-app-v2",
         intent,
         platform: "android",
       },
