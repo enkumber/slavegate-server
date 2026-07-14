@@ -99,6 +99,59 @@ function policyGatesForBlockers(blockers: string[]): Record<string, unknown>[] {
     .map(policyGateSummary);
 }
 
+function policyGateId(gate: Record<string, unknown>): string | null {
+  return typeof gate.id === "string" && gate.id.trim().length > 0 ? gate.id.trim() : null;
+}
+
+function collectPolicyGatesFromValue(value: unknown, out: Map<string, Record<string, unknown>>): void {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectPolicyGatesFromValue(item, out);
+    return;
+  }
+
+  const object = value as Record<string, unknown>;
+  const directGates = Array.isArray(object.policyGates) ? object.policyGates : [];
+  for (const gate of directGates) {
+    if (!gate || typeof gate !== "object" || Array.isArray(gate)) continue;
+    const gateObject = gate as Record<string, unknown>;
+    const id = policyGateId(gateObject);
+    if (id && !out.has(id)) out.set(id, gateObject);
+  }
+
+  const decisionGates = Array.isArray(object.policyGateSummary) ? object.policyGateSummary : [];
+  for (const gate of decisionGates) {
+    if (!gate || typeof gate !== "object" || Array.isArray(gate)) continue;
+    const gateObject = gate as Record<string, unknown>;
+    const id = policyGateId(gateObject);
+    if (id && !out.has(id)) out.set(id, gateObject);
+  }
+
+  for (const nested of Object.values(object)) {
+    if (nested && typeof nested === "object") collectPolicyGatesFromValue(nested, out);
+  }
+}
+
+function aggregatePolicyGateSummary(...values: unknown[]): Record<string, unknown> {
+  const gatesById = new Map<string, Record<string, unknown>>();
+  for (const value of values) collectPolicyGatesFromValue(value, gatesById);
+  const gates = Array.from(gatesById.values()).map((gate) => ({
+    id: gate.id,
+    category: gate.category ?? null,
+    state: gate.state ?? null,
+    risk: gate.risk ?? null,
+    owner: gate.owner ?? null,
+    safeToAutoApply: gate.safeToAutoApply === true,
+  }));
+  return {
+    gates,
+    total: gates.length,
+    blocked: gates.filter((gate) => gate.state === "blocked").length,
+    highRisk: gates.filter((gate) => gate.risk === "high").length,
+    safeToAutoApply: gates.filter((gate) => gate.safeToAutoApply === true).length,
+  };
+}
+
 function remediationForBlockers(blockers: string[]): Record<string, unknown> {
   const uniqueBlockers = Array.from(new Set(blockers));
   const nextActions = uniqueBlockers.flatMap((blocker) => {
@@ -348,6 +401,12 @@ export function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Reco
     reason: "compiler_auto_use_disabled",
   }));
   const decision = decisionFor({ toolCandidates, stepCandidates, knowledgeCandidates });
+  const policyGateSummary = aggregatePolicyGateSummary(
+    toolCandidates,
+    stepCandidates,
+    knowledgeCandidates,
+    decision
+  );
 
   return {
     intent: input.intent ?? null,
@@ -370,6 +429,7 @@ export function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Reco
       knowledge: knowledgeCandidates,
     },
     decision,
+    policyGateSummary,
     guardrails: [
       "No compiler plan changes are made from awareness data.",
       "Step Library entries are not auto-used by compiler in this phase.",

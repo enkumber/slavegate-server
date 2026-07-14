@@ -500,6 +500,22 @@ export interface CompilerAwarenessResponse {
     notes?: string[];
     [key: string]: unknown;
   };
+  policyGateSummary?: {
+    gates?: Array<{
+      id?: string;
+      category?: string | null;
+      state?: string | null;
+      risk?: string | null;
+      owner?: string | null;
+      safeToAutoApply?: boolean;
+      [key: string]: unknown;
+    }>;
+    total?: number;
+    blocked?: number;
+    highRisk?: number;
+    safeToAutoApply?: number;
+    [key: string]: unknown;
+  };
   guardrails: string[];
 }
 

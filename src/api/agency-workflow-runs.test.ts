@@ -1573,6 +1573,18 @@ describe("agency workflow runs API", () => {
         requiredPolicyChanges: expect.arrayContaining(["compiler_auto_use"]),
       },
     });
+    expect(response.body.data.policyGateSummary).toMatchObject({
+      total: 4,
+      blocked: 4,
+      highRisk: 2,
+      safeToAutoApply: 0,
+      gates: expect.arrayContaining([
+        expect.objectContaining({ id: "compiler_tool_visibility", state: "blocked", safeToAutoApply: false }),
+        expect.objectContaining({ id: "compiler_knowledge_application", state: "blocked", safeToAutoApply: false }),
+        expect.objectContaining({ id: "step_compiler_eligibility", state: "blocked", safeToAutoApply: false }),
+        expect.objectContaining({ id: "compiler_auto_use", state: "blocked", safeToAutoApply: false }),
+      ]),
+    });
     expect(response.body.data.candidates.tools.some((tool: any) => tool.id === "unlock" && tool.wouldUse === false)).toBe(true);
     expect(response.body.data.candidates.knowledge.every((entry: any) => entry.wouldApply === false)).toBe(true);
     expect(String(mocks.db.query.mock.calls[0][0])).toContain("c.candidate_state = 'validated_step'");

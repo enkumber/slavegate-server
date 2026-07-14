@@ -79,6 +79,14 @@ function eventPolicyGateText(event: CompilerAwarenessEvent) {
   return `${ids}${suffix} · blocked ${summary?.blocked ?? 0} · high ${summary?.highRisk ?? 0}`;
 }
 
+function awarenessPolicyGateText(summary: CompilerAwarenessResponse["policyGateSummary"]) {
+  const gates = summary?.gates ?? [];
+  if (!gates.length) return "-";
+  const ids = gates.map((gate) => gate.id).filter(Boolean).slice(0, 5).join(", ");
+  const suffix = (summary?.total ?? gates.length) > 5 ? " +" : "";
+  return `${ids}${suffix}`;
+}
+
 export function CompilerKnowledgePage() {
   const [items, setItems] = useState<CompilerKnowledgeEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -277,6 +285,15 @@ export function CompilerKnowledgePage() {
                 <Badge label={`decision: ${awareness.decision.outcome ?? "unknown"}`} tone="yellow" />
                 <Badge label={`wouldChangePlan: ${String(awareness.decision.wouldChangePlan ?? false)}`} tone="gray" />
                 <Badge label={`wouldExecuteStepLibrary: ${String(awareness.decision.wouldExecuteStepLibrary ?? false)}`} tone="gray" />
+              </div>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginBottom: "8px" }}>
+                <Badge label={`gates: ${awareness.policyGateSummary?.total ?? 0}`} tone="blue" />
+                <Badge label={`blocked: ${awareness.policyGateSummary?.blocked ?? 0}`} tone="yellow" />
+                <Badge label={`high-risk: ${awareness.policyGateSummary?.highRisk ?? 0}`} tone="red" />
+                <Badge label={`safeToAutoApply: ${awareness.policyGateSummary?.safeToAutoApply ?? 0}`} tone="gray" />
+              </div>
+              <div style={{ color: "#888", fontSize: "12px", marginBottom: "8px" }}>
+                Gate summary: {awarenessPolicyGateText(awareness.policyGateSummary)}
               </div>
               <div style={{ color: "#888", fontSize: "12px" }}>
                 Blockers: {(awareness.decision.blockers ?? []).join(", ") || "-"}
