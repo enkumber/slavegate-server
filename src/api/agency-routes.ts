@@ -13,6 +13,7 @@ import { workflowEvents } from "../modules/workflow-events";
 import { listToolCatalog } from "../modules/tool-catalog/tool-catalog";
 import { listCompilerKnowledge } from "../modules/compiler-knowledge/compiler-knowledge-base";
 import { buildCompilerAwareness } from "../modules/compiler-awareness/compiler-awareness";
+import { listCompilerPolicyGates } from "../modules/compiler-policy-gates/compiler-policy-gates";
 
 const router = Router();
 
@@ -1665,6 +1666,36 @@ router.get("/compiler-knowledge", requireAdminAuth, async (req: Request, res: Re
         autoUseEnabled: false,
         executionChanging: false,
         mode: "read_only_knowledge_base",
+      },
+    },
+  });
+});
+
+router.get("/compiler-policy-gates", requireAdminAuth, async (req: Request, res: Response) => {
+  const category = typeof req.query.category === "string" && req.query.category.trim().length > 0
+    ? req.query.category.trim()
+    : undefined;
+  const state = typeof req.query.state === "string" && req.query.state.trim().length > 0
+    ? req.query.state.trim()
+    : undefined;
+  const risk = typeof req.query.risk === "string" && req.query.risk.trim().length > 0
+    ? req.query.risk.trim()
+    : undefined;
+  const owner = typeof req.query.owner === "string" && req.query.owner.trim().length > 0
+    ? req.query.owner.trim()
+    : undefined;
+  const items = listCompilerPolicyGates({ category, state, risk, owner });
+  res.json({
+    ok: true,
+    data: {
+      items,
+      total: items.length,
+      policy: {
+        readOnly: true,
+        compilerVisible: false,
+        autoUseEnabled: false,
+        executionChanging: false,
+        mode: "read_only_compiler_policy_gates",
       },
     },
   });

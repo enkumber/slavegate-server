@@ -1011,6 +1011,63 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query).not.toHaveBeenCalled();
   });
 
+  it("lists read-only Compiler Policy Gates without enabling auto-use", async () => {
+    const response = await getAgency("/api/agency/compiler-policy-gates");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.policy).toEqual({
+      readOnly: true,
+      compilerVisible: false,
+      autoUseEnabled: false,
+      executionChanging: false,
+      mode: "read_only_compiler_policy_gates",
+    });
+    expect(response.body.data.total).toBeGreaterThanOrEqual(6);
+    expect(response.body.data.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "compiler_auto_use",
+          state: "blocked",
+          risk: "high",
+          blocks: expect.arrayContaining(["compiler_auto_use_disabled"]),
+          requiredPolicyChanges: expect.arrayContaining(["compiler_auto_use"]),
+          remediation: expect.objectContaining({
+            state: "manual_review_required",
+            safeToAutoApply: false,
+          }),
+        }),
+        expect.objectContaining({
+          id: "step_compiler_eligibility",
+          state: "blocked",
+          blocks: expect.arrayContaining(["step_not_compiler_eligible"]),
+          requiredPolicyChanges: expect.arrayContaining(["step_compiler_eligibility"]),
+        }),
+        expect.objectContaining({
+          id: "execution_path_change",
+          state: "blocked",
+          blocks: expect.arrayContaining(["execution_changing_disabled"]),
+        }),
+      ])
+    );
+    expect(response.body.data.items.every((gate: any) => gate.remediation.safeToAutoApply === false)).toBe(true);
+    expect(response.body.data.items.every((gate: any) => gate.state !== "enabled")).toBe(true);
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
+
+  it("filters Compiler Policy Gates by category and risk", async () => {
+    const response = await getAgency("/api/agency/compiler-policy-gates?category=auto_use&risk=high");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.items.length).toBe(1);
+    expect(response.body.data.items[0]).toMatchObject({
+      id: "compiler_auto_use",
+      category: "auto_use",
+      risk: "high",
+      state: "blocked",
+    });
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
+
   it("lists Step Library promotion audit events without enabling reuse", async () => {
     const event = {
       id: "66666666-6666-4666-8666-666666666666",

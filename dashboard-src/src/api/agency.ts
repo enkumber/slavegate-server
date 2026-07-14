@@ -381,6 +381,37 @@ export interface CompilerKnowledgeResponse {
   };
 }
 
+export interface CompilerPolicyGate {
+  id: string;
+  title: string;
+  category: string;
+  state: string;
+  risk: "low" | "medium" | "high" | string;
+  owner: string;
+  blocks: string[];
+  requiredEvidence: string[];
+  requiredPolicyChanges: string[];
+  remediation: {
+    state: string;
+    nextActions: string[];
+    safeToAutoApply: false;
+  };
+  guardrails: string[];
+  notes: string[];
+}
+
+export interface CompilerPolicyGatesResponse {
+  items: CompilerPolicyGate[];
+  total: number;
+  policy: {
+    readOnly: true;
+    compilerVisible: false;
+    autoUseEnabled: false;
+    executionChanging: false;
+    mode: string;
+  };
+}
+
 export interface CompilerAwarenessCandidate {
   id: string;
   name?: string;
@@ -632,6 +663,17 @@ export const agencyApi = {
       if (params?.risk) query.set("risk", params.risk);
       if (params?.source) query.set("source", params.source);
       return api.get<CompilerKnowledgeResponse>(`/agency/compiler-knowledge?${query}`);
+    },
+  },
+
+  compilerPolicyGates: {
+    list: (params?: { category?: string; state?: string; risk?: string; owner?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.category) query.set("category", params.category);
+      if (params?.state) query.set("state", params.state);
+      if (params?.risk) query.set("risk", params.risk);
+      if (params?.owner) query.set("owner", params.owner);
+      return api.get<CompilerPolicyGatesResponse>(`/agency/compiler-policy-gates?${query}`);
     },
   },
 

@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, CompilerAwarenessEvent, CompilerAwarenessResponse, CompilerKnowledgeEntry } from "../api/agency";
+import { agencyApi, CompilerAwarenessEvent, CompilerAwarenessResponse, CompilerKnowledgeEntry, CompilerPolicyGate } from "../api/agency";
 
 function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gray" | "red" | "blue" }) {
   const palette = {
@@ -35,6 +35,13 @@ function sourceTone(source: string): "blue" | "yellow" | "gray" | "green" | "red
   return "green";
 }
 
+function stateTone(state: string): "green" | "yellow" | "gray" | "red" | "blue" {
+  if (state === "enabled") return "green";
+  if (state === "review_ready") return "yellow";
+  if (state === "blocked") return "red";
+  return "gray";
+}
+
 function listText(values: string[]) {
   return values.length ? values.join(", ") : "-";
 }
@@ -62,6 +69,8 @@ export function CompilerKnowledgePage() {
   const [awarenessIntent, setAwarenessIntent] = useState("unlock device");
   const [awareness, setAwareness] = useState<CompilerAwarenessResponse | null>(null);
   const [awarenessEvents, setAwarenessEvents] = useState<CompilerAwarenessEvent[]>([]);
+  const [policyGates, setPolicyGates] = useState<CompilerPolicyGate[]>([]);
+  const [policyGateMode, setPolicyGateMode] = useState("read_only_compiler_policy_gates");
   const [awarenessLoading, setAwarenessLoading] = useState(false);
   const [awarenessError, setAwarenessError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -95,6 +104,20 @@ export function CompilerKnowledgePage() {
   useEffect(() => {
     void loadKnowledge();
   }, [loadKnowledge]);
+
+  const loadPolicyGates = useCallback(async () => {
+    try {
+      const data = await agencyApi.compilerPolicyGates.list();
+      setPolicyGates(data.items);
+      setPolicyGateMode(data.policy.mode);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load Compiler Policy Gates");
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPolicyGates();
+  }, [loadPolicyGates]);
 
   const loadAwareness = useCallback(async () => {
     setAwarenessLoading(true);
@@ -146,6 +169,43 @@ export function CompilerKnowledgePage() {
         <Badge label="autoUseEnabled: false" tone="gray" />
         <Badge label="executionChanging: false" tone="gray" />
         <span style={{ color: "#777", fontSize: "12px" }}>Read-only guidance. Compiler execution remains unchanged.</span>
+      </div>
+
+      <div style={{ border: "1px solid #222", borderRadius: "6px", background: "#101010", padding: "14px", marginBottom: "14px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", marginBottom: "12px", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ color: "#fff", fontSize: "15px", fontWeight: 600 }}>Compiler Policy Gates</div>
+            <div style={{ color: "#777", fontSize: "12px", marginTop: "4px" }}>Read-only registry of explicit gates required before compiler auto-use can exist.</div>
+          </div>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Badge label={`mode: ${policyGateMode}`} tone="blue" />
+            <Badge label="safeToAutoApply: false" tone="gray" />
+          </div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(190px, 1fr))", gap: "10px" }}>
+          {policyGates.map((gate) => (
+            <div key={gate.id} style={{ background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "12px", minWidth: 0 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", alignItems: "start", marginBottom: "8px" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ color: "#e5e7eb", fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{gate.title}</div>
+                  <div style={{ color: "#666", fontSize: "11px", marginTop: "3px" }}>{gate.id}</div>
+                </div>
+                <Badge label={gate.state} tone={stateTone(gate.state)} />
+              </div>
+              <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "8px" }}>
+                <Badge label={gate.category} tone="gray" />
+                <Badge label={gate.risk} tone={riskTone(gate.risk)} />
+                <Badge label={gate.owner} tone="blue" />
+              </div>
+              <div style={{ color: "#888", fontSize: "11px", lineHeight: 1.45 }}>
+                Blocks: {listText(gate.blocks)}
+              </div>
+              <div style={{ color: "#666", fontSize: "11px", lineHeight: 1.45, marginTop: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                Next: {gate.remediation.nextActions[0] ?? "-"}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div style={{ border: "1px solid #222", borderRadius: "6px", background: "#101010", padding: "14px", marginBottom: "14px" }}>

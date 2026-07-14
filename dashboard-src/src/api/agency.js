@@ -110,6 +110,20 @@ export const agencyApi = {
             return api.get(`/agency/compiler-knowledge?${query}`);
         },
     },
+    compilerPolicyGates: {
+        list: (params) => {
+            const query = new URLSearchParams();
+            if (params?.category)
+                query.set("category", params.category);
+            if (params?.state)
+                query.set("state", params.state);
+            if (params?.risk)
+                query.set("risk", params.risk);
+            if (params?.owner)
+                query.set("owner", params.owner);
+            return api.get(`/agency/compiler-policy-gates?${query}`);
+        },
+    },
     compilerAwareness: {
         get: (params) => {
             const query = new URLSearchParams();
