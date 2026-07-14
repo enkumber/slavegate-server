@@ -697,6 +697,11 @@ export interface WorkflowDefinition {
     promotedAt: string | null;
     revokedBy: string | null;
     revokedAt: string | null;
+    confidence: number;
+    readiness: Record<string, unknown>;
+    scopeDetails: Record<string, unknown>;
+    rollbackDefinitionId: string | null;
+    rollbackPreview: Record<string, unknown>;
     reusable: boolean;
     compilerEligible: false;
     wouldUseDefinition: false;
@@ -747,6 +752,10 @@ export interface WorkflowDefinitionPromotionEvent {
   actor: string | null;
   policy: Record<string, unknown>;
   validationSnapshot: Record<string, unknown>;
+  promotionConfidence: number;
+  promotionReadiness: Record<string, unknown>;
+  promotionScopeDetails: Record<string, unknown>;
+  rollbackPreview: Record<string, unknown>;
   createdAt: string | null;
 }
 
@@ -756,6 +765,25 @@ export interface WorkflowDefinitionPromotionResponse {
   previousState: string | null;
   nextState: string;
   validationSnapshot: Record<string, unknown>;
+  promotionConfidence: number;
+  promotionReadiness: Record<string, unknown>;
+  promotionScopeDetails: Record<string, unknown>;
+  rollbackPreview: Record<string, unknown>;
+  policy: Record<string, unknown>;
+}
+
+export interface WorkflowDefinitionRollbackPreviewResponse {
+  mode: string;
+  available: boolean;
+  currentDefinition: Record<string, unknown>;
+  candidateTargets: Array<Record<string, unknown>>;
+  selectedTarget: Record<string, unknown> | null;
+  wouldRollbackNow: false;
+  wouldChangePlan: false;
+  wouldChangeWorkflowCache: false;
+  wouldExecuteWorkflow: false;
+  requiresManualRollback: true;
+  notes: string[];
   policy: Record<string, unknown>;
 }
 
@@ -1085,6 +1113,8 @@ export const agencyApi = {
     },
     promote: (id: string, data: { action: "promote_limited" | "revoke"; scope?: string | null; note?: string | null }) =>
       api.patch<WorkflowDefinitionPromotionResponse>(`/agency/workflow-definitions/${id}/promotion`, data),
+    rollbackPreview: (id: string) =>
+      api.get<WorkflowDefinitionRollbackPreviewResponse>(`/agency/workflow-definitions/${id}/rollback-preview`),
     listPromotionEvents: (params?: { page?: number; pageSize?: number; definitionId?: string; key?: string; action?: string; actor?: string }) => {
       const query = new URLSearchParams();
       if (params?.page) query.set("page", String(params.page));

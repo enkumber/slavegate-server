@@ -200,6 +200,7 @@ export const agencyApi = {
             return api.get(`/agency/workflow-definitions/resolve?${query}`);
         },
         promote: (id, data) => api.patch(`/agency/workflow-definitions/${id}/promotion`, data),
+        rollbackPreview: (id) => api.get(`/agency/workflow-definitions/${id}/rollback-preview`),
         listPromotionEvents: (params) => {
             const query = new URLSearchParams();
             if (params?.page)

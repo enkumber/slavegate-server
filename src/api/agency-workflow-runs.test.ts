@@ -2097,6 +2097,10 @@ describe("agency workflow runs API", () => {
           promotion_state: "limited_reuse",
           promotion_scope: "device:test-device",
           promotion_note: "Manual approval for one device",
+          promotion_confidence: 0.83,
+          promotion_readiness: { state: "manual_limited_promotion_ready", validationScore: 75, branchCoveragePercent: 100 },
+          promotion_scope_details: { scope: "device:test-device", scopeType: "device", globalScopeAllowed: false },
+          rollback_preview: { available: false, wouldRollbackNow: false },
           promoted_by: "dashboard",
           promoted_at: new Date("2026-05-22T11:10:00.000Z"),
           updated_at: new Date("2026-05-22T11:10:00.000Z"),
@@ -2132,6 +2136,16 @@ describe("agency workflow runs API", () => {
         promotion: expect.objectContaining({
           state: "limited_reuse",
           scope: "device:test-device",
+          confidence: 0.83,
+          readiness: expect.objectContaining({
+            state: "manual_limited_promotion_ready",
+            validationScore: 75,
+            branchCoveragePercent: 100,
+          }),
+          scopeDetails: expect.objectContaining({
+            scopeType: "device",
+            globalScopeAllowed: false,
+          }),
           reusable: true,
           compilerEligible: false,
           wouldUseDefinition: false,
@@ -2146,20 +2160,41 @@ describe("agency workflow runs API", () => {
           safeToAutoApply: false,
         }),
       }),
+      promotionConfidence: 0.83,
+      promotionReadiness: expect.objectContaining({
+        state: "manual_limited_promotion_ready",
+        validationScore: 75,
+      }),
+      promotionScopeDetails: expect.objectContaining({
+        scope: "device:test-device",
+        globalScopeAllowed: false,
+      }),
+      rollbackPreview: expect.objectContaining({
+        wouldRollbackNow: false,
+        wouldExecuteWorkflow: false,
+      }),
     });
     expect(mocks.client.query.mock.calls[0][0]).toBe("BEGIN");
     expect(String(mocks.client.query.mock.calls[1][0])).toContain("SET promotion_state = 'limited_reuse'");
-    expect(mocks.client.query.mock.calls[1][1]).toEqual([
+    expect(mocks.client.query.mock.calls[1][1].slice(0, 4)).toEqual([
       "99999999-9999-4999-8999-999999999999",
       "device:test-device",
       "Manual approval for one device",
+      0.83,
     ]);
+    expect(mocks.client.query.mock.calls[1][1][4]).toContain("\"state\":\"manual_limited_promotion_ready\"");
+    expect(mocks.client.query.mock.calls[1][1][5]).toContain("\"scopeType\":\"device\"");
+    expect(mocks.client.query.mock.calls[1][1][6]).toContain("\"wouldRollbackNow\":false");
     expect(String(mocks.client.query.mock.calls[2][0])).toContain("agency_workflow_definition_promotion_events");
     expect(mocks.client.query.mock.calls[2][1][3]).toBe("promote_limited");
     expect(mocks.client.query.mock.calls[2][1][4]).toBe("review_only");
     expect(mocks.client.query.mock.calls[2][1][5]).toBe("limited_reuse");
     expect(mocks.client.query.mock.calls[2][1][8]).toContain("\"manualOnly\":true");
     expect(mocks.client.query.mock.calls[2][1][9]).toContain("\"wouldExecuteWorkflow\":false");
+    expect(mocks.client.query.mock.calls[2][1][10]).toBe(0.83);
+    expect(mocks.client.query.mock.calls[2][1][11]).toContain("\"state\":\"manual_limited_promotion_ready\"");
+    expect(mocks.client.query.mock.calls[2][1][12]).toContain("\"scopeType\":\"device\"");
+    expect(mocks.client.query.mock.calls[2][1][13]).toContain("\"wouldRollbackNow\":false");
     expect(mocks.client.query.mock.calls[3][0]).toBe("COMMIT");
   });
 
@@ -2226,6 +2261,10 @@ describe("agency workflow runs API", () => {
           promotion_state: "revoked",
           promotion_scope: null,
           promotion_note: "Bad scope",
+          promotion_confidence: 0,
+          promotion_readiness: { state: "revoked" },
+          promotion_scope_details: { globalScopeAllowed: false },
+          rollback_preview: { available: false, wouldRollbackNow: false },
           revoked_by: "dashboard",
           revoked_at: new Date("2026-05-22T11:20:00.000Z"),
           updated_at: new Date("2026-05-22T11:20:00.000Z"),
@@ -2247,6 +2286,8 @@ describe("agency workflow runs API", () => {
       definition: expect.objectContaining({
         promotion: expect.objectContaining({
           state: "revoked",
+          confidence: 0,
+          readiness: expect.objectContaining({ state: "revoked" }),
           reusable: false,
           compilerEligible: false,
           wouldUseDefinition: false,
@@ -2266,7 +2307,81 @@ describe("agency workflow runs API", () => {
     expect(mocks.client.query.mock.calls[2][1][3]).toBe("revoke");
     expect(mocks.client.query.mock.calls[2][1][4]).toBe("limited_reuse");
     expect(mocks.client.query.mock.calls[2][1][5]).toBe("revoked");
+    expect(mocks.client.query.mock.calls[2][1][10]).toBe(0);
+    expect(mocks.client.query.mock.calls[2][1][11]).toContain("\"state\":\"revoked\"");
     expect(mocks.client.query.mock.calls[3][0]).toBe("COMMIT");
+  });
+
+  it("previews workflow definition rollback without changing compiler or execution", async () => {
+    const current = {
+      id: "99999999-9999-4999-8999-999999999999",
+      definition_key: "device_unlock",
+      version: 2,
+      status: "active",
+      title: "Device unlock",
+      description: "Unlock device definition",
+      platform: "android",
+      intent: "device_unlock",
+      goal: "Unlock the device without changing workflow cache",
+      source: "static_seed",
+      definition: {
+        steps: ["wake_device", "swipe_unlock", "verify_home"],
+        terminalStates: ["success", "expected_failure", "needs_review", "quarantined"],
+        sideEffects: [],
+      },
+      success_criteria: ["home screen visible", "no challenge detected"],
+      allowed_tools: ["wake_device", "gesture_swipe", "ui_tree_dump"],
+      required_capabilities: ["device.online_or_approved"],
+      constraints: ["read_only_validation", "limited_scope_only"],
+      fallback_rules: ["if device unavailable or timeout classify needs_review"],
+      rollback: { required: true },
+      policy: {},
+      promotion_state: "limited_reuse",
+      promotion_scope: "device:test-device",
+      promotion_note: "Manual approval",
+      promotion_confidence: 0.83,
+      promotion_readiness: { state: "manual_limited_promotion_ready" },
+      promotion_scope_details: { scopeType: "device" },
+      rollback_preview: {},
+      created_by: "migration",
+      created_at: new Date("2026-05-22T11:00:00.000Z"),
+      updated_at: new Date("2026-05-22T11:10:00.000Z"),
+    };
+    const previous = {
+      ...current,
+      id: "88888888-8888-4888-8888-888888888888",
+      version: 1,
+      promotion_state: "review_only",
+      promotion_scope: null,
+      promotion_confidence: 0.5,
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [current] })
+      .mockResolvedValueOnce({ rows: [previous] });
+
+    const response = await getAgency("/api/agency/workflow-definitions/99999999-9999-4999-8999-999999999999/rollback-preview");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      mode: "workflow_definition_rollback_preview",
+      available: true,
+      wouldRollbackNow: false,
+      wouldChangePlan: false,
+      wouldChangeWorkflowCache: false,
+      wouldExecuteWorkflow: false,
+      requiresManualRollback: true,
+      selectedTarget: expect.objectContaining({
+        id: "88888888-8888-4888-8888-888888888888",
+        version: 1,
+      }),
+      policy: expect.objectContaining({
+        readOnly: true,
+        rollbackPreviewOnly: true,
+        autoUseEnabled: false,
+        executionChanging: false,
+        workflowCacheChanging: false,
+      }),
+    });
   });
 
   it("lists workflow definition promotion audit events without enabling auto-use", async () => {
@@ -2285,6 +2400,10 @@ describe("agency workflow runs API", () => {
           actor: "dashboard",
           policy: { manualOnly: true, autoUseEnabled: false },
           validation_snapshot: { decision: { wouldExecuteWorkflow: false } },
+          promotion_confidence: 0.83,
+          promotion_readiness: { state: "manual_limited_promotion_ready" },
+          promotion_scope_details: { scopeType: "device", globalScopeAllowed: false },
+          rollback_preview: { available: false, wouldRollbackNow: false },
           created_at: new Date("2026-05-22T11:15:00.000Z"),
         }],
       })
@@ -2306,6 +2425,10 @@ describe("agency workflow runs API", () => {
       previousState: "review_only",
       nextState: "limited_reuse",
       promotionScope: "device:test-device",
+      promotionConfidence: 0.83,
+      promotionReadiness: expect.objectContaining({ state: "manual_limited_promotion_ready" }),
+      promotionScopeDetails: expect.objectContaining({ scopeType: "device" }),
+      rollbackPreview: expect.objectContaining({ wouldRollbackNow: false }),
       policy: expect.objectContaining({ autoUseEnabled: false }),
       validationSnapshot: expect.objectContaining({
         decision: expect.objectContaining({ wouldExecuteWorkflow: false }),

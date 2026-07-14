@@ -404,6 +404,10 @@ function rowToWorkflowDefinitionPromotionEvent(row: Record<string, unknown>): Re
     actor: row.actor ?? null,
     policy: row.policy ?? {},
     validationSnapshot: row.validation_snapshot ?? {},
+    promotionConfidence: Number(row.promotion_confidence ?? 0),
+    promotionReadiness: row.promotion_readiness ?? {},
+    promotionScopeDetails: row.promotion_scope_details ?? {},
+    rollbackPreview: row.rollback_preview ?? {},
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
   };
 }
@@ -545,7 +549,8 @@ function parseWorkflowDefinitionPromotion(input: unknown): {
     if (rawScope.length > 160) {
       return { error: "scope must be 160 characters or fewer", code: "WORKFLOW_DEFINITION_PROMOTION_SCOPE_TOO_LONG" };
     }
-    if (["global", "all", "compiler", "auto"].includes(rawScope.toLowerCase())) {
+    const loweredScope = rawScope.toLowerCase();
+    if (["global", "all", "compiler", "auto"].some((blocked) => loweredScope === blocked || loweredScope.startsWith(`${blocked}:`))) {
       return { error: "global or compiler scope is not allowed in this phase", code: "WORKFLOW_DEFINITION_GLOBAL_SCOPE_DISABLED" };
     }
   }
@@ -607,6 +612,146 @@ function normalizeJsonArray(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value)
     ? value.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object" && !Array.isArray(entry))
     : [];
+}
+
+function workflowDefinitionScopeDetails(scope: string | null): Record<string, unknown> {
+  const normalized = scope?.trim() || null;
+  const [scopeType = null, ...scopeParts] = normalized ? normalized.split(":") : [];
+  const scopeValue = scopeParts.join(":") || null;
+  return {
+    scope: normalized,
+    scopeType,
+    scopeValue,
+    limitedReuseOnly: true,
+    globalScopeAllowed: false,
+    compilerEligible: false,
+    wouldUseDefinition: false,
+    wouldChangePlan: false,
+    wouldChangeWorkflowCache: false,
+    allowedScopePrefixes: ["definition", "device", "user", "account", "client", "tenant", "environment"],
+    notes: [
+      "Promotion scope is metadata for manual review only.",
+      "Global compiler reuse is disabled in this phase.",
+    ],
+  };
+}
+
+function workflowDefinitionPromotionMetadata(input: {
+  definition: ReturnType<typeof rowToWorkflowDefinition>;
+  validationSnapshot: Record<string, unknown>;
+  scope: string | null;
+}): {
+  confidence: number;
+  readiness: Record<string, unknown>;
+  scopeDetails: Record<string, unknown>;
+} {
+  const staticValidation = normalizeJsonObject(input.validationSnapshot.staticValidation);
+  const dryRun = normalizeJsonObject(input.validationSnapshot.dryRun);
+  const decision = normalizeJsonObject(input.validationSnapshot.decision);
+  const branchCoverage = normalizeJsonObject(dryRun.branchCoverage);
+  const validationScore = Number(decision.validationScore ?? 0);
+  const coveragePercent = Number(branchCoverage.coveragePercent ?? 0);
+  const staticErrors = Number(staticValidation.errors ?? 0);
+  const staticWarnings = Number(staticValidation.warnings ?? 0);
+  const confidence = staticErrors > 0
+    ? 0
+    : Math.max(0, Math.min(0.99, Math.round(((validationScore * 0.7 + coveragePercent * 0.3) / 100) * 100) / 100));
+  const readinessState = staticErrors === 0 && validationScore >= 60 && coveragePercent >= 50
+    ? "manual_limited_promotion_ready"
+    : "blocked";
+  return {
+    confidence,
+    readiness: {
+      state: readinessState,
+      manualOnly: true,
+      validationScore,
+      branchCoveragePercent: coveragePercent,
+      staticErrors,
+      staticWarnings,
+      promotionThresholds: {
+        validationScore: 60,
+        branchCoveragePercent: 50,
+        staticErrors: 0,
+      },
+      linkedPipeline: {
+        mode: "workflow_validation_pipeline_v2",
+        definitionId: input.definition.id,
+        definitionKey: input.definition.key,
+        definitionVersion: input.definition.version,
+      },
+      wouldPromoteDefinitionAutomatically: false,
+      wouldUseDefinition: false,
+      wouldExecuteWorkflow: false,
+      wouldChangePlan: false,
+      wouldChangeWorkflowCache: false,
+      blockers: readinessState === "blocked"
+        ? [
+            ...(staticErrors > 0 ? ["static_validation_errors"] : []),
+            ...(validationScore < 60 ? ["validation_score_below_threshold"] : []),
+            ...(coveragePercent < 50 ? ["branch_coverage_below_threshold"] : []),
+          ]
+        : [
+            "manual_review_required",
+            "compiler_auto_use_disabled",
+          ],
+      nextActions: [
+        "review Validation Pipeline evidence",
+        "keep promotion scope limited",
+        "record rollback target before broader reuse",
+      ],
+    },
+    scopeDetails: workflowDefinitionScopeDetails(input.scope),
+  };
+}
+
+async function workflowDefinitionRollbackPreview(db: ReturnType<typeof getDb>, definition: ReturnType<typeof rowToWorkflowDefinition>): Promise<Record<string, unknown>> {
+  const rows = await db.query(
+    `SELECT *
+     FROM agency_workflow_definitions
+     WHERE definition_key = $1
+       AND id <> $2
+     ORDER BY version DESC, updated_at DESC
+     LIMIT 5`,
+    [definition.key, definition.id]
+  );
+  const candidates = (rows?.rows ?? []).map(rowToWorkflowDefinition);
+  const target = candidates.find((candidate) => candidate.version < definition.version) ?? candidates[0] ?? null;
+  return {
+    mode: "workflow_definition_rollback_preview",
+    currentDefinition: {
+      id: definition.id,
+      key: definition.key,
+      version: definition.version,
+      status: definition.status,
+      promotionState: definition.promotion.state,
+    },
+    candidateTargets: candidates.map((candidate) => ({
+      id: candidate.id,
+      key: candidate.key,
+      version: candidate.version,
+      status: candidate.status,
+      promotionState: candidate.promotion.state,
+      confidence: candidate.promotion.confidence,
+    })),
+    selectedTarget: target
+      ? {
+          id: target.id,
+          key: target.key,
+          version: target.version,
+          status: target.status,
+          promotionState: target.promotion.state,
+        }
+      : null,
+    available: !!target,
+    wouldRollbackNow: false,
+    wouldChangePlan: false,
+    wouldChangeWorkflowCache: false,
+    wouldExecuteWorkflow: false,
+    requiresManualRollback: true,
+    notes: target
+      ? ["Rollback preview is available, but no rollback is applied by this endpoint."]
+      : ["No previous workflow definition version is available for rollback preview."],
+  };
 }
 
 function stepLabel(step: Record<string, unknown>, fallbackIndex: number): string {
@@ -2049,6 +2194,39 @@ router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Reques
   res.json({ ok: true, data: resolution });
 });
 
+router.get("/workflow-definitions/:id/rollback-preview", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const rows = await db.query(
+    `SELECT *
+     FROM agency_workflow_definitions
+     WHERE id = $1`,
+    [req.params.id]
+  );
+  const row = rows.rows[0];
+  if (!row) {
+    return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
+  }
+  const definition = rowToWorkflowDefinition(row);
+  const preview = await workflowDefinitionRollbackPreview(db, definition);
+  res.json({
+    ok: true,
+    data: {
+      ...preview,
+      policy: {
+        readOnly: true,
+        rollbackPreviewOnly: true,
+        compilerVisible: false,
+        autoUseEnabled: false,
+        executionChanging: false,
+        workflowCacheChanging: false,
+        wouldUseDefinition: false,
+        wouldExecuteWorkflow: false,
+        mode: "workflow_definition_rollback_preview_read_only",
+      },
+    },
+  });
+});
+
 router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
   const parsed = parseWorkflowDefinitionPromotion(req.body);
@@ -2125,6 +2303,10 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
        SET promotion_state = 'limited_reuse',
            promotion_scope = $2,
            promotion_note = $3,
+           promotion_confidence = $4,
+           promotion_readiness = $5,
+           promotion_scope_details = $6,
+           rollback_preview = $7,
            promoted_by = 'dashboard',
            promoted_at = NOW(),
            revoked_by = NULL,
@@ -2136,14 +2318,15 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
        SET promotion_state = 'revoked',
            promotion_scope = NULL,
            promotion_note = $2,
+           promotion_confidence = 0,
+           promotion_readiness = $3,
+           promotion_scope_details = $4,
+           rollback_preview = $5,
            revoked_by = 'dashboard',
            revoked_at = NOW(),
            updated_at = NOW()
        WHERE id = $1
        RETURNING *`;
-  const updateValues = parsed.action === "promote_limited"
-    ? [definition.id, parsed.scope, parsed.note]
-    : [definition.id, parsed.note];
   const validationSnapshot = {
     staticValidation,
     dryRun: {
@@ -2167,9 +2350,44 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
       blockers: decision.blockers ?? [],
     },
   };
+  const promotionMetadata = workflowDefinitionPromotionMetadata({
+    definition,
+    validationSnapshot,
+    scope: parsed.scope,
+  });
+  const rollbackPreview = await workflowDefinitionRollbackPreview(db, definition);
+  const revokedReadiness = {
+    ...promotionMetadata.readiness,
+    state: "revoked",
+    blockers: [
+      "workflow_definition_revoked",
+      "manual_review_required_before_repromotion",
+    ],
+  };
+  const revokedScopeDetails = workflowDefinitionScopeDetails(null);
+  const updateValues = parsed.action === "promote_limited"
+    ? [
+        definition.id,
+        parsed.scope,
+        parsed.note,
+        promotionMetadata.confidence,
+        JSON.stringify(promotionMetadata.readiness),
+        JSON.stringify(promotionMetadata.scopeDetails),
+        JSON.stringify(rollbackPreview),
+      ]
+    : [
+        definition.id,
+        parsed.note,
+        JSON.stringify(revokedReadiness),
+        JSON.stringify(revokedScopeDetails),
+        JSON.stringify(rollbackPreview),
+      ];
 
   const promotionPolicy = {
     manualOnly: true,
+    readinessLinkedToValidationPipeline: true,
+    confidenceRequired: true,
+    rollbackPreviewRequired: true,
     compilerVisible: false,
     autoUseEnabled: false,
     executionChanging: false,
@@ -2198,9 +2416,13 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
          note,
          actor,
          policy,
-         validation_snapshot
+         validation_snapshot,
+         promotion_confidence,
+         promotion_readiness,
+         promotion_scope_details,
+         rollback_preview
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'dashboard', $9, $10)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'dashboard', $9, $10, $11, $12, $13, $14)`,
       [
         definition.id,
         definition.key,
@@ -2212,6 +2434,10 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
         parsed.note,
         JSON.stringify(promotionPolicy),
         JSON.stringify(validationSnapshot),
+        parsed.action === "promote_limited" ? promotionMetadata.confidence : 0,
+        JSON.stringify(parsed.action === "promote_limited" ? promotionMetadata.readiness : revokedReadiness),
+        JSON.stringify(parsed.action === "promote_limited" ? promotionMetadata.scopeDetails : revokedScopeDetails),
+        JSON.stringify(rollbackPreview),
       ]
     );
     await client.query("COMMIT");
@@ -2230,6 +2456,10 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
       previousState: definition.promotion.state,
       nextState,
       validationSnapshot,
+      promotionConfidence: parsed.action === "promote_limited" ? promotionMetadata.confidence : 0,
+      promotionReadiness: parsed.action === "promote_limited" ? promotionMetadata.readiness : revokedReadiness,
+      promotionScopeDetails: parsed.action === "promote_limited" ? promotionMetadata.scopeDetails : revokedScopeDetails,
+      rollbackPreview,
       policy: {
         ...promotionPolicy,
         wouldUseDefinition: false,

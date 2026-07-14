@@ -31,6 +31,11 @@ export interface WorkflowDefinition {
     promotedAt: string | null;
     revokedBy: string | null;
     revokedAt: string | null;
+    confidence: number;
+    readiness: JsonObject;
+    scopeDetails: JsonObject;
+    rollbackDefinitionId: string | null;
+    rollbackPreview: JsonObject;
     reusable: boolean;
     compilerEligible: false;
     wouldUseDefinition: false;
@@ -127,6 +132,11 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
       promotedAt: dateValue(row.promoted_at),
       revokedBy: typeof row.revoked_by === "string" ? row.revoked_by : null,
       revokedAt: dateValue(row.revoked_at),
+      confidence: Number(row.promotion_confidence ?? 0),
+      readiness: objectValue(row.promotion_readiness),
+      scopeDetails: objectValue(row.promotion_scope_details),
+      rollbackDefinitionId: typeof row.rollback_definition_id === "string" ? row.rollback_definition_id : null,
+      rollbackPreview: objectValue(row.rollback_preview),
       reusable: row.promotion_state === "limited_reuse",
       compilerEligible: false,
       wouldUseDefinition: false,

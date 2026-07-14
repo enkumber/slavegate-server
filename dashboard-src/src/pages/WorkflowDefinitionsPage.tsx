@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, WorkflowDefinition, WorkflowDefinitionPromotionEvent, WorkflowDefinitionResolutionResponse } from "../api/agency";
+import { agencyApi, WorkflowDefinition, WorkflowDefinitionPromotionEvent, WorkflowDefinitionResolutionResponse, WorkflowDefinitionRollbackPreviewResponse } from "../api/agency";
 
 function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gray" | "red" | "blue" }) {
   const palette = {
@@ -29,7 +29,20 @@ function shortList(values: unknown[], limit = 3) {
   return `${values.slice(0, limit).map(String).join(", ")}${values.length > limit ? " +" : ""}`;
 }
 
+function numberValue(value: unknown, fallback = 0) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function promotionReadinessLabel(definition: WorkflowDefinition) {
+  return typeof definition.promotion?.readiness?.state === "string"
+    ? definition.promotion.readiness.state
+    : "not_evaluated";
+}
+
 function DefinitionCard({ definition }: { definition: WorkflowDefinition }) {
+  const readiness = promotionReadinessLabel(definition);
+  const branchCoverage = numberValue(definition.promotion?.readiness?.branchCoveragePercent);
+  const validationScore = numberValue(definition.promotion?.readiness?.validationScore);
   return (
     <div style={{ background: "#101010", border: "1px solid #222", borderRadius: "6px", padding: "14px", minWidth: 0 }}>
       <div style={{ display: "flex", gap: "8px", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px" }}>
@@ -44,6 +57,7 @@ function DefinitionCard({ definition }: { definition: WorkflowDefinition }) {
         <Badge label={definition.intent} tone="gray" />
         <Badge label={definition.source} tone="gray" />
         <Badge label={`promotion: ${definition.promotion?.state ?? "review_only"}`} tone={definition.promotion?.state === "limited_reuse" ? "green" : definition.promotion?.state === "revoked" ? "red" : "gray"} />
+        <Badge label={`confidence: ${Math.round(numberValue(definition.promotion?.confidence) * 100)}%`} tone="blue" />
       </div>
       <div style={{ color: "#aaa", fontSize: "12px", lineHeight: 1.55, marginBottom: "10px" }}>{definition.goal}</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(70px, 1fr))", gap: "6px", marginBottom: "10px" }}>
@@ -64,6 +78,7 @@ function DefinitionCard({ definition }: { definition: WorkflowDefinition }) {
       <div style={{ color: "#777", fontSize: "11px", lineHeight: 1.5 }}>Capabilities: {shortList(definition.requiredCapabilities)}</div>
       <div style={{ color: "#777", fontSize: "11px", lineHeight: 1.5 }}>Rollback: {String(definition.rollback?.strategy ?? definition.rollback?.reason ?? "-")}</div>
       <div style={{ color: "#777", fontSize: "11px", lineHeight: 1.5 }}>Promotion scope: {definition.promotion?.scope ?? "-"}</div>
+      <div style={{ color: "#777", fontSize: "11px", lineHeight: 1.5 }}>Readiness: {readiness} · score {validationScore} · branches {branchCoverage}%</div>
     </div>
   );
 }
@@ -81,6 +96,7 @@ export function WorkflowDefinitionsPage() {
   const [promotionNote, setPromotionNote] = useState("");
   const [promotionBusy, setPromotionBusy] = useState(false);
   const [promotionEvents, setPromotionEvents] = useState<WorkflowDefinitionPromotionEvent[]>([]);
+  const [rollbackPreview, setRollbackPreview] = useState<WorkflowDefinitionRollbackPreviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -130,6 +146,15 @@ export function WorkflowDefinitionsPage() {
     setPromotionEvents(response.items);
   }, []);
 
+  const loadRollbackPreview = useCallback(async (definitionId?: string | null) => {
+    if (!definitionId) {
+      setRollbackPreview(null);
+      return;
+    }
+    const response = await agencyApi.workflowDefinitions.rollbackPreview(definitionId);
+    setRollbackPreview(response);
+  }, []);
+
   const promoteSelected = useCallback(async () => {
     if (!selected) return;
     setPromotionBusy(true);
@@ -143,12 +168,13 @@ export function WorkflowDefinitionsPage() {
       setSelected(response.definition);
       await load();
       await loadPromotionEvents(selected.id);
+      await loadRollbackPreview(selected.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to promote workflow definition");
     } finally {
       setPromotionBusy(false);
     }
-  }, [load, loadPromotionEvents, promotionNote, promotionScope, selected]);
+  }, [load, loadPromotionEvents, loadRollbackPreview, promotionNote, promotionScope, selected]);
 
   const revokeSelected = useCallback(async () => {
     if (!selected) return;
@@ -162,12 +188,13 @@ export function WorkflowDefinitionsPage() {
       setSelected(response.definition);
       await load();
       await loadPromotionEvents(selected.id);
+      await loadRollbackPreview(selected.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to revoke workflow definition promotion");
     } finally {
       setPromotionBusy(false);
     }
-  }, [load, loadPromotionEvents, promotionNote, selected]);
+  }, [load, loadPromotionEvents, loadRollbackPreview, promotionNote, selected]);
 
   useEffect(() => {
     void load();
@@ -179,7 +206,8 @@ export function WorkflowDefinitionsPage() {
 
   useEffect(() => {
     void loadPromotionEvents(selected?.id);
-  }, [loadPromotionEvents, selected?.id]);
+    void loadRollbackPreview(selected?.id);
+  }, [loadPromotionEvents, loadRollbackPreview, selected?.id]);
 
   return (
     <AgencyLayout currentRoute="#/agency/workflow-definitions">
@@ -268,6 +296,10 @@ export function WorkflowDefinitionsPage() {
                 ["Selected", `${selected.key}@v${selected.version}`],
                 ["State", selected.promotion?.state ?? "review_only"],
                 ["Scope", selected.promotion?.scope ?? "-"],
+                ["Confidence", `${Math.round(numberValue(selected.promotion?.confidence) * 100)}%`],
+                ["Readiness", promotionReadinessLabel(selected)],
+                ["Validation score", String(numberValue(selected.promotion?.readiness?.validationScore))],
+                ["Branch coverage", `${numberValue(selected.promotion?.readiness?.branchCoveragePercent)}%`],
                 ["Compiler eligible", String(selected.promotion?.compilerEligible ?? false)],
               ].map(([label, value]) => (
                 <div key={label} style={{ background: "#0a0a0a", border: "1px solid #222", borderRadius: "6px", padding: "10px", minWidth: 0 }}>
@@ -282,6 +314,26 @@ export function WorkflowDefinitionsPage() {
               <button onClick={() => void promoteSelected()} disabled={promotionBusy || selected.promotion?.state === "limited_reuse"} style={{ background: selected.promotion?.state === "limited_reuse" ? "#1f1f1f" : "#166534", border: "1px solid #15803d", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.promotion?.state === "limited_reuse" ? "not-allowed" : "pointer" }}>Promote limited</button>
               <button onClick={() => void revokeSelected()} disabled={promotionBusy || selected.promotion?.state === "revoked"} style={{ background: selected.promotion?.state === "revoked" ? "#1f1f1f" : "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.promotion?.state === "revoked" ? "not-allowed" : "pointer" }}>Revoke</button>
             </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(180px, 1fr))", gap: "8px", marginBottom: "12px" }}>
+              <div style={{ background: "#0a0a0a", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
+                <div style={{ color: "#777", fontSize: "11px", marginBottom: "5px" }}>Scope Details</div>
+                <div style={{ color: "#e5e7eb", fontSize: "12px", overflowWrap: "anywhere" }}>
+                  {String(selected.promotion?.scopeDetails?.scopeType ?? "-")} · global allowed: {String(selected.promotion?.scopeDetails?.globalScopeAllowed ?? false)}
+                </div>
+              </div>
+              <div style={{ background: "#0a0a0a", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
+                <div style={{ color: "#777", fontSize: "11px", marginBottom: "5px" }}>Rollback Preview</div>
+                <div style={{ color: "#e5e7eb", fontSize: "12px", overflowWrap: "anywhere" }}>
+                  {rollbackPreview?.available ? "target available" : "no previous version"} · wouldRollbackNow: {String(rollbackPreview?.wouldRollbackNow ?? false)}
+                </div>
+              </div>
+              <div style={{ background: "#0a0a0a", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
+                <div style={{ color: "#777", fontSize: "11px", marginBottom: "5px" }}>Promotion Mode</div>
+                <div style={{ color: "#e5e7eb", fontSize: "12px", overflowWrap: "anywhere" }}>
+                  manual only · auto-use {String(selected.promotion?.autoUseEnabled ?? false)}
+                </div>
+              </div>
+            </div>
             <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600, marginBottom: "8px" }}>Promotion Audit</div>
             <div style={{ display: "grid", gap: "8px" }}>
               {promotionEvents.map((event) => (
@@ -292,6 +344,7 @@ export function WorkflowDefinitionsPage() {
                   </div>
                   <div style={{ color: "#aaa", fontSize: "12px", overflowWrap: "anywhere" }}>State: {event.previousState ?? "-"} → {event.nextState ?? "-"}</div>
                   <div style={{ color: "#aaa", fontSize: "12px", overflowWrap: "anywhere" }}>Actor: {event.actor ?? "-"} · Scope: {event.promotionScope ?? "-"}</div>
+                  <div style={{ color: "#aaa", fontSize: "12px", overflowWrap: "anywhere" }}>Confidence: {Math.round(numberValue(event.promotionConfidence) * 100)}% · Readiness: {String(event.promotionReadiness?.state ?? "-")}</div>
                   <div style={{ color: "#777", fontSize: "12px", overflowWrap: "anywhere" }}>Note: {event.note ?? "-"}</div>
                 </div>
               ))}
