@@ -1012,6 +1012,19 @@ describe("agency workflow runs API", () => {
   });
 
   it("lists read-only Compiler Policy Gates without enabling auto-use", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{
+        gate_id: "compiler_auto_use",
+        state: "blocked",
+        version: 2,
+        owner: "product",
+        risk: "high",
+        config: { source: "test" },
+        updated_by: "test",
+        updated_at: new Date("2026-05-22T10:30:00.000Z"),
+      }],
+    });
+
     const response = await getAgency("/api/agency/compiler-policy-gates");
 
     expect(response.status).toBe(200);
@@ -1035,6 +1048,8 @@ describe("agency workflow runs API", () => {
             state: "manual_review_required",
             safeToAutoApply: false,
           }),
+          version: 2,
+          configState: "blocked",
         }),
         expect.objectContaining({
           id: "step_compiler_eligibility",
@@ -1051,10 +1066,13 @@ describe("agency workflow runs API", () => {
     );
     expect(response.body.data.items.every((gate: any) => gate.remediation.safeToAutoApply === false)).toBe(true);
     expect(response.body.data.items.every((gate: any) => gate.state !== "enabled")).toBe(true);
-    expect(mocks.db.query).not.toHaveBeenCalled();
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("agency_compiler_policy_gate_config");
   });
 
   it("filters Compiler Policy Gates by category and risk", async () => {
+    mocks.db.query.mockResolvedValueOnce({ rows: [] });
+
     const response = await getAgency("/api/agency/compiler-policy-gates?category=auto_use&risk=high");
 
     expect(response.status).toBe(200);
@@ -1065,7 +1083,7 @@ describe("agency workflow runs API", () => {
       risk: "high",
       state: "blocked",
     });
-    expect(mocks.db.query).not.toHaveBeenCalled();
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 
   it("lists Step Library promotion audit events without enabling reuse", async () => {
@@ -1599,6 +1617,109 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"outcome\":\"blocked_by_policy\"");
     expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"policyGateSummary\"");
     expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"safeToAutoApply\":false");
+  });
+
+  it("exposes Compiler Control Plane dry-run without changing execution", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: "55555555-5555-4555-8555-555555555555",
+          label: "unlock",
+          action: "unlock",
+          type: null,
+          candidate_state: "validated_step",
+          library_state: "limited_reuse",
+          promotion_scope: "device:test-device",
+          validation_contract: {
+            preconditions: ["device screen is awake"],
+            postconditions: ["device unlocked"],
+          },
+          validation_evidence: { source: "test" },
+          run_intent: "unlock device",
+          device_name: "Pixel",
+          validated_at: new Date("2026-05-22T10:08:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          gate_id: "compiler_auto_use",
+          state: "blocked",
+          version: 3,
+          owner: "product",
+          risk: "high",
+          config: { source: "test" },
+          updated_by: "test",
+          updated_at: new Date("2026-05-22T10:35:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: "11111111-1111-4111-8111-111111111111",
+          friendly_name: "Pixel",
+          model: "Pixel 8",
+          android_version: "15",
+          agent_version: "4.0.24",
+          status: "online",
+          last_seen_at: new Date("2026-05-22T10:34:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await getAgency("/api/agency/compiler-control-plane?intent=unlock%20device&scope=device:test-device");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.policy).toMatchObject({
+      readOnly: true,
+      compilerVisible: false,
+      autoUseEnabled: false,
+      executionChanging: false,
+      workflowCacheChanging: false,
+      mode: "compiler_control_plane_read_only",
+    });
+    expect(response.body.data.policyGates.summary).toMatchObject({
+      total: expect.any(Number),
+      blocked: expect.any(Number),
+      safeToAutoApply: 0,
+    });
+    expect(response.body.data.dryRun).toMatchObject({
+      mode: "scoped_compiler_dry_run_read_only",
+      wouldUseStepLibrary: false,
+      wouldChangePlan: false,
+      wouldExecuteStepLibrary: false,
+      selectedStepIds: [],
+      selectedToolIds: [],
+      safeToAutoApply: false,
+      outcome: "blocked_by_policy",
+    });
+    expect(response.body.data.capabilityManifest).toMatchObject({
+      source: "server_inferred_manifest",
+      publishedByDevice: false,
+      deviceSelected: true,
+      deviceName: "Pixel",
+      compatibility: expect.objectContaining({ state: "known_device" }),
+    });
+    expect(response.body.data.limitedReusePlan).toMatchObject({
+      mode: "limited_reuse_planning_read_only",
+      requestedScope: "device:test-device",
+      summary: expect.objectContaining({
+        candidates: 1,
+        wouldUse: 0,
+        safeToAutoApply: 0,
+      }),
+    });
+    expect(response.body.data.limitedReusePlan.items[0]).toMatchObject({
+      action: "unlock",
+      scopeMatch: true,
+      capabilityMatch: true,
+      wouldUse: false,
+      safeToAutoApply: false,
+      blockers: expect.arrayContaining(["compiler_auto_use_disabled", "step_not_compiler_eligible"]),
+    });
+    expect(String(mocks.db.query.mock.calls[1][0])).toContain("agency_compiler_policy_gate_config");
+    expect(String(mocks.db.query.mock.calls[3][0])).toContain("agency_compiler_control_plane_events");
+    expect(mocks.db.query.mock.calls[3][1][5]).toContain("\"autoUseEnabled\":false");
+    expect(mocks.db.query.mock.calls[3][1][6]).toContain("\"wouldExecuteStepLibrary\":false");
+    expect(mocks.db.query.mock.calls[3][1][8]).toContain("\"wouldUse\":0");
   });
 
   it("lists compiler awareness audit events without changing execution", async () => {

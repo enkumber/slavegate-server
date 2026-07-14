@@ -10,6 +10,7 @@ const navItems = [
     { path: "#/agency/step-library", label: "Step Library", icon: "✓" },
     { path: "#/agency/tool-catalog", label: "Tool Catalog", icon: "⚙" },
     { path: "#/agency/compiler-knowledge", label: "Compiler Knowledge", icon: "◇" },
+    { path: "#/agency/compiler-control-plane", label: "Compiler Control", icon: "▣" },
     { path: "#/agency/reports", label: "Reports", icon: "📊" },
 ];
 export function AgencyLayout({ children, currentRoute }) {

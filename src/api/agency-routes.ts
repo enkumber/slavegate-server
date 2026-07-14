@@ -13,7 +13,8 @@ import { workflowEvents } from "../modules/workflow-events";
 import { listToolCatalog } from "../modules/tool-catalog/tool-catalog";
 import { listCompilerKnowledge } from "../modules/compiler-knowledge/compiler-knowledge-base";
 import { buildCompilerAwareness } from "../modules/compiler-awareness/compiler-awareness";
-import { listCompilerPolicyGates } from "../modules/compiler-policy-gates/compiler-policy-gates";
+import { buildCompilerControlPlane } from "../modules/compiler-control-plane/compiler-control-plane";
+import { listCompilerPolicyGatesWithConfig } from "../modules/compiler-policy-gates/compiler-policy-gates";
 
 const router = Router();
 
@@ -338,6 +339,37 @@ function rowToCompilerAwarenessEvent(row: Record<string, unknown>): Record<strin
     source: row.source ?? null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
   };
+}
+
+function rowToCompilerControlPlaneEvent(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id,
+    intent: row.intent ?? null,
+    action: row.action ?? null,
+    deviceId: row.device_id ?? null,
+    requestedScope: row.requested_scope ?? null,
+    summary: row.summary ?? {},
+    policy: row.policy ?? {},
+    dryRun: row.dry_run ?? {},
+    capabilityManifest: row.capability_manifest ?? {},
+    limitedReusePlan: row.limited_reuse_plan ?? {},
+    actor: row.actor ?? null,
+    source: row.source ?? null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+  };
+}
+
+async function getCompilerPolicyGates(db: ReturnType<typeof getDb>, filters: {
+  category?: string;
+  state?: string;
+  risk?: string;
+  owner?: string;
+} = {}) {
+  const configRows = await db.query(
+    `SELECT gate_id, state, version, owner, risk, config, updated_by, updated_at
+     FROM agency_compiler_policy_gate_config`
+  );
+  return listCompilerPolicyGatesWithConfig(configRows.rows, filters);
 }
 
 type WorkflowRunFeedbackRating = "ok" | "not_ok" | "partial";
@@ -1722,6 +1754,7 @@ router.get("/compiler-knowledge", requireAdminAuth, async (req: Request, res: Re
 });
 
 router.get("/compiler-policy-gates", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
   const category = typeof req.query.category === "string" && req.query.category.trim().length > 0
     ? req.query.category.trim()
     : undefined;
@@ -1734,7 +1767,7 @@ router.get("/compiler-policy-gates", requireAdminAuth, async (req: Request, res:
   const owner = typeof req.query.owner === "string" && req.query.owner.trim().length > 0
     ? req.query.owner.trim()
     : undefined;
-  const items = listCompilerPolicyGates({ category, state, risk, owner });
+  const items = await getCompilerPolicyGates(db, { category, state, risk, owner });
   res.json({
     ok: true,
     data: {
@@ -1749,6 +1782,172 @@ router.get("/compiler-policy-gates", requireAdminAuth, async (req: Request, res:
       },
     },
   });
+});
+
+router.get("/compiler-control-plane/events", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const { page, pageSize, offset } = parsePagination(req.query);
+  const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
+    ? req.query.intent.trim()
+    : null;
+  const action = typeof req.query.action === "string" && req.query.action.trim().length > 0
+    ? req.query.action.trim()
+    : null;
+  const deviceId = typeof req.query.deviceId === "string" && req.query.deviceId.trim().length > 0
+    ? req.query.deviceId.trim()
+    : null;
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (intent) {
+    conditions.push(`intent ILIKE $${idx++}`);
+    values.push(`%${intent}%`);
+  }
+  if (action) {
+    conditions.push(`action = $${idx++}`);
+    values.push(action);
+  }
+  if (deviceId) {
+    conditions.push(`device_id = $${idx++}`);
+    values.push(deviceId);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  values.push(pageSize, offset);
+
+  const [rows, count] = await Promise.all([
+    db.query(
+      `SELECT *
+       FROM agency_compiler_control_plane_events
+       ${where}
+       ORDER BY created_at DESC, id DESC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      values
+    ),
+    db.query(
+      `SELECT COUNT(*)
+       FROM agency_compiler_control_plane_events
+       ${where}`,
+      values.slice(0, -2)
+    ),
+  ]);
+
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map(rowToCompilerControlPlaneEvent),
+      total: parseInt(count.rows[0].count, 10),
+      page,
+      pageSize,
+      policy: {
+        readOnly: true,
+        compilerVisible: false,
+        autoUseEnabled: false,
+        executionChanging: false,
+        mode: "compiler_control_plane_events_read_only",
+      },
+    },
+  });
+});
+
+router.get("/compiler-control-plane", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
+    ? req.query.intent.trim()
+    : undefined;
+  const action = typeof req.query.action === "string" && req.query.action.trim().length > 0
+    ? req.query.action.trim()
+    : undefined;
+  const deviceId = typeof req.query.deviceId === "string" && req.query.deviceId.trim().length > 0
+    ? req.query.deviceId.trim()
+    : undefined;
+  const requestedScope = typeof req.query.scope === "string" && req.query.scope.trim().length > 0
+    ? req.query.scope.trim()
+    : undefined;
+
+  const values: unknown[] = [];
+  const conditions = ["c.candidate_state = 'validated_step'"];
+  let idx = 1;
+  if (action) {
+    conditions.push(`c.action = $${idx++}`);
+    values.push(action);
+  }
+
+  const [steps, gates, device] = await Promise.all([
+    db.query(
+      `SELECT c.*,
+              r.intent AS run_intent,
+              d.friendly_name AS device_name
+       FROM agency_workflow_step_candidates c
+       LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
+       LEFT JOIN devices d ON d.id = r.device_id
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY c.validated_at DESC NULLS LAST, c.updated_at DESC, c.created_at DESC
+       LIMIT 50`,
+      values
+    ),
+    getCompilerPolicyGates(db),
+    deviceId
+      ? db.query(
+          `SELECT id, friendly_name, model, android_version, agent_version, status, last_seen_at
+           FROM devices
+           WHERE id = $1`,
+          [deviceId]
+        )
+      : db.query(
+          `SELECT id, friendly_name, model, android_version, agent_version, status, last_seen_at
+           FROM devices
+           WHERE status IN ('online', 'approved')
+           ORDER BY last_seen_at DESC NULLS LAST
+           LIMIT 1`
+        ),
+  ]);
+
+  const awareness = buildCompilerAwareness({ intent, action, steps: steps.rows });
+  const controlPlane = buildCompilerControlPlane({
+    intent,
+    action,
+    requestedScope,
+    device: device.rows[0] ?? null,
+    awareness,
+    policyGates: gates,
+  });
+  const data = controlPlane as Record<string, any>;
+  await db.query(
+    `INSERT INTO agency_compiler_control_plane_events (
+       intent,
+       action,
+       device_id,
+       requested_scope,
+       summary,
+       policy,
+       dry_run,
+       capability_manifest,
+       limited_reuse_plan,
+       actor,
+       source
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'dashboard', 'dashboard')`,
+    [
+      intent ?? null,
+      action ?? null,
+      data.capabilityManifest?.deviceId ?? null,
+      requestedScope ?? null,
+      JSON.stringify({
+        policyGates: data.policyGates?.summary ?? {},
+        awareness: data.awareness?.summary ?? {},
+        dryRun: data.dryRun?.candidateCounts ?? {},
+        limitedReuse: data.limitedReusePlan?.summary ?? {},
+      }),
+      JSON.stringify(data.policy ?? {}),
+      JSON.stringify(data.dryRun ?? {}),
+      JSON.stringify(data.capabilityManifest ?? {}),
+      JSON.stringify(data.limitedReusePlan ?? {}),
+    ]
+  );
+
+  res.json({ ok: true, data: controlPlane });
 });
 
 router.get("/compiler-awareness/events", requireAdminAuth, async (req: Request, res: Response) => {

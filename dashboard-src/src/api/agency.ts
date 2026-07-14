@@ -388,6 +388,11 @@ export interface CompilerPolicyGate {
   state: string;
   risk: "low" | "medium" | "high" | string;
   owner: string;
+  configState?: string;
+  version?: number;
+  config?: Record<string, unknown>;
+  updatedBy?: string | null;
+  updatedAt?: string | null;
   blocks: string[];
   requiredEvidence: string[];
   requiredPolicyChanges: string[];
@@ -562,6 +567,104 @@ export interface CompilerAwarenessEvent {
     safeToAutoApply?: number;
     [key: string]: unknown;
   };
+  actor: string | null;
+  source: string | null;
+  createdAt: string | null;
+}
+
+export interface CompilerControlPlaneResponse {
+  intent: string | null;
+  action: string | null;
+  requestedScope: string | null;
+  policy: {
+    readOnly: true;
+    compilerVisible: false;
+    autoUseEnabled: false;
+    executionChanging: false;
+    workflowCacheChanging: false;
+    mode: string;
+  };
+  policyGates: {
+    items: CompilerPolicyGate[];
+    summary: {
+      total?: number;
+      blocked?: number;
+      reviewReady?: number;
+      enabled?: number;
+      highRisk?: number;
+      safeToAutoApply?: number;
+      gates?: Array<Record<string, unknown>>;
+      [key: string]: unknown;
+    };
+  };
+  awareness: CompilerAwarenessResponse;
+  dryRun: {
+    mode: string;
+    wouldUseStepLibrary: false;
+    wouldChangePlan: false;
+    wouldExecuteStepLibrary: false;
+    selectedStepIds: string[];
+    selectedToolIds: string[];
+    safeToAutoApply: false;
+    outcome: string;
+    blockers: string[];
+    candidateCounts: Record<string, unknown>;
+    policyGateSummary: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+  capabilityManifest: {
+    source: string;
+    publishedByDevice: boolean;
+    deviceSelected: boolean;
+    deviceId: string | null;
+    deviceName: string | null;
+    model: string | null;
+    androidVersion: string | null;
+    agentVersion: string | null;
+    status: string | null;
+    compatibility: {
+      state?: string;
+      availableTools?: number;
+      totalTools?: number;
+      [key: string]: unknown;
+    };
+    tools: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  limitedReusePlan: {
+    mode: string;
+    requestedScope: string | null;
+    items: Array<{
+      stepId?: string | null;
+      action?: string | null;
+      name?: string | null;
+      libraryState?: string | null;
+      promotionScope?: string | null;
+      requestedScope?: string | null;
+      scopeMatch?: boolean;
+      capabilityMatch?: boolean;
+      wouldUse?: false;
+      safeToAutoApply?: false;
+      blockers?: string[];
+      notes?: string[];
+      [key: string]: unknown;
+    }>;
+    summary: Record<string, unknown>;
+  };
+  guardrails: string[];
+}
+
+export interface CompilerControlPlaneEvent {
+  id: string;
+  intent: string | null;
+  action: string | null;
+  deviceId: string | null;
+  requestedScope: string | null;
+  summary: Record<string, unknown>;
+  policy: Record<string, unknown>;
+  dryRun: Record<string, unknown>;
+  capabilityManifest: Record<string, unknown>;
+  limitedReusePlan: Record<string, unknown>;
   actor: string | null;
   source: string | null;
   createdAt: string | null;
@@ -742,6 +845,26 @@ export const agencyApi = {
       if (params?.action) query.set("action", params.action);
       if (params?.source) query.set("source", params.source);
       return api.get<PaginatedResponse<CompilerAwarenessEvent> & { policy: Record<string, unknown> }>(`/agency/compiler-awareness/events?${query}`);
+    },
+  },
+
+  compilerControlPlane: {
+    get: (params?: { intent?: string; action?: string; deviceId?: string; scope?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.intent) query.set("intent", params.intent);
+      if (params?.action) query.set("action", params.action);
+      if (params?.deviceId) query.set("deviceId", params.deviceId);
+      if (params?.scope) query.set("scope", params.scope);
+      return api.get<CompilerControlPlaneResponse>(`/agency/compiler-control-plane?${query}`);
+    },
+    listEvents: (params?: { page?: number; pageSize?: number; intent?: string; action?: string; deviceId?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.pageSize) query.set("pageSize", String(params.pageSize));
+      if (params?.intent) query.set("intent", params.intent);
+      if (params?.action) query.set("action", params.action);
+      if (params?.deviceId) query.set("deviceId", params.deviceId);
+      return api.get<PaginatedResponse<CompilerControlPlaneEvent> & { policy: Record<string, unknown> }>(`/agency/compiler-control-plane/events?${query}`);
     },
   },
 

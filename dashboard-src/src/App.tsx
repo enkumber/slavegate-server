@@ -16,6 +16,7 @@ import { RunHistoryPage } from "./pages/RunHistoryPage";
 import { StepLibraryPage } from "./pages/StepLibraryPage";
 import { ToolCatalogPage } from "./pages/ToolCatalogPage";
 import { CompilerKnowledgePage } from "./pages/CompilerKnowledgePage";
+import { CompilerControlPlanePage } from "./pages/CompilerControlPlanePage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TokenManagement } from "./pages/TokenManagement";
@@ -71,6 +72,8 @@ export function App() {
     page = <ToolCatalogPage />;
   } else if (route.startsWith("#/agency/compiler-knowledge")) {
     page = <CompilerKnowledgePage />;
+  } else if (route.startsWith("#/agency/compiler-control-plane")) {
+    page = <CompilerControlPlanePage />;
   } else if (route.startsWith("#/agency/reports")) {
     page = <ReportsPage />;
   } else if (route === "#/tokens") {

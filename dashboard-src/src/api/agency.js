@@ -148,6 +148,34 @@ export const agencyApi = {
             return api.get(`/agency/compiler-awareness/events?${query}`);
         },
     },
+    compilerControlPlane: {
+        get: (params) => {
+            const query = new URLSearchParams();
+            if (params?.intent)
+                query.set("intent", params.intent);
+            if (params?.action)
+                query.set("action", params.action);
+            if (params?.deviceId)
+                query.set("deviceId", params.deviceId);
+            if (params?.scope)
+                query.set("scope", params.scope);
+            return api.get(`/agency/compiler-control-plane?${query}`);
+        },
+        listEvents: (params) => {
+            const query = new URLSearchParams();
+            if (params?.page)
+                query.set("page", String(params.page));
+            if (params?.pageSize)
+                query.set("pageSize", String(params.pageSize));
+            if (params?.intent)
+                query.set("intent", params.intent);
+            if (params?.action)
+                query.set("action", params.action);
+            if (params?.deviceId)
+                query.set("deviceId", params.deviceId);
+            return api.get(`/agency/compiler-control-plane/events?${query}`);
+        },
+    },
     // Clients
     clients: {
         list: (params) => {
