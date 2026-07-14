@@ -15,6 +15,11 @@ import { listCompilerKnowledge } from "../modules/compiler-knowledge/compiler-kn
 import { buildCompilerAwareness } from "../modules/compiler-awareness/compiler-awareness";
 import { buildCompilerControlPlane } from "../modules/compiler-control-plane/compiler-control-plane";
 import { listCompilerPolicyGatesWithConfig } from "../modules/compiler-policy-gates/compiler-policy-gates";
+import {
+  buildWorkflowDefinitionResolution,
+  rowToWorkflowDefinition,
+  workflowDefinitionRegistryPolicy,
+} from "../modules/workflow-definition-registry/workflow-definition-registry";
 
 const router = Router();
 
@@ -1782,6 +1787,109 @@ router.get("/compiler-policy-gates", requireAdminAuth, async (req: Request, res:
       },
     },
   });
+});
+
+router.get("/workflow-definitions", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const status = typeof req.query.status === "string" && req.query.status.trim().length > 0
+    ? req.query.status.trim()
+    : undefined;
+  const platform = typeof req.query.platform === "string" && req.query.platform.trim().length > 0
+    ? req.query.platform.trim()
+    : undefined;
+  const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
+    ? req.query.intent.trim()
+    : undefined;
+  const key = typeof req.query.key === "string" && req.query.key.trim().length > 0
+    ? req.query.key.trim()
+    : undefined;
+
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (status) {
+    conditions.push(`status = $${idx++}`);
+    values.push(status);
+  }
+  if (platform) {
+    conditions.push(`platform = $${idx++}`);
+    values.push(platform);
+  }
+  if (intent) {
+    conditions.push(`intent = $${idx++}`);
+    values.push(intent);
+  }
+  if (key) {
+    conditions.push(`definition_key = $${idx++}`);
+    values.push(key);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  const rows = await db.query(
+    `SELECT *
+     FROM agency_workflow_definitions
+     ${where}
+     ORDER BY
+       CASE status
+         WHEN 'active' THEN 1
+         WHEN 'draft' THEN 2
+         WHEN 'deprecated' THEN 3
+         ELSE 4
+       END,
+       definition_key ASC,
+       version DESC`,
+    values
+  );
+  const items = rows.rows.map(rowToWorkflowDefinition);
+
+  res.json({
+    ok: true,
+    data: {
+      items,
+      total: items.length,
+      policy: workflowDefinitionRegistryPolicy(),
+      summary: {
+        active: items.filter((item) => item.status === "active").length,
+        draft: items.filter((item) => item.status === "draft").length,
+        deprecated: items.filter((item) => item.status === "deprecated").length,
+        archived: items.filter((item) => item.status === "archived").length,
+      },
+    },
+  });
+});
+
+router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
+    ? req.query.intent.trim()
+    : undefined;
+  const platform = typeof req.query.platform === "string" && req.query.platform.trim().length > 0
+    ? req.query.platform.trim()
+    : undefined;
+  const key = typeof req.query.key === "string" && req.query.key.trim().length > 0
+    ? req.query.key.trim()
+    : undefined;
+
+  const [definitions, gates] = await Promise.all([
+    db.query(
+      `SELECT *
+       FROM agency_workflow_definitions
+       WHERE status IN ('active', 'draft')
+       ORDER BY definition_key ASC, version DESC`
+    ),
+    getCompilerPolicyGates(db),
+  ]);
+
+  const resolution = buildWorkflowDefinitionResolution({
+    intent,
+    platform,
+    key,
+    definitions: definitions.rows.map(rowToWorkflowDefinition),
+    policyGates: gates,
+  });
+
+  res.json({ ok: true, data: resolution });
 });
 
 router.get("/compiler-control-plane/events", requireAdminAuth, async (req: Request, res: Response) => {

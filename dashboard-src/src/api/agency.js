@@ -176,6 +176,30 @@ export const agencyApi = {
             return api.get(`/agency/compiler-control-plane/events?${query}`);
         },
     },
+    workflowDefinitions: {
+        list: (params) => {
+            const query = new URLSearchParams();
+            if (params?.status)
+                query.set("status", params.status);
+            if (params?.platform)
+                query.set("platform", params.platform);
+            if (params?.intent)
+                query.set("intent", params.intent);
+            if (params?.key)
+                query.set("key", params.key);
+            return api.get(`/agency/workflow-definitions?${query}`);
+        },
+        resolve: (params) => {
+            const query = new URLSearchParams();
+            if (params?.intent)
+                query.set("intent", params.intent);
+            if (params?.platform)
+                query.set("platform", params.platform);
+            if (params?.key)
+                query.set("key", params.key);
+            return api.get(`/agency/workflow-definitions/resolve?${query}`);
+        },
+    },
     // Clients
     clients: {
         list: (params) => {

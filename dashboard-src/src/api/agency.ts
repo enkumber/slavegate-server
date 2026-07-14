@@ -670,6 +670,79 @@ export interface CompilerControlPlaneEvent {
   createdAt: string | null;
 }
 
+export interface WorkflowDefinition {
+  id: string;
+  key: string;
+  version: number;
+  status: "draft" | "active" | "deprecated" | "archived" | string;
+  title: string;
+  description: string | null;
+  platform: string;
+  intent: string;
+  goal: string;
+  source: string;
+  definition: Record<string, unknown>;
+  successCriteria: unknown[];
+  allowedTools: string[];
+  requiredCapabilities: string[];
+  constraints: string[];
+  fallbackRules: string[];
+  rollback: Record<string, unknown>;
+  policy: Record<string, unknown>;
+  summary: {
+    successCriteria: number;
+    allowedTools: number;
+    requiredCapabilities: number;
+    constraints: number;
+    fallbackRules: number;
+  };
+  createdBy: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface WorkflowDefinitionRegistryResponse {
+  items: WorkflowDefinition[];
+  total: number;
+  policy: {
+    readOnly: true;
+    compilerVisible: false;
+    autoUseEnabled: false;
+    executionChanging: false;
+    workflowCacheChanging: false;
+    mode: string;
+    [key: string]: unknown;
+  };
+  summary: {
+    active: number;
+    draft: number;
+    deprecated: number;
+    archived: number;
+  };
+}
+
+export interface WorkflowDefinitionResolutionResponse {
+  intent: string | null;
+  platform: string | null;
+  key: string | null;
+  policy: Record<string, unknown>;
+  outcome: string;
+  candidateDefinition: WorkflowDefinition | null;
+  candidateDefinitions: Array<{
+    definition: WorkflowDefinition;
+    score: number;
+  }>;
+  wouldUseDefinition: false;
+  wouldChangePlan: false;
+  wouldChangeWorkflowCache: false;
+  wouldExecuteWorkflow: false;
+  selectedDefinitionId: null;
+  blockers: string[];
+  policyGateSummary: Record<string, unknown>;
+  rollbackPreview: Record<string, unknown>;
+  notes: string[];
+}
+
 export interface WorkflowRun {
   id: string;
   clientId: string | null;
@@ -865,6 +938,24 @@ export const agencyApi = {
       if (params?.action) query.set("action", params.action);
       if (params?.deviceId) query.set("deviceId", params.deviceId);
       return api.get<PaginatedResponse<CompilerControlPlaneEvent> & { policy: Record<string, unknown> }>(`/agency/compiler-control-plane/events?${query}`);
+    },
+  },
+
+  workflowDefinitions: {
+    list: (params?: { status?: string; platform?: string; intent?: string; key?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.status) query.set("status", params.status);
+      if (params?.platform) query.set("platform", params.platform);
+      if (params?.intent) query.set("intent", params.intent);
+      if (params?.key) query.set("key", params.key);
+      return api.get<WorkflowDefinitionRegistryResponse>(`/agency/workflow-definitions?${query}`);
+    },
+    resolve: (params?: { intent?: string; platform?: string; key?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.intent) query.set("intent", params.intent);
+      if (params?.platform) query.set("platform", params.platform);
+      if (params?.key) query.set("key", params.key);
+      return api.get<WorkflowDefinitionResolutionResponse>(`/agency/workflow-definitions/resolve?${query}`);
     },
   },
 

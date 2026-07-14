@@ -1722,6 +1722,149 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[3][1][8]).toContain("\"wouldUse\":0");
   });
 
+  it("lists Workflow Definition Registry entries without enabling compiler use", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{
+        id: "99999999-9999-4999-8999-999999999999",
+        definition_key: "reddit_account_health_scan",
+        version: 1,
+        status: "active",
+        title: "Reddit account health scan",
+        description: "Read-only workflow definition",
+        platform: "reddit",
+        intent: "reddit_account_health_scan",
+        goal: "Classify Reddit account health without side effects",
+        source: "static_seed",
+        definition: { steps: ["open_reddit", "classify_reddit_health_scan"] },
+        success_criteria: ["loggedIn classified", "screenState classified"],
+        allowed_tools: ["open_app", "ui_tree_dump"],
+        required_capabilities: ["device.online_or_approved"],
+        constraints: ["read_only_only"],
+        fallback_rules: ["if login wall detected classify expected_failure"],
+        rollback: { required: false },
+        policy: {
+          readOnly: true,
+          compilerVisible: false,
+          autoUseEnabled: false,
+          executionChanging: false,
+          workflowCacheChanging: false,
+        },
+        created_by: "migration",
+        created_at: new Date("2026-05-22T11:00:00.000Z"),
+        updated_at: new Date("2026-05-22T11:00:00.000Z"),
+      }],
+    });
+
+    const response = await getAgency("/api/agency/workflow-definitions?platform=reddit&status=active");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.policy).toMatchObject({
+      readOnly: true,
+      compilerVisible: false,
+      autoUseEnabled: false,
+      executionChanging: false,
+      workflowCacheChanging: false,
+      mode: "workflow_definition_registry_read_only",
+    });
+    expect(response.body.data.summary).toMatchObject({ active: 1, draft: 0 });
+    expect(response.body.data.items[0]).toMatchObject({
+      key: "reddit_account_health_scan",
+      version: 1,
+      status: "active",
+      platform: "reddit",
+      intent: "reddit_account_health_scan",
+      allowedTools: ["open_app", "ui_tree_dump"],
+      policy: expect.objectContaining({
+        compilerVisible: false,
+        autoUseEnabled: false,
+        executionChanging: false,
+        workflowCacheChanging: false,
+      }),
+      summary: {
+        successCriteria: 2,
+        allowedTools: 2,
+        requiredCapabilities: 1,
+        constraints: 1,
+        fallbackRules: 1,
+      },
+    });
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("agency_workflow_definitions");
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("status = $1");
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("platform = $2");
+    expect(mocks.db.query.mock.calls[0][1]).toEqual(["active", "reddit"]);
+  });
+
+  it("previews Workflow Definition resolution without changing plans or cache", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: "99999999-9999-4999-8999-999999999999",
+          definition_key: "reddit_account_health_scan",
+          version: 1,
+          status: "active",
+          title: "Reddit account health scan",
+          description: "Read-only workflow definition",
+          platform: "reddit",
+          intent: "reddit_account_health_scan",
+          goal: "Classify Reddit account health without side effects",
+          source: "static_seed",
+          definition: { steps: ["open_reddit", "classify_reddit_health_scan"] },
+          success_criteria: ["loggedIn classified"],
+          allowed_tools: ["open_app", "ui_tree_dump"],
+          required_capabilities: ["device.online_or_approved"],
+          constraints: ["read_only_only"],
+          fallback_rules: ["if login wall detected classify expected_failure"],
+          rollback: { required: false },
+          policy: {},
+          created_by: "migration",
+          created_at: new Date("2026-05-22T11:00:00.000Z"),
+          updated_at: new Date("2026-05-22T11:00:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          gate_id: "compiler_auto_use",
+          state: "blocked",
+          version: 1,
+          owner: "product",
+          risk: "high",
+          config: {},
+          updated_by: "migration",
+          updated_at: new Date("2026-05-22T11:00:00.000Z"),
+        }],
+      });
+
+    const response = await getAgency("/api/agency/workflow-definitions/resolve?intent=reddit_account_health_scan&platform=reddit");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      outcome: "blocked_by_policy",
+      wouldUseDefinition: false,
+      wouldChangePlan: false,
+      wouldChangeWorkflowCache: false,
+      wouldExecuteWorkflow: false,
+      selectedDefinitionId: null,
+      blockers: expect.arrayContaining([
+        "workflow_definition_registry_read_only",
+        "compiler_auto_use_disabled",
+        "execution_changing_disabled",
+      ]),
+      candidateDefinition: expect.objectContaining({
+        key: "reddit_account_health_scan",
+        platform: "reddit",
+      }),
+      rollbackPreview: expect.objectContaining({
+        available: true,
+        wouldRollback: false,
+      }),
+      policyGateSummary: expect.objectContaining({
+        safeToAutoApply: 0,
+      }),
+    });
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("agency_workflow_definitions");
+    expect(String(mocks.db.query.mock.calls[1][0])).toContain("agency_compiler_policy_gate_config");
+  });
+
   it("lists compiler awareness audit events without changing execution", async () => {
     mocks.db.query
       .mockResolvedValueOnce({

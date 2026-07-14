@@ -17,6 +17,7 @@ import { StepLibraryPage } from "./pages/StepLibraryPage";
 import { ToolCatalogPage } from "./pages/ToolCatalogPage";
 import { CompilerKnowledgePage } from "./pages/CompilerKnowledgePage";
 import { CompilerControlPlanePage } from "./pages/CompilerControlPlanePage";
+import { WorkflowDefinitionsPage } from "./pages/WorkflowDefinitionsPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TokenManagement } from "./pages/TokenManagement";
@@ -79,6 +80,9 @@ export function App() {
     }
     else if (route.startsWith("#/agency/compiler-control-plane")) {
         page = _jsx(CompilerControlPlanePage, {});
+    }
+    else if (route.startsWith("#/agency/workflow-definitions")) {
+        page = _jsx(WorkflowDefinitionsPage, {});
     }
     else if (route.startsWith("#/agency/reports")) {
         page = _jsx(ReportsPage, {});
