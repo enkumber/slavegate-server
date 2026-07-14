@@ -381,6 +381,48 @@ export interface CompilerKnowledgeResponse {
   };
 }
 
+export interface CompilerAwarenessCandidate {
+  id: string;
+  name?: string;
+  title?: string;
+  action?: string | null;
+  type?: string | null;
+  category?: string;
+  domain?: string;
+  source?: string;
+  risk?: string;
+  libraryState?: string;
+  promotionScope?: string | null;
+  matchedTerms: string[];
+  compilerEligible?: false;
+  wouldUse?: false;
+  wouldApply?: false;
+  reason: string;
+}
+
+export interface CompilerAwarenessResponse {
+  intent: string | null;
+  terms: string[];
+  policy: {
+    readOnly: true;
+    compilerVisible: false;
+    autoUseEnabled: false;
+    executionChanging: false;
+    mode: string;
+  };
+  summary: {
+    toolCandidates: number;
+    stepCandidates: number;
+    knowledgeCandidates: number;
+  };
+  candidates: {
+    tools: CompilerAwarenessCandidate[];
+    steps: CompilerAwarenessCandidate[];
+    knowledge: CompilerAwarenessCandidate[];
+  };
+  guardrails: string[];
+}
+
 export interface WorkflowRun {
   id: string;
   clientId: string | null;
@@ -527,6 +569,15 @@ export const agencyApi = {
       if (params?.risk) query.set("risk", params.risk);
       if (params?.source) query.set("source", params.source);
       return api.get<CompilerKnowledgeResponse>(`/agency/compiler-knowledge?${query}`);
+    },
+  },
+
+  compilerAwareness: {
+    get: (params?: { intent?: string; action?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.intent) query.set("intent", params.intent);
+      if (params?.action) query.set("action", params.action);
+      return api.get<CompilerAwarenessResponse>(`/agency/compiler-awareness?${query}`);
     },
   },
 

@@ -1437,4 +1437,48 @@ describe("agency workflow runs API", () => {
     expect(response.body.code).toBe("STEP_CANDIDATE_NOT_IN_REVIEW");
     expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
+
+  it("exposes compiler awareness without enabling step auto-use", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{
+        id: "55555555-5555-4555-8555-555555555555",
+        label: "unlock",
+        action: "unlock",
+        type: null,
+        candidate_state: "validated_step",
+        library_state: "limited_reuse",
+        promotion_scope: "device:test-device",
+        validation_contract: {
+          preconditions: ["device screen is awake"],
+          postconditions: ["device unlocked"],
+        },
+        validation_evidence: { source: "test" },
+        run_intent: "unlock device",
+        device_name: "Pixel",
+        validated_at: new Date("2026-05-22T10:08:00.000Z"),
+      }],
+    });
+
+    const response = await getAgency("/api/agency/compiler-awareness?intent=unlock%20device");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.policy).toMatchObject({
+      readOnly: true,
+      compilerVisible: false,
+      autoUseEnabled: false,
+      executionChanging: false,
+      mode: "read_only_compiler_awareness",
+    });
+    expect(response.body.data.summary.stepCandidates).toBe(1);
+    expect(response.body.data.candidates.steps[0]).toMatchObject({
+      id: "55555555-5555-4555-8555-555555555555",
+      action: "unlock",
+      compilerEligible: false,
+      wouldUse: false,
+      reason: "compiler_auto_use_disabled",
+    });
+    expect(response.body.data.candidates.tools.some((tool: any) => tool.id === "unlock" && tool.wouldUse === false)).toBe(true);
+    expect(response.body.data.candidates.knowledge.every((entry: any) => entry.wouldApply === false)).toBe(true);
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("c.candidate_state = 'validated_step'");
+  });
 });

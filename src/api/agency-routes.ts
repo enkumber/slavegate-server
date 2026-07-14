@@ -12,6 +12,7 @@ import fs from "fs/promises";
 import { workflowEvents } from "../modules/workflow-events";
 import { listToolCatalog } from "../modules/tool-catalog/tool-catalog";
 import { listCompilerKnowledge } from "../modules/compiler-knowledge/compiler-knowledge-base";
+import { buildCompilerAwareness } from "../modules/compiler-awareness/compiler-awareness";
 
 const router = Router();
 
@@ -1650,6 +1651,46 @@ router.get("/compiler-knowledge", requireAdminAuth, async (req: Request, res: Re
         mode: "read_only_knowledge_base",
       },
     },
+  });
+});
+
+router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
+    ? req.query.intent.trim()
+    : undefined;
+  const action = typeof req.query.action === "string" && req.query.action.trim().length > 0
+    ? req.query.action.trim()
+    : undefined;
+
+  const values: unknown[] = [];
+  const conditions = ["c.candidate_state = 'validated_step'"];
+  let idx = 1;
+  if (action) {
+    conditions.push(`c.action = $${idx++}`);
+    values.push(action);
+  }
+
+  const steps = await db.query(
+    `SELECT c.*,
+            r.intent AS run_intent,
+            d.friendly_name AS device_name
+     FROM agency_workflow_step_candidates c
+     LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
+     LEFT JOIN devices d ON d.id = r.device_id
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY c.validated_at DESC NULLS LAST, c.updated_at DESC, c.created_at DESC
+     LIMIT 50`,
+    values
+  );
+
+  res.json({
+    ok: true,
+    data: buildCompilerAwareness({
+      intent,
+      action,
+      steps: steps.rows,
+    }),
   });
 });
 

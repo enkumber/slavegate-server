@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, CompilerKnowledgeEntry } from "../api/agency";
+import { agencyApi, CompilerAwarenessResponse, CompilerKnowledgeEntry } from "../api/agency";
 
 function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gray" | "red" | "blue" }) {
   const palette = {
@@ -47,6 +47,10 @@ export function CompilerKnowledgePage() {
   const [riskFilter, setRiskFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [policyMode, setPolicyMode] = useState("read_only_knowledge_base");
+  const [awarenessIntent, setAwarenessIntent] = useState("unlock device");
+  const [awareness, setAwareness] = useState<CompilerAwarenessResponse | null>(null);
+  const [awarenessLoading, setAwarenessLoading] = useState(false);
+  const [awarenessError, setAwarenessError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,6 +83,23 @@ export function CompilerKnowledgePage() {
     void loadKnowledge();
   }, [loadKnowledge]);
 
+  const loadAwareness = useCallback(async () => {
+    setAwarenessLoading(true);
+    setAwarenessError(null);
+    try {
+      const data = await agencyApi.compilerAwareness.get({ intent: awarenessIntent || undefined });
+      setAwareness(data);
+    } catch (err) {
+      setAwarenessError(err instanceof Error ? err.message : "Failed to load Compiler Awareness");
+    } finally {
+      setAwarenessLoading(false);
+    }
+  }, [awarenessIntent]);
+
+  useEffect(() => {
+    void loadAwareness();
+  }, [loadAwareness]);
+
   const ruleCount = items.filter((item) => item.type === "rule").length;
   const negativeCount = items.filter((item) => item.type === "negative_example" || item.type === "anti_pattern").length;
   const compilerVisibleCount = items.filter((item) => item.policy.compilerVisible).length;
@@ -110,6 +131,51 @@ export function CompilerKnowledgePage() {
         <Badge label="autoUseEnabled: false" tone="gray" />
         <Badge label="executionChanging: false" tone="gray" />
         <span style={{ color: "#777", fontSize: "12px" }}>Read-only guidance. Compiler execution remains unchanged.</span>
+      </div>
+
+      <div style={{ border: "1px solid #222", borderRadius: "6px", background: "#101010", padding: "14px", marginBottom: "14px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", marginBottom: "12px", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ color: "#fff", fontSize: "15px", fontWeight: 600 }}>Compiler Awareness</div>
+            <div style={{ color: "#777", fontSize: "12px", marginTop: "4px" }}>Read-only candidate matching from Tool Catalog, Step Library, and Knowledge Base.</div>
+          </div>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              value={awarenessIntent}
+              onChange={(event) => setAwarenessIntent(event.target.value)}
+              placeholder="Intent"
+              style={{ background: "#0a0a0a", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", minWidth: "220px" }}
+            />
+            <button onClick={() => void loadAwareness()} style={{ background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "8px 12px", cursor: "pointer" }}>
+              Check
+            </button>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "12px" }}>
+          <Badge label="mode: read_only_compiler_awareness" tone="blue" />
+          <Badge label="wouldUse: false" tone="gray" />
+          <Badge label="autoUseEnabled: false" tone="gray" />
+          <Badge label="executionChanging: false" tone="gray" />
+        </div>
+        {awarenessError ? (
+          <div style={{ color: "#f87171", fontSize: "12px" }}>{awarenessError}</div>
+        ) : awarenessLoading ? (
+          <div style={{ color: "#777", fontSize: "12px" }}>Loading awareness...</div>
+        ) : awareness ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(150px, 1fr))", gap: "10px" }}>
+            {([
+              ["Tool candidates", awareness.summary.toolCandidates, awareness.candidates.tools.map((item) => item.id).join(", ")],
+              ["Step candidates", awareness.summary.stepCandidates, awareness.candidates.steps.map((item) => `${item.name ?? item.id} (${item.reason})`).join(", ")],
+              ["Knowledge candidates", awareness.summary.knowledgeCandidates, awareness.candidates.knowledge.map((item) => item.id).join(", ")],
+            ] as Array<[string, number, string]>).map(([label, value, detail]) => (
+              <div key={label} style={{ background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "12px", minWidth: 0 }}>
+                <div style={{ color: "#777", fontSize: "11px", marginBottom: "5px" }}>{label}</div>
+                <div style={{ color: "#e5e7eb", fontSize: "20px", fontWeight: 600 }}>{value}</div>
+                <div style={{ color: "#888", fontSize: "11px", marginTop: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail || "-"}</div>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "14px", flexWrap: "wrap" }}>

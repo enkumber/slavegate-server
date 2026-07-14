@@ -110,6 +110,16 @@ export const agencyApi = {
             return api.get(`/agency/compiler-knowledge?${query}`);
         },
     },
+    compilerAwareness: {
+        get: (params) => {
+            const query = new URLSearchParams();
+            if (params?.intent)
+                query.set("intent", params.intent);
+            if (params?.action)
+                query.set("action", params.action);
+            return api.get(`/agency/compiler-awareness?${query}`);
+        },
+    },
     // Clients
     clients: {
         list: (params) => {
