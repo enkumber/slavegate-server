@@ -530,6 +530,22 @@ export interface CompilerAwarenessEvent {
     blockers?: string[];
     [key: string]: unknown;
   };
+  policyGateSummary?: {
+    gates?: Array<{
+      id?: string;
+      category?: string | null;
+      state?: string | null;
+      risk?: string | null;
+      owner?: string | null;
+      safeToAutoApply?: boolean;
+      [key: string]: unknown;
+    }>;
+    total?: number;
+    blocked?: number;
+    highRisk?: number;
+    safeToAutoApply?: number;
+    [key: string]: unknown;
+  };
   actor: string | null;
   source: string | null;
   createdAt: string | null;

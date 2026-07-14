@@ -274,6 +274,55 @@ function rowToStepLibraryPromotionEvent(row: Record<string, unknown>): Record<st
   };
 }
 
+function policyGateId(gate: Record<string, unknown>): string | null {
+  return typeof gate.id === "string" && gate.id.trim().length > 0 ? gate.id.trim() : null;
+}
+
+function collectPolicyGatesFromValue(value: unknown, out: Map<string, Record<string, unknown>>): void {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectPolicyGatesFromValue(item, out);
+    return;
+  }
+
+  const object = value as Record<string, unknown>;
+  const policyGates = normalizeJsonArray(object.policyGates);
+  for (const gate of policyGates) {
+    const id = policyGateId(gate);
+    if (id && !out.has(id)) out.set(id, gate);
+  }
+  const decisionGates = normalizeJsonArray(object.policyGateSummary);
+  for (const gate of decisionGates) {
+    const id = policyGateId(gate);
+    if (id && !out.has(id)) out.set(id, gate);
+  }
+
+  for (const nested of Object.values(object)) {
+    if (nested && typeof nested === "object") collectPolicyGatesFromValue(nested, out);
+  }
+}
+
+function compilerAwarenessEventPolicyGateSummary(row: Record<string, unknown>): Record<string, unknown> {
+  const gatesById = new Map<string, Record<string, unknown>>();
+  collectPolicyGatesFromValue(row.decision, gatesById);
+  collectPolicyGatesFromValue(row.candidates, gatesById);
+  const gates = Array.from(gatesById.values()).map((gate) => ({
+    id: gate.id,
+    category: gate.category ?? null,
+    state: gate.state ?? null,
+    risk: gate.risk ?? null,
+    owner: gate.owner ?? null,
+    safeToAutoApply: gate.safeToAutoApply === true,
+  }));
+  return {
+    gates,
+    total: gates.length,
+    blocked: gates.filter((gate) => gate.state === "blocked").length,
+    highRisk: gates.filter((gate) => gate.risk === "high").length,
+    safeToAutoApply: gates.filter((gate) => gate.safeToAutoApply === true).length,
+  };
+}
+
 function rowToCompilerAwarenessEvent(row: Record<string, unknown>): Record<string, unknown> {
   return {
     id: row.id,
@@ -284,6 +333,7 @@ function rowToCompilerAwarenessEvent(row: Record<string, unknown>): Record<strin
     policy: row.policy ?? {},
     candidates: row.candidates ?? {},
     decision: row.decision ?? {},
+    policyGateSummary: compilerAwarenessEventPolicyGateSummary(row),
     actor: row.actor ?? null,
     source: row.source ?? null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,

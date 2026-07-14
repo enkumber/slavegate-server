@@ -1615,6 +1615,16 @@ describe("agency workflow runs API", () => {
             wouldChangePlan: false,
             wouldExecuteStepLibrary: false,
             blockers: ["compiler_auto_use_disabled"],
+            policyGateSummary: [
+              {
+                id: "compiler_auto_use",
+                category: "auto_use",
+                state: "blocked",
+                risk: "high",
+                owner: "product",
+                safeToAutoApply: false,
+              },
+            ],
           },
           actor: "dashboard",
           source: "dashboard",
@@ -1643,6 +1653,20 @@ describe("agency workflow runs API", () => {
       intent: "unlock device",
       summary: { toolCandidates: 2, stepCandidates: 1, knowledgeCandidates: 3 },
       decision: { outcome: "blocked_by_policy" },
+      policyGateSummary: {
+        total: 1,
+        blocked: 1,
+        highRisk: 1,
+        safeToAutoApply: 0,
+        gates: [
+          expect.objectContaining({
+            id: "compiler_auto_use",
+            state: "blocked",
+            risk: "high",
+            safeToAutoApply: false,
+          }),
+        ],
+      },
       source: "dashboard",
     });
     expect(String(mocks.db.query.mock.calls[0][0])).toContain("agency_compiler_awareness_events");

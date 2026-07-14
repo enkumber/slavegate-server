@@ -70,6 +70,15 @@ function decisionPolicyGates(decision: CompilerAwarenessResponse["decision"]) {
     : "-";
 }
 
+function eventPolicyGateText(event: CompilerAwarenessEvent) {
+  const summary = event.policyGateSummary;
+  const gates = summary?.gates ?? [];
+  if (!gates.length) return "-";
+  const ids = gates.map((gate) => gate.id).filter(Boolean).slice(0, 3).join(", ");
+  const suffix = (summary?.total ?? gates.length) > 3 ? " +" : "";
+  return `${ids}${suffix} · blocked ${summary?.blocked ?? 0} · high ${summary?.highRisk ?? 0}`;
+}
+
 export function CompilerKnowledgePage() {
   const [items, setItems] = useState<CompilerKnowledgeEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -323,7 +332,7 @@ export function CompilerKnowledgePage() {
         ) : (
           <div style={{ display: "grid", gap: "8px" }}>
             {awarenessEvents.map((event) => (
-              <div key={event.id} style={{ display: "grid", gridTemplateColumns: "1fr 0.8fr 0.8fr 0.8fr 0.9fr", gap: "10px", alignItems: "center", background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
+              <div key={event.id} style={{ display: "grid", gridTemplateColumns: "1fr 0.6fr 0.6fr 0.6fr 0.9fr 1.1fr", gap: "10px", alignItems: "center", background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ color: "#e5e7eb", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.intent || event.action || "awareness check"}</div>
                   <div style={{ color: "#666", fontSize: "11px", marginTop: "3px" }}>{event.createdAt ? new Date(event.createdAt).toLocaleString() : "-"}</div>
@@ -332,6 +341,7 @@ export function CompilerKnowledgePage() {
                 <div style={{ color: "#aaa", fontSize: "12px" }}>steps: {event.summary.stepCandidates ?? 0}</div>
                 <div style={{ color: "#aaa", fontSize: "12px" }}>knowledge: {event.summary.knowledgeCandidates ?? 0}</div>
                 <div style={{ color: "#aaa", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.decision.outcome ?? "no decision"}</div>
+                <div style={{ color: "#aaa", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>gates: {eventPolicyGateText(event)}</div>
               </div>
             ))}
           </div>
