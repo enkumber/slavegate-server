@@ -781,6 +781,10 @@ describe("agency workflow runs API", () => {
       review_note: null,
       reviewed_by: null,
       reviewed_at: null,
+      validation_contract: {},
+      validation_evidence: {},
+      validated_by: null,
+      validated_at: null,
       run_status: "completed",
       run_intent: "reddit_account_health_scan",
       device_name: "Pixel",
@@ -830,6 +834,10 @@ describe("agency workflow runs API", () => {
       review_note: null,
       reviewed_by: null,
       reviewed_at: null,
+      validation_contract: {},
+      validation_evidence: {},
+      validated_by: null,
+      validated_at: null,
       created_at: new Date("2026-05-22T10:06:00.000Z"),
       updated_at: new Date("2026-05-22T10:06:00.000Z"),
     };
@@ -876,6 +884,109 @@ describe("agency workflow runs API", () => {
 
     expect(response.status).toBe(409);
     expect(response.body.code).toBe("VALIDATED_STEP_REVIEW_LOCKED");
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
+  });
+
+  it("validates a step candidate only with contract and evidence", async () => {
+    const candidate = {
+      id: "44444444-4444-4444-8444-444444444444",
+      run_id: "33333333-3333-4333-8333-333333333333",
+      step_index: 0,
+      step_id: "open_reddit",
+      label: "open_app",
+      action: "open_app",
+      type: null,
+      step_status: "succeeded",
+      candidate_state: "step_candidate",
+      request_key: "c02c59dfbe512562f8c65c97",
+      cache_key: null,
+      canonical_workflow_id: "agent_generated_reddit_account_health_scan_v1",
+      canonical_workflow_version: "1.0.0",
+      last_good_step_index: 1,
+      step_snapshot: { index: 0 },
+      evidence: { source: "dashboard_partial_feedback" },
+      note: "first step looked good",
+      review_note: null,
+      reviewed_by: null,
+      reviewed_at: null,
+      validation_contract: {},
+      validation_evidence: {},
+      validated_by: null,
+      validated_at: null,
+      created_at: new Date("2026-05-22T10:06:00.000Z"),
+      updated_at: new Date("2026-05-22T10:06:00.000Z"),
+    };
+    const contract = {
+      preconditions: ["Reddit is installed"],
+      postconditions: ["Reddit home or login surface is visible"],
+      sideEffects: ["opens app"],
+    };
+    const evidence = {
+      source: "dashboard_manual_validation",
+      runId: candidate.run_id,
+      stepIndex: candidate.step_index,
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [candidate] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...candidate,
+          candidate_state: "validated_step",
+          validation_contract: contract,
+          validation_evidence: evidence,
+          review_note: "contract ok",
+          reviewed_by: "dashboard",
+          reviewed_at: new Date("2026-05-22T10:08:00.000Z"),
+          validated_by: "dashboard",
+          validated_at: new Date("2026-05-22T10:08:00.000Z"),
+        }],
+      });
+
+    const response = await patchAgency(
+      `/api/agency/workflow-step-candidates/${candidate.id}/validate`,
+      { contract, evidence, note: "contract ok" }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      id: candidate.id,
+      candidateState: "validated_step",
+      validationContract: contract,
+      validationEvidence: evidence,
+      validatedBy: "dashboard",
+    });
+    expect(mocks.db.query.mock.calls[1][0]).toContain("candidate_state = 'validated_step'");
+    expect(mocks.db.query.mock.calls[1][1]).toEqual([candidate.id, contract, evidence, "contract ok"]);
+  });
+
+  it("requires validation preconditions postconditions and evidence", async () => {
+    const response = await patchAgency(
+      "/api/agency/workflow-step-candidates/44444444-4444-4444-8444-444444444444/validate",
+      { contract: { preconditions: [], postconditions: ["done"] }, evidence: {} }
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("VALIDATION_PRECONDITIONS_REQUIRED");
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
+
+  it("does not validate rejected candidates", async () => {
+    const candidate = {
+      id: "44444444-4444-4444-8444-444444444444",
+      candidate_state: "rejected",
+    };
+    mocks.db.query.mockResolvedValueOnce({ rows: [candidate] });
+
+    const response = await patchAgency(
+      `/api/agency/workflow-step-candidates/${candidate.id}/validate`,
+      {
+        contract: { preconditions: ["known input"], postconditions: ["known output"] },
+        evidence: { source: "test" },
+      }
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("STEP_CANDIDATE_NOT_IN_REVIEW");
     expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 });

@@ -51,6 +51,7 @@ export const agencyApi = {
             return api.get(`/agency/workflow-step-candidates?${query}`);
         },
         reviewStepCandidate: (id, data) => api.patch(`/agency/workflow-step-candidates/${id}/review`, data),
+        validateStepCandidate: (id, data) => api.patch(`/agency/workflow-step-candidates/${id}/validate`, data),
     },
     // Clients
     clients: {

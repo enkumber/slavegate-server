@@ -126,6 +126,10 @@ function rowToStepCandidate(row: Record<string, unknown>): Record<string, unknow
     reviewNote: row.review_note ?? null,
     reviewedBy: row.reviewed_by ?? null,
     reviewedAt: row.reviewed_at instanceof Date ? row.reviewed_at.toISOString() : row.reviewed_at ?? null,
+    validationContract: row.validation_contract ?? {},
+    validationEvidence: row.validation_evidence ?? {},
+    validatedBy: row.validated_by ?? null,
+    validatedAt: row.validated_at instanceof Date ? row.validated_at.toISOString() : row.validated_at ?? null,
     runStatus: row.run_status ?? null,
     runIntent: row.run_intent ?? null,
     deviceName: row.device_name ?? null,
@@ -189,6 +193,48 @@ function parseStepCandidateReview(input: unknown): {
 
   return {
     action: action as StepCandidateReviewAction,
+    note: note.length > 0 ? note : null,
+  };
+}
+
+function nonEmptyStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim())
+    : [];
+}
+
+function parseStepCandidateValidation(input: unknown): {
+  contract: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  note: string | null;
+} | { error: string; code: string } {
+  const body = normalizeJsonObject(input);
+  const contract = normalizeJsonObject(body.contract);
+  const evidence = normalizeJsonObject(body.evidence);
+  const preconditions = nonEmptyStringArray(contract.preconditions);
+  const postconditions = nonEmptyStringArray(contract.postconditions);
+  if (preconditions.length === 0) {
+    return { error: "contract.preconditions must contain at least one item", code: "VALIDATION_PRECONDITIONS_REQUIRED" };
+  }
+  if (postconditions.length === 0) {
+    return { error: "contract.postconditions must contain at least one item", code: "VALIDATION_POSTCONDITIONS_REQUIRED" };
+  }
+  if (Object.keys(evidence).length === 0) {
+    return { error: "evidence is required for validated_step", code: "VALIDATION_EVIDENCE_REQUIRED" };
+  }
+
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note.length > 1000) {
+    return { error: "note must be 1000 characters or fewer", code: "STEP_CANDIDATE_VALIDATION_NOTE_TOO_LONG" };
+  }
+
+  return {
+    contract: {
+      ...contract,
+      preconditions,
+      postconditions,
+    },
+    evidence,
     note: note.length > 0 ? note : null,
   };
 }
@@ -1281,6 +1327,47 @@ router.patch("/workflow-step-candidates/:id/review", requireAdminAuth, async (re
      WHERE id = $1
      RETURNING *`,
     [req.params.id, nextState, parsed.note]
+  );
+
+  return res.json({ ok: true, data: rowToStepCandidate(updated.rows[0]) });
+});
+
+router.patch("/workflow-step-candidates/:id/validate", requireAdminAuth, async (req: Request, res: Response) => {
+  const parsed = parseStepCandidateValidation(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
+  }
+
+  const db = getDb();
+  const existing = await db.query(
+    `SELECT * FROM agency_workflow_step_candidates WHERE id = $1`,
+    [req.params.id]
+  );
+  if (existing.rows.length === 0) {
+    return res.status(404).json({ ok: false, error: "Step candidate not found", code: "STEP_CANDIDATE_NOT_FOUND" });
+  }
+  if (existing.rows[0].candidate_state !== "step_candidate") {
+    return res.status(409).json({
+      ok: false,
+      error: "Only step_candidate entries can be validated",
+      code: "STEP_CANDIDATE_NOT_IN_REVIEW",
+    });
+  }
+
+  const updated = await db.query(
+    `UPDATE agency_workflow_step_candidates
+     SET candidate_state = 'validated_step',
+         validation_contract = $2,
+         validation_evidence = $3,
+         review_note = $4,
+         reviewed_by = 'dashboard',
+         reviewed_at = NOW(),
+         validated_by = 'dashboard',
+         validated_at = NOW(),
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [req.params.id, parsed.contract, parsed.evidence, parsed.note]
   );
 
   return res.json({ ok: true, data: rowToStepCandidate(updated.rows[0]) });

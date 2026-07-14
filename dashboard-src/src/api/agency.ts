@@ -235,6 +235,10 @@ export interface WorkflowRunStepCandidate {
   reviewNote: string | null;
   reviewedBy: string | null;
   reviewedAt: string | null;
+  validationContract: Record<string, unknown>;
+  validationEvidence: Record<string, unknown>;
+  validatedBy: string | null;
+  validatedAt: string | null;
   runStatus?: string | null;
   runIntent?: string | null;
   deviceName?: string | null;
@@ -328,6 +332,21 @@ export const agencyApi = {
       id: string,
       data: { action: "keep_review" | "reject"; note?: string | null }
     ) => api.patch<WorkflowRunStepCandidate>(`/agency/workflow-step-candidates/${id}/review`, data),
+    validateStepCandidate: (
+      id: string,
+      data: {
+        contract: {
+          preconditions: string[];
+          postconditions: string[];
+          inputs?: string[];
+          outputs?: string[];
+          sideEffects?: string[];
+          compatibility?: Record<string, unknown>;
+        };
+        evidence: Record<string, unknown>;
+        note?: string | null;
+      }
+    ) => api.patch<WorkflowRunStepCandidate>(`/agency/workflow-step-candidates/${id}/validate`, data),
   },
 
   // Clients

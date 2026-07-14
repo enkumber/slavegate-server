@@ -173,6 +173,50 @@ export function RunHistoryPage() {
     }
   }, [updateSelectedCandidate]);
 
+  const validateCandidate = useCallback(async (candidate: WorkflowRunStepCandidate) => {
+    setCandidateReviewingId(candidate.id);
+    setCandidateReviewMessage(null);
+    try {
+      const updated = await agencyApi.workflowRuns.validateStepCandidate(candidate.id, {
+        contract: {
+          inputs: ["manual dashboard review", candidate.action ?? candidate.type ?? candidate.label],
+          preconditions: [
+            "Reviewer confirmed this step boundary is reusable outside the original failed workflow.",
+            "Required account, app, device, and permission context is understood for this step.",
+          ],
+          postconditions: [
+            "Step result matches its label/action and the observed run timeline.",
+            "No unexpected side effects were observed for this step candidate.",
+          ],
+          outputs: [candidate.label],
+          sideEffects: ["No additional side effects approved by this validation."],
+          compatibility: {
+            requestKey: candidate.requestKey,
+            cacheKey: candidate.cacheKey,
+            canonicalWorkflowId: candidate.canonicalWorkflowId,
+            canonicalWorkflowVersion: candidate.canonicalWorkflowVersion,
+          },
+        },
+        evidence: {
+          source: "dashboard_manual_validation",
+          runId: candidate.runId,
+          stepIndex: candidate.stepIndex,
+          stepId: candidate.stepId,
+          stepStatus: candidate.stepStatus,
+          lastGoodStepIndex: candidate.lastGoodStepIndex,
+          previousEvidence: candidate.evidence,
+        },
+        note: "Validated from dashboard with minimum contract.",
+      });
+      updateSelectedCandidate(updated);
+      setCandidateReviewMessage("Candidate validated.");
+    } catch (err) {
+      setCandidateReviewMessage(err instanceof Error ? err.message : "Failed to validate candidate");
+    } finally {
+      setCandidateReviewingId(null);
+    }
+  }, [updateSelectedCandidate]);
+
   const counts = useMemo(() => ({
     total: runs.length,
     running: runs.filter((run) => run.status === "running").length,
@@ -391,11 +435,23 @@ export function RunHistoryPage() {
                               Reviewed {formatDate(candidate.reviewedAt)}
                             </div>
                           )}
+                          {candidate.validatedAt && (
+                            <div style={{ color: "#4ade80", fontSize: "11px", marginTop: "3px" }}>
+                              Validated {formatDate(candidate.validatedAt)}
+                            </div>
+                          )}
                         </div>
                         <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center" }}>
                           <Badge value={candidate.candidateState} palette={stepCandidateColors} />
                           {candidate.candidateState === "step_candidate" && (
                             <>
+                              <button
+                                onClick={() => void validateCandidate(candidate)}
+                                disabled={candidateReviewingId === candidate.id}
+                                style={{ background: "#0f3323", border: "1px solid #166534", color: "#bbf7d0", borderRadius: "6px", padding: "6px 8px", cursor: "pointer", fontSize: "11px" }}
+                              >
+                                Validate
+                              </button>
                               <button
                                 onClick={() => void reviewCandidate(candidate, "keep_review")}
                                 disabled={candidateReviewingId === candidate.id}
