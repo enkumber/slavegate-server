@@ -2037,6 +2037,285 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[0][1]).toEqual(["reddit_account_health_scan", 50, 0]);
   });
 
+  it("promotes a workflow definition to limited reuse without enabling compiler or execution", async () => {
+    const definitionRow = {
+      id: "99999999-9999-4999-8999-999999999999",
+      definition_key: "device_unlock",
+      version: 1,
+      status: "active",
+      title: "Device unlock",
+      description: "Unlock device definition",
+      platform: "android",
+      intent: "device_unlock",
+      goal: "Unlock the device without changing workflow cache",
+      source: "static_seed",
+      definition: {
+        steps: ["wake_device", "swipe_unlock", "verify_home"],
+        terminalStates: ["success", "expected_failure", "needs_review", "quarantined"],
+        sideEffects: [],
+      },
+      success_criteria: ["home screen visible", "no challenge detected"],
+      allowed_tools: ["wake_device", "gesture_swipe", "ui_tree_dump"],
+      required_capabilities: ["device.online_or_approved"],
+      constraints: ["read_only_validation", "limited_scope_only"],
+      fallback_rules: [
+        "if device unavailable or timeout classify needs_review",
+        "if manual review is required record partial boundary",
+      ],
+      rollback: { required: false },
+      policy: {},
+      promotion_state: "review_only",
+      promotion_scope: null,
+      promotion_note: null,
+      promoted_by: null,
+      promoted_at: null,
+      revoked_by: null,
+      revoked_at: null,
+      created_by: "migration",
+      created_at: new Date("2026-05-22T11:00:00.000Z"),
+      updated_at: new Date("2026-05-22T11:00:00.000Z"),
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [definitionRow] })
+      .mockResolvedValueOnce({
+        rows: [{
+          gate_id: "compiler_auto_use",
+          state: "blocked",
+          version: 1,
+          owner: "product",
+          risk: "high",
+          config: {},
+          updated_by: "migration",
+          updated_at: new Date("2026-05-22T11:00:00.000Z"),
+        }],
+      });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...definitionRow,
+          promotion_state: "limited_reuse",
+          promotion_scope: "device:test-device",
+          promotion_note: "Manual approval for one device",
+          promoted_by: "dashboard",
+          promoted_at: new Date("2026-05-22T11:10:00.000Z"),
+          updated_at: new Date("2026-05-22T11:10:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await patchAgency(
+      "/api/agency/workflow-definitions/99999999-9999-4999-8999-999999999999/promotion",
+      { action: "promote_limited", scope: "device:test-device", note: "Manual approval for one device" }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      action: "promote_limited",
+      previousState: "review_only",
+      nextState: "limited_reuse",
+      policy: {
+        manualOnly: true,
+        compilerVisible: false,
+        autoUseEnabled: false,
+        executionChanging: false,
+        workflowCacheChanging: false,
+        wouldUseDefinition: false,
+        wouldChangePlan: false,
+        wouldChangeWorkflowCache: false,
+        wouldExecuteWorkflow: false,
+        safeToAutoApply: false,
+      },
+      definition: expect.objectContaining({
+        key: "device_unlock",
+        promotion: expect.objectContaining({
+          state: "limited_reuse",
+          scope: "device:test-device",
+          reusable: true,
+          compilerEligible: false,
+          wouldUseDefinition: false,
+          autoUseEnabled: false,
+        }),
+      }),
+      validationSnapshot: expect.objectContaining({
+        decision: expect.objectContaining({
+          wouldPromoteDefinition: false,
+          wouldUseDefinition: false,
+          wouldExecuteWorkflow: false,
+          safeToAutoApply: false,
+        }),
+      }),
+    });
+    expect(mocks.client.query.mock.calls[0][0]).toBe("BEGIN");
+    expect(String(mocks.client.query.mock.calls[1][0])).toContain("SET promotion_state = 'limited_reuse'");
+    expect(mocks.client.query.mock.calls[1][1]).toEqual([
+      "99999999-9999-4999-8999-999999999999",
+      "device:test-device",
+      "Manual approval for one device",
+    ]);
+    expect(String(mocks.client.query.mock.calls[2][0])).toContain("agency_workflow_definition_promotion_events");
+    expect(mocks.client.query.mock.calls[2][1][3]).toBe("promote_limited");
+    expect(mocks.client.query.mock.calls[2][1][4]).toBe("review_only");
+    expect(mocks.client.query.mock.calls[2][1][5]).toBe("limited_reuse");
+    expect(mocks.client.query.mock.calls[2][1][8]).toContain("\"manualOnly\":true");
+    expect(mocks.client.query.mock.calls[2][1][9]).toContain("\"wouldExecuteWorkflow\":false");
+    expect(mocks.client.query.mock.calls[3][0]).toBe("COMMIT");
+  });
+
+  it("rejects global workflow definition promotion scope", async () => {
+    const response = await patchAgency(
+      "/api/agency/workflow-definitions/99999999-9999-4999-8999-999999999999/promotion",
+      { action: "promote_limited", scope: "global" }
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "WORKFLOW_DEFINITION_GLOBAL_SCOPE_DISABLED",
+    });
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
+
+  it("revokes workflow definition promotion and records an audit event", async () => {
+    const definitionRow = {
+      id: "99999999-9999-4999-8999-999999999999",
+      definition_key: "device_unlock",
+      version: 1,
+      status: "active",
+      title: "Device unlock",
+      description: "Unlock device definition",
+      platform: "android",
+      intent: "device_unlock",
+      goal: "Unlock the device without changing workflow cache",
+      source: "static_seed",
+      definition: {
+        steps: ["wake_device", "swipe_unlock", "verify_home"],
+        terminalStates: ["success", "expected_failure", "needs_review", "quarantined"],
+        sideEffects: [],
+      },
+      success_criteria: ["home screen visible", "no challenge detected"],
+      allowed_tools: ["wake_device", "gesture_swipe", "ui_tree_dump"],
+      required_capabilities: ["device.online_or_approved"],
+      constraints: ["read_only_validation", "limited_scope_only"],
+      fallback_rules: [
+        "if device unavailable or timeout classify needs_review",
+        "if manual review is required record partial boundary",
+      ],
+      rollback: { required: false },
+      policy: {},
+      promotion_state: "limited_reuse",
+      promotion_scope: "device:test-device",
+      promotion_note: "Manual approval",
+      promoted_by: "dashboard",
+      promoted_at: new Date("2026-05-22T11:10:00.000Z"),
+      revoked_by: null,
+      revoked_at: null,
+      created_by: "migration",
+      created_at: new Date("2026-05-22T11:00:00.000Z"),
+      updated_at: new Date("2026-05-22T11:10:00.000Z"),
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [definitionRow] })
+      .mockResolvedValueOnce({ rows: [] });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...definitionRow,
+          promotion_state: "revoked",
+          promotion_scope: null,
+          promotion_note: "Bad scope",
+          revoked_by: "dashboard",
+          revoked_at: new Date("2026-05-22T11:20:00.000Z"),
+          updated_at: new Date("2026-05-22T11:20:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await patchAgency(
+      "/api/agency/workflow-definitions/99999999-9999-4999-8999-999999999999/promotion",
+      { action: "revoke", note: "Bad scope" }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      action: "revoke",
+      previousState: "limited_reuse",
+      nextState: "revoked",
+      definition: expect.objectContaining({
+        promotion: expect.objectContaining({
+          state: "revoked",
+          reusable: false,
+          compilerEligible: false,
+          wouldUseDefinition: false,
+        }),
+      }),
+      policy: expect.objectContaining({
+        autoUseEnabled: false,
+        executionChanging: false,
+        workflowCacheChanging: false,
+        wouldExecuteWorkflow: false,
+        safeToAutoApply: false,
+      }),
+    });
+    expect(mocks.client.query.mock.calls[0][0]).toBe("BEGIN");
+    expect(String(mocks.client.query.mock.calls[1][0])).toContain("SET promotion_state = 'revoked'");
+    expect(String(mocks.client.query.mock.calls[2][0])).toContain("agency_workflow_definition_promotion_events");
+    expect(mocks.client.query.mock.calls[2][1][3]).toBe("revoke");
+    expect(mocks.client.query.mock.calls[2][1][4]).toBe("limited_reuse");
+    expect(mocks.client.query.mock.calls[2][1][5]).toBe("revoked");
+    expect(mocks.client.query.mock.calls[3][0]).toBe("COMMIT");
+  });
+
+  it("lists workflow definition promotion audit events without enabling auto-use", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: "77777777-7777-4777-8777-777777777777",
+          definition_id: "99999999-9999-4999-8999-999999999999",
+          definition_key: "device_unlock",
+          definition_version: 1,
+          action: "promote_limited",
+          previous_state: "review_only",
+          next_state: "limited_reuse",
+          promotion_scope: "device:test-device",
+          note: "Manual approval",
+          actor: "dashboard",
+          policy: { manualOnly: true, autoUseEnabled: false },
+          validation_snapshot: { decision: { wouldExecuteWorkflow: false } },
+          created_at: new Date("2026-05-22T11:15:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ count: "1" }] });
+
+    const response = await getAgency("/api/agency/workflow-definitions/promotion-events?key=device_unlock&pageSize=20");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.policy).toMatchObject({
+      readOnly: true,
+      auditOnly: true,
+      autoUseEnabled: false,
+      executionChanging: false,
+      workflowCacheChanging: false,
+    });
+    expect(response.body.data.items[0]).toMatchObject({
+      definitionKey: "device_unlock",
+      action: "promote_limited",
+      previousState: "review_only",
+      nextState: "limited_reuse",
+      promotionScope: "device:test-device",
+      policy: expect.objectContaining({ autoUseEnabled: false }),
+      validationSnapshot: expect.objectContaining({
+        decision: expect.objectContaining({ wouldExecuteWorkflow: false }),
+      }),
+    });
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("agency_workflow_definition_promotion_events");
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("definition_key = $1");
+    expect(mocks.db.query.mock.calls[0][1]).toEqual(["device_unlock", 20, 0]);
+  });
+
   it("lists compiler awareness audit events without changing execution", async () => {
     mocks.db.query
       .mockResolvedValueOnce({

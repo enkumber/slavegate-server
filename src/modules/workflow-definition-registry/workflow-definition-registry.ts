@@ -23,6 +23,19 @@ export interface WorkflowDefinition {
   fallbackRules: string[];
   rollback: JsonObject;
   policy: JsonObject;
+  promotion: {
+    state: string;
+    scope: string | null;
+    note: string | null;
+    promotedBy: string | null;
+    promotedAt: string | null;
+    revokedBy: string | null;
+    revokedAt: string | null;
+    reusable: boolean;
+    compilerEligible: false;
+    wouldUseDefinition: false;
+    autoUseEnabled: false;
+  };
   summary: {
     successCriteria: number;
     allowedTools: number;
@@ -105,6 +118,19 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
     policy: {
       ...rowPolicy,
       ...registryPolicy(),
+    },
+    promotion: {
+      state: String(row.promotion_state ?? "review_only"),
+      scope: typeof row.promotion_scope === "string" ? row.promotion_scope : null,
+      note: typeof row.promotion_note === "string" ? row.promotion_note : null,
+      promotedBy: typeof row.promoted_by === "string" ? row.promoted_by : null,
+      promotedAt: dateValue(row.promoted_at),
+      revokedBy: typeof row.revoked_by === "string" ? row.revoked_by : null,
+      revokedAt: dateValue(row.revoked_at),
+      reusable: row.promotion_state === "limited_reuse",
+      compilerEligible: false,
+      wouldUseDefinition: false,
+      autoUseEnabled: false,
     },
     summary: {
       successCriteria: successCriteria.length,

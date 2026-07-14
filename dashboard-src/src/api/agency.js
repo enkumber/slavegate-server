@@ -199,6 +199,23 @@ export const agencyApi = {
                 query.set("key", params.key);
             return api.get(`/agency/workflow-definitions/resolve?${query}`);
         },
+        promote: (id, data) => api.patch(`/agency/workflow-definitions/${id}/promotion`, data),
+        listPromotionEvents: (params) => {
+            const query = new URLSearchParams();
+            if (params?.page)
+                query.set("page", String(params.page));
+            if (params?.pageSize)
+                query.set("pageSize", String(params.pageSize));
+            if (params?.definitionId)
+                query.set("definitionId", params.definitionId);
+            if (params?.key)
+                query.set("key", params.key);
+            if (params?.action)
+                query.set("action", params.action);
+            if (params?.actor)
+                query.set("actor", params.actor);
+            return api.get(`/agency/workflow-definitions/promotion-events?${query}`);
+        },
     },
     workflowValidationPipeline: {
         get: (params) => {

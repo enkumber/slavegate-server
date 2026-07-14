@@ -390,6 +390,24 @@ function rowToWorkflowValidationEvent(row: Record<string, unknown>): Record<stri
   };
 }
 
+function rowToWorkflowDefinitionPromotionEvent(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id,
+    definitionId: row.definition_id ?? null,
+    definitionKey: row.definition_key ?? null,
+    definitionVersion: row.definition_version ?? null,
+    action: row.action ?? null,
+    previousState: row.previous_state ?? null,
+    nextState: row.next_state ?? null,
+    promotionScope: row.promotion_scope ?? null,
+    note: row.note ?? null,
+    actor: row.actor ?? null,
+    policy: row.policy ?? {},
+    validationSnapshot: row.validation_snapshot ?? {},
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+  };
+}
+
 async function getCompilerPolicyGates(db: ReturnType<typeof getDb>, filters: {
   category?: string;
   state?: string;
@@ -505,6 +523,44 @@ function parseStepCandidateValidation(input: unknown): {
 }
 
 type StepLibraryPromotionAction = "promote_limited" | "revoke";
+
+type WorkflowDefinitionPromotionAction = "promote_limited" | "revoke";
+
+function parseWorkflowDefinitionPromotion(input: unknown): {
+  action: WorkflowDefinitionPromotionAction;
+  scope: string | null;
+  note: string | null;
+} | { error: string; code: string } {
+  const body = normalizeJsonObject(input);
+  const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
+  if (!["promote_limited", "revoke"].includes(action)) {
+    return { error: "action must be one of promote_limited, revoke", code: "INVALID_WORKFLOW_DEFINITION_PROMOTION_ACTION" };
+  }
+
+  const rawScope = typeof body.scope === "string" ? body.scope.trim() : "";
+  if (action === "promote_limited") {
+    if (!rawScope) {
+      return { error: "scope is required for limited promotion", code: "WORKFLOW_DEFINITION_PROMOTION_SCOPE_REQUIRED" };
+    }
+    if (rawScope.length > 160) {
+      return { error: "scope must be 160 characters or fewer", code: "WORKFLOW_DEFINITION_PROMOTION_SCOPE_TOO_LONG" };
+    }
+    if (["global", "all", "compiler", "auto"].includes(rawScope.toLowerCase())) {
+      return { error: "global or compiler scope is not allowed in this phase", code: "WORKFLOW_DEFINITION_GLOBAL_SCOPE_DISABLED" };
+    }
+  }
+
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note.length > 1000) {
+    return { error: "note must be 1000 characters or fewer", code: "WORKFLOW_DEFINITION_PROMOTION_NOTE_TOO_LONG" };
+  }
+
+  return {
+    action: action as WorkflowDefinitionPromotionAction,
+    scope: action === "promote_limited" ? rawScope : null,
+    note: note.length > 0 ? note : null,
+  };
+}
 
 function parseStepLibraryPromotion(input: unknown): {
   action: StepLibraryPromotionAction;
@@ -1815,6 +1871,81 @@ router.get("/compiler-policy-gates", requireAdminAuth, async (req: Request, res:
   });
 });
 
+router.get("/workflow-definitions/promotion-events", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const { page, pageSize, offset } = parsePagination(req.query);
+  const definitionId = typeof req.query.definitionId === "string" && req.query.definitionId.trim().length > 0
+    ? req.query.definitionId.trim()
+    : null;
+  const key = typeof req.query.key === "string" && req.query.key.trim().length > 0
+    ? req.query.key.trim()
+    : null;
+  const action = typeof req.query.action === "string" && req.query.action.trim().length > 0
+    ? req.query.action.trim()
+    : null;
+  const actor = typeof req.query.actor === "string" && req.query.actor.trim().length > 0
+    ? req.query.actor.trim()
+    : null;
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (definitionId) {
+    conditions.push(`definition_id = $${idx++}`);
+    values.push(definitionId);
+  }
+  if (key) {
+    conditions.push(`definition_key = $${idx++}`);
+    values.push(key);
+  }
+  if (action) {
+    conditions.push(`action = $${idx++}`);
+    values.push(action);
+  }
+  if (actor) {
+    conditions.push(`actor = $${idx++}`);
+    values.push(actor);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  values.push(pageSize, offset);
+
+  const [rows, count] = await Promise.all([
+    db.query(
+      `SELECT *
+       FROM agency_workflow_definition_promotion_events
+       ${where}
+       ORDER BY created_at DESC, id DESC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      values
+    ),
+    db.query(
+      `SELECT COUNT(*)
+       FROM agency_workflow_definition_promotion_events
+       ${where}`,
+      values.slice(0, -2)
+    ),
+  ]);
+
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map(rowToWorkflowDefinitionPromotionEvent),
+      total: parseInt(count.rows[0].count, 10),
+      page,
+      pageSize,
+      policy: {
+        readOnly: true,
+        auditOnly: true,
+        autoUseEnabled: false,
+        executionChanging: false,
+        workflowCacheChanging: false,
+        mode: "workflow_definition_promotion_events_read_only",
+      },
+    },
+  });
+});
+
 router.get("/workflow-definitions", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
   const status = typeof req.query.status === "string" && req.query.status.trim().length > 0
@@ -1916,6 +2047,199 @@ router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Reques
   });
 
   res.json({ ok: true, data: resolution });
+});
+
+router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const parsed = parseWorkflowDefinitionPromotion(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
+  }
+
+  const [definitionRows, gates] = await Promise.all([
+    db.query(
+      `SELECT *
+       FROM agency_workflow_definitions
+       WHERE id = $1`,
+      [req.params.id]
+    ),
+    getCompilerPolicyGates(db),
+  ]);
+
+  const currentRow = definitionRows.rows[0];
+  if (!currentRow) {
+    return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
+  }
+
+  const definition = rowToWorkflowDefinition(currentRow);
+  const pipeline = buildWorkflowValidationPipeline({
+    definitions: [definition],
+    policyGates: gates,
+    intent: definition.intent,
+    platform: definition.platform,
+    key: definition.key,
+  }) as Record<string, any>;
+  const item = Array.isArray(pipeline.items) ? pipeline.items[0] as Record<string, any> | undefined : undefined;
+  const staticValidation = (item?.staticValidation ?? {}) as Record<string, any>;
+  const dryRun = (item?.dryRun ?? {}) as Record<string, any>;
+  const decision = (item?.decision ?? {}) as Record<string, any>;
+  const validationScore = Number(decision.validationScore ?? 0);
+  const staticErrors = Number(staticValidation.errors ?? 0);
+  const branchCoverage = Number(((dryRun.branchCoverage ?? {}) as Record<string, any>).coveragePercent ?? 0);
+
+  if (parsed.action === "promote_limited") {
+    if (!["active", "draft"].includes(definition.status)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Only active or draft workflow definitions can enter limited promotion review",
+        code: "WORKFLOW_DEFINITION_STATUS_NOT_PROMOTABLE",
+      });
+    }
+    if (definition.promotion.state === "limited_reuse") {
+      return res.status(400).json({
+        ok: false,
+        error: "Workflow definition is already promoted for limited reuse",
+        code: "WORKFLOW_DEFINITION_ALREADY_PROMOTED",
+      });
+    }
+    if (staticErrors > 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "Workflow definition has static validation errors",
+        code: "WORKFLOW_DEFINITION_STATIC_ERRORS_BLOCK_PROMOTION",
+      });
+    }
+    if (validationScore < 60 || branchCoverage < 50) {
+      return res.status(400).json({
+        ok: false,
+        error: "Workflow definition validation score or branch coverage is below the limited-promotion threshold",
+        code: "WORKFLOW_DEFINITION_READINESS_BLOCKS_PROMOTION",
+        data: { validationScore, branchCoverage, threshold: { validationScore: 60, branchCoverage: 50 } },
+      });
+    }
+  }
+
+  const nextState = parsed.action === "promote_limited" ? "limited_reuse" : "revoked";
+  const updateSql = parsed.action === "promote_limited"
+    ? `UPDATE agency_workflow_definitions
+       SET promotion_state = 'limited_reuse',
+           promotion_scope = $2,
+           promotion_note = $3,
+           promoted_by = 'dashboard',
+           promoted_at = NOW(),
+           revoked_by = NULL,
+           revoked_at = NULL,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`
+    : `UPDATE agency_workflow_definitions
+       SET promotion_state = 'revoked',
+           promotion_scope = NULL,
+           promotion_note = $2,
+           revoked_by = 'dashboard',
+           revoked_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`;
+  const updateValues = parsed.action === "promote_limited"
+    ? [definition.id, parsed.scope, parsed.note]
+    : [definition.id, parsed.note];
+  const validationSnapshot = {
+    staticValidation,
+    dryRun: {
+      mode: dryRun.mode,
+      branchCoverage: dryRun.branchCoverage,
+      wouldUseDefinition: dryRun.wouldUseDefinition,
+      wouldChangePlan: dryRun.wouldChangePlan,
+      wouldChangeWorkflowCache: dryRun.wouldChangeWorkflowCache,
+      wouldExecuteWorkflow: dryRun.wouldExecuteWorkflow,
+    },
+    decision: {
+      outcome: decision.outcome,
+      validationScore,
+      promotionReadiness: decision.promotionReadiness,
+      wouldPromoteDefinition: false,
+      wouldUseDefinition: false,
+      wouldExecuteWorkflow: false,
+      wouldChangePlan: false,
+      wouldChangeWorkflowCache: false,
+      safeToAutoApply: false,
+      blockers: decision.blockers ?? [],
+    },
+  };
+
+  const promotionPolicy = {
+    manualOnly: true,
+    compilerVisible: false,
+    autoUseEnabled: false,
+    executionChanging: false,
+    workflowCacheChanging: false,
+    wouldUseDefinition: false,
+    wouldExecuteWorkflow: false,
+    safeToAutoApply: false,
+    mode: "workflow_definition_controlled_promotion_manual_only",
+  };
+  const client = await db.connect();
+  let updatedDefinition;
+  try {
+    await client.query("BEGIN");
+    const updated = await client.query(updateSql, updateValues);
+    updatedDefinition = rowToWorkflowDefinition(updated.rows[0]);
+
+    await client.query(
+      `INSERT INTO agency_workflow_definition_promotion_events (
+         definition_id,
+         definition_key,
+         definition_version,
+         action,
+         previous_state,
+         next_state,
+         promotion_scope,
+         note,
+         actor,
+         policy,
+         validation_snapshot
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'dashboard', $9, $10)`,
+      [
+        definition.id,
+        definition.key,
+        definition.version,
+        parsed.action,
+        definition.promotion.state,
+        nextState,
+        parsed.scope,
+        parsed.note,
+        JSON.stringify(promotionPolicy),
+        JSON.stringify(validationSnapshot),
+      ]
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  res.json({
+    ok: true,
+    data: {
+      definition: updatedDefinition,
+      action: parsed.action,
+      previousState: definition.promotion.state,
+      nextState,
+      validationSnapshot,
+      policy: {
+        ...promotionPolicy,
+        wouldUseDefinition: false,
+        wouldChangePlan: false,
+        wouldChangeWorkflowCache: false,
+        wouldExecuteWorkflow: false,
+        safeToAutoApply: false,
+      },
+    },
+  });
 });
 
 router.get("/workflow-validation-pipeline/events", requireAdminAuth, async (req: Request, res: Response) => {

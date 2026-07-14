@@ -689,6 +689,19 @@ export interface WorkflowDefinition {
   fallbackRules: string[];
   rollback: Record<string, unknown>;
   policy: Record<string, unknown>;
+  promotion: {
+    state: string;
+    scope: string | null;
+    note: string | null;
+    promotedBy: string | null;
+    promotedAt: string | null;
+    revokedBy: string | null;
+    revokedAt: string | null;
+    reusable: boolean;
+    compilerEligible: false;
+    wouldUseDefinition: false;
+    autoUseEnabled: false;
+  };
   summary: {
     successCriteria: number;
     allowedTools: number;
@@ -719,6 +732,31 @@ export interface WorkflowDefinitionRegistryResponse {
     deprecated: number;
     archived: number;
   };
+}
+
+export interface WorkflowDefinitionPromotionEvent {
+  id: string;
+  definitionId: string | null;
+  definitionKey: string | null;
+  definitionVersion: number | null;
+  action: "promote_limited" | "revoke" | string;
+  previousState: string | null;
+  nextState: string | null;
+  promotionScope: string | null;
+  note: string | null;
+  actor: string | null;
+  policy: Record<string, unknown>;
+  validationSnapshot: Record<string, unknown>;
+  createdAt: string | null;
+}
+
+export interface WorkflowDefinitionPromotionResponse {
+  definition: WorkflowDefinition;
+  action: "promote_limited" | "revoke" | string;
+  previousState: string | null;
+  nextState: string;
+  validationSnapshot: Record<string, unknown>;
+  policy: Record<string, unknown>;
 }
 
 export interface WorkflowDefinitionResolutionResponse {
@@ -1044,6 +1082,18 @@ export const agencyApi = {
       if (params?.platform) query.set("platform", params.platform);
       if (params?.key) query.set("key", params.key);
       return api.get<WorkflowDefinitionResolutionResponse>(`/agency/workflow-definitions/resolve?${query}`);
+    },
+    promote: (id: string, data: { action: "promote_limited" | "revoke"; scope?: string | null; note?: string | null }) =>
+      api.patch<WorkflowDefinitionPromotionResponse>(`/agency/workflow-definitions/${id}/promotion`, data),
+    listPromotionEvents: (params?: { page?: number; pageSize?: number; definitionId?: string; key?: string; action?: string; actor?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.pageSize) query.set("pageSize", String(params.pageSize));
+      if (params?.definitionId) query.set("definitionId", params.definitionId);
+      if (params?.key) query.set("key", params.key);
+      if (params?.action) query.set("action", params.action);
+      if (params?.actor) query.set("actor", params.actor);
+      return api.get<PaginatedResponse<WorkflowDefinitionPromotionEvent> & { policy: Record<string, unknown> }>(`/agency/workflow-definitions/promotion-events?${query}`);
     },
   },
 
