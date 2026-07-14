@@ -29,6 +29,18 @@ function shortList(values: unknown, limit = 4) {
   return `${values.slice(0, limit).map(String).join(", ")}${values.length > limit ? " +" : ""}`;
 }
 
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function numberValue(value: unknown) {
+  return typeof value === "number" ? value : 0;
+}
+
 function SummaryCard({ label, value, color }: { label: string; value: unknown; color: string }) {
   return (
     <div style={{ background: "#101010", border: "1px solid #222", borderRadius: "6px", padding: "12px" }}>
@@ -39,6 +51,11 @@ function SummaryCard({ label, value, color }: { label: string; value: unknown; c
 }
 
 function PipelineItem({ item }: { item: WorkflowValidationPipelineResponse["items"][number] }) {
+  const branchCoverage = objectValue(item.dryRun.branchCoverage);
+  const fixtureMatrix = arrayValue(item.dryRun.fixtureMatrix);
+  const smokeScore = numberValue(item.smokeReadiness.score);
+  const canaryScore = numberValue(item.canaryReadiness.score);
+  const regressionScore = numberValue(item.regressionReadiness.score);
   return (
     <div style={{ background: "#101010", border: "1px solid #222", borderRadius: "6px", padding: "14px" }}>
       <div style={{ display: "flex", gap: "8px", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "10px" }}>
@@ -53,15 +70,16 @@ function PipelineItem({ item }: { item: WorkflowValidationPipelineResponse["item
         <Badge label={item.definition.platform} tone="blue" />
         <Badge label={item.definition.intent} tone="gray" />
         <Badge label={`static: ${String(item.staticValidation.state ?? "unknown")}`} tone={stateTone(item.staticValidation.state)} />
+        <Badge label={`score: ${String(item.decision.validationScore ?? 0)}`} tone="yellow" />
         <Badge label="dry-run only" tone="yellow" />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(90px, 1fr))", gap: "8px", marginBottom: "10px" }}>
         {([
-          ["Static", item.staticValidation.state ?? "unknown"],
-          ["Smoke", item.smokeReadiness.state ?? "blocked"],
-          ["Canary", item.canaryReadiness.state ?? "blocked"],
-          ["Regression", item.regressionReadiness.state ?? "blocked"],
+          ["Errors", item.staticValidation.errors ?? 0],
+          ["Warnings", item.staticValidation.warnings ?? 0],
+          ["Coverage", `${String(branchCoverage.coveragePercent ?? 0)}%`],
+          ["Fixtures", fixtureMatrix.length],
           ["Safe", String(item.decision.safeToAutoApply ?? false)],
         ] as Array<[string, unknown]>).map(([label, value]) => (
           <div key={String(label)} style={{ background: "#0a0a0a", border: "1px solid #1f1f1f", borderRadius: "6px", padding: "8px" }}>
@@ -71,8 +89,26 @@ function PipelineItem({ item }: { item: WorkflowValidationPipelineResponse["item
         ))}
       </div>
 
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(90px, 1fr))", gap: "8px", marginBottom: "10px" }}>
+        {([
+          ["Smoke", item.smokeReadiness.state ?? "blocked", smokeScore],
+          ["Canary", item.canaryReadiness.state ?? "blocked", canaryScore],
+          ["Regression", item.regressionReadiness.state ?? "blocked", regressionScore],
+        ] as Array<[string, unknown, number]>).map(([label, state, score]) => (
+          <div key={String(label)} style={{ background: "#0a0a0a", border: "1px solid #1f1f1f", borderRadius: "6px", padding: "8px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", alignItems: "center" }}>
+              <div style={{ color: "#666", fontSize: "10px" }}>{label}</div>
+              <Badge label={`${score}%`} tone="gray" />
+            </div>
+            <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600 }}>{String(state)}</div>
+          </div>
+        ))}
+      </div>
+
       <div style={{ color: "#777", fontSize: "11px", lineHeight: 1.5 }}>Blockers: {shortList(item.decision.blockers)}</div>
       <div style={{ color: "#777", fontSize: "11px", lineHeight: 1.5 }}>Dry-run: wouldUseDefinition={String(item.dryRun.wouldUseDefinition)}; wouldExecuteWorkflow={String(item.dryRun.wouldExecuteWorkflow)}</div>
+      <div style={{ color: "#777", fontSize: "11px", lineHeight: 1.5 }}>Fixtures: {shortList(fixtureMatrix.map((fixture) => objectValue(fixture).id))}</div>
+      <div style={{ color: "#777", fontSize: "11px", lineHeight: 1.5 }}>Missing branches: {shortList(branchCoverage.missingBranches)}</div>
       <div style={{ color: "#777", fontSize: "11px", lineHeight: 1.5 }}>Criteria: {shortList(item.definition.successCriteria)}</div>
     </div>
   );
@@ -80,12 +116,13 @@ function PipelineItem({ item }: { item: WorkflowValidationPipelineResponse["item
 
 function EventRow({ event }: { event: WorkflowValidationEvent }) {
   const decision = event.decision ?? {};
+  const summary = event.summary ?? {};
   return (
     <div style={{ background: "#0b0b0b", border: "1px solid #202020", borderRadius: "6px", padding: "10px", display: "grid", gridTemplateColumns: "180px 1fr 160px", gap: "10px", alignItems: "center" }}>
       <div style={{ color: "#888", fontSize: "11px" }}>{event.createdAt ? new Date(event.createdAt).toLocaleString() : "-"}</div>
       <div style={{ minWidth: 0 }}>
         <div style={{ color: "#e5e7eb", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.definitionKey ?? event.intent ?? "-"}</div>
-        <div style={{ color: "#666", fontSize: "11px" }}>{event.platform ?? "-"} · {event.source ?? "-"}</div>
+        <div style={{ color: "#666", fontSize: "11px" }}>{event.platform ?? "-"} · {event.source ?? "-"} · score {String(summary.averageValidationScore ?? "-")}</div>
       </div>
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
         <Badge label={String(decision.outcome ?? "recorded")} tone="gray" />
@@ -159,9 +196,16 @@ export function WorkflowValidationPipelinePage() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(120px, 1fr))", gap: "12px", marginBottom: "14px" }}>
         <SummaryCard label="Definitions" value={summary.definitions} color="#e5e7eb" />
         <SummaryCard label="Static Passed" value={summary.staticPassed} color="#4ade80" />
-        <SummaryCard label="Dry-run Blocked" value={summary.dryRunBlocked} color="#f87171" />
-        <SummaryCard label="Would Promote" value={summary.wouldPromoteDefinition} color="#fbbf24" />
+        <SummaryCard label="Branch Coverage" value={`${String(summary.branchCoveragePercent ?? 0)}%`} color="#60a5fa" />
+        <SummaryCard label="Validation Score" value={summary.averageValidationScore} color="#fbbf24" />
         <SummaryCard label="Safe Auto Apply" value={summary.safeToAutoApply} color="#f87171" />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(120px, 1fr))", gap: "12px", marginBottom: "14px" }}>
+        <SummaryCard label="Static Warnings" value={summary.staticWarnings} color="#fbbf24" />
+        <SummaryCard label="Dry-run Fixtures" value={summary.dryRunFixtures} color="#60a5fa" />
+        <SummaryCard label="Readiness Blocked" value={summary.readinessBlocked} color="#f87171" />
+        <SummaryCard label="Would Promote" value={summary.wouldPromoteDefinition} color="#f87171" />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: "12px", marginBottom: "18px" }}>
