@@ -1,6 +1,8 @@
-# ws-relay — WebSocket Relay for Umbrel
+# ws-relay — OBSOLETE WebSocket Relay Notes
 
-Relay-ul expune portul 18791 al containerului OpenClaw pe host-ul Umbrel, astfel încât telefoanele să se poată conecta.
+Această documentație este veche. Pentru sistemul live, folosește Phone Network la `http://enkzoned.go.ro:3000`; telefoanele se conectează outbound la `ws://enkzoned.go.ro:3000/ws-direct`.
+
+Nu folosi `localhost` din containerul OpenClaw pentru verificări live: `localhost` este container-local.
 
 ## Problema
 
@@ -67,8 +69,8 @@ sudo bash scripts/ws-relay.sh --ip
 ## Verificare
 
 ```bash
-# Trebuie să returneze 401 (nu 000)
-curl -s -o /dev/null -w "%{http_code}" http://192.168.50.57:18791/api/devices
+# Verificare live API
+curl -s -o /dev/null -w "%{http_code}" http://enkzoned.go.ro:3000/api/health
 
 # Status relay
 sudo docker ps | grep ws-relay

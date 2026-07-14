@@ -119,9 +119,11 @@ The `--appendonly yes` flag enables AOF persistence.
 
 ---
 
-## WS-Relay (WebSocket Relay pentru telefoane)
+## WS-Relay (OBSOLETE)
 
-Telefoanele se conectează la server prin WireGuard. Trebuie un relay care să expună portul 18791 de pe containerul OpenClaw pe host-ul Umbrel.
+Această secțiune documentează o variantă veche. Pentru verificări și operațiuni live folosește Phone Network la `http://enkzoned.go.ro:3000`; telefoanele folosesc outbound DirectWS la `ws://enkzoned.go.ro:3000/ws-direct`.
+
+Nu folosi `localhost` din containerul OpenClaw pentru verificări live: `localhost` este container-local.
 
 ### Setup ws-relay
 
@@ -144,8 +146,8 @@ docker run -d --name ws-relay --restart=always --network=host alpine/socat TCP-L
 ### Verificare
 
 ```bash
-# Trebuie să returneze 401 (nu 000)
-curl -s -o /dev/null -w "%{http_code}" http://192.168.50.57:18791/api/devices
+# Verificare live API
+curl -s -o /dev/null -w "%{http_code}" http://enkzoned.go.ro:3000/api/health
 
 # Status relay
 docker ps | grep ws-relay

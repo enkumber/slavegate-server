@@ -114,7 +114,9 @@ async function bootstrap(): Promise<void> {
 
   // ─── Skill Updater — triggered via cron (POST /api/skill-updater/run) ─────
   // Removed internal setTimeout scheduler — use external cron instead:
-  // openclaw cron add "0 1 * * *" "curl -s -X POST http://localhost:18791/api/skill-updater/run -H 'X-API-Key: $API_KEY'"
+  // Live checks from OpenClaw should use PHONE_NETWORK_API_BASE (default http://enkzoned.go.ro:3000);
+  // localhost is container-local.
+  // openclaw cron add "0 1 * * *" "curl -s -X POST $PHONE_NETWORK_API_BASE/api/skill-updater/run -H 'X-API-Key: $API_KEY'"
   console.log("[skill-updater] Ready for cron trigger at POST /api/skill-updater/run");
 
   // ─── Ops Monitor — creates skill_update_jobs based on cascade-tap metrics ─

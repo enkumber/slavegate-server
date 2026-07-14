@@ -20,8 +20,8 @@ const router = Router();
 
 function requireApiKey(req: Request, res: Response, next: Function): void {
   const apiKey = req.headers["x-api-key"] as string;
-  const validKey = process.env.API_KEY || "928b9e0ba7caeb3e039dafde99076d2d";
-  if (apiKey !== validKey) {
+  const validKey = process.env.API_KEY;
+  if (!validKey || apiKey !== validKey) {
     res.status(401).json({ ok: false, error: "Invalid API key" });
     return;
   }

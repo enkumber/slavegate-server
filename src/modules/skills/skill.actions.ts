@@ -288,9 +288,10 @@ async function handleConditionalNavigate(
   } else if (tapText) {
     // Dynamic text — full cascade via internal HTTP call (a11y → OCR → VLM)
     try {
-      const response = await fetch(`http://localhost:18791/api/hydra/cascade-tap`, {
+      const internalApiBase = process.env.INTERNAL_API_BASE || `http://localhost:${process.env.PORT || '3000'}`;
+      const response = await fetch(`${internalApiBase}/api/hydra/cascade-tap`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.API_KEY || '928b9e0ba7caeb3e039dafde99076d2d' },
+        headers: { 'Content-Type': 'application/json', 'X-API-Key': process.env.API_KEY || '' },
         body: JSON.stringify({ deviceId: ctx.deviceId, text: tapText }),
       });
       const result = await response.json() as { ok: boolean; success?: boolean };

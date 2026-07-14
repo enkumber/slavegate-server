@@ -7,8 +7,8 @@
 const http = require('http');
 
 const CONFIG = {
-  apiBase: 'http://localhost:18791',
-  apiKey: '928b9e0ba7caeb3e039dafde99076d2d',
+  apiBase: process.env.PHONE_NETWORK_API_BASE ,
+  apiKey: process.env.PHONE_NETWORK_API_KEY || process.env.API_KEY || '',
   deviceId: '2cd08058-f4ad-4445-b953-eb9a23d0e1a0',
   taskId: process.argv[2] || '4146f32f-91db-4d36-b5f3-b4fae9b66f0b',
   dbUrl: 'postgresql://node@localhost:5432/phonenetwork'
