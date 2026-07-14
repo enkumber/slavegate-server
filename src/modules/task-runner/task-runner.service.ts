@@ -846,6 +846,7 @@ async function executeGeneratedWorkflowTask(
     intent?: unknown;
     workflow?: unknown;
     variables?: unknown;
+    allowCandidateArtifact?: unknown;
   };
 
   if (Object.prototype.hasOwnProperty.call(params, "workflow")) {
@@ -863,6 +864,9 @@ async function executeGeneratedWorkflowTask(
   const clientId = accountClientId ?? (typeof params.clientId === "string" ? params.clientId : undefined);
   const campaignId = typeof params.campaignId === "string" ? params.campaignId : undefined;
   const source = generatedWorkflowTaskSource(cacheKey, requestKey);
+  const allowCandidateArtifact = params.allowCandidateArtifact === true
+    && agencyWorkflowRunIdFromTask(task) !== null
+    && task.params?.source === "dashboard_human";
 
   if (!cacheKey && !requestKey) {
     generatedWorkflowTaskRunnerDispatches?.labels(routine, "unknown", "dispatch_failed").inc();
@@ -911,8 +915,8 @@ async function executeGeneratedWorkflowTask(
   }
 
   const cached = cacheKey
-    ? await workflowService.getGeneratedPlanCache(cacheKey)
-    : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);
+    ? await workflowService.getGeneratedPlanCache(cacheKey, { includeCandidate: allowCandidateArtifact })
+    : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!, { includeCandidate: allowCandidateArtifact });
 
   if (!cached) {
     generatedWorkflowCacheLookups?.labels("task_runner", "miss").inc();

@@ -85,6 +85,7 @@ function cacheRow(overrides: Record<string, unknown> = {}) {
     canonical_workflow_id: workflow.id,
     canonical_workflow_version: workflow.version,
     compiled_plan_hash: computeGeneratedWorkflowCompiledPlanHash(compiledPlan),
+    artifact_state: "promoted",
     source_metadata: { source: "test" },
     template_id: workflow.id,
     platform: workflow.platform,
@@ -132,17 +133,18 @@ describe("generated workflow plan cache service", () => {
     expect(values[2]).toBe(workflow.id);
     expect(values[3]).toBe(workflow.version);
     expect(values[4]).toBe(computeGeneratedWorkflowCompiledPlanHash(compiledPlan));
-    expect(values[5]).toBe(JSON.stringify({
+    expect(values[5]).toBe("candidate");
+    expect(values[6]).toBe(JSON.stringify({
       intent: null,
       safetyClass: null,
       outputSchema: null,
       allowedRecoveryRequests: [],
     }));
-    expect(values[6]).toBe(workflow.id);
-    expect(values[7]).toBe("reddit");
-    expect(values[8]).toBe("1.0.0");
-    expect(values[9]).toBe(JSON.stringify(workflow));
-    expect(values[10]).toBe(JSON.stringify(compiledPlan));
+    expect(values[7]).toBe(workflow.id);
+    expect(values[8]).toBe("reddit");
+    expect(values[9]).toBe("1.0.0");
+    expect(values[10]).toBe(JSON.stringify(workflow));
+    expect(values[11]).toBe(JSON.stringify(compiledPlan));
   });
 
   it("replaces an existing canonical requestKey with the freshly compiled artifact", async () => {
@@ -158,6 +160,28 @@ describe("generated workflow plan cache service", () => {
     expect(query.mock.calls[1][0]).toContain("INSERT INTO generated_workflow_plan_cache");
   });
 
+  it("can promote the same candidate artifact for an existing requestKey", async () => {
+    const service = new WorkflowService();
+    const workflow = redditHomeWorkflow();
+    const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [{ cache_key: compiledPlan.cacheKey, artifact_state: "candidate" }] })
+      .mockResolvedValueOnce({ rows: [] });
+    vi.mocked(getDb).mockReturnValue({ query } as any);
+
+    await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97", {
+      artifactState: "promoted",
+      sourceMetadata: { source: "test_promotion" },
+    });
+
+    expect(query).toHaveBeenCalledTimes(2);
+    const [sql, values] = query.mock.calls[1];
+    expect(sql).toContain("ON CONFLICT (cache_key) DO UPDATE");
+    expect(values[0]).toBe(compiledPlan.cacheKey);
+    expect(values[5]).toBe("promoted");
+  });
+
   it("persists canonical generated workflow safety metadata in source metadata", async () => {
     const service = new WorkflowService();
     const workflow = redditAccountHealthWorkflow();
@@ -169,7 +193,7 @@ describe("generated workflow plan cache service", () => {
     });
 
     const [, values] = query.mock.calls[1];
-    expect(JSON.parse(values[5] as string)).toEqual({
+    expect(JSON.parse(values[6] as string)).toEqual({
       intent: "reddit_account_health_scan",
       safetyClass: "read_only",
       outputSchema: workflow.outputSchema,
@@ -197,7 +221,8 @@ describe("generated workflow plan cache service", () => {
     expect(sql).toContain("UPDATE generated_workflow_plan_cache");
     expect(sql).toContain("SET hit_count = hit_count + 1, last_used_at = NOW()");
     expect(sql).toContain("WHERE cache_key = $1");
-    expect(values).toEqual(["56d91a7aa0e90314241896a2"]);
+    expect(sql).toContain("artifact_state = ANY($2::text[])");
+    expect(values).toEqual(["56d91a7aa0e90314241896a2", ["promoted"]]);
   });
 
   it("rejects unsafe compiled plans before canonical cache persistence", async () => {
@@ -230,6 +255,7 @@ describe("generated workflow plan cache service", () => {
       canonicalWorkflowId: "agent_generated_reddit_home_smoke_v1",
       canonicalWorkflowVersion: "1.0.0",
       compiledPlanHash: row.compiled_plan_hash,
+      artifactState: "promoted",
       sourceMetadata: { source: "test" },
       templateId: "agent_generated_reddit_home_smoke_v1",
       platform: "reddit",
@@ -287,9 +313,23 @@ describe("generated workflow plan cache service", () => {
     const [sql, values] = query.mock.calls[0];
     expect(sql).toContain("WHERE cache_key = (");
     expect(sql).toContain("WHERE request_key = $1");
+    expect(sql).toContain("artifact_state = ANY($2::text[])");
     expect(sql).toContain("ORDER BY updated_at DESC");
     expect(sql).toContain("LIMIT 1");
-    expect(values).toEqual(["c02c59dfbe512562f8c65c97"]);
+    expect(values).toEqual(["c02c59dfbe512562f8c65c97", ["promoted"]]);
+  });
+
+  it("can include candidate artifacts only through an explicit lookup option", async () => {
+    const row = cacheRow({ artifact_state: "candidate" });
+    const service = new WorkflowService();
+    const query = mockDbQuery([row]);
+
+    const result = await service.getGeneratedPlanCache(row.cache_key as string, { includeCandidate: true });
+
+    expect(result?.artifactState).toBe("candidate");
+    const [sql, values] = query.mock.calls[0];
+    expect(sql).toContain("artifact_state = ANY($2::text[])");
+    expect(values).toEqual([row.cache_key, ["promoted", "candidate"]]);
   });
 
   it("supports execute-from-cache semantics with no regenerated workflow payload", async () => {

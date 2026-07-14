@@ -181,6 +181,7 @@ export async function createCreativeWorkflowRun(req: CreativeWorkflowCreateReque
     const cacheResult = await client.query<Record<string, unknown>>(
       `SELECT * FROM generated_workflow_plan_cache
        WHERE platform = $1
+         AND artifact_state = 'promoted'
          AND COALESCE(compiled_plan #>> '{metadata,intent}', workflow ->> 'intent', source_metadata ->> 'intent') = $2
          AND COALESCE(compiled_plan #>> '{metadata,safetyClass}', workflow ->> 'safetyClass', source_metadata ->> 'safetyClass') = 'read_only'
          AND COALESCE(compiled_plan #>> '{llmBudget,happyPathRequests}', '') = '0'

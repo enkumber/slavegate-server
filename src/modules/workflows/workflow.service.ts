@@ -57,6 +57,7 @@ export interface GeneratedWorkflowPlanCacheRecord {
   canonicalWorkflowId: string;
   canonicalWorkflowVersion: string;
   compiledPlanHash: string;
+  artifactState: "candidate" | "promoted" | "failed" | "quarantined";
   sourceMetadata: Record<string, unknown>;
   templateId: string;
   platform: string;
@@ -67,6 +68,17 @@ export interface GeneratedWorkflowPlanCacheRecord {
   createdAt: string;
   updatedAt: string;
   lastUsedAt: string | null;
+}
+
+export type GeneratedWorkflowArtifactState = GeneratedWorkflowPlanCacheRecord["artifactState"];
+
+export interface SaveGeneratedPlanCacheOptions {
+  sourceMetadata?: Record<string, unknown>;
+  artifactState?: GeneratedWorkflowArtifactState;
+}
+
+export interface GeneratedWorkflowCacheLookupOptions {
+  includeCandidate?: boolean;
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -309,9 +321,11 @@ export class WorkflowService {
     template: WorkflowTemplate,
     compiledPlan: GeneratedWorkflowCompiledPlan,
     requestKey?: string,
-    sourceMetadata: Record<string, unknown> = {}
+    sourceMetadataOrOptions: Record<string, unknown> | SaveGeneratedPlanCacheOptions = {}
   ): Promise<void> {
     const db = getDb();
+    const options = normalizeSaveGeneratedPlanCacheOptions(sourceMetadataOrOptions);
+    const artifactState = options.artifactState ?? "candidate";
     const validation = validateGeneratedWorkflowTemplate(template);
     if (!validation.template) {
       throw Object.assign(
@@ -331,7 +345,7 @@ export class WorkflowService {
       safetyClass: compiledPlan.metadata.safetyClass,
       outputSchema: compiledPlan.metadata.outputSchema,
       allowedRecoveryRequests: compiledPlan.metadata.allowedRecoveryRequests,
-      ...sourceMetadata,
+      ...options.sourceMetadata,
     };
     if (requestKey) {
       await db.query("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1 AND cache_key <> $2", [
@@ -342,13 +356,18 @@ export class WorkflowService {
     await db.query(
       `INSERT INTO generated_workflow_plan_cache
          (cache_key, request_key, canonical_workflow_id, canonical_workflow_version, compiled_plan_hash,
-          source_metadata, template_id, platform, template_version, workflow, compiled_plan)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          artifact_state, source_metadata, template_id, platform, template_version, workflow, compiled_plan)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        ON CONFLICT (cache_key) DO UPDATE SET
          request_key      = COALESCE(EXCLUDED.request_key, generated_workflow_plan_cache.request_key),
          canonical_workflow_id = EXCLUDED.canonical_workflow_id,
          canonical_workflow_version = EXCLUDED.canonical_workflow_version,
          compiled_plan_hash = EXCLUDED.compiled_plan_hash,
+         artifact_state = CASE
+           WHEN generated_workflow_plan_cache.artifact_state = 'promoted' AND EXCLUDED.artifact_state = 'candidate'
+             THEN generated_workflow_plan_cache.artifact_state
+           ELSE EXCLUDED.artifact_state
+         END,
          source_metadata = generated_workflow_plan_cache.source_metadata || EXCLUDED.source_metadata,
          template_id      = EXCLUDED.template_id,
          platform         = EXCLUDED.platform,
@@ -362,6 +381,7 @@ export class WorkflowService {
         template.id,
         template.version,
         compiledPlanHash,
+        artifactState,
         JSON.stringify(canonicalSourceMetadata),
         template.id,
         template.platform,
@@ -372,20 +392,27 @@ export class WorkflowService {
     );
   }
 
-  async getGeneratedPlanCache(cacheKey: string): Promise<GeneratedWorkflowPlanCacheRecord | null> {
+  async getGeneratedPlanCache(
+    cacheKey: string,
+    options: GeneratedWorkflowCacheLookupOptions = {}
+  ): Promise<GeneratedWorkflowPlanCacheRecord | null> {
     const db = getDb();
     const result = await db.query(
       `UPDATE generated_workflow_plan_cache
        SET hit_count = hit_count + 1, last_used_at = NOW()
        WHERE cache_key = $1
+         AND artifact_state = ANY($2::text[])
        RETURNING *`,
-      [cacheKey]
+      [cacheKey, allowedArtifactStates(options)]
     );
     if (result.rows.length === 0) return null;
     return rowToGeneratedPlanCache(result.rows[0]);
   }
 
-  async getGeneratedPlanCacheByRequestKey(requestKey: string): Promise<GeneratedWorkflowPlanCacheRecord | null> {
+  async getGeneratedPlanCacheByRequestKey(
+    requestKey: string,
+    options: GeneratedWorkflowCacheLookupOptions = {}
+  ): Promise<GeneratedWorkflowPlanCacheRecord | null> {
     const db = getDb();
     const result = await db.query(
       `UPDATE generated_workflow_plan_cache
@@ -393,11 +420,12 @@ export class WorkflowService {
        WHERE cache_key = (
          SELECT cache_key FROM generated_workflow_plan_cache
          WHERE request_key = $1
+           AND artifact_state = ANY($2::text[])
          ORDER BY updated_at DESC
          LIMIT 1
        )
        RETURNING *`,
-      [requestKey]
+      [requestKey, allowedArtifactStates(options)]
     );
     if (result.rows.length === 0) return null;
     return rowToGeneratedPlanCache(result.rows[0]);
@@ -434,6 +462,7 @@ function rowToGeneratedPlanCache(row: Record<string, unknown>): GeneratedWorkflo
     canonicalWorkflowId: (row.canonical_workflow_id as string) ?? (row.template_id as string),
     canonicalWorkflowVersion: (row.canonical_workflow_version as string) ?? (row.template_version as string),
     compiledPlanHash: (row.compiled_plan_hash as string) ?? (row.cache_key as string),
+    artifactState: (row.artifact_state as GeneratedWorkflowArtifactState) ?? "promoted",
     sourceMetadata: (row.source_metadata as Record<string, unknown>) ?? {},
     templateId: row.template_id as string,
     platform: row.platform as string,
@@ -445,4 +474,22 @@ function rowToGeneratedPlanCache(row: Record<string, unknown>): GeneratedWorkflo
     updatedAt: row.updated_at ? (row.updated_at as Date).toISOString() : "",
     lastUsedAt: row.last_used_at ? (row.last_used_at as Date).toISOString() : null,
   };
+}
+
+function normalizeSaveGeneratedPlanCacheOptions(
+  value: Record<string, unknown> | SaveGeneratedPlanCacheOptions
+): SaveGeneratedPlanCacheOptions {
+  if (
+    Object.prototype.hasOwnProperty.call(value, "sourceMetadata")
+    || Object.prototype.hasOwnProperty.call(value, "artifactState")
+  ) {
+    return value as SaveGeneratedPlanCacheOptions;
+  }
+  return { sourceMetadata: value as Record<string, unknown> };
+}
+
+function allowedArtifactStates(options: GeneratedWorkflowCacheLookupOptions): GeneratedWorkflowArtifactState[] {
+  const states: GeneratedWorkflowArtifactState[] = ["promoted"];
+  if (options.includeCandidate) states.push("candidate");
+  return states;
 }

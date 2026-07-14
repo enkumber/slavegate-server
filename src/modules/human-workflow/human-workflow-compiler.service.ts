@@ -959,15 +959,18 @@ export class HumanWorkflowCompilerService {
     compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
     await workflowService.saveTemplate(template);
     await workflowService.saveGeneratedPlanCache(template, compiledPlan, input.requestKey, {
-      source: "dashboard_human",
-      compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
-      shortcut: shortcutKey,
-      shortcutId,
-      intent: input.intent,
-      deviceId: input.target.device_id,
-      accountId: input.target.account_id,
-      platform,
-      compiledAt: new Date().toISOString(),
+      artifactState: "promoted",
+      sourceMetadata: {
+        source: "dashboard_human",
+        compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
+        shortcut: shortcutKey,
+        shortcutId,
+        intent: input.intent,
+        deviceId: input.target.device_id,
+        accountId: input.target.account_id,
+        platform,
+        compiledAt: new Date().toISOString(),
+      },
     });
     return {
       status: "ready",
