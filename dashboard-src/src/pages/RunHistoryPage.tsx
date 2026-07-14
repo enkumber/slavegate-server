@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, WorkflowRun, WorkflowRunFeedbackRating } from "../api/agency";
+import { agencyApi, WorkflowRun, WorkflowRunFeedbackRating, WorkflowRunStepCandidate } from "../api/agency";
 
 const statusColors: Record<string, { bg: string; color: string; label: string }> = {
   queued: { bg: "#313244", color: "#cdd6f4", label: "Queued" },
@@ -72,6 +72,8 @@ export function RunHistoryPage() {
   const [feedbackNote, setFeedbackNote] = useState("");
   const [feedbackSaving, setFeedbackSaving] = useState(false);
   const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+  const [candidateReviewingId, setCandidateReviewingId] = useState<string | null>(null);
+  const [candidateReviewMessage, setCandidateReviewMessage] = useState<string | null>(null);
 
   const loadRuns = useCallback(async () => {
     setLoading(true);
@@ -142,6 +144,34 @@ export function RunHistoryPage() {
       setFeedbackSaving(false);
     }
   }, [feedbackNote, feedbackRating, lastGoodStepIndex, selectedRun]);
+
+  const updateSelectedCandidate = useCallback((updated: WorkflowRunStepCandidate) => {
+    setSelectedRun((current) => current
+      ? {
+          ...current,
+          stepCandidates: (current.stepCandidates ?? []).map((candidate) =>
+            candidate.id === updated.id ? updated : candidate
+          ),
+        }
+      : current);
+  }, []);
+
+  const reviewCandidate = useCallback(async (candidate: WorkflowRunStepCandidate, action: "keep_review" | "reject") => {
+    setCandidateReviewingId(candidate.id);
+    setCandidateReviewMessage(null);
+    try {
+      const updated = await agencyApi.workflowRuns.reviewStepCandidate(candidate.id, {
+        action,
+        note: action === "reject" ? "Rejected from dashboard review." : "Kept in manual review.",
+      });
+      updateSelectedCandidate(updated);
+      setCandidateReviewMessage(action === "reject" ? "Candidate rejected." : "Candidate kept in review.");
+    } catch (err) {
+      setCandidateReviewMessage(err instanceof Error ? err.message : "Failed to review candidate");
+    } finally {
+      setCandidateReviewingId(null);
+    }
+  }, [updateSelectedCandidate]);
 
   const counts = useMemo(() => ({
     total: runs.length,
@@ -338,10 +368,17 @@ export function RunHistoryPage() {
               </div>
               {(selectedRun.stepCandidates ?? []).length > 0 && (
                 <div style={{ border: "1px solid #2f2a12", borderRadius: "6px", padding: "12px", marginBottom: "14px", background: "#10100b" }}>
-                  <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600, marginBottom: "8px" }}>Step Candidates</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", marginBottom: "8px" }}>
+                    <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600 }}>Step Candidates</div>
+                    {candidateReviewMessage && (
+                      <div style={{ color: candidateReviewMessage.includes("Failed") ? "#fbbf24" : "#4ade80", fontSize: "11px", textAlign: "right" }}>
+                        {candidateReviewMessage}
+                      </div>
+                    )}
+                  </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                     {selectedRun.stepCandidates!.map((candidate) => (
-                      <div key={candidate.id} style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", borderTop: "1px solid #1f1f1f", paddingTop: "8px" }}>
+                      <div key={candidate.id} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: "10px", alignItems: "center", borderTop: "1px solid #1f1f1f", paddingTop: "8px" }}>
                         <div style={{ minWidth: 0 }}>
                           <div style={{ color: "#ddd", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {candidate.stepIndex + 1}. {candidate.label}
@@ -349,8 +386,33 @@ export function RunHistoryPage() {
                           <div style={{ color: "#777", fontSize: "11px", marginTop: "3px" }}>
                             Last good step {candidate.lastGoodStepIndex + 1}
                           </div>
+                          {candidate.reviewedAt && (
+                            <div style={{ color: "#777", fontSize: "11px", marginTop: "3px" }}>
+                              Reviewed {formatDate(candidate.reviewedAt)}
+                            </div>
+                          )}
                         </div>
-                        <Badge value={candidate.candidateState} palette={stepCandidateColors} />
+                        <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center" }}>
+                          <Badge value={candidate.candidateState} palette={stepCandidateColors} />
+                          {candidate.candidateState === "step_candidate" && (
+                            <>
+                              <button
+                                onClick={() => void reviewCandidate(candidate, "keep_review")}
+                                disabled={candidateReviewingId === candidate.id}
+                                style={{ background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "6px 8px", cursor: "pointer", fontSize: "11px" }}
+                              >
+                                Keep review
+                              </button>
+                              <button
+                                onClick={() => void reviewCandidate(candidate, "reject")}
+                                disabled={candidateReviewingId === candidate.id}
+                                style={{ background: "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "6px 8px", cursor: "pointer", fontSize: "11px" }}
+                              >
+                                Reject
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>

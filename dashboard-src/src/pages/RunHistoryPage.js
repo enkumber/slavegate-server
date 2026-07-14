@@ -64,6 +64,8 @@ export function RunHistoryPage() {
     const [feedbackNote, setFeedbackNote] = useState("");
     const [feedbackSaving, setFeedbackSaving] = useState(false);
     const [feedbackMessage, setFeedbackMessage] = useState(null);
+    const [candidateReviewingId, setCandidateReviewingId] = useState(null);
+    const [candidateReviewMessage, setCandidateReviewMessage] = useState(null);
     const loadRuns = useCallback(async () => {
         setLoading(true);
         setError(null);
@@ -133,6 +135,32 @@ export function RunHistoryPage() {
             setFeedbackSaving(false);
         }
     }, [feedbackNote, feedbackRating, lastGoodStepIndex, selectedRun]);
+    const updateSelectedCandidate = useCallback((updated) => {
+        setSelectedRun((current) => current
+            ? {
+                ...current,
+                stepCandidates: (current.stepCandidates ?? []).map((candidate) => candidate.id === updated.id ? updated : candidate),
+            }
+            : current);
+    }, []);
+    const reviewCandidate = useCallback(async (candidate, action) => {
+        setCandidateReviewingId(candidate.id);
+        setCandidateReviewMessage(null);
+        try {
+            const updated = await agencyApi.workflowRuns.reviewStepCandidate(candidate.id, {
+                action,
+                note: action === "reject" ? "Rejected from dashboard review." : "Kept in manual review.",
+            });
+            updateSelectedCandidate(updated);
+            setCandidateReviewMessage(action === "reject" ? "Candidate rejected." : "Candidate kept in review.");
+        }
+        catch (err) {
+            setCandidateReviewMessage(err instanceof Error ? err.message : "Failed to review candidate");
+        }
+        finally {
+            setCandidateReviewingId(null);
+        }
+    }, [updateSelectedCandidate]);
     const counts = useMemo(() => ({
         total: runs.length,
         running: runs.filter((run) => run.status === "running").length,
@@ -176,5 +204,5 @@ export function RunHistoryPage() {
                                                         padding: "8px 12px",
                                                         cursor: feedbackSaving ? "wait" : "pointer",
                                                         opacity: feedbackRating === "partial" && lastGoodStepIndex === "" ? 0.55 : 1,
-                                                    }, children: feedbackSaving ? "Saving..." : "Save feedback" }), feedbackMessage && (_jsx("div", { style: { color: feedbackMessage.includes("saved") ? "#4ade80" : "#fbbf24", fontSize: "12px", textAlign: "right" }, children: feedbackMessage }))] })] }), (selectedRun.stepCandidates ?? []).length > 0 && (_jsxs("div", { style: { border: "1px solid #2f2a12", borderRadius: "6px", padding: "12px", marginBottom: "14px", background: "#10100b" }, children: [_jsx("div", { style: { color: "#e5e7eb", fontSize: "13px", fontWeight: 600, marginBottom: "8px" }, children: "Step Candidates" }), _jsx("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: selectedRun.stepCandidates.map((candidate) => (_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", borderTop: "1px solid #1f1f1f", paddingTop: "8px" }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsxs("div", { style: { color: "#ddd", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: [candidate.stepIndex + 1, ". ", candidate.label] }), _jsxs("div", { style: { color: "#777", fontSize: "11px", marginTop: "3px" }, children: ["Last good step ", candidate.lastGoodStepIndex + 1] })] }), _jsx(Badge, { value: candidate.candidateState, palette: stepCandidateColors })] }, candidate.id))) })] })), _jsx("div", { style: { display: "flex", flexDirection: "column", gap: "10px" }, children: (selectedRun.timeline ?? []).length === 0 ? (_jsx("div", { style: { color: "#777", padding: "18px", textAlign: "center" }, children: "No timeline available." })) : (selectedRun.timeline.map((step) => (_jsxs("div", { style: { display: "grid", gridTemplateColumns: "26px 1fr", gap: "10px" }, children: [_jsx("div", { style: { width: "24px", height: "24px", borderRadius: "50%", background: statusColors[step.status]?.bg ?? "#27272a", color: statusColors[step.status]?.color ?? "#d4d4d8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px" }, children: step.index + 1 }), _jsxs("div", { style: { borderBottom: "1px solid #1f1f1f", paddingBottom: "10px" }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "10px" }, children: [_jsx("div", { style: { color: "#e5e7eb", fontSize: "13px" }, children: step.label }), _jsx(Badge, { value: step.status, palette: statusColors })] }), _jsx("div", { style: { color: "#666", fontSize: "11px", marginTop: "4px" }, children: step.id }), step.error && _jsx("div", { style: { color: "#f87171", fontSize: "12px", marginTop: "6px" }, children: step.error }), step.state && _jsx("div", { style: { color: "#fbbf24", fontSize: "11px", marginTop: "4px" }, children: step.state })] })] }, `${step.index}-${step.id}`)))) })] })) : (_jsx("div", { style: { color: "#777", textAlign: "center", padding: "28px" }, children: "Select a run." })) })] })] }));
+                                                    }, children: feedbackSaving ? "Saving..." : "Save feedback" }), feedbackMessage && (_jsx("div", { style: { color: feedbackMessage.includes("saved") ? "#4ade80" : "#fbbf24", fontSize: "12px", textAlign: "right" }, children: feedbackMessage }))] })] }), (selectedRun.stepCandidates ?? []).length > 0 && (_jsxs("div", { style: { border: "1px solid #2f2a12", borderRadius: "6px", padding: "12px", marginBottom: "14px", background: "#10100b" }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", marginBottom: "8px" }, children: [_jsx("div", { style: { color: "#e5e7eb", fontSize: "13px", fontWeight: 600 }, children: "Step Candidates" }), candidateReviewMessage && (_jsx("div", { style: { color: candidateReviewMessage.includes("Failed") ? "#fbbf24" : "#4ade80", fontSize: "11px", textAlign: "right" }, children: candidateReviewMessage }))] }), _jsx("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: selectedRun.stepCandidates.map((candidate) => (_jsxs("div", { style: { display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: "10px", alignItems: "center", borderTop: "1px solid #1f1f1f", paddingTop: "8px" }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsxs("div", { style: { color: "#ddd", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: [candidate.stepIndex + 1, ". ", candidate.label] }), _jsxs("div", { style: { color: "#777", fontSize: "11px", marginTop: "3px" }, children: ["Last good step ", candidate.lastGoodStepIndex + 1] }), candidate.reviewedAt && (_jsxs("div", { style: { color: "#777", fontSize: "11px", marginTop: "3px" }, children: ["Reviewed ", formatDate(candidate.reviewedAt)] }))] }), _jsxs("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center" }, children: [_jsx(Badge, { value: candidate.candidateState, palette: stepCandidateColors }), candidate.candidateState === "step_candidate" && (_jsxs(_Fragment, { children: [_jsx("button", { onClick: () => void reviewCandidate(candidate, "keep_review"), disabled: candidateReviewingId === candidate.id, style: { background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "6px 8px", cursor: "pointer", fontSize: "11px" }, children: "Keep review" }), _jsx("button", { onClick: () => void reviewCandidate(candidate, "reject"), disabled: candidateReviewingId === candidate.id, style: { background: "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "6px 8px", cursor: "pointer", fontSize: "11px" }, children: "Reject" })] }))] })] }, candidate.id))) })] })), _jsx("div", { style: { display: "flex", flexDirection: "column", gap: "10px" }, children: (selectedRun.timeline ?? []).length === 0 ? (_jsx("div", { style: { color: "#777", padding: "18px", textAlign: "center" }, children: "No timeline available." })) : (selectedRun.timeline.map((step) => (_jsxs("div", { style: { display: "grid", gridTemplateColumns: "26px 1fr", gap: "10px" }, children: [_jsx("div", { style: { width: "24px", height: "24px", borderRadius: "50%", background: statusColors[step.status]?.bg ?? "#27272a", color: statusColors[step.status]?.color ?? "#d4d4d8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px" }, children: step.index + 1 }), _jsxs("div", { style: { borderBottom: "1px solid #1f1f1f", paddingBottom: "10px" }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "10px" }, children: [_jsx("div", { style: { color: "#e5e7eb", fontSize: "13px" }, children: step.label }), _jsx(Badge, { value: step.status, palette: statusColors })] }), _jsx("div", { style: { color: "#666", fontSize: "11px", marginTop: "4px" }, children: step.id }), step.error && _jsx("div", { style: { color: "#f87171", fontSize: "12px", marginTop: "6px" }, children: step.error }), step.state && _jsx("div", { style: { color: "#fbbf24", fontSize: "11px", marginTop: "4px" }, children: step.state })] })] }, `${step.index}-${step.id}`)))) })] })) : (_jsx("div", { style: { color: "#777", textAlign: "center", padding: "28px" }, children: "Select a run." })) })] })] }));
 }

@@ -136,6 +136,44 @@ async function getWorkflowRun(path: string) {
   });
 }
 
+async function getAgency(path: string, headers: Record<string, string> = { "x-api-key": "test-api-key" }) {
+  const server = await app();
+  return new Promise<{ status: number; body: any }>((resolve, reject) => {
+    const listener = server.listen(0, async () => {
+      try {
+        const address = listener.address();
+        if (!address || typeof address === "string") throw new Error("no address");
+        const res = await fetch(`http://127.0.0.1:${address.port}${path}`, { headers });
+        const json = await res.json();
+        listener.close(() => resolve({ status: res.status, body: json }));
+      } catch (err) {
+        listener.close(() => reject(err));
+      }
+    });
+  });
+}
+
+async function patchAgency(path: string, body: Record<string, unknown>, headers: Record<string, string> = { "x-api-key": "test-api-key" }) {
+  const server = await app();
+  return new Promise<{ status: number; body: any }>((resolve, reject) => {
+    const listener = server.listen(0, async () => {
+      try {
+        const address = listener.address();
+        if (!address || typeof address === "string") throw new Error("no address");
+        const res = await fetch(`http://127.0.0.1:${address.port}${path}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json", ...headers },
+          body: JSON.stringify(body),
+        });
+        const json = await res.json();
+        listener.close(() => resolve({ status: res.status, body: json }));
+      } catch (err) {
+        listener.close(() => reject(err));
+      }
+    });
+  });
+}
+
 describe("agency workflow runs API", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -719,5 +757,125 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[0][0]).toContain("LEFT JOIN LATERAL");
     expect(mocks.db.query.mock.calls[0][1]).toEqual([run.id]);
     expect(mocks.db.query.mock.calls[1][0]).toContain("FROM agency_workflow_step_candidates");
+  });
+
+  it("lists step candidates for dashboard review", async () => {
+    const candidate = {
+      id: "44444444-4444-4444-8444-444444444444",
+      run_id: "33333333-3333-4333-8333-333333333333",
+      step_index: 0,
+      step_id: "open_reddit",
+      label: "open_app",
+      action: "open_app",
+      type: null,
+      step_status: "succeeded",
+      candidate_state: "step_candidate",
+      request_key: "c02c59dfbe512562f8c65c97",
+      cache_key: null,
+      canonical_workflow_id: "agent_generated_reddit_account_health_scan_v1",
+      canonical_workflow_version: "1.0.0",
+      last_good_step_index: 1,
+      step_snapshot: { index: 0 },
+      evidence: { source: "dashboard_partial_feedback" },
+      note: "first step looked good",
+      review_note: null,
+      reviewed_by: null,
+      reviewed_at: null,
+      run_status: "completed",
+      run_intent: "reddit_account_health_scan",
+      device_name: "Pixel",
+      created_at: new Date("2026-05-22T10:06:00.000Z"),
+      updated_at: new Date("2026-05-22T10:06:00.000Z"),
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [candidate] })
+      .mockResolvedValueOnce({ rows: [{ count: "1" }] });
+
+    const response = await getAgency("/api/agency/workflow-step-candidates?state=step_candidate&pageSize=10");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ total: 1, page: 1, pageSize: 10 });
+    expect(response.body.data.items[0]).toMatchObject({
+      id: candidate.id,
+      runId: candidate.run_id,
+      candidateState: "step_candidate",
+      runStatus: "completed",
+      runIntent: "reddit_account_health_scan",
+      deviceName: "Pixel",
+    });
+    expect(mocks.db.query.mock.calls[0][0]).toContain("FROM agency_workflow_step_candidates c");
+    expect(mocks.db.query.mock.calls[0][0]).toContain("c.candidate_state = $1");
+    expect(mocks.db.query.mock.calls[0][1]).toEqual(["step_candidate", 10, 0]);
+  });
+
+  it("rejects a step candidate without promoting it", async () => {
+    const candidate = {
+      id: "44444444-4444-4444-8444-444444444444",
+      run_id: "33333333-3333-4333-8333-333333333333",
+      step_index: 0,
+      step_id: "open_reddit",
+      label: "open_app",
+      action: "open_app",
+      type: null,
+      step_status: "succeeded",
+      candidate_state: "step_candidate",
+      request_key: "c02c59dfbe512562f8c65c97",
+      cache_key: null,
+      canonical_workflow_id: "agent_generated_reddit_account_health_scan_v1",
+      canonical_workflow_version: "1.0.0",
+      last_good_step_index: 1,
+      step_snapshot: { index: 0 },
+      evidence: { source: "dashboard_partial_feedback" },
+      note: "first step looked good",
+      review_note: null,
+      reviewed_by: null,
+      reviewed_at: null,
+      created_at: new Date("2026-05-22T10:06:00.000Z"),
+      updated_at: new Date("2026-05-22T10:06:00.000Z"),
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [candidate] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...candidate,
+          candidate_state: "rejected",
+          review_note: "bad boundary",
+          reviewed_by: "dashboard",
+          reviewed_at: new Date("2026-05-22T10:07:00.000Z"),
+        }],
+      });
+
+    const response = await patchAgency(
+      `/api/agency/workflow-step-candidates/${candidate.id}/review`,
+      { action: "reject", note: "bad boundary" }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      id: candidate.id,
+      candidateState: "rejected",
+      reviewNote: "bad boundary",
+      reviewedBy: "dashboard",
+    });
+    expect(mocks.db.query.mock.calls[1][0]).toContain("candidate_state = $2");
+    expect(mocks.db.query.mock.calls[1][1]).toEqual([candidate.id, "rejected", "bad boundary"]);
+    expect(mocks.db.query.mock.calls[1][0]).not.toContain("validated_step");
+  });
+
+  it("does not review validated steps from the lightweight candidate UI", async () => {
+    const candidate = {
+      id: "44444444-4444-4444-8444-444444444444",
+      candidate_state: "validated_step",
+    };
+    mocks.db.query.mockResolvedValueOnce({ rows: [candidate] });
+
+    const response = await patchAgency(
+      `/api/agency/workflow-step-candidates/${candidate.id}/review`,
+      { action: "reject", note: "do not reject" }
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("VALIDATED_STEP_REVIEW_LOCKED");
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 });

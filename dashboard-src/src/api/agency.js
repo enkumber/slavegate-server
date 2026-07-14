@@ -40,6 +40,17 @@ export const agencyApi = {
         },
         get: (id) => api.get(`/agency/workflow-runs/${id}`),
         submitFeedback: (id, data) => api.post(`/agency/workflow-runs/${id}/feedback`, data),
+        listStepCandidates: (params) => {
+            const query = new URLSearchParams();
+            if (params?.page)
+                query.set("page", String(params.page));
+            if (params?.pageSize)
+                query.set("pageSize", String(params.pageSize));
+            if (params?.state)
+                query.set("state", params.state);
+            return api.get(`/agency/workflow-step-candidates?${query}`);
+        },
+        reviewStepCandidate: (id, data) => api.patch(`/agency/workflow-step-candidates/${id}/review`, data),
     },
     // Clients
     clients: {

@@ -232,6 +232,12 @@ export interface WorkflowRunStepCandidate {
   stepSnapshot: Record<string, unknown>;
   evidence: Record<string, unknown>;
   note: string | null;
+  reviewNote: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  runStatus?: string | null;
+  runIntent?: string | null;
+  deviceName?: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -311,6 +317,17 @@ export const agencyApi = {
       id: string,
       data: { rating: WorkflowRunFeedbackRating; lastGoodStepIndex?: number | null; note?: string | null }
     ) => api.post<WorkflowRun>(`/agency/workflow-runs/${id}/feedback`, data),
+    listStepCandidates: (params?: { page?: number; pageSize?: number; state?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.pageSize) query.set("pageSize", String(params.pageSize));
+      if (params?.state) query.set("state", params.state);
+      return api.get<PaginatedResponse<WorkflowRunStepCandidate>>(`/agency/workflow-step-candidates?${query}`);
+    },
+    reviewStepCandidate: (
+      id: string,
+      data: { action: "keep_review" | "reject"; note?: string | null }
+    ) => api.patch<WorkflowRunStepCandidate>(`/agency/workflow-step-candidates/${id}/review`, data),
   },
 
   // Clients

@@ -123,6 +123,12 @@ function rowToStepCandidate(row: Record<string, unknown>): Record<string, unknow
     stepSnapshot: row.step_snapshot ?? {},
     evidence: row.evidence ?? {},
     note: row.note ?? null,
+    reviewNote: row.review_note ?? null,
+    reviewedBy: row.reviewed_by ?? null,
+    reviewedAt: row.reviewed_at instanceof Date ? row.reviewed_at.toISOString() : row.reviewed_at ?? null,
+    runStatus: row.run_status ?? null,
+    runIntent: row.run_intent ?? null,
+    deviceName: row.device_name ?? null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at ?? null,
   };
@@ -160,6 +166,29 @@ function parseWorkflowRunFeedback(input: unknown): {
   return {
     rating: rating as WorkflowRunFeedbackRating,
     lastGoodStepIndex: rating === "partial" ? lastGoodStepIndex : null,
+    note: note.length > 0 ? note : null,
+  };
+}
+
+type StepCandidateReviewAction = "keep_review" | "reject";
+
+function parseStepCandidateReview(input: unknown): {
+  action: StepCandidateReviewAction;
+  note: string | null;
+} | { error: string; code: string } {
+  const body = normalizeJsonObject(input);
+  const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
+  if (!["keep_review", "reject"].includes(action)) {
+    return { error: "action must be one of keep_review, reject", code: "INVALID_STEP_CANDIDATE_REVIEW_ACTION" };
+  }
+
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note.length > 1000) {
+    return { error: "note must be 1000 characters or fewer", code: "STEP_CANDIDATE_REVIEW_NOTE_TOO_LONG" };
+  }
+
+  return {
+    action: action as StepCandidateReviewAction,
     note: note.length > 0 ? note : null,
   };
 }
@@ -1169,6 +1198,92 @@ router.get("/workflow-runs", async (req: Request, res: Response) => {
       pageSize,
     },
   });
+});
+
+router.get("/workflow-step-candidates", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const { page, pageSize, offset } = parsePagination(req.query);
+  const rawState = typeof req.query.state === "string" ? req.query.state : "step_candidate";
+  const state = ["step_candidate", "validated_step", "rejected", "all"].includes(rawState) ? rawState : "step_candidate";
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (state !== "all") {
+    conditions.push(`c.candidate_state = $${idx++}`);
+    values.push(state);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  values.push(pageSize, offset);
+
+  const [rows, count] = await Promise.all([
+    db.query(
+      `SELECT c.*,
+              r.status AS run_status,
+              r.intent AS run_intent,
+              d.friendly_name AS device_name
+       FROM agency_workflow_step_candidates c
+       LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
+       LEFT JOIN devices d ON d.id = r.device_id
+       ${where}
+       ORDER BY c.updated_at DESC, c.created_at DESC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      values
+    ),
+    db.query(
+      `SELECT COUNT(*) FROM agency_workflow_step_candidates c ${where}`,
+      values.slice(0, -2)
+    ),
+  ]);
+
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map(rowToStepCandidate),
+      total: parseInt(count.rows[0].count, 10),
+      page,
+      pageSize,
+    },
+  });
+});
+
+router.patch("/workflow-step-candidates/:id/review", requireAdminAuth, async (req: Request, res: Response) => {
+  const parsed = parseStepCandidateReview(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
+  }
+
+  const db = getDb();
+  const existing = await db.query(
+    `SELECT * FROM agency_workflow_step_candidates WHERE id = $1`,
+    [req.params.id]
+  );
+  if (existing.rows.length === 0) {
+    return res.status(404).json({ ok: false, error: "Step candidate not found", code: "STEP_CANDIDATE_NOT_FOUND" });
+  }
+  if (existing.rows[0].candidate_state === "validated_step") {
+    return res.status(409).json({
+      ok: false,
+      error: "validated_step candidates require the validation workflow",
+      code: "VALIDATED_STEP_REVIEW_LOCKED",
+    });
+  }
+
+  const nextState = parsed.action === "reject" ? "rejected" : "step_candidate";
+  const updated = await db.query(
+    `UPDATE agency_workflow_step_candidates
+     SET candidate_state = $2,
+         review_note = $3,
+         reviewed_by = 'dashboard',
+         reviewed_at = NOW(),
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING *`,
+    [req.params.id, nextState, parsed.note]
+  );
+
+  return res.json({ ok: true, data: rowToStepCandidate(updated.rows[0]) });
 });
 
 router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request, res: Response) => {
