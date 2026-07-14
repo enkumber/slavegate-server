@@ -144,6 +144,47 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
   const scope = typeof contract.scope === "string" && contract.scope.trim().length > 0
     ? contract.scope.trim()
     : "manual_review";
+  const preconditions = nonEmptyStringArray(contract.preconditions);
+  const postconditions = nonEmptyStringArray(contract.postconditions);
+  const compatibility = normalizeJsonObject(contract.compatibility);
+  const evidence = normalizeJsonObject(row.validation_evidence);
+  const gates = {
+    validatedStep: row.candidate_state === "validated_step",
+    contractPresent: Object.keys(contract).length > 0,
+    preconditionsPresent: preconditions.length > 0,
+    postconditionsPresent: postconditions.length > 0,
+    evidencePresent: Object.keys(evidence).length > 0,
+    compatibilityDeclared: Object.keys(compatibility).length > 0,
+    successfulSourceStep: row.step_status === "succeeded",
+    successfulSourceRun: row.run_status === "completed",
+    scopedReuse: scope !== "manual_review",
+    compilerAutoUseEnabled: false,
+  };
+  const blockers: string[] = [];
+  if (!gates.preconditionsPresent) blockers.push("missing_preconditions");
+  if (!gates.postconditionsPresent) blockers.push("missing_postconditions");
+  if (!gates.evidencePresent) blockers.push("missing_validation_evidence");
+  if (!gates.compatibilityDeclared) blockers.push("missing_compatibility");
+  if (!gates.successfulSourceStep) blockers.push("source_step_not_succeeded");
+  if (!gates.successfulSourceRun) blockers.push("source_run_not_completed");
+  if (!gates.scopedReuse) blockers.push("reuse_scope_not_explicit");
+  blockers.push("compiler_auto_use_disabled");
+
+  const readyGateCount = [
+    gates.validatedStep,
+    gates.contractPresent,
+    gates.preconditionsPresent,
+    gates.postconditionsPresent,
+    gates.evidencePresent,
+    gates.compatibilityDeclared,
+    gates.successfulSourceStep,
+    gates.successfulSourceRun,
+    gates.scopedReuse,
+  ].filter(Boolean).length;
+  const readinessScore = Math.round((readyGateCount / 9) * 100) / 100;
+  const readinessState = blockers.length === 1 && blockers[0] === "compiler_auto_use_disabled"
+    ? "review_ready"
+    : "needs_review";
   return {
     id: row.id,
     stepCandidateId: row.id,
@@ -155,12 +196,23 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
     reuseScope: scope,
     reusable: false,
     compilerEligible: false,
-    confidence: null,
+    confidence: readinessScore,
+    readiness: {
+      state: readinessState,
+      score: readinessScore,
+      threshold: 0.9,
+      gates,
+      blockers,
+      notes: [
+        "Step Library is read-only in this phase.",
+        "Compiler auto-use remains disabled until a later explicit promotion flow.",
+      ],
+    },
     contract,
-    evidence: row.validation_evidence ?? {},
-    preconditions: nonEmptyStringArray(contract.preconditions),
-    postconditions: nonEmptyStringArray(contract.postconditions),
-    compatibility: normalizeJsonObject(contract.compatibility),
+    evidence,
+    preconditions,
+    postconditions,
+    compatibility,
     sourceCandidate: candidate,
     runId: row.run_id,
     runIntent: row.run_intent ?? null,

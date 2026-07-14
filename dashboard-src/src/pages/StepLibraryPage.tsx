@@ -30,6 +30,10 @@ function listPreview(items: string[]) {
   return items.slice(0, 2).join("; ");
 }
 
+function formatPercent(value: number | null | undefined) {
+  return typeof value === "number" ? `${Math.round(value * 100)}%` : "-";
+}
+
 export function StepLibraryPage() {
   const [entries, setEntries] = useState<StepLibraryEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -67,6 +71,7 @@ export function StepLibraryPage() {
 
   const validatedCount = entries.filter((entry) => entry.status === "validated_step").length;
   const compilerEligibleCount = entries.filter((entry) => entry.compilerEligible).length;
+  const reviewReadyCount = entries.filter((entry) => entry.readiness?.state === "review_ready").length;
 
   return (
     <AgencyLayout currentRoute="#/agency/step-library">
@@ -74,10 +79,11 @@ export function StepLibraryPage() {
         <h1 style={{ color: "#fff", margin: 0, fontSize: "24px" }}>Step Library</h1>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(130px, 1fr))", gap: "12px", marginBottom: "18px" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(130px, 1fr))", gap: "12px", marginBottom: "18px" }}>
         {([
           ["Validated", validatedCount, "#4ade80"],
           ["Review-only", entries.filter((entry) => entry.libraryState === "review_only").length, "#fbbf24"],
+          ["Review ready", reviewReadyCount, reviewReadyCount === 0 ? "#a1a1aa" : "#60a5fa"],
           ["Compiler eligible", compilerEligibleCount, compilerEligibleCount === 0 ? "#a1a1aa" : "#60a5fa"],
         ] as Array<[string, number, string]>).map(([label, value, color]) => (
           <div key={label} style={{ background: "#111", border: "1px solid #222", borderRadius: "6px", padding: "14px" }}>
@@ -112,9 +118,10 @@ export function StepLibraryPage() {
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(400px, 1.1fr) minmax(360px, 0.9fr)", gap: "16px", alignItems: "start" }}>
         <div style={{ border: "1px solid #222", borderRadius: "6px", overflow: "hidden", background: "#0d0d0d" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.8fr 0.8fr 0.8fr", gap: "10px", padding: "10px 12px", color: "#777", fontSize: "11px", borderBottom: "1px solid #222" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.8fr 0.7fr 0.8fr 0.8fr", gap: "10px", padding: "10px 12px", color: "#777", fontSize: "11px", borderBottom: "1px solid #222" }}>
             <div>Step</div>
             <div>State</div>
+            <div>Readiness</div>
             <div>Scope</div>
             <div>Validated</div>
           </div>
@@ -130,7 +137,7 @@ export function StepLibraryPage() {
                 style={{
                   width: "100%",
                   display: "grid",
-                  gridTemplateColumns: "1.1fr 0.8fr 0.8fr 0.8fr",
+                  gridTemplateColumns: "1.1fr 0.8fr 0.7fr 0.8fr 0.8fr",
                   gap: "10px",
                   alignItems: "center",
                   padding: "12px",
@@ -152,6 +159,9 @@ export function StepLibraryPage() {
                   <Badge label="Validated" tone="green" />
                   <Badge label={entry.compilerEligible ? "Compiler" : "Review-only"} tone={entry.compilerEligible ? "green" : "yellow"} />
                 </div>
+                <div style={{ color: entry.readiness?.state === "review_ready" ? "#60a5fa" : "#fbbf24", fontSize: "12px" }}>
+                  {formatPercent(entry.readiness?.score ?? entry.confidence)}
+                </div>
                 <div style={{ color: "#aaa", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.reuseScope}</div>
                 <div style={{ color: "#aaa", fontSize: "12px" }}>{formatDate(entry.validatedAt)}</div>
               </button>
@@ -169,6 +179,7 @@ export function StepLibraryPage() {
                 </div>
                 <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end" }}>
                   <Badge label={selected.libraryState === "review_only" ? "Review-only" : selected.libraryState} tone="yellow" />
+                  <Badge label={selected.readiness?.state === "review_ready" ? "Review ready" : "Needs review"} tone={selected.readiness?.state === "review_ready" ? "green" : "yellow"} />
                   <Badge label={selected.reusable ? "Reusable" : "Not reusable"} tone={selected.reusable ? "green" : "gray"} />
                   <Badge label={selected.compilerEligible ? "Compiler eligible" : "Compiler disabled"} tone={selected.compilerEligible ? "green" : "gray"} />
                 </div>
@@ -179,6 +190,7 @@ export function StepLibraryPage() {
                   ["Action", selected.action ?? "-"],
                   ["Type", selected.type ?? "-"],
                   ["Scope", selected.reuseScope],
+                  ["Readiness", formatPercent(selected.readiness?.score ?? selected.confidence)],
                   ["Device", selected.deviceName ?? "-"],
                   ["Run intent", selected.runIntent ?? "-"],
                   ["Validated by", selected.validatedBy ?? "-"],
@@ -188,6 +200,21 @@ export function StepLibraryPage() {
                     <div style={{ color: "#e5e7eb", fontSize: "12px", overflowWrap: "anywhere" }}>{value}</div>
                   </div>
                 ))}
+              </div>
+
+              <div style={{ border: "1px solid #222", borderRadius: "6px", padding: "12px", marginBottom: "12px", background: "#101010" }}>
+                <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600, marginBottom: "8px" }}>Readiness Gate</div>
+                <div style={{ color: "#aaa", fontSize: "12px", marginBottom: "8px" }}>
+                  State: {selected.readiness?.state ?? "needs_review"} · Threshold: {formatPercent(selected.readiness?.threshold)}
+                </div>
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "8px" }}>
+                  {Object.entries(selected.readiness?.gates ?? {}).map(([name, passed]) => (
+                    <Badge key={name} label={`${name}: ${passed ? "yes" : "no"}`} tone={passed ? "green" : "red"} />
+                  ))}
+                </div>
+                <div style={{ color: "#aaa", fontSize: "12px" }}>
+                  Blockers: {(selected.readiness?.blockers ?? []).join(", ") || "-"}
+                </div>
               </div>
 
               <div style={{ border: "1px solid #222", borderRadius: "6px", padding: "12px", marginBottom: "12px", background: "#101010" }}>

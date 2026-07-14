@@ -258,6 +258,14 @@ export interface StepLibraryEntry {
   reusable: boolean;
   compilerEligible: boolean;
   confidence: number | null;
+  readiness: {
+    state: "review_ready" | "needs_review" | string;
+    score: number;
+    threshold: number;
+    gates: Record<string, boolean>;
+    blockers: string[];
+    notes: string[];
+  };
   contract: Record<string, unknown>;
   evidence: Record<string, unknown>;
   preconditions: string[];
