@@ -502,8 +502,12 @@ describe("agency workflow runs API", () => {
     });
     mocks.db.query
       .mockResolvedValueOnce({ rows: [run] })
+      .mockResolvedValueOnce({ rows: [updated] })
+      .mockResolvedValueOnce({ rows: [] });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [updated] });
+      .mockResolvedValueOnce({ rows: [] });
 
     const response = await postAgency(
       `/api/agency/workflow-runs/${run.id}/feedback`,
@@ -522,8 +526,118 @@ describe("agency workflow runs API", () => {
         at: "2026-05-22T10:05:00.000Z",
       },
     });
-    expect(mocks.db.query.mock.calls[1][0]).toContain("feedback_rating = $2");
-    expect(mocks.db.query.mock.calls[1][1]).toEqual([run.id, "ok", null, "looks good"]);
+    expect(response.body.data.stepCandidates).toEqual([]);
+    expect(mocks.client.query.mock.calls[0][0]).toBe("BEGIN");
+    expect(mocks.client.query.mock.calls[1][0]).toContain("feedback_rating = $2");
+    expect(mocks.client.query.mock.calls[1][1]).toEqual([run.id, "ok", null, "looks good"]);
+    expect(mocks.client.query.mock.calls[2][0]).toBe("COMMIT");
+    expect(mocks.client.query.mock.calls.some(([sql]) => String(sql).includes("agency_workflow_step_candidates"))).toBe(false);
+  });
+
+  it("creates step candidates from partial feedback without promoting steps", async () => {
+    const run = hydratedRun({
+      status: "failed",
+      workflow_status: "failed",
+      workflow_current_step: 3,
+      workflow_total_steps: 3,
+      workflow_error: "tap failed",
+      artifact_state: "candidate",
+      cached_workflow: {
+        steps: [
+          { id: "open_reddit", action: "open_app" },
+          { id: "open_search", action: "semantic_tap" },
+          { id: "type_query", action: "type_text" },
+        ],
+      },
+    });
+    const updated = hydratedRun({
+      ...run,
+      feedback_rating: "partial",
+      feedback_last_good_step_index: 1,
+      feedback_note: "first two steps looked good",
+      feedback_source: "dashboard",
+      feedback_at: new Date("2026-05-22T10:06:00.000Z"),
+    });
+    const candidates = [
+      {
+        id: "44444444-4444-4444-8444-444444444444",
+        run_id: run.id,
+        step_index: 0,
+        step_id: "open_reddit",
+        label: "open_app",
+        action: "open_app",
+        type: null,
+        step_status: "succeeded",
+        candidate_state: "step_candidate",
+        request_key: run.request_key,
+        cache_key: null,
+        canonical_workflow_id: run.canonical_workflow_id,
+        canonical_workflow_version: run.canonical_workflow_version,
+        last_good_step_index: 1,
+        step_snapshot: { index: 0, id: "open_reddit" },
+        evidence: { source: "dashboard_partial_feedback" },
+        note: "first two steps looked good",
+        created_at: new Date("2026-05-22T10:06:00.000Z"),
+        updated_at: new Date("2026-05-22T10:06:00.000Z"),
+      },
+      {
+        id: "55555555-5555-4555-8555-555555555555",
+        run_id: run.id,
+        step_index: 1,
+        step_id: "open_search",
+        label: "semantic_tap",
+        action: "semantic_tap",
+        type: null,
+        step_status: "succeeded",
+        candidate_state: "step_candidate",
+        request_key: run.request_key,
+        cache_key: null,
+        canonical_workflow_id: run.canonical_workflow_id,
+        canonical_workflow_version: run.canonical_workflow_version,
+        last_good_step_index: 1,
+        step_snapshot: { index: 1, id: "open_search" },
+        evidence: { source: "dashboard_partial_feedback" },
+        note: "first two steps looked good",
+        created_at: new Date("2026-05-22T10:06:00.000Z"),
+        updated_at: new Date("2026-05-22T10:06:00.000Z"),
+      },
+    ];
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [run] })
+      .mockResolvedValueOnce({ rows: [updated] })
+      .mockResolvedValueOnce({ rows: candidates });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await postAgency(
+      `/api/agency/workflow-runs/${run.id}/feedback`,
+      { rating: "partial", lastGoodStepIndex: 1, note: "first two steps looked good" }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.feedback).toMatchObject({
+      rating: "partial",
+      lastGoodStepIndex: 1,
+      note: "first two steps looked good",
+    });
+    expect(response.body.data.stepCandidates).toHaveLength(2);
+    expect(response.body.data.stepCandidates[0]).toMatchObject({
+      stepIndex: 0,
+      stepId: "open_reddit",
+      candidateState: "step_candidate",
+      lastGoodStepIndex: 1,
+    });
+    const candidateInserts = mocks.client.query.mock.calls.filter(([sql]) =>
+      String(sql).includes("INSERT INTO agency_workflow_step_candidates")
+    );
+    expect(candidateInserts).toHaveLength(2);
+    expect(candidateInserts[0][0]).toContain("candidate_state");
+    expect(candidateInserts[0][0]).not.toContain("promoted");
+    expect(mocks.client.query.mock.calls[4][0]).toBe("COMMIT");
   });
 
   it("returns a workflow run by id with task and operator context", async () => {
@@ -543,7 +657,9 @@ describe("agency workflow runs API", () => {
         ],
       },
     });
-    mocks.db.query.mockResolvedValueOnce({ rows: [run] });
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [run] })
+      .mockResolvedValueOnce({ rows: [] });
 
     const response = await getWorkflowRun(`/api/agency/workflow-runs/${run.id}`);
 
@@ -602,5 +718,6 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[0][0]).toContain("LEFT JOIN workflows w");
     expect(mocks.db.query.mock.calls[0][0]).toContain("LEFT JOIN LATERAL");
     expect(mocks.db.query.mock.calls[0][1]).toEqual([run.id]);
+    expect(mocks.db.query.mock.calls[1][0]).toContain("FROM agency_workflow_step_candidates");
   });
 });

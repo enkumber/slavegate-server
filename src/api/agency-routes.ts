@@ -99,8 +99,33 @@ function rowToAgencyWorkflowRun(row: Record<string, unknown>): Record<string, un
     output.artifactState = row.artifact_state ?? null;
     output.workflowStatus = row.workflow_status ?? null;
     output.timeline = buildAgencyWorkflowTimeline(row);
+    output.stepCandidates = normalizeJsonArray(row.step_candidates).map(rowToStepCandidate);
   }
   return output;
+}
+
+function rowToStepCandidate(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    stepIndex: row.step_index,
+    stepId: row.step_id ?? null,
+    label: row.label,
+    action: row.action ?? null,
+    type: row.type ?? null,
+    stepStatus: row.step_status ?? null,
+    candidateState: row.candidate_state,
+    requestKey: row.request_key ?? null,
+    cacheKey: row.cache_key ?? null,
+    canonicalWorkflowId: row.canonical_workflow_id ?? null,
+    canonicalWorkflowVersion: row.canonical_workflow_version ?? null,
+    lastGoodStepIndex: row.last_good_step_index,
+    stepSnapshot: row.step_snapshot ?? {},
+    evidence: row.evidence ?? {},
+    note: row.note ?? null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at ?? null,
+  };
 }
 
 type WorkflowRunFeedbackRating = "ok" | "not_ok" | "partial";
@@ -220,6 +245,32 @@ function buildAgencyWorkflowTimeline(row: Record<string, unknown>): Record<strin
   });
 }
 
+function buildStepCandidateEvidence(input: {
+  run: Record<string, unknown>;
+  lastGoodStepIndex: number;
+  step: Record<string, unknown>;
+}): Record<string, unknown> {
+  return {
+    source: "dashboard_partial_feedback",
+    feedbackBoundary: {
+      lastGoodStepIndex: input.lastGoodStepIndex,
+      nominatedStepIndex: input.step.index,
+    },
+    run: {
+      status: input.run.status ?? null,
+      workflowStatus: input.run.workflow_status ?? null,
+      artifactState: input.run.artifact_state ?? null,
+      workflowId: input.run.workflow_id ?? null,
+      taskId: input.run.task_id ?? null,
+    },
+    guardrails: {
+      reusable: false,
+      requiresReview: true,
+      promotion: "manual_contract_validation_required",
+    },
+  };
+}
+
 function cachedWorkflowLlmHappyPathRequests(cached: Record<string, unknown>): number | null {
   const compiledPlan = (cached.compiled_plan ?? cached.compiledPlan) as Record<string, unknown> | null;
   const llmBudget = compiledPlan?.llmBudget as Record<string, unknown> | undefined;
@@ -285,6 +336,17 @@ async function hydrateAgencyWorkflowRun(db: ReturnType<typeof getDb>, runId: str
     [runId]
   );
   return hydrated.rows[0] ?? null;
+}
+
+async function loadStepCandidates(db: Pick<ReturnType<typeof getDb>, "query">, runId: string): Promise<Record<string, unknown>[]> {
+  const result = await db.query(
+    `SELECT *
+     FROM agency_workflow_step_candidates
+     WHERE run_id = $1
+     ORDER BY step_index ASC`,
+    [runId]
+  );
+  return result.rows;
 }
 
 // ─── File upload config ───────────────────────────────────────────────────────
@@ -1250,9 +1312,9 @@ router.post("/workflow-runs/:id/feedback", requireAdminAuth, async (req: Request
     return res.status(404).json({ ok: false, error: "Workflow run not found", code: "WORKFLOW_RUN_NOT_FOUND" });
   }
 
+  const existingRun = rowToAgencyWorkflowRun({ ...existing.rows[0], include_timeline: true });
+  const timeline = Array.isArray(existingRun.timeline) ? existingRun.timeline : [];
   if (parsed.rating === "partial") {
-    const existingRun = rowToAgencyWorkflowRun({ ...existing.rows[0], include_timeline: true });
-    const timeline = Array.isArray(existingRun.timeline) ? existingRun.timeline : [];
     if (timeline.length > 0 && parsed.lastGoodStepIndex !== null && parsed.lastGoodStepIndex >= timeline.length) {
       return res.status(400).json({
         ok: false,
@@ -1262,29 +1324,98 @@ router.post("/workflow-runs/:id/feedback", requireAdminAuth, async (req: Request
     }
   }
 
-  await db.query(
-    `UPDATE agency_workflow_runs
-     SET feedback_rating = $2,
-         feedback_last_good_step_index = $3,
-         feedback_note = $4,
-         feedback_source = 'dashboard',
-         feedback_at = NOW(),
-         updated_at = NOW()
-     WHERE id = $1`,
-    [req.params.id, parsed.rating, parsed.lastGoodStepIndex, parsed.note]
-  );
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
 
-  const updated = await db.query(agencyWorkflowRunSelectSql(`r.id = $1`), [req.params.id]);
-  return res.json({ ok: true, data: rowToAgencyWorkflowRun({ ...updated.rows[0], include_timeline: true }) });
+    await client.query(
+      `UPDATE agency_workflow_runs
+       SET feedback_rating = $2,
+           feedback_last_good_step_index = $3,
+           feedback_note = $4,
+           feedback_source = 'dashboard',
+           feedback_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1`,
+      [req.params.id, parsed.rating, parsed.lastGoodStepIndex, parsed.note]
+    );
+
+    if (parsed.rating === "partial" && parsed.lastGoodStepIndex !== null) {
+      const nominatedSteps = timeline
+        .filter((step): step is Record<string, unknown> => normalizeJsonObject(step).index !== undefined)
+        .filter((step) => typeof step.index === "number" && step.index <= parsed.lastGoodStepIndex!);
+
+      for (const step of nominatedSteps) {
+        await client.query(
+          `INSERT INTO agency_workflow_step_candidates
+             (run_id, step_index, step_id, label, action, type, step_status,
+              candidate_state, request_key, cache_key, canonical_workflow_id,
+              canonical_workflow_version, last_good_step_index, step_snapshot, evidence, note)
+           VALUES
+             ($1, $2, $3, $4, $5, $6, $7,
+              'step_candidate', $8, $9, $10,
+              $11, $12, $13, $14, $15)
+           ON CONFLICT (run_id, step_index) DO UPDATE
+             SET label = EXCLUDED.label,
+                 action = EXCLUDED.action,
+                 type = EXCLUDED.type,
+                 step_status = EXCLUDED.step_status,
+                 candidate_state = 'step_candidate',
+                 last_good_step_index = EXCLUDED.last_good_step_index,
+                 step_snapshot = EXCLUDED.step_snapshot,
+                 evidence = EXCLUDED.evidence,
+                 note = EXCLUDED.note,
+                 updated_at = NOW()
+           WHERE agency_workflow_step_candidates.candidate_state = 'step_candidate'`,
+          [
+            req.params.id,
+            step.index,
+            step.id ?? null,
+            step.label ?? `Step ${Number(step.index) + 1}`,
+            step.action ?? null,
+            step.type ?? null,
+            step.status ?? null,
+            existing.rows[0].request_key ?? null,
+            existing.rows[0].cache_key ?? null,
+            existing.rows[0].canonical_workflow_id ?? null,
+            existing.rows[0].canonical_workflow_version ?? null,
+            parsed.lastGoodStepIndex,
+            step,
+            buildStepCandidateEvidence({ run: existing.rows[0], lastGoodStepIndex: parsed.lastGoodStepIndex, step }),
+            parsed.note,
+          ]
+        );
+      }
+    }
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return res.status(500).json({ ok: false, error: (err as Error).message });
+  } finally {
+    client.release();
+  }
+
+  const [updated, stepCandidates] = await Promise.all([
+    db.query(agencyWorkflowRunSelectSql(`r.id = $1`), [req.params.id]),
+    loadStepCandidates(db, req.params.id),
+  ]);
+  return res.json({
+    ok: true,
+    data: rowToAgencyWorkflowRun({ ...updated.rows[0], include_timeline: true, step_candidates: stepCandidates }),
+  });
 });
 
 router.get("/workflow-runs/:id", async (req: Request, res: Response) => {
   const db = getDb();
-  const result = await db.query(agencyWorkflowRunSelectSql(`r.id = $1`), [req.params.id]);
+  const [result, stepCandidates] = await Promise.all([
+    db.query(agencyWorkflowRunSelectSql(`r.id = $1`), [req.params.id]),
+    loadStepCandidates(db, req.params.id),
+  ]);
   if (result.rows.length === 0) {
     return res.status(404).json({ ok: false, error: "Workflow run not found" });
   }
-  res.json({ ok: true, data: rowToAgencyWorkflowRun({ ...result.rows[0], include_timeline: true }) });
+  res.json({ ok: true, data: rowToAgencyWorkflowRun({ ...result.rows[0], include_timeline: true, step_candidates: stepCandidates }) });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

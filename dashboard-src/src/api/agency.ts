@@ -214,6 +214,28 @@ export interface WorkflowRunFeedback {
   at: string | null;
 }
 
+export interface WorkflowRunStepCandidate {
+  id: string;
+  runId: string;
+  stepIndex: number;
+  stepId: string | null;
+  label: string;
+  action: string | null;
+  type: string | null;
+  stepStatus: string | null;
+  candidateState: "step_candidate" | "validated_step" | "rejected" | string;
+  requestKey: string | null;
+  cacheKey: string | null;
+  canonicalWorkflowId: string | null;
+  canonicalWorkflowVersion: string | null;
+  lastGoodStepIndex: number;
+  stepSnapshot: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  note: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
 export interface WorkflowRun {
   id: string;
   clientId: string | null;
@@ -248,6 +270,7 @@ export interface WorkflowRun {
   deviceName: string | null;
   feedback: WorkflowRunFeedback | null;
   timeline?: WorkflowRunTimelineStep[];
+  stepCandidates?: WorkflowRunStepCandidate[];
 }
 
 // ─── API ──────────────────────────────────────────────────────────────────────

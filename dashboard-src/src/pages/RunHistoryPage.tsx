@@ -29,6 +29,12 @@ const feedbackColors: Record<string, { bg: string; color: string; label: string 
   partial: { bg: "#332b12", color: "#fbbf24", label: "Partial" },
 };
 
+const stepCandidateColors: Record<string, { bg: string; color: string; label: string }> = {
+  step_candidate: { bg: "#332b12", color: "#fbbf24", label: "Step Candidate" },
+  validated_step: { bg: "#0f3323", color: "#4ade80", label: "Validated Step" },
+  rejected: { bg: "#3a1618", color: "#f87171", label: "Rejected" },
+};
+
 function Badge({ value, palette }: { value: string | null | undefined; palette: Record<string, { bg: string; color: string; label: string }> }) {
   if (!value) return null;
   const config = palette[value] ?? { bg: "#27272a", color: "#d4d4d8", label: value };
@@ -330,6 +336,26 @@ export function RunHistoryPage() {
                   )}
                 </div>
               </div>
+              {(selectedRun.stepCandidates ?? []).length > 0 && (
+                <div style={{ border: "1px solid #2f2a12", borderRadius: "6px", padding: "12px", marginBottom: "14px", background: "#10100b" }}>
+                  <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600, marginBottom: "8px" }}>Step Candidates</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                    {selectedRun.stepCandidates!.map((candidate) => (
+                      <div key={candidate.id} style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", borderTop: "1px solid #1f1f1f", paddingTop: "8px" }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ color: "#ddd", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {candidate.stepIndex + 1}. {candidate.label}
+                          </div>
+                          <div style={{ color: "#777", fontSize: "11px", marginTop: "3px" }}>
+                            Last good step {candidate.lastGoodStepIndex + 1}
+                          </div>
+                        </div>
+                        <Badge value={candidate.candidateState} palette={stepCandidateColors} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                 {(selectedRun.timeline ?? []).length === 0 ? (
                   <div style={{ color: "#777", padding: "18px", textAlign: "center" }}>No timeline available.</div>
