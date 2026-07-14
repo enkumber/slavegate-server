@@ -39,6 +39,10 @@ function listText(values: string[]) {
   return values.length ? values.join(", ") : "-";
 }
 
+function eligibilityBlockers(item: { eligibility?: { blockers?: string[] } }) {
+  return item.eligibility?.blockers?.length ? item.eligibility.blockers.join(", ") : "-";
+}
+
 export function CompilerKnowledgePage() {
   const [items, setItems] = useState<CompilerKnowledgeEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -188,6 +192,22 @@ export function CompilerKnowledgePage() {
               <div style={{ color: "#888", fontSize: "12px" }}>
                 Blockers: {(awareness.decision.blockers ?? []).join(", ") || "-"}
               </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(180px, 1fr))", gap: "10px" }}>
+              {([
+                ["Tool eligibility", awareness.candidates.tools.slice(0, 3).map((item) => `${item.id}: ${eligibilityBlockers(item)}`)],
+                ["Step eligibility", awareness.candidates.steps.slice(0, 3).map((item) => `${item.name ?? item.id}: ${eligibilityBlockers(item)}`)],
+                ["Knowledge eligibility", awareness.candidates.knowledge.slice(0, 3).map((item) => `${item.id}: ${eligibilityBlockers(item)}`)],
+              ] as Array<[string, string[]]>).map(([label, details]) => (
+                <div key={label} style={{ background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "12px", minWidth: 0 }}>
+                  <div style={{ color: "#777", fontSize: "11px", marginBottom: "7px" }}>{label}</div>
+                  <div style={{ display: "grid", gap: "6px" }}>
+                    {(details.length ? details : ["-"]).map((detail) => (
+                      <div key={detail} style={{ color: "#aaa", fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail}</div>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         ) : null}

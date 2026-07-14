@@ -1476,6 +1476,18 @@ describe("agency workflow runs API", () => {
       compilerEligible: false,
       wouldUse: false,
       reason: "compiler_auto_use_disabled",
+      eligibility: {
+        state: "blocked",
+        gates: {
+          validatedStep: true,
+          limitedReusePromoted: true,
+          notRevoked: true,
+          scopedReuseDeclared: true,
+          compilerEligiblePolicy: false,
+          autoUseEnabled: false,
+        },
+        blockers: expect.arrayContaining(["compiler_auto_use_disabled", "step_not_compiler_eligible"]),
+      },
     });
     expect(response.body.data.decision).toMatchObject({
       outcome: "blocked_by_policy",
@@ -1490,6 +1502,8 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[1][1][0]).toBe("unlock device");
     expect(mocks.db.query.mock.calls[1][1][4]).toContain("\"autoUseEnabled\":false");
     expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"wouldUse\":false");
+    expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"eligibility\"");
+    expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"step_not_compiler_eligible\"");
     expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"outcome\":\"blocked_by_policy\"");
   });
 

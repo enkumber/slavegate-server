@@ -80,6 +80,75 @@ function objectKeys(value: unknown): string[] {
   return value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : [];
 }
 
+function eligibilityForTool(tool: { policy?: Record<string, unknown> }): Record<string, unknown> {
+  return {
+    state: "blocked",
+    gates: {
+      catalogDeclared: true,
+      compilerVisible: tool.policy?.compilerVisible === true,
+      autoUseEnabled: tool.policy?.autoUseEnabled === true,
+      executionChangingAllowed: false,
+    },
+    blockers: [
+      "tool_catalog_read_only",
+      "compiler_auto_use_disabled",
+    ],
+    notes: [
+      "Tool Catalog is visible for awareness only.",
+      "Compiler cannot select tools until compiler visibility and auto-use policy are explicitly enabled.",
+    ],
+  };
+}
+
+function eligibilityForKnowledge(entry: { policy?: Record<string, unknown> }): Record<string, unknown> {
+  return {
+    state: "blocked",
+    gates: {
+      knowledgeDeclared: true,
+      compilerVisible: entry.policy?.compilerVisible === true,
+      autoUseEnabled: entry.policy?.autoUseEnabled === true,
+      executionChangingAllowed: false,
+    },
+    blockers: [
+      "knowledge_base_read_only",
+      "compiler_auto_use_disabled",
+    ],
+    notes: [
+      "Knowledge Base entries are guidance only in this phase.",
+      "Compiler cannot apply knowledge until a later explicit policy enables it.",
+    ],
+  };
+}
+
+function eligibilityForStep(step: CompilerAwarenessStepRow): Record<string, unknown> {
+  const libraryState = step.library_state ?? "review_only";
+  const promotedForLimitedReuse = libraryState === "limited_reuse" && typeof step.promotion_scope === "string" && step.promotion_scope.trim().length > 0;
+  const gates = {
+    validatedStep: step.candidate_state === "validated_step",
+    limitedReusePromoted: promotedForLimitedReuse,
+    notRevoked: libraryState !== "revoked",
+    scopedReuseDeclared: typeof step.promotion_scope === "string" && step.promotion_scope.trim().length > 0,
+    compilerEligiblePolicy: false,
+    autoUseEnabled: false,
+  };
+  const blockers: string[] = ["compiler_auto_use_disabled"];
+  if (!gates.validatedStep) blockers.push("step_not_validated");
+  if (!gates.limitedReusePromoted) blockers.push("limited_reuse_not_promoted");
+  if (!gates.notRevoked) blockers.push("step_library_entry_revoked");
+  if (!gates.scopedReuseDeclared) blockers.push("scope_not_declared");
+  if (!gates.compilerEligiblePolicy) blockers.push("step_not_compiler_eligible");
+
+  return {
+    state: "blocked",
+    gates,
+    blockers: Array.from(new Set(blockers)),
+    notes: [
+      "Step Library candidate is evaluated for awareness only.",
+      "No Step Library execution can be selected while compiler auto-use is disabled.",
+    ],
+  };
+}
+
 function decisionFor(input: {
   toolCandidates: Array<Record<string, unknown>>;
   stepCandidates: Array<Record<string, unknown>>;
@@ -136,6 +205,7 @@ export function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Reco
     risk: tool.risk,
     matchedTerms: matchingTerms(terms, haystackFor([tool.id, tool.name, tool.description, tool.notes])),
     policy: tool.policy,
+    eligibility: eligibilityForTool(tool),
     wouldUse: false,
     reason: "read_only_awareness_only",
   }));
@@ -161,6 +231,7 @@ export function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Reco
     source: entry.source,
     matchedTerms: matchingTerms(terms, haystackFor([entry.id, entry.title, entry.summary, entry.guidance])),
     policy: entry.policy,
+    eligibility: eligibilityForKnowledge(entry),
     wouldApply: false,
     reason: "read_only_awareness_only",
   }));
@@ -191,6 +262,7 @@ export function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Reco
     validatedAt: step.validated_at instanceof Date ? step.validated_at.toISOString() : step.validated_at ?? null,
     matchedTerms: matchingTerms(terms, haystackFor([step.id, step.label, step.action, step.type, step.run_intent])),
     compilerEligible: false,
+    eligibility: eligibilityForStep(step),
     wouldUse: false,
     reason: "compiler_auto_use_disabled",
   }));

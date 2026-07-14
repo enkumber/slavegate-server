@@ -1777,9 +1777,9 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
     summary?: Record<string, unknown>;
     policy?: Record<string, unknown>;
     candidates?: {
-      tools?: Array<{ id?: unknown; wouldUse?: unknown; reason?: unknown }>;
-      steps?: Array<{ id?: unknown; action?: unknown; libraryState?: unknown; compilerEligible?: unknown; wouldUse?: unknown; reason?: unknown }>;
-      knowledge?: Array<{ id?: unknown; wouldApply?: unknown; reason?: unknown }>;
+      tools?: Array<{ id?: unknown; wouldUse?: unknown; reason?: unknown; eligibility?: unknown }>;
+      steps?: Array<{ id?: unknown; action?: unknown; libraryState?: unknown; compilerEligible?: unknown; wouldUse?: unknown; reason?: unknown; eligibility?: unknown }>;
+      knowledge?: Array<{ id?: unknown; wouldApply?: unknown; reason?: unknown; eligibility?: unknown }>;
     };
     decision?: Record<string, unknown>;
   };
@@ -1807,6 +1807,7 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
           id: tool.id ?? null,
           wouldUse: tool.wouldUse ?? false,
           reason: tool.reason ?? null,
+          eligibility: tool.eligibility ?? null,
         })),
         steps: (data.candidates?.steps ?? []).slice(0, 6).map((step) => ({
           id: step.id ?? null,
@@ -1815,11 +1816,13 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
           compilerEligible: step.compilerEligible ?? false,
           wouldUse: step.wouldUse ?? false,
           reason: step.reason ?? null,
+          eligibility: step.eligibility ?? null,
         })),
         knowledge: (data.candidates?.knowledge ?? []).slice(0, 6).map((entry) => ({
           id: entry.id ?? null,
           wouldApply: entry.wouldApply ?? false,
           reason: entry.reason ?? null,
+          eligibility: entry.eligibility ?? null,
         })),
       }),
       JSON.stringify(data.decision ?? {}),

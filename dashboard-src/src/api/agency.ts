@@ -398,6 +398,13 @@ export interface CompilerAwarenessCandidate {
   wouldUse?: false;
   wouldApply?: false;
   reason: string;
+  eligibility?: {
+    state?: string;
+    gates?: Record<string, boolean>;
+    blockers?: string[];
+    notes?: string[];
+    [key: string]: unknown;
+  };
 }
 
 export interface CompilerAwarenessResponse {
