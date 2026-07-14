@@ -273,6 +273,21 @@ function rowToStepLibraryPromotionEvent(row: Record<string, unknown>): Record<st
   };
 }
 
+function rowToCompilerAwarenessEvent(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id,
+    intent: row.intent ?? null,
+    action: row.action ?? null,
+    terms: Array.isArray(row.terms) ? row.terms : [],
+    summary: row.summary ?? {},
+    policy: row.policy ?? {},
+    candidates: row.candidates ?? {},
+    actor: row.actor ?? null,
+    source: row.source ?? null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+  };
+}
+
 type WorkflowRunFeedbackRating = "ok" | "not_ok" | "partial";
 
 function parseWorkflowRunFeedback(input: unknown): {
@@ -1654,6 +1669,73 @@ router.get("/compiler-knowledge", requireAdminAuth, async (req: Request, res: Re
   });
 });
 
+router.get("/compiler-awareness/events", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const { page, pageSize, offset } = parsePagination(req.query);
+  const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
+    ? req.query.intent.trim()
+    : null;
+  const action = typeof req.query.action === "string" && req.query.action.trim().length > 0
+    ? req.query.action.trim()
+    : null;
+  const source = typeof req.query.source === "string" && req.query.source.trim().length > 0
+    ? req.query.source.trim()
+    : null;
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (intent) {
+    conditions.push(`intent ILIKE $${idx++}`);
+    values.push(`%${intent}%`);
+  }
+  if (action) {
+    conditions.push(`action = $${idx++}`);
+    values.push(action);
+  }
+  if (source) {
+    conditions.push(`source = $${idx++}`);
+    values.push(source);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  values.push(pageSize, offset);
+
+  const [rows, count] = await Promise.all([
+    db.query(
+      `SELECT *
+       FROM agency_compiler_awareness_events
+       ${where}
+       ORDER BY created_at DESC, id DESC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      values
+    ),
+    db.query(
+      `SELECT COUNT(*)
+       FROM agency_compiler_awareness_events
+       ${where}`,
+      values.slice(0, -2)
+    ),
+  ]);
+
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map(rowToCompilerAwarenessEvent),
+      total: parseInt(count.rows[0].count, 10),
+      page,
+      pageSize,
+      policy: {
+        readOnly: true,
+        compilerVisible: false,
+        autoUseEnabled: false,
+        executionChanging: false,
+        mode: "read_only_compiler_awareness_events",
+      },
+    },
+  });
+});
+
 router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
   const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
@@ -1684,13 +1766,65 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
     values
   );
 
+  const awareness = buildCompilerAwareness({
+    intent,
+    action,
+    steps: steps.rows,
+  });
+  const data = awareness as {
+    terms?: unknown[];
+    summary?: Record<string, unknown>;
+    policy?: Record<string, unknown>;
+    candidates?: {
+      tools?: Array<{ id?: unknown; wouldUse?: unknown; reason?: unknown }>;
+      steps?: Array<{ id?: unknown; action?: unknown; libraryState?: unknown; compilerEligible?: unknown; wouldUse?: unknown; reason?: unknown }>;
+      knowledge?: Array<{ id?: unknown; wouldApply?: unknown; reason?: unknown }>;
+    };
+  };
+  await db.query(
+    `INSERT INTO agency_compiler_awareness_events (
+       intent,
+       action,
+       terms,
+       summary,
+       policy,
+       candidates,
+       actor,
+       source
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, 'dashboard', 'dashboard')`,
+    [
+      intent ?? null,
+      action ?? null,
+      Array.isArray(data.terms) ? data.terms.filter((term): term is string => typeof term === "string") : [],
+      JSON.stringify(data.summary ?? {}),
+      JSON.stringify(data.policy ?? {}),
+      JSON.stringify({
+        tools: (data.candidates?.tools ?? []).slice(0, 6).map((tool) => ({
+          id: tool.id ?? null,
+          wouldUse: tool.wouldUse ?? false,
+          reason: tool.reason ?? null,
+        })),
+        steps: (data.candidates?.steps ?? []).slice(0, 6).map((step) => ({
+          id: step.id ?? null,
+          action: step.action ?? null,
+          libraryState: step.libraryState ?? null,
+          compilerEligible: step.compilerEligible ?? false,
+          wouldUse: step.wouldUse ?? false,
+          reason: step.reason ?? null,
+        })),
+        knowledge: (data.candidates?.knowledge ?? []).slice(0, 6).map((entry) => ({
+          id: entry.id ?? null,
+          wouldApply: entry.wouldApply ?? false,
+          reason: entry.reason ?? null,
+        })),
+      }),
+    ]
+  );
+
   res.json({
     ok: true,
-    data: buildCompilerAwareness({
-      intent,
-      action,
-      steps: steps.rows,
-    }),
+    data: awareness,
   });
 });
 

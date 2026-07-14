@@ -1457,7 +1457,7 @@ describe("agency workflow runs API", () => {
         device_name: "Pixel",
         validated_at: new Date("2026-05-22T10:08:00.000Z"),
       }],
-    });
+    }).mockResolvedValueOnce({ rows: [] });
 
     const response = await getAgency("/api/agency/compiler-awareness?intent=unlock%20device");
 
@@ -1480,5 +1480,63 @@ describe("agency workflow runs API", () => {
     expect(response.body.data.candidates.tools.some((tool: any) => tool.id === "unlock" && tool.wouldUse === false)).toBe(true);
     expect(response.body.data.candidates.knowledge.every((entry: any) => entry.wouldApply === false)).toBe(true);
     expect(String(mocks.db.query.mock.calls[0][0])).toContain("c.candidate_state = 'validated_step'");
+    expect(String(mocks.db.query.mock.calls[1][0])).toContain("agency_compiler_awareness_events");
+    expect(mocks.db.query.mock.calls[1][1][0]).toBe("unlock device");
+    expect(mocks.db.query.mock.calls[1][1][4]).toContain("\"autoUseEnabled\":false");
+    expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"wouldUse\":false");
+  });
+
+  it("lists compiler awareness audit events without changing execution", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: "77777777-7777-4777-8777-777777777777",
+          intent: "unlock device",
+          action: null,
+          terms: ["unlock", "device"],
+          summary: { toolCandidates: 2, stepCandidates: 1, knowledgeCandidates: 3 },
+          policy: {
+            readOnly: true,
+            compilerVisible: false,
+            autoUseEnabled: false,
+            executionChanging: false,
+            mode: "read_only_compiler_awareness",
+          },
+          candidates: {
+            tools: [{ id: "unlock", wouldUse: false }],
+            steps: [{ id: "55555555-5555-4555-8555-555555555555", wouldUse: false }],
+            knowledge: [{ id: "workflow-failure-never-promotes", wouldApply: false }],
+          },
+          actor: "dashboard",
+          source: "dashboard",
+          created_at: new Date("2026-05-22T10:20:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ count: "1" }] });
+
+    const response = await getAgency("/api/agency/compiler-awareness/events?intent=unlock&pageSize=10");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      total: 1,
+      page: 1,
+      pageSize: 10,
+      policy: {
+        readOnly: true,
+        compilerVisible: false,
+        autoUseEnabled: false,
+        executionChanging: false,
+        mode: "read_only_compiler_awareness_events",
+      },
+    });
+    expect(response.body.data.items[0]).toMatchObject({
+      id: "77777777-7777-4777-8777-777777777777",
+      intent: "unlock device",
+      summary: { toolCandidates: 2, stepCandidates: 1, knowledgeCandidates: 3 },
+      source: "dashboard",
+    });
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("agency_compiler_awareness_events");
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("intent ILIKE $1");
+    expect(mocks.db.query.mock.calls[0][1]).toEqual(["%unlock%", 10, 0]);
   });
 });

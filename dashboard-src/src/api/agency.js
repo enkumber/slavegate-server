@@ -119,6 +119,20 @@ export const agencyApi = {
                 query.set("action", params.action);
             return api.get(`/agency/compiler-awareness?${query}`);
         },
+        listEvents: (params) => {
+            const query = new URLSearchParams();
+            if (params?.page)
+                query.set("page", String(params.page));
+            if (params?.pageSize)
+                query.set("pageSize", String(params.pageSize));
+            if (params?.intent)
+                query.set("intent", params.intent);
+            if (params?.action)
+                query.set("action", params.action);
+            if (params?.source)
+                query.set("source", params.source);
+            return api.get(`/agency/compiler-awareness/events?${query}`);
+        },
     },
     // Clients
     clients: {

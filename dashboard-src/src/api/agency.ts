@@ -423,6 +423,31 @@ export interface CompilerAwarenessResponse {
   guardrails: string[];
 }
 
+export interface CompilerAwarenessEvent {
+  id: string;
+  intent: string | null;
+  action: string | null;
+  terms: string[];
+  summary: {
+    toolCandidates?: number;
+    stepCandidates?: number;
+    knowledgeCandidates?: number;
+    [key: string]: unknown;
+  };
+  policy: {
+    readOnly?: boolean;
+    compilerVisible?: boolean;
+    autoUseEnabled?: boolean;
+    executionChanging?: boolean;
+    mode?: string;
+    [key: string]: unknown;
+  };
+  candidates: Record<string, unknown>;
+  actor: string | null;
+  source: string | null;
+  createdAt: string | null;
+}
+
 export interface WorkflowRun {
   id: string;
   clientId: string | null;
@@ -578,6 +603,15 @@ export const agencyApi = {
       if (params?.intent) query.set("intent", params.intent);
       if (params?.action) query.set("action", params.action);
       return api.get<CompilerAwarenessResponse>(`/agency/compiler-awareness?${query}`);
+    },
+    listEvents: (params?: { page?: number; pageSize?: number; intent?: string; action?: string; source?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.pageSize) query.set("pageSize", String(params.pageSize));
+      if (params?.intent) query.set("intent", params.intent);
+      if (params?.action) query.set("action", params.action);
+      if (params?.source) query.set("source", params.source);
+      return api.get<PaginatedResponse<CompilerAwarenessEvent> & { policy: Record<string, unknown> }>(`/agency/compiler-awareness/events?${query}`);
     },
   },
 

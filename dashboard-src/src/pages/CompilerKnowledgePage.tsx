@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, CompilerAwarenessResponse, CompilerKnowledgeEntry } from "../api/agency";
+import { agencyApi, CompilerAwarenessEvent, CompilerAwarenessResponse, CompilerKnowledgeEntry } from "../api/agency";
 
 function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gray" | "red" | "blue" }) {
   const palette = {
@@ -49,6 +49,7 @@ export function CompilerKnowledgePage() {
   const [policyMode, setPolicyMode] = useState("read_only_knowledge_base");
   const [awarenessIntent, setAwarenessIntent] = useState("unlock device");
   const [awareness, setAwareness] = useState<CompilerAwarenessResponse | null>(null);
+  const [awarenessEvents, setAwarenessEvents] = useState<CompilerAwarenessEvent[]>([]);
   const [awarenessLoading, setAwarenessLoading] = useState(false);
   const [awarenessError, setAwarenessError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -89,6 +90,8 @@ export function CompilerKnowledgePage() {
     try {
       const data = await agencyApi.compilerAwareness.get({ intent: awarenessIntent || undefined });
       setAwareness(data);
+      const events = await agencyApi.compilerAwareness.listEvents({ pageSize: 6 });
+      setAwarenessEvents(events.items);
     } catch (err) {
       setAwarenessError(err instanceof Error ? err.message : "Failed to load Compiler Awareness");
     } finally {
@@ -176,6 +179,33 @@ export function CompilerKnowledgePage() {
             ))}
           </div>
         ) : null}
+      </div>
+
+      <div style={{ border: "1px solid #222", borderRadius: "6px", background: "#101010", padding: "14px", marginBottom: "14px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "center", marginBottom: "12px", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ color: "#fff", fontSize: "15px", fontWeight: 600 }}>Awareness Audit</div>
+            <div style={{ color: "#777", fontSize: "12px", marginTop: "4px" }}>Append-only log of read-only awareness checks. These entries never change execution.</div>
+          </div>
+          <Badge label="audit-only" tone="gray" />
+        </div>
+        {awarenessEvents.length === 0 ? (
+          <div style={{ color: "#777", fontSize: "12px" }}>No awareness checks logged yet.</div>
+        ) : (
+          <div style={{ display: "grid", gap: "8px" }}>
+            {awarenessEvents.map((event) => (
+              <div key={event.id} style={{ display: "grid", gridTemplateColumns: "1fr 0.8fr 0.8fr 0.8fr", gap: "10px", alignItems: "center", background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ color: "#e5e7eb", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.intent || event.action || "awareness check"}</div>
+                  <div style={{ color: "#666", fontSize: "11px", marginTop: "3px" }}>{event.createdAt ? new Date(event.createdAt).toLocaleString() : "-"}</div>
+                </div>
+                <div style={{ color: "#aaa", fontSize: "12px" }}>tools: {event.summary.toolCandidates ?? 0}</div>
+                <div style={{ color: "#aaa", fontSize: "12px" }}>steps: {event.summary.stepCandidates ?? 0}</div>
+                <div style={{ color: "#aaa", fontSize: "12px" }}>knowledge: {event.summary.knowledgeCandidates ?? 0}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "14px", flexWrap: "wrap" }}>
