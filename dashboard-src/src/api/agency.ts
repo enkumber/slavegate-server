@@ -288,6 +288,48 @@ export interface StepLibraryEntry {
   updatedAt: string | null;
 }
 
+export interface ToolCatalogEntry {
+  id: string;
+  name: string;
+  source: "device_job" | "workflow_runtime" | "server_skill" | string;
+  category: string;
+  description: string;
+  risk: "low" | "medium" | "high" | string;
+  requiresDevice: boolean;
+  sideEffects: string[];
+  inputSchema: {
+    required: string[];
+    optional: string[];
+  };
+  outputSchema: {
+    produces: string[];
+  };
+  policy: {
+    readOnly: boolean;
+    mutating: boolean;
+    destructive: boolean;
+    externalAction: boolean;
+    compilerVisible: false;
+    autoUseEnabled: false;
+  };
+  availability: {
+    directWs: boolean;
+    edgeWorkflow: boolean;
+    serverRuntime: boolean;
+  };
+  notes: string[];
+}
+
+export interface ToolCatalogResponse {
+  items: ToolCatalogEntry[];
+  total: number;
+  policy: {
+    compilerVisible: false;
+    autoUseEnabled: false;
+    mode: string;
+  };
+}
+
 export interface WorkflowRun {
   id: string;
   clientId: string | null;
@@ -404,6 +446,16 @@ export const agencyApi = {
       id: string,
       data: { action: "promote_limited" | "revoke"; scope?: string | null; note?: string | null }
     ) => api.patch<StepLibraryEntry>(`/agency/step-library/${id}/promotion`, data),
+  },
+
+  toolCatalog: {
+    list: (params?: { category?: string; risk?: string; source?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.category) query.set("category", params.category);
+      if (params?.risk) query.set("risk", params.risk);
+      if (params?.source) query.set("source", params.source);
+      return api.get<ToolCatalogResponse>(`/agency/tool-catalog?${query}`);
+    },
   },
 
   // Clients

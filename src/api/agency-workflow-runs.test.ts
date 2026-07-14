@@ -899,6 +899,62 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[0][0]).not.toContain("step_candidate'");
   });
 
+  it("lists the read-only Tool Catalog without enabling compiler auto-use", async () => {
+    const response = await getAgency("/api/agency/tool-catalog");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.total).toBeGreaterThan(10);
+    expect(response.body.data.policy).toEqual({
+      compilerVisible: false,
+      autoUseEnabled: false,
+      mode: "read_only_catalog",
+    });
+    expect(response.body.data.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "open_app",
+          source: "device_job",
+          category: "navigation",
+          risk: "medium",
+          requiresDevice: true,
+          inputSchema: expect.objectContaining({
+            required: ["packageName"],
+          }),
+          policy: expect.objectContaining({
+            compilerVisible: false,
+            autoUseEnabled: false,
+          }),
+        }),
+        expect.objectContaining({
+          id: "ui_tree_dump",
+          category: "observation",
+          policy: expect.objectContaining({
+            readOnly: true,
+            mutating: false,
+            compilerVisible: false,
+            autoUseEnabled: false,
+          }),
+        }),
+      ])
+    );
+    expect(response.body.data.items.every((item: any) => item.policy.compilerVisible === false)).toBe(true);
+    expect(response.body.data.items.every((item: any) => item.policy.autoUseEnabled === false)).toBe(true);
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
+
+  it("filters the Tool Catalog by risk and category", async () => {
+    const response = await getAgency("/api/agency/tool-catalog?risk=high&category=input");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.items.length).toBeGreaterThan(0);
+    expect(response.body.data.items.every((item: any) => item.risk === "high")).toBe(true);
+    expect(response.body.data.items.every((item: any) => item.category === "input")).toBe(true);
+    expect(response.body.data.items.map((item: any) => item.id)).toEqual(
+      expect.arrayContaining(["tap", "semantic_tap", "type_text"])
+    );
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
+
   it("promotes a review-ready Step Library entry for limited reuse only", async () => {
     const validated = {
       id: "55555555-5555-4555-8555-555555555555",

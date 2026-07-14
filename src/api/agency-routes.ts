@@ -10,6 +10,7 @@ import multer from "multer";
 import path from "path";
 import fs from "fs/promises";
 import { workflowEvents } from "../modules/workflow-events";
+import { listToolCatalog } from "../modules/tool-catalog/tool-catalog";
 
 const router = Router();
 
@@ -1500,6 +1501,31 @@ router.get("/step-library", requireAdminAuth, async (req: Request, res: Response
       total: parseInt(count.rows[0].count, 10),
       page,
       pageSize,
+    },
+  });
+});
+
+router.get("/tool-catalog", requireAdminAuth, async (req: Request, res: Response) => {
+  const category = typeof req.query.category === "string" && req.query.category.trim().length > 0
+    ? req.query.category.trim()
+    : undefined;
+  const risk = typeof req.query.risk === "string" && req.query.risk.trim().length > 0
+    ? req.query.risk.trim()
+    : undefined;
+  const source = typeof req.query.source === "string" && req.query.source.trim().length > 0
+    ? req.query.source.trim()
+    : undefined;
+  const items = listToolCatalog({ category, risk, source });
+  res.json({
+    ok: true,
+    data: {
+      items,
+      total: items.length,
+      policy: {
+        compilerVisible: false,
+        autoUseEnabled: false,
+        mode: "read_only_catalog",
+      },
     },
   });
 });

@@ -19,6 +19,7 @@ const navItems = [
   { path: "#/agency/tasks", label: "Tasks", icon: "⚡" },
   { path: "#/agency/runs", label: "Run History", icon: "⏱" },
   { path: "#/agency/step-library", label: "Step Library", icon: "✓" },
+  { path: "#/agency/tool-catalog", label: "Tool Catalog", icon: "⚙" },
   { path: "#/agency/reports", label: "Reports", icon: "📊" },
 ];
 

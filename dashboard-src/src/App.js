@@ -14,6 +14,7 @@ import { MaterialsPage } from "./pages/MaterialsPage";
 import { TasksPage } from "./pages/TasksPage";
 import { RunHistoryPage } from "./pages/RunHistoryPage";
 import { StepLibraryPage } from "./pages/StepLibraryPage";
+import { ToolCatalogPage } from "./pages/ToolCatalogPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TokenManagement } from "./pages/TokenManagement";
@@ -67,6 +68,9 @@ export function App() {
     }
     else if (route.startsWith("#/agency/step-library")) {
         page = _jsx(StepLibraryPage, {});
+    }
+    else if (route.startsWith("#/agency/tool-catalog")) {
+        page = _jsx(ToolCatalogPage, {});
     }
     else if (route.startsWith("#/agency/reports")) {
         page = _jsx(ReportsPage, {});

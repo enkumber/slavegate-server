@@ -68,6 +68,18 @@ export const agencyApi = {
         },
         updatePromotion: (id, data) => api.patch(`/agency/step-library/${id}/promotion`, data),
     },
+    toolCatalog: {
+        list: (params) => {
+            const query = new URLSearchParams();
+            if (params?.category)
+                query.set("category", params.category);
+            if (params?.risk)
+                query.set("risk", params.risk);
+            if (params?.source)
+                query.set("source", params.source);
+            return api.get(`/agency/tool-catalog?${query}`);
+        },
+    },
     // Clients
     clients: {
         list: (params) => {
