@@ -43,6 +43,14 @@ function eligibilityBlockers(item: { eligibility?: { blockers?: string[] } }) {
   return item.eligibility?.blockers?.length ? item.eligibility.blockers.join(", ") : "-";
 }
 
+function remediationActions(item: { eligibility?: { remediation?: { nextActions?: string[] } } }) {
+  return item.eligibility?.remediation?.nextActions?.length ? item.eligibility.remediation.nextActions : [];
+}
+
+function decisionRemediation(decision: CompilerAwarenessResponse["decision"]) {
+  return decision.remediation?.nextActions?.length ? decision.remediation.nextActions : [];
+}
+
 export function CompilerKnowledgePage() {
   const [items, setItems] = useState<CompilerKnowledgeEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -192,19 +200,30 @@ export function CompilerKnowledgePage() {
               <div style={{ color: "#888", fontSize: "12px" }}>
                 Blockers: {(awareness.decision.blockers ?? []).join(", ") || "-"}
               </div>
+              <div style={{ color: "#888", fontSize: "12px", marginTop: "8px" }}>
+                Remediation: {decisionRemediation(awareness.decision).slice(0, 2).join(" · ") || "-"}
+              </div>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(180px, 1fr))", gap: "10px" }}>
               {([
-                ["Tool eligibility", awareness.candidates.tools.slice(0, 3).map((item) => `${item.id}: ${eligibilityBlockers(item)}`)],
-                ["Step eligibility", awareness.candidates.steps.slice(0, 3).map((item) => `${item.name ?? item.id}: ${eligibilityBlockers(item)}`)],
-                ["Knowledge eligibility", awareness.candidates.knowledge.slice(0, 3).map((item) => `${item.id}: ${eligibilityBlockers(item)}`)],
-              ] as Array<[string, string[]]>).map(([label, details]) => (
+                ["Tool eligibility", awareness.candidates.tools.slice(0, 3)],
+                ["Step eligibility", awareness.candidates.steps.slice(0, 3)],
+                ["Knowledge eligibility", awareness.candidates.knowledge.slice(0, 3)],
+              ] as Array<[string, CompilerAwarenessResponse["candidates"]["tools"]]>).map(([label, candidates]) => (
                 <div key={label} style={{ background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "12px", minWidth: 0 }}>
                   <div style={{ color: "#777", fontSize: "11px", marginBottom: "7px" }}>{label}</div>
                   <div style={{ display: "grid", gap: "6px" }}>
-                    {(details.length ? details : ["-"]).map((detail) => (
-                      <div key={detail} style={{ color: "#aaa", fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail}</div>
+                    {(candidates.length ? candidates : []).map((item) => (
+                      <div key={item.id} style={{ minWidth: 0 }}>
+                        <div style={{ color: "#aaa", fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {item.name ?? item.id}: {eligibilityBlockers(item)}
+                        </div>
+                        <div style={{ color: "#666", fontSize: "10px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: "2px" }}>
+                          {(remediationActions(item)[0] ?? "No remediation hint.")}
+                        </div>
+                      </div>
                     ))}
+                    {candidates.length === 0 && <div style={{ color: "#aaa", fontSize: "11px" }}>-</div>}
                   </div>
                 </div>
               ))}

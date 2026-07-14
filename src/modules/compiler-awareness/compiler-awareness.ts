@@ -80,7 +80,60 @@ function objectKeys(value: unknown): string[] {
   return value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : [];
 }
 
+function remediationForBlockers(blockers: string[]): Record<string, unknown> {
+  const uniqueBlockers = Array.from(new Set(blockers));
+  const nextActions = uniqueBlockers.flatMap((blocker) => {
+    switch (blocker) {
+      case "tool_catalog_read_only":
+        return ["Keep Tool Catalog as observability until compiler tool visibility policy is explicitly enabled."];
+      case "knowledge_base_read_only":
+        return ["Keep Knowledge Base as guidance until compiler knowledge application policy is explicitly enabled."];
+      case "compiler_auto_use_disabled":
+        return ["Do not auto-use candidates; enable compiler auto-use only through a later explicit policy gate."];
+      case "limited_reuse_not_promoted":
+        return ["Promote the validated step to limited_reuse for a declared scope before considering reuse."];
+      case "step_library_entry_revoked":
+        return ["Review the revoked Step Library entry and create a new validated candidate instead of reusing the revoked entry."];
+      case "scope_not_declared":
+        return ["Declare a narrow reuse scope such as device, user, account, app version, or session before reuse."];
+      case "step_not_compiler_eligible":
+        return ["Keep compilerEligible=false until compatibility, confidence, and policy gates are explicitly satisfied."];
+      case "step_not_validated":
+        return ["Validate the step with contract and evidence before it can become a Step Library candidate."];
+      case "no_matching_validated_step":
+        return ["Capture and validate a matching step candidate before expecting Step Library reuse."];
+      default:
+        return [`Review blocker ${blocker} before changing compiler behavior.`];
+    }
+  });
+  const requiredPolicyChanges = uniqueBlockers.flatMap((blocker) => {
+    switch (blocker) {
+      case "tool_catalog_read_only":
+        return ["compiler_tool_visibility"];
+      case "knowledge_base_read_only":
+        return ["compiler_knowledge_application"];
+      case "compiler_auto_use_disabled":
+        return ["compiler_auto_use"];
+      case "step_not_compiler_eligible":
+        return ["step_compiler_eligibility"];
+      default:
+        return [];
+    }
+  });
+
+  return {
+    state: "manual_review_required",
+    nextActions: Array.from(new Set(nextActions)),
+    requiredPolicyChanges: Array.from(new Set(requiredPolicyChanges)),
+    safeToAutoApply: false,
+  };
+}
+
 function eligibilityForTool(tool: { policy?: Record<string, unknown> }): Record<string, unknown> {
+  const blockers = [
+    "tool_catalog_read_only",
+    "compiler_auto_use_disabled",
+  ];
   return {
     state: "blocked",
     gates: {
@@ -89,10 +142,8 @@ function eligibilityForTool(tool: { policy?: Record<string, unknown> }): Record<
       autoUseEnabled: tool.policy?.autoUseEnabled === true,
       executionChangingAllowed: false,
     },
-    blockers: [
-      "tool_catalog_read_only",
-      "compiler_auto_use_disabled",
-    ],
+    blockers,
+    remediation: remediationForBlockers(blockers),
     notes: [
       "Tool Catalog is visible for awareness only.",
       "Compiler cannot select tools until compiler visibility and auto-use policy are explicitly enabled.",
@@ -101,6 +152,10 @@ function eligibilityForTool(tool: { policy?: Record<string, unknown> }): Record<
 }
 
 function eligibilityForKnowledge(entry: { policy?: Record<string, unknown> }): Record<string, unknown> {
+  const blockers = [
+    "knowledge_base_read_only",
+    "compiler_auto_use_disabled",
+  ];
   return {
     state: "blocked",
     gates: {
@@ -109,10 +164,8 @@ function eligibilityForKnowledge(entry: { policy?: Record<string, unknown> }): R
       autoUseEnabled: entry.policy?.autoUseEnabled === true,
       executionChangingAllowed: false,
     },
-    blockers: [
-      "knowledge_base_read_only",
-      "compiler_auto_use_disabled",
-    ],
+    blockers,
+    remediation: remediationForBlockers(blockers),
     notes: [
       "Knowledge Base entries are guidance only in this phase.",
       "Compiler cannot apply knowledge until a later explicit policy enables it.",
@@ -142,6 +195,7 @@ function eligibilityForStep(step: CompilerAwarenessStepRow): Record<string, unkn
     state: "blocked",
     gates,
     blockers: Array.from(new Set(blockers)),
+    remediation: remediationForBlockers(blockers),
     notes: [
       "Step Library candidate is evaluated for awareness only.",
       "No Step Library execution can be selected while compiler auto-use is disabled.",
@@ -164,6 +218,7 @@ function decisionFor(input: {
   if (input.stepCandidates.length === 0) {
     blockers.push("no_matching_validated_step");
   }
+  const uniqueBlockers = Array.from(new Set(blockers));
 
   return {
     outcome: "blocked_by_policy",
@@ -171,7 +226,8 @@ function decisionFor(input: {
     wouldExecuteStepLibrary: false,
     selectedStepIds: [],
     selectedToolIds: [],
-    blockers: Array.from(new Set(blockers)),
+    blockers: uniqueBlockers,
+    remediation: remediationForBlockers(uniqueBlockers),
     notes: [
       "Awareness is observability-only.",
       "Compiler auto-use remains disabled.",

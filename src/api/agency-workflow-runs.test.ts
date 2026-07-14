@@ -1487,6 +1487,15 @@ describe("agency workflow runs API", () => {
           autoUseEnabled: false,
         },
         blockers: expect.arrayContaining(["compiler_auto_use_disabled", "step_not_compiler_eligible"]),
+        remediation: {
+          state: "manual_review_required",
+          safeToAutoApply: false,
+          nextActions: expect.arrayContaining([
+            expect.stringContaining("auto-use"),
+            expect.stringContaining("compilerEligible=false"),
+          ]),
+          requiredPolicyChanges: expect.arrayContaining(["compiler_auto_use", "step_compiler_eligibility"]),
+        },
       },
     });
     expect(response.body.data.decision).toMatchObject({
@@ -1494,6 +1503,11 @@ describe("agency workflow runs API", () => {
       wouldChangePlan: false,
       wouldExecuteStepLibrary: false,
       blockers: expect.arrayContaining(["compiler_auto_use_disabled"]),
+      remediation: {
+        state: "manual_review_required",
+        safeToAutoApply: false,
+        requiredPolicyChanges: expect.arrayContaining(["compiler_auto_use"]),
+      },
     });
     expect(response.body.data.candidates.tools.some((tool: any) => tool.id === "unlock" && tool.wouldUse === false)).toBe(true);
     expect(response.body.data.candidates.knowledge.every((entry: any) => entry.wouldApply === false)).toBe(true);
@@ -1503,8 +1517,10 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[1][1][4]).toContain("\"autoUseEnabled\":false");
     expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"wouldUse\":false");
     expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"eligibility\"");
+    expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"remediation\"");
     expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"step_not_compiler_eligible\"");
     expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"outcome\":\"blocked_by_policy\"");
+    expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"safeToAutoApply\":false");
   });
 
   it("lists compiler awareness audit events without changing execution", async () => {
