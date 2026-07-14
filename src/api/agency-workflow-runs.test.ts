@@ -410,6 +410,50 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[0][0]).toContain("r.request_key = $3");
   });
 
+  it("previews failed workflow cleanup without deleting rows", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [{ count: 2 }] })
+      .mockResolvedValueOnce({ rows: [{ count: 3 }] })
+      .mockResolvedValueOnce({ rows: [{ count: 4 }] });
+
+    const response = await postAgency("/api/agency/workflow-runs/purge-failed", {});
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({
+      dryRun: true,
+      failedWorkflowRuns: 2,
+      failedCompileJobs: 3,
+      generatedCacheArtifacts: 4,
+    });
+    expect(mocks.db.connect).not.toHaveBeenCalled();
+    expect(mocks.db.query.mock.calls.some(([sql]) => String(sql).includes("DELETE FROM"))).toBe(false);
+  });
+
+  it("purges failed workflow runs, failed compile jobs, and failed generated artifacts when confirmed", async () => {
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ count: 5 }] })
+      .mockResolvedValueOnce({ rows: [{ id: "compile-job-1" }, { id: "compile-job-2" }], rowCount: 2 })
+      .mockResolvedValueOnce({ rows: [{ id: "run-1" }, { id: "run-2" }, { id: "run-3" }], rowCount: 3 })
+      .mockResolvedValueOnce({ rows: [] }); // COMMIT
+
+    const response = await postAgency("/api/agency/workflow-runs/purge-failed", { confirm: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({
+      dryRun: false,
+      failedWorkflowRuns: 3,
+      failedCompileJobs: 2,
+      generatedCacheArtifacts: 5,
+    });
+    expect(mocks.client.query.mock.calls[0][0]).toBe("BEGIN");
+    expect(mocks.client.query.mock.calls[1][0]).toContain("DELETE FROM generated_workflow_plan_cache");
+    expect(mocks.client.query.mock.calls[2][0]).toContain("DELETE FROM human_workflow_compile_jobs");
+    expect(mocks.client.query.mock.calls[3][0]).toContain("DELETE FROM agency_workflow_runs");
+    expect(mocks.client.query.mock.calls[4][0]).toBe("COMMIT");
+    expect(mocks.client.release).toHaveBeenCalledTimes(1);
+  });
+
   it("returns a workflow run by id with task and operator context", async () => {
     const run = hydratedRun();
     mocks.db.query.mockResolvedValueOnce({ rows: [run] });

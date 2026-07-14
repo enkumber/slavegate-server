@@ -959,6 +959,135 @@ router.get("/workflow-runs", async (req: Request, res: Response) => {
   });
 });
 
+router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request, res: Response) => {
+  const confirm = req.body?.confirm === true;
+  const db = getDb();
+
+  if (!confirm) {
+    const [runs, compileJobs, cacheArtifacts] = await Promise.all([
+      db.query(
+        `SELECT COUNT(*)::int AS count
+         FROM agency_workflow_runs r
+         LEFT JOIN tasks t ON t.id = r.task_id
+         WHERE r.status = 'failed'
+            OR t.status = 'failed'`
+      ),
+      db.query(
+        `SELECT COUNT(*)::int AS count
+         FROM human_workflow_compile_jobs
+         WHERE status IN ('failed', 'cancelled')`
+      ),
+      db.query(
+        `WITH failed_handles AS (
+           SELECT request_key, cache_key
+           FROM human_workflow_compile_jobs
+           WHERE status IN ('failed', 'cancelled')
+
+           UNION
+
+           SELECT r.request_key, r.cache_key
+           FROM agency_workflow_runs r
+           LEFT JOIN tasks t ON t.id = r.task_id
+           WHERE r.status = 'failed'
+              OR t.status = 'failed'
+         )
+         SELECT COUNT(DISTINCT c.cache_key)::int AS count
+         FROM generated_workflow_plan_cache c
+         LEFT JOIN failed_handles h
+           ON (h.request_key IS NOT NULL AND c.request_key = h.request_key)
+           OR (h.cache_key IS NOT NULL AND c.cache_key = h.cache_key)
+         WHERE c.artifact_state IN ('failed', 'quarantined')
+            OR h.request_key IS NOT NULL
+            OR h.cache_key IS NOT NULL`
+      ),
+    ]);
+
+    return res.json({
+      ok: true,
+      data: {
+        dryRun: true,
+        failedWorkflowRuns: runs.rows[0]?.count ?? 0,
+        failedCompileJobs: compileJobs.rows[0]?.count ?? 0,
+        generatedCacheArtifacts: cacheArtifacts.rows[0]?.count ?? 0,
+      },
+    });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+
+    const cacheArtifacts = await client.query(
+      `WITH failed_handles AS (
+         SELECT request_key, cache_key
+         FROM human_workflow_compile_jobs
+         WHERE status IN ('failed', 'cancelled')
+
+         UNION
+
+         SELECT r.request_key, r.cache_key
+         FROM agency_workflow_runs r
+         LEFT JOIN tasks t ON t.id = r.task_id
+         WHERE r.status = 'failed'
+            OR t.status = 'failed'
+       ),
+       deleted AS (
+         DELETE FROM generated_workflow_plan_cache c
+         USING failed_handles h
+         WHERE (h.request_key IS NOT NULL AND c.request_key = h.request_key)
+            OR (h.cache_key IS NOT NULL AND c.cache_key = h.cache_key)
+         RETURNING c.cache_key
+       ),
+       state_deleted AS (
+         DELETE FROM generated_workflow_plan_cache c
+         WHERE c.artifact_state IN ('failed', 'quarantined')
+           AND NOT EXISTS (SELECT 1 FROM deleted d WHERE d.cache_key = c.cache_key)
+         RETURNING c.cache_key
+       )
+       SELECT
+         (SELECT COUNT(*)::int FROM deleted) +
+         (SELECT COUNT(*)::int FROM state_deleted) AS count`
+    );
+
+    const compileJobs = await client.query(
+      `DELETE FROM human_workflow_compile_jobs
+       WHERE status IN ('failed', 'cancelled')
+       RETURNING id`
+    );
+
+    const workflowRuns = await client.query(
+      `DELETE FROM agency_workflow_runs r
+       WHERE r.status = 'failed'
+          OR EXISTS (
+            SELECT 1 FROM tasks t
+            WHERE t.id = r.task_id
+              AND t.status = 'failed'
+          )
+       RETURNING id`
+    );
+
+    await client.query("COMMIT");
+
+    return res.json({
+      ok: true,
+      data: {
+        dryRun: false,
+        failedWorkflowRuns: workflowRuns.rowCount ?? 0,
+        failedCompileJobs: compileJobs.rowCount ?? 0,
+        generatedCacheArtifacts: cacheArtifacts.rows[0]?.count ?? 0,
+      },
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    return res.status(500).json({
+      ok: false,
+      error: (err as Error).message,
+    });
+  } finally {
+    client.release();
+  }
+});
+
 router.get("/workflow-runs/:id", async (req: Request, res: Response) => {
   const db = getDb();
   const result = await db.query(agencyWorkflowRunSelectSql(`r.id = $1`), [req.params.id]);
