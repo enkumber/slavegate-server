@@ -39,6 +39,7 @@ export const agencyApi = {
             return api.get(`/agency/workflow-runs?${query}`);
         },
         get: (id) => api.get(`/agency/workflow-runs/${id}`),
+        submitFeedback: (id, data) => api.post(`/agency/workflow-runs/${id}/feedback`, data),
     },
     // Clients
     clients: {

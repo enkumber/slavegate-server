@@ -454,6 +454,78 @@ describe("agency workflow runs API", () => {
     expect(mocks.client.release).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects partial feedback without lastGoodStepIndex", async () => {
+    const response = await postAgency(
+      "/api/agency/workflow-runs/33333333-3333-4333-8333-333333333333/feedback",
+      { rating: "partial" }
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("FEEDBACK_LAST_GOOD_STEP_REQUIRED");
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
+
+  it("rejects partial feedback outside the available timeline", async () => {
+    const run = hydratedRun({
+      workflow_status: "failed",
+      workflow_current_step: 2,
+      workflow_total_steps: 2,
+      cached_workflow: {
+        steps: [
+          { id: "open_gmail", action: "open_app" },
+          { id: "tap_create_account", action: "semantic_tap" },
+        ],
+      },
+    });
+    mocks.db.query.mockResolvedValueOnce({ rows: [run] });
+
+    const response = await postAgency(
+      `/api/agency/workflow-runs/${run.id}/feedback`,
+      { rating: "partial", lastGoodStepIndex: 3 }
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("FEEDBACK_LAST_GOOD_STEP_OUT_OF_RANGE");
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
+  });
+
+  it("records dashboard workflow feedback without changing run status", async () => {
+    const run = hydratedRun({ status: "completed", workflow_status: "completed" });
+    const updated = hydratedRun({
+      status: "completed",
+      workflow_status: "completed",
+      feedback_rating: "ok",
+      feedback_last_good_step_index: null,
+      feedback_note: "looks good",
+      feedback_source: "dashboard",
+      feedback_at: new Date("2026-05-22T10:05:00.000Z"),
+    });
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [run] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [updated] });
+
+    const response = await postAgency(
+      `/api/agency/workflow-runs/${run.id}/feedback`,
+      { rating: "ok", note: " looks good " }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      id: run.id,
+      status: "completed",
+      feedback: {
+        rating: "ok",
+        lastGoodStepIndex: null,
+        note: "looks good",
+        source: "dashboard",
+        at: "2026-05-22T10:05:00.000Z",
+      },
+    });
+    expect(mocks.db.query.mock.calls[1][0]).toContain("feedback_rating = $2");
+    expect(mocks.db.query.mock.calls[1][1]).toEqual([run.id, "ok", null, "looks good"]);
+  });
+
   it("returns a workflow run by id with task and operator context", async () => {
     const run = hydratedRun({
       status: "failed",

@@ -54,6 +54,7 @@ function parsePagination(query: Record<string, unknown>): { page: number; pageSi
 
 function rowToAgencyWorkflowRun(row: Record<string, unknown>): Record<string, unknown> {
   const deviceId = row.device_id as string;
+  const feedbackRating = typeof row.feedback_rating === "string" ? row.feedback_rating : null;
   const output: Record<string, unknown> = {
     id: row.id,
     clientId: row.client_id,
@@ -84,6 +85,15 @@ function rowToAgencyWorkflowRun(row: Record<string, unknown>): Record<string, un
     accountPlatform: row.account_platform ?? null,
     clientName: row.client_name ?? null,
     deviceName: row.device_name ?? null,
+    feedback: feedbackRating
+      ? {
+          rating: feedbackRating,
+          lastGoodStepIndex: typeof row.feedback_last_good_step_index === "number" ? row.feedback_last_good_step_index : null,
+          note: row.feedback_note ?? null,
+          source: row.feedback_source ?? null,
+          at: row.feedback_at instanceof Date ? row.feedback_at.toISOString() : row.feedback_at ?? null,
+        }
+      : null,
   };
   if (row.include_timeline === true) {
     output.artifactState = row.artifact_state ?? null;
@@ -91,6 +101,42 @@ function rowToAgencyWorkflowRun(row: Record<string, unknown>): Record<string, un
     output.timeline = buildAgencyWorkflowTimeline(row);
   }
   return output;
+}
+
+type WorkflowRunFeedbackRating = "ok" | "not_ok" | "partial";
+
+function parseWorkflowRunFeedback(input: unknown): {
+  rating: WorkflowRunFeedbackRating;
+  lastGoodStepIndex: number | null;
+  note: string | null;
+} | { error: string; code: string } {
+  const body = normalizeJsonObject(input);
+  const rating = typeof body.rating === "string" ? body.rating.trim().toLowerCase() : "";
+  if (!["ok", "not_ok", "partial"].includes(rating)) {
+    return { error: "rating must be one of ok, not_ok, partial", code: "INVALID_FEEDBACK_RATING" };
+  }
+
+  const rawLastGoodStepIndex = body.lastGoodStepIndex;
+  const lastGoodStepIndex = typeof rawLastGoodStepIndex === "number" && Number.isInteger(rawLastGoodStepIndex)
+    ? rawLastGoodStepIndex
+    : null;
+  if (rating === "partial" && lastGoodStepIndex === null) {
+    return { error: "lastGoodStepIndex is required for partial feedback", code: "FEEDBACK_LAST_GOOD_STEP_REQUIRED" };
+  }
+  if (lastGoodStepIndex !== null && lastGoodStepIndex < 0) {
+    return { error: "lastGoodStepIndex must be non-negative", code: "INVALID_LAST_GOOD_STEP_INDEX" };
+  }
+
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note.length > 1000) {
+    return { error: "note must be 1000 characters or fewer", code: "FEEDBACK_NOTE_TOO_LONG" };
+  }
+
+  return {
+    rating: rating as WorkflowRunFeedbackRating,
+    lastGoodStepIndex: rating === "partial" ? lastGoodStepIndex : null,
+    note: note.length > 0 ? note : null,
+  };
 }
 
 function normalizeJsonObject(value: unknown): Record<string, unknown> {
@@ -1190,6 +1236,46 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
   } finally {
     client.release();
   }
+});
+
+router.post("/workflow-runs/:id/feedback", requireAdminAuth, async (req: Request, res: Response) => {
+  const parsed = parseWorkflowRunFeedback(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
+  }
+
+  const db = getDb();
+  const existing = await db.query(agencyWorkflowRunSelectSql(`r.id = $1`), [req.params.id]);
+  if (existing.rows.length === 0) {
+    return res.status(404).json({ ok: false, error: "Workflow run not found", code: "WORKFLOW_RUN_NOT_FOUND" });
+  }
+
+  if (parsed.rating === "partial") {
+    const existingRun = rowToAgencyWorkflowRun({ ...existing.rows[0], include_timeline: true });
+    const timeline = Array.isArray(existingRun.timeline) ? existingRun.timeline : [];
+    if (timeline.length > 0 && parsed.lastGoodStepIndex !== null && parsed.lastGoodStepIndex >= timeline.length) {
+      return res.status(400).json({
+        ok: false,
+        error: "lastGoodStepIndex is outside the run timeline",
+        code: "FEEDBACK_LAST_GOOD_STEP_OUT_OF_RANGE",
+      });
+    }
+  }
+
+  await db.query(
+    `UPDATE agency_workflow_runs
+     SET feedback_rating = $2,
+         feedback_last_good_step_index = $3,
+         feedback_note = $4,
+         feedback_source = 'dashboard',
+         feedback_at = NOW(),
+         updated_at = NOW()
+     WHERE id = $1`,
+    [req.params.id, parsed.rating, parsed.lastGoodStepIndex, parsed.note]
+  );
+
+  const updated = await db.query(agencyWorkflowRunSelectSql(`r.id = $1`), [req.params.id]);
+  return res.json({ ok: true, data: rowToAgencyWorkflowRun({ ...updated.rows[0], include_timeline: true }) });
 });
 
 router.get("/workflow-runs/:id", async (req: Request, res: Response) => {

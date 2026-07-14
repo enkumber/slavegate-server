@@ -204,6 +204,16 @@ export interface WorkflowRunTimelineStep {
   state: string | null;
 }
 
+export type WorkflowRunFeedbackRating = "ok" | "not_ok" | "partial";
+
+export interface WorkflowRunFeedback {
+  rating: WorkflowRunFeedbackRating;
+  lastGoodStepIndex: number | null;
+  note: string | null;
+  source: string | null;
+  at: string | null;
+}
+
 export interface WorkflowRun {
   id: string;
   clientId: string | null;
@@ -236,6 +246,7 @@ export interface WorkflowRun {
   accountPlatform: string | null;
   clientName: string | null;
   deviceName: string | null;
+  feedback: WorkflowRunFeedback | null;
   timeline?: WorkflowRunTimelineStep[];
 }
 
@@ -273,6 +284,10 @@ export const agencyApi = {
       return api.get<PaginatedResponse<WorkflowRun>>(`/agency/workflow-runs?${query}`);
     },
     get: (id: string) => api.get<WorkflowRun>(`/agency/workflow-runs/${id}`),
+    submitFeedback: (
+      id: string,
+      data: { rating: WorkflowRunFeedbackRating; lastGoodStepIndex?: number | null; note?: string | null }
+    ) => api.post<WorkflowRun>(`/agency/workflow-runs/${id}/feedback`, data),
   },
 
   // Clients

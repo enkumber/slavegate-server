@@ -20,6 +20,11 @@ const artifactColors = {
     quarantined: { bg: "#3a1618", color: "#f87171", label: "Quarantined" },
     failed: { bg: "#3a1618", color: "#f87171", label: "Failed" },
 };
+const feedbackColors = {
+    ok: { bg: "#0f3323", color: "#4ade80", label: "OK" },
+    not_ok: { bg: "#3a1618", color: "#f87171", label: "Not OK" },
+    partial: { bg: "#332b12", color: "#fbbf24", label: "Partial" },
+};
 function Badge({ value, palette }) {
     if (!value)
         return null;
@@ -49,6 +54,11 @@ export function RunHistoryPage() {
     const [loading, setLoading] = useState(false);
     const [detailLoading, setDetailLoading] = useState(false);
     const [error, setError] = useState(null);
+    const [feedbackRating, setFeedbackRating] = useState("ok");
+    const [lastGoodStepIndex, setLastGoodStepIndex] = useState("");
+    const [feedbackNote, setFeedbackNote] = useState("");
+    const [feedbackSaving, setFeedbackSaving] = useState(false);
+    const [feedbackMessage, setFeedbackMessage] = useState(null);
     const loadRuns = useCallback(async () => {
         setLoading(true);
         setError(null);
@@ -79,6 +89,45 @@ export function RunHistoryPage() {
             .catch((err) => setError(err instanceof Error ? err.message : "Failed to load workflow run"))
             .finally(() => setDetailLoading(false));
     }, [selectedId]);
+    useEffect(() => {
+        if (!selectedRun?.feedback) {
+            setFeedbackRating("ok");
+            setLastGoodStepIndex("");
+            setFeedbackNote("");
+            setFeedbackMessage(null);
+            return;
+        }
+        setFeedbackRating(selectedRun.feedback.rating);
+        setLastGoodStepIndex(selectedRun.feedback.lastGoodStepIndex === null ? "" : String(selectedRun.feedback.lastGoodStepIndex));
+        setFeedbackNote(selectedRun.feedback.note ?? "");
+        setFeedbackMessage(null);
+    }, [selectedRun?.id, selectedRun?.feedback]);
+    const submitFeedback = useCallback(async () => {
+        if (!selectedRun)
+            return;
+        if (feedbackRating === "partial" && lastGoodStepIndex === "") {
+            setFeedbackMessage("Select the last good step for Partial.");
+            return;
+        }
+        setFeedbackSaving(true);
+        setFeedbackMessage(null);
+        try {
+            const updated = await agencyApi.workflowRuns.submitFeedback(selectedRun.id, {
+                rating: feedbackRating,
+                lastGoodStepIndex: feedbackRating === "partial" ? Number(lastGoodStepIndex) : null,
+                note: feedbackNote.trim() || null,
+            });
+            setSelectedRun(updated);
+            setRuns((current) => current.map((run) => run.id === updated.id ? { ...run, feedback: updated.feedback } : run));
+            setFeedbackMessage("Feedback saved.");
+        }
+        catch (err) {
+            setFeedbackMessage(err instanceof Error ? err.message : "Failed to save feedback");
+        }
+        finally {
+            setFeedbackSaving(false);
+        }
+    }, [feedbackNote, feedbackRating, lastGoodStepIndex, selectedRun]);
     const counts = useMemo(() => ({
         total: runs.length,
         running: runs.filter((run) => run.status === "running").length,
@@ -106,5 +155,21 @@ export function RunHistoryPage() {
                                     color: "#ddd",
                                     textAlign: "left",
                                     cursor: "pointer",
-                                }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsx("div", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "13px" }, children: run.intent }), _jsxs("div", { style: { color: "#666", fontSize: "11px", marginTop: "4px" }, children: [run.platform, " \u00B7 ", run.deviceName ?? run.shortDeviceId ?? "device", " \u00B7 ", run.requestKey ? "AI" : "manual"] })] }), _jsxs("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" }, children: [_jsx(Badge, { value: run.status, palette: statusColors }), _jsx(Badge, { value: run.artifactState, palette: artifactColors })] }), _jsx("div", { style: { color: "#aaa", fontSize: "12px" }, children: formatDate(run.createdAt) }), _jsx("div", { style: { color: "#aaa", fontSize: "12px" }, children: duration(run) })] }, run.id))))] }), _jsx("div", { style: { border: "1px solid #222", borderRadius: "6px", background: "#0d0d0d", padding: "16px" }, children: detailLoading ? (_jsx("div", { style: { color: "#777", textAlign: "center", padding: "28px" }, children: "Loading timeline..." })) : selectedRun ? (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "start", marginBottom: "14px" }, children: [_jsxs("div", { children: [_jsx("h2", { style: { color: "#fff", fontSize: "16px", margin: "0 0 6px" }, children: "Timeline" }), _jsx("div", { style: { color: "#777", fontSize: "12px" }, children: selectedRun.canonicalWorkflowId })] }), _jsx(Badge, { value: selectedRun.workflowStatus ?? selectedRun.status, palette: statusColors })] }), _jsx("div", { style: { display: "flex", flexDirection: "column", gap: "10px" }, children: (selectedRun.timeline ?? []).length === 0 ? (_jsx("div", { style: { color: "#777", padding: "18px", textAlign: "center" }, children: "No timeline available." })) : (selectedRun.timeline.map((step) => (_jsxs("div", { style: { display: "grid", gridTemplateColumns: "26px 1fr", gap: "10px" }, children: [_jsx("div", { style: { width: "24px", height: "24px", borderRadius: "50%", background: statusColors[step.status]?.bg ?? "#27272a", color: statusColors[step.status]?.color ?? "#d4d4d8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px" }, children: step.index + 1 }), _jsxs("div", { style: { borderBottom: "1px solid #1f1f1f", paddingBottom: "10px" }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "10px" }, children: [_jsx("div", { style: { color: "#e5e7eb", fontSize: "13px" }, children: step.label }), _jsx(Badge, { value: step.status, palette: statusColors })] }), _jsx("div", { style: { color: "#666", fontSize: "11px", marginTop: "4px" }, children: step.id }), step.error && _jsx("div", { style: { color: "#f87171", fontSize: "12px", marginTop: "6px" }, children: step.error }), step.state && _jsx("div", { style: { color: "#fbbf24", fontSize: "11px", marginTop: "4px" }, children: step.state })] })] }, `${step.index}-${step.id}`)))) })] })) : (_jsx("div", { style: { color: "#777", textAlign: "center", padding: "28px" }, children: "Select a run." })) })] })] }));
+                                }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsx("div", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "13px" }, children: run.intent }), _jsxs("div", { style: { color: "#666", fontSize: "11px", marginTop: "4px" }, children: [run.platform, " \u00B7 ", run.deviceName ?? run.shortDeviceId ?? "device", " \u00B7 ", run.requestKey ? "AI" : "manual"] })] }), _jsxs("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" }, children: [_jsx(Badge, { value: run.status, palette: statusColors }), _jsx(Badge, { value: run.artifactState, palette: artifactColors })] }), _jsx("div", { style: { color: "#aaa", fontSize: "12px" }, children: formatDate(run.createdAt) }), _jsx("div", { style: { color: "#aaa", fontSize: "12px" }, children: duration(run) })] }, run.id))))] }), _jsx("div", { style: { border: "1px solid #222", borderRadius: "6px", background: "#0d0d0d", padding: "16px" }, children: detailLoading ? (_jsx("div", { style: { color: "#777", textAlign: "center", padding: "28px" }, children: "Loading timeline..." })) : selectedRun ? (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "start", marginBottom: "14px" }, children: [_jsxs("div", { children: [_jsx("h2", { style: { color: "#fff", fontSize: "16px", margin: "0 0 6px" }, children: "Timeline" }), _jsx("div", { style: { color: "#777", fontSize: "12px" }, children: selectedRun.canonicalWorkflowId })] }), _jsxs("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end" }, children: [_jsx(Badge, { value: selectedRun.workflowStatus ?? selectedRun.status, palette: statusColors }), _jsx(Badge, { value: selectedRun.feedback?.rating, palette: feedbackColors })] })] }), _jsxs("div", { style: { border: "1px solid #222", borderRadius: "6px", padding: "12px", marginBottom: "14px", background: "#101010" }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", marginBottom: "10px" }, children: [_jsxs("div", { children: [_jsx("div", { style: { color: "#e5e7eb", fontSize: "13px", fontWeight: 600 }, children: "Feedback" }), selectedRun.feedback?.at && (_jsxs("div", { style: { color: "#777", fontSize: "11px", marginTop: "3px" }, children: ["Saved ", formatDate(selectedRun.feedback.at)] }))] }), _jsx("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" }, children: ["ok", "not_ok", "partial"].map((rating) => (_jsx("button", { onClick: () => setFeedbackRating(rating), style: {
+                                                            background: feedbackRating === rating ? feedbackColors[rating].bg : "#151515",
+                                                            border: `1px solid ${feedbackRating === rating ? feedbackColors[rating].color : "#333"}`,
+                                                            color: feedbackRating === rating ? feedbackColors[rating].color : "#d4d4d8",
+                                                            borderRadius: "6px",
+                                                            padding: "7px 9px",
+                                                            cursor: "pointer",
+                                                            fontSize: "12px",
+                                                        }, children: feedbackColors[rating].label }, rating))) })] }), feedbackRating === "partial" && (_jsxs("label", { style: { display: "block", color: "#aaa", fontSize: "12px", marginBottom: "10px" }, children: ["Last good step", _jsxs("select", { value: lastGoodStepIndex, onChange: (event) => setLastGoodStepIndex(event.target.value), style: { marginTop: "5px", width: "100%", background: "#0d0d0d", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px" }, children: [_jsx("option", { value: "", children: "Select step" }), (selectedRun.timeline ?? []).map((step) => (_jsxs("option", { value: step.index, children: [step.index + 1, ". ", step.label] }, step.index)))] })] })), _jsx("textarea", { value: feedbackNote, onChange: (event) => setFeedbackNote(event.target.value.slice(0, 1000)), placeholder: "Optional note", rows: 3, style: { width: "100%", boxSizing: "border-box", resize: "vertical", background: "#0d0d0d", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px", fontSize: "12px", marginBottom: "10px" } }), _jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center" }, children: [_jsx("button", { onClick: () => void submitFeedback(), disabled: feedbackSaving || (feedbackRating === "partial" && lastGoodStepIndex === ""), style: {
+                                                        background: feedbackSaving ? "#27272a" : "#1f2937",
+                                                        border: "1px solid #374151",
+                                                        color: "#e5e7eb",
+                                                        borderRadius: "6px",
+                                                        padding: "8px 12px",
+                                                        cursor: feedbackSaving ? "wait" : "pointer",
+                                                        opacity: feedbackRating === "partial" && lastGoodStepIndex === "" ? 0.55 : 1,
+                                                    }, children: feedbackSaving ? "Saving..." : "Save feedback" }), feedbackMessage && (_jsx("div", { style: { color: feedbackMessage.includes("saved") ? "#4ade80" : "#fbbf24", fontSize: "12px", textAlign: "right" }, children: feedbackMessage }))] })] }), _jsx("div", { style: { display: "flex", flexDirection: "column", gap: "10px" }, children: (selectedRun.timeline ?? []).length === 0 ? (_jsx("div", { style: { color: "#777", padding: "18px", textAlign: "center" }, children: "No timeline available." })) : (selectedRun.timeline.map((step) => (_jsxs("div", { style: { display: "grid", gridTemplateColumns: "26px 1fr", gap: "10px" }, children: [_jsx("div", { style: { width: "24px", height: "24px", borderRadius: "50%", background: statusColors[step.status]?.bg ?? "#27272a", color: statusColors[step.status]?.color ?? "#d4d4d8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px" }, children: step.index + 1 }), _jsxs("div", { style: { borderBottom: "1px solid #1f1f1f", paddingBottom: "10px" }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "10px" }, children: [_jsx("div", { style: { color: "#e5e7eb", fontSize: "13px" }, children: step.label }), _jsx(Badge, { value: step.status, palette: statusColors })] }), _jsx("div", { style: { color: "#666", fontSize: "11px", marginTop: "4px" }, children: step.id }), step.error && _jsx("div", { style: { color: "#f87171", fontSize: "12px", marginTop: "6px" }, children: step.error }), step.state && _jsx("div", { style: { color: "#fbbf24", fontSize: "11px", marginTop: "4px" }, children: step.state })] })] }, `${step.index}-${step.id}`)))) })] })) : (_jsx("div", { style: { color: "#777", textAlign: "center", padding: "28px" }, children: "Select a run." })) })] })] }));
 }

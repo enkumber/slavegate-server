@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, WorkflowRun } from "../api/agency";
+import { agencyApi, WorkflowRun, WorkflowRunFeedbackRating } from "../api/agency";
 
 const statusColors: Record<string, { bg: string; color: string; label: string }> = {
   queued: { bg: "#313244", color: "#cdd6f4", label: "Queued" },
@@ -21,6 +21,12 @@ const artifactColors: Record<string, { bg: string; color: string; label: string 
   promoted: { bg: "#0f3323", color: "#4ade80", label: "Promoted" },
   quarantined: { bg: "#3a1618", color: "#f87171", label: "Quarantined" },
   failed: { bg: "#3a1618", color: "#f87171", label: "Failed" },
+};
+
+const feedbackColors: Record<string, { bg: string; color: string; label: string }> = {
+  ok: { bg: "#0f3323", color: "#4ade80", label: "OK" },
+  not_ok: { bg: "#3a1618", color: "#f87171", label: "Not OK" },
+  partial: { bg: "#332b12", color: "#fbbf24", label: "Partial" },
 };
 
 function Badge({ value, palette }: { value: string | null | undefined; palette: Record<string, { bg: string; color: string; label: string }> }) {
@@ -55,6 +61,11 @@ export function RunHistoryPage() {
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [feedbackRating, setFeedbackRating] = useState<WorkflowRunFeedbackRating>("ok");
+  const [lastGoodStepIndex, setLastGoodStepIndex] = useState("");
+  const [feedbackNote, setFeedbackNote] = useState("");
+  const [feedbackSaving, setFeedbackSaving] = useState(false);
+  const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
 
   const loadRuns = useCallback(async () => {
     setLoading(true);
@@ -85,6 +96,46 @@ export function RunHistoryPage() {
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load workflow run"))
       .finally(() => setDetailLoading(false));
   }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectedRun?.feedback) {
+      setFeedbackRating("ok");
+      setLastGoodStepIndex("");
+      setFeedbackNote("");
+      setFeedbackMessage(null);
+      return;
+    }
+    setFeedbackRating(selectedRun.feedback.rating);
+    setLastGoodStepIndex(
+      selectedRun.feedback.lastGoodStepIndex === null ? "" : String(selectedRun.feedback.lastGoodStepIndex)
+    );
+    setFeedbackNote(selectedRun.feedback.note ?? "");
+    setFeedbackMessage(null);
+  }, [selectedRun?.id, selectedRun?.feedback]);
+
+  const submitFeedback = useCallback(async () => {
+    if (!selectedRun) return;
+    if (feedbackRating === "partial" && lastGoodStepIndex === "") {
+      setFeedbackMessage("Select the last good step for Partial.");
+      return;
+    }
+    setFeedbackSaving(true);
+    setFeedbackMessage(null);
+    try {
+      const updated = await agencyApi.workflowRuns.submitFeedback(selectedRun.id, {
+        rating: feedbackRating,
+        lastGoodStepIndex: feedbackRating === "partial" ? Number(lastGoodStepIndex) : null,
+        note: feedbackNote.trim() || null,
+      });
+      setSelectedRun(updated);
+      setRuns((current) => current.map((run) => run.id === updated.id ? { ...run, feedback: updated.feedback } : run));
+      setFeedbackMessage("Feedback saved.");
+    } catch (err) {
+      setFeedbackMessage(err instanceof Error ? err.message : "Failed to save feedback");
+    } finally {
+      setFeedbackSaving(false);
+    }
+  }, [feedbackNote, feedbackRating, lastGoodStepIndex, selectedRun]);
 
   const counts = useMemo(() => ({
     total: runs.length,
@@ -197,7 +248,87 @@ export function RunHistoryPage() {
                   <h2 style={{ color: "#fff", fontSize: "16px", margin: "0 0 6px" }}>Timeline</h2>
                   <div style={{ color: "#777", fontSize: "12px" }}>{selectedRun.canonicalWorkflowId}</div>
                 </div>
-                <Badge value={selectedRun.workflowStatus ?? selectedRun.status} palette={statusColors} />
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  <Badge value={selectedRun.workflowStatus ?? selectedRun.status} palette={statusColors} />
+                  <Badge value={selectedRun.feedback?.rating} palette={feedbackColors} />
+                </div>
+              </div>
+              <div style={{ border: "1px solid #222", borderRadius: "6px", padding: "12px", marginBottom: "14px", background: "#101010" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
+                  <div>
+                    <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600 }}>Feedback</div>
+                    {selectedRun.feedback?.at && (
+                      <div style={{ color: "#777", fontSize: "11px", marginTop: "3px" }}>
+                        Saved {formatDate(selectedRun.feedback.at)}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                    {(["ok", "not_ok", "partial"] as WorkflowRunFeedbackRating[]).map((rating) => (
+                      <button
+                        key={rating}
+                        onClick={() => setFeedbackRating(rating)}
+                        style={{
+                          background: feedbackRating === rating ? feedbackColors[rating].bg : "#151515",
+                          border: `1px solid ${feedbackRating === rating ? feedbackColors[rating].color : "#333"}`,
+                          color: feedbackRating === rating ? feedbackColors[rating].color : "#d4d4d8",
+                          borderRadius: "6px",
+                          padding: "7px 9px",
+                          cursor: "pointer",
+                          fontSize: "12px",
+                        }}
+                      >
+                        {feedbackColors[rating].label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {feedbackRating === "partial" && (
+                  <label style={{ display: "block", color: "#aaa", fontSize: "12px", marginBottom: "10px" }}>
+                    Last good step
+                    <select
+                      value={lastGoodStepIndex}
+                      onChange={(event) => setLastGoodStepIndex(event.target.value)}
+                      style={{ marginTop: "5px", width: "100%", background: "#0d0d0d", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px" }}
+                    >
+                      <option value="">Select step</option>
+                      {(selectedRun.timeline ?? []).map((step) => (
+                        <option key={step.index} value={step.index}>
+                          {step.index + 1}. {step.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <textarea
+                  value={feedbackNote}
+                  onChange={(event) => setFeedbackNote(event.target.value.slice(0, 1000))}
+                  placeholder="Optional note"
+                  rows={3}
+                  style={{ width: "100%", boxSizing: "border-box", resize: "vertical", background: "#0d0d0d", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px", fontSize: "12px", marginBottom: "10px" }}
+                />
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center" }}>
+                  <button
+                    onClick={() => void submitFeedback()}
+                    disabled={feedbackSaving || (feedbackRating === "partial" && lastGoodStepIndex === "")}
+                    style={{
+                      background: feedbackSaving ? "#27272a" : "#1f2937",
+                      border: "1px solid #374151",
+                      color: "#e5e7eb",
+                      borderRadius: "6px",
+                      padding: "8px 12px",
+                      cursor: feedbackSaving ? "wait" : "pointer",
+                      opacity: feedbackRating === "partial" && lastGoodStepIndex === "" ? 0.55 : 1,
+                    }}
+                  >
+                    {feedbackSaving ? "Saving..." : "Save feedback"}
+                  </button>
+                  {feedbackMessage && (
+                    <div style={{ color: feedbackMessage.includes("saved") ? "#4ade80" : "#fbbf24", fontSize: "12px", textAlign: "right" }}>
+                      {feedbackMessage}
+                    </div>
+                  )}
+                </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                 {(selectedRun.timeline ?? []).length === 0 ? (
