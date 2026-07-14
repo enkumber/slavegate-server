@@ -812,6 +812,74 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[0][1]).toEqual(["step_candidate", 10, 0]);
   });
 
+  it("lists validated steps in the read-only step library without compiler reuse", async () => {
+    const validated = {
+      id: "55555555-5555-4555-8555-555555555555",
+      run_id: "33333333-3333-4333-8333-333333333333",
+      step_index: 1,
+      step_id: "unlock",
+      label: "unlock",
+      action: "unlock",
+      type: null,
+      step_status: "succeeded",
+      candidate_state: "validated_step",
+      request_key: "c02c59dfbe512562f8c65c97",
+      cache_key: null,
+      canonical_workflow_id: "agent_generated_reddit_account_health_scan_v1",
+      canonical_workflow_version: "1.0.0",
+      last_good_step_index: 1,
+      step_snapshot: { index: 1 },
+      evidence: { source: "dashboard_partial_feedback" },
+      note: "second step looked good",
+      review_note: "contract ok",
+      reviewed_by: "dashboard",
+      reviewed_at: new Date("2026-05-22T10:08:00.000Z"),
+      validation_contract: {
+        scope: "phase_3c_live_smoke",
+        preconditions: ["screen is awake"],
+        postconditions: ["device is unlocked"],
+        compatibility: { serverVersion: "3.9.113" },
+      },
+      validation_evidence: { source: "dashboard_manual_validation" },
+      validated_by: "dashboard",
+      validated_at: new Date("2026-05-22T10:08:00.000Z"),
+      run_status: "completed",
+      run_intent: "reddit_account_health_scan",
+      device_name: "Pixel",
+      created_at: new Date("2026-05-22T10:06:00.000Z"),
+      updated_at: new Date("2026-05-22T10:08:00.000Z"),
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [validated] })
+      .mockResolvedValueOnce({ rows: [{ count: "1" }] });
+
+    const response = await getAgency("/api/agency/step-library?pageSize=10");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.total).toBe(1);
+    expect(response.body.data.items[0]).toMatchObject({
+      id: validated.id,
+      stepCandidateId: validated.id,
+      name: "unlock",
+      action: "unlock",
+      status: "validated_step",
+      libraryState: "review_only",
+      reuseScope: "phase_3c_live_smoke",
+      reusable: false,
+      compilerEligible: false,
+      preconditions: ["screen is awake"],
+      postconditions: ["device is unlocked"],
+      runIntent: "reddit_account_health_scan",
+      deviceName: "Pixel",
+      sourceCandidate: {
+        id: validated.id,
+        candidateState: "validated_step",
+      },
+    });
+    expect(mocks.db.query.mock.calls[0][0]).toContain("c.candidate_state = 'validated_step'");
+    expect(mocks.db.query.mock.calls[0][0]).not.toContain("step_candidate'");
+  });
+
   it("rejects a step candidate without promoting it", async () => {
     const candidate = {
       id: "44444444-4444-4444-8444-444444444444",

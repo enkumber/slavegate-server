@@ -13,6 +13,7 @@ import { PostsPage } from "./pages/PostsPage";
 import { MaterialsPage } from "./pages/MaterialsPage";
 import { TasksPage } from "./pages/TasksPage";
 import { RunHistoryPage } from "./pages/RunHistoryPage";
+import { StepLibraryPage } from "./pages/StepLibraryPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TokenManagement } from "./pages/TokenManagement";
@@ -62,6 +63,8 @@ export function App() {
     page = <TasksPage />;
   } else if (route.startsWith("#/agency/runs")) {
     page = <RunHistoryPage />;
+  } else if (route.startsWith("#/agency/step-library")) {
+    page = <StepLibraryPage />;
   } else if (route.startsWith("#/agency/reports")) {
     page = <ReportsPage />;
   } else if (route === "#/tokens") {

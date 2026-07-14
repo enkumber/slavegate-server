@@ -246,6 +246,34 @@ export interface WorkflowRunStepCandidate {
   updatedAt: string | null;
 }
 
+export interface StepLibraryEntry {
+  id: string;
+  stepCandidateId: string;
+  name: string;
+  action: string | null;
+  type: string | null;
+  status: "validated_step" | string;
+  libraryState: "review_only" | string;
+  reuseScope: string;
+  reusable: boolean;
+  compilerEligible: boolean;
+  confidence: number | null;
+  contract: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  preconditions: string[];
+  postconditions: string[];
+  compatibility: Record<string, unknown>;
+  sourceCandidate: WorkflowRunStepCandidate;
+  runId: string;
+  runIntent: string | null;
+  runStatus: string | null;
+  deviceName: string | null;
+  validatedBy: string | null;
+  validatedAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
 export interface WorkflowRun {
   id: string;
   clientId: string | null;
@@ -347,6 +375,17 @@ export const agencyApi = {
         note?: string | null;
       }
     ) => api.patch<WorkflowRunStepCandidate>(`/agency/workflow-step-candidates/${id}/validate`, data),
+  },
+
+  stepLibrary: {
+    list: (params?: { page?: number; pageSize?: number; action?: string; intent?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.pageSize) query.set("pageSize", String(params.pageSize));
+      if (params?.action) query.set("action", params.action);
+      if (params?.intent) query.set("intent", params.intent);
+      return api.get<PaginatedResponse<StepLibraryEntry>>(`/agency/step-library?${query}`);
+    },
   },
 
   // Clients

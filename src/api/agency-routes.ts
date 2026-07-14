@@ -138,6 +138,41 @@ function rowToStepCandidate(row: Record<string, unknown>): Record<string, unknow
   };
 }
 
+function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unknown> {
+  const candidate = rowToStepCandidate(row);
+  const contract = normalizeJsonObject(row.validation_contract);
+  const scope = typeof contract.scope === "string" && contract.scope.trim().length > 0
+    ? contract.scope.trim()
+    : "manual_review";
+  return {
+    id: row.id,
+    stepCandidateId: row.id,
+    name: row.label,
+    action: row.action ?? null,
+    type: row.type ?? null,
+    status: "validated_step",
+    libraryState: "review_only",
+    reuseScope: scope,
+    reusable: false,
+    compilerEligible: false,
+    confidence: null,
+    contract,
+    evidence: row.validation_evidence ?? {},
+    preconditions: nonEmptyStringArray(contract.preconditions),
+    postconditions: nonEmptyStringArray(contract.postconditions),
+    compatibility: normalizeJsonObject(contract.compatibility),
+    sourceCandidate: candidate,
+    runId: row.run_id,
+    runIntent: row.run_intent ?? null,
+    runStatus: row.run_status ?? null,
+    deviceName: row.device_name ?? null,
+    validatedBy: row.validated_by ?? null,
+    validatedAt: row.validated_at instanceof Date ? row.validated_at.toISOString() : row.validated_at ?? null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at ?? null,
+  };
+}
+
 type WorkflowRunFeedbackRating = "ok" | "not_ok" | "partial";
 
 function parseWorkflowRunFeedback(input: unknown): {
@@ -1287,6 +1322,64 @@ router.get("/workflow-step-candidates", requireAdminAuth, async (req: Request, r
     ok: true,
     data: {
       items: rows.rows.map(rowToStepCandidate),
+      total: parseInt(count.rows[0].count, 10),
+      page,
+      pageSize,
+    },
+  });
+});
+
+router.get("/step-library", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const { page, pageSize, offset } = parsePagination(req.query);
+  const action = typeof req.query.action === "string" && req.query.action.trim().length > 0
+    ? req.query.action.trim()
+    : null;
+  const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
+    ? req.query.intent.trim()
+    : null;
+  const conditions = ["c.candidate_state = 'validated_step'"];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (action) {
+    conditions.push(`c.action = $${idx++}`);
+    values.push(action);
+  }
+  if (intent) {
+    conditions.push(`r.intent = $${idx++}`);
+    values.push(intent);
+  }
+
+  const where = `WHERE ${conditions.join(" AND ")}`;
+  values.push(pageSize, offset);
+
+  const [rows, count] = await Promise.all([
+    db.query(
+      `SELECT c.*,
+              r.status AS run_status,
+              r.intent AS run_intent,
+              d.friendly_name AS device_name
+       FROM agency_workflow_step_candidates c
+       LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
+       LEFT JOIN devices d ON d.id = r.device_id
+       ${where}
+       ORDER BY c.validated_at DESC NULLS LAST, c.updated_at DESC, c.created_at DESC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      values
+    ),
+    db.query(
+      `SELECT COUNT(*) FROM agency_workflow_step_candidates c
+       LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
+       ${where}`,
+      values.slice(0, -2)
+    ),
+  ]);
+
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map(rowToStepLibraryEntry),
       total: parseInt(count.rows[0].count, 10),
       page,
       pageSize,

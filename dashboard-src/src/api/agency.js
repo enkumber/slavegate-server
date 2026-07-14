@@ -53,6 +53,20 @@ export const agencyApi = {
         reviewStepCandidate: (id, data) => api.patch(`/agency/workflow-step-candidates/${id}/review`, data),
         validateStepCandidate: (id, data) => api.patch(`/agency/workflow-step-candidates/${id}/validate`, data),
     },
+    stepLibrary: {
+        list: (params) => {
+            const query = new URLSearchParams();
+            if (params?.page)
+                query.set("page", String(params.page));
+            if (params?.pageSize)
+                query.set("pageSize", String(params.pageSize));
+            if (params?.action)
+                query.set("action", params.action);
+            if (params?.intent)
+                query.set("intent", params.intent);
+            return api.get(`/agency/step-library?${query}`);
+        },
+    },
     // Clients
     clients: {
         list: (params) => {
