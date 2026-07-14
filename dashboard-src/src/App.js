@@ -12,6 +12,7 @@ import { FarmingProfilesPage } from "./pages/FarmingProfilesPage";
 import { PostsPage } from "./pages/PostsPage";
 import { MaterialsPage } from "./pages/MaterialsPage";
 import { TasksPage } from "./pages/TasksPage";
+import { RunHistoryPage } from "./pages/RunHistoryPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TokenManagement } from "./pages/TokenManagement";
@@ -59,6 +60,9 @@ export function App() {
     }
     else if (route.startsWith("#/agency/tasks")) {
         page = _jsx(TasksPage, {});
+    }
+    else if (route.startsWith("#/agency/runs")) {
+        page = _jsx(RunHistoryPage, {});
     }
     else if (route.startsWith("#/agency/reports")) {
         page = _jsx(ReportsPage, {});

@@ -1,0 +1,110 @@
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
+/**
+ * RunHistoryPage.tsx
+ * Read-only generated workflow run history with derived step timeline.
+ */
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AgencyLayout } from "../components/AgencyLayout";
+import { agencyApi } from "../api/agency";
+const statusColors = {
+    queued: { bg: "#313244", color: "#cdd6f4", label: "Queued" },
+    running: { bg: "#12314f", color: "#60a5fa", label: "Running" },
+    completed: { bg: "#0f3323", color: "#4ade80", label: "Succeeded" },
+    failed: { bg: "#3a1618", color: "#f87171", label: "Failed" },
+    partial: { bg: "#332b12", color: "#fbbf24", label: "Partial" },
+    cancelled: { bg: "#2b2b2b", color: "#a1a1aa", label: "Cancelled" },
+};
+const artifactColors = {
+    candidate: { bg: "#2f2a12", color: "#facc15", label: "Candidate" },
+    promoted: { bg: "#0f3323", color: "#4ade80", label: "Promoted" },
+    quarantined: { bg: "#3a1618", color: "#f87171", label: "Quarantined" },
+    failed: { bg: "#3a1618", color: "#f87171", label: "Failed" },
+};
+function Badge({ value, palette }) {
+    if (!value)
+        return null;
+    const config = palette[value] ?? { bg: "#27272a", color: "#d4d4d8", label: value };
+    return (_jsx("span", { style: { padding: "3px 8px", borderRadius: "6px", background: config.bg, color: config.color, fontSize: "11px" }, children: config.label }));
+}
+function formatDate(value) {
+    return value ? new Date(value).toLocaleString() : "-";
+}
+function duration(run) {
+    const start = run.startedAt ?? run.createdAt;
+    const end = run.completedAt ?? run.updatedAt;
+    if (!start || !end)
+        return "-";
+    const ms = new Date(end).getTime() - new Date(start).getTime();
+    if (!Number.isFinite(ms) || ms < 0)
+        return "-";
+    if (ms < 1000)
+        return `${ms}ms`;
+    return `${Math.round(ms / 1000)}s`;
+}
+export function RunHistoryPage() {
+    const [runs, setRuns] = useState([]);
+    const [selectedId, setSelectedId] = useState(null);
+    const [selectedRun, setSelectedRun] = useState(null);
+    const [statusFilter, setStatusFilter] = useState("");
+    const [loading, setLoading] = useState(false);
+    const [detailLoading, setDetailLoading] = useState(false);
+    const [error, setError] = useState(null);
+    const loadRuns = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            const data = await agencyApi.workflowRuns.list({ pageSize: 50, status: statusFilter || undefined });
+            setRuns(data.items);
+            if (!selectedId && data.items[0])
+                setSelectedId(data.items[0].id);
+        }
+        catch (err) {
+            setError(err instanceof Error ? err.message : "Failed to load run history");
+        }
+        finally {
+            setLoading(false);
+        }
+    }, [selectedId, statusFilter]);
+    useEffect(() => {
+        void loadRuns();
+    }, [loadRuns]);
+    useEffect(() => {
+        if (!selectedId) {
+            setSelectedRun(null);
+            return;
+        }
+        setDetailLoading(true);
+        agencyApi.workflowRuns.get(selectedId)
+            .then(setSelectedRun)
+            .catch((err) => setError(err instanceof Error ? err.message : "Failed to load workflow run"))
+            .finally(() => setDetailLoading(false));
+    }, [selectedId]);
+    const counts = useMemo(() => ({
+        total: runs.length,
+        running: runs.filter((run) => run.status === "running").length,
+        succeeded: runs.filter((run) => run.status === "completed").length,
+        failed: runs.filter((run) => run.status === "failed").length,
+    }), [runs]);
+    return (_jsxs(AgencyLayout, { currentRoute: "#/agency/runs", children: [_jsx("div", { style: { marginBottom: "20px" }, children: _jsx("h1", { style: { color: "#fff", margin: 0, fontSize: "24px" }, children: "Run History" }) }), _jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, minmax(110px, 1fr))", gap: "12px", marginBottom: "18px" }, children: [
+                    ["Total", counts.total, "#d4d4d8"],
+                    ["Running", counts.running, "#60a5fa"],
+                    ["Succeeded", counts.succeeded, "#4ade80"],
+                    ["Failed", counts.failed, "#f87171"],
+                ].map(([label, value, color]) => (_jsxs("div", { style: { background: "#111", border: "1px solid #222", borderRadius: "6px", padding: "14px" }, children: [_jsx("div", { style: { color: "#777", fontSize: "11px", marginBottom: "6px" }, children: label }), _jsx("div", { style: { color, fontSize: "22px", fontWeight: 600 }, children: value })] }, label))) }), _jsxs("div", { style: { display: "flex", gap: "10px", alignItems: "center", marginBottom: "14px" }, children: [_jsxs("select", { value: statusFilter, onChange: (event) => {
+                            setStatusFilter(event.target.value);
+                            setSelectedId(null);
+                        }, style: { background: "#111", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px" }, children: [_jsx("option", { value: "", children: "All statuses" }), _jsx("option", { value: "completed", children: "Succeeded" }), _jsx("option", { value: "running", children: "Running" }), _jsx("option", { value: "failed", children: "Failed" }), _jsx("option", { value: "queued", children: "Queued" })] }), _jsx("button", { onClick: () => void loadRuns(), style: { background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "8px 12px", cursor: "pointer" }, children: "Refresh" })] }), error && _jsx("div", { style: { color: "#f87171", background: "#1a0d0d", border: "1px solid #3a1618", borderRadius: "6px", padding: "10px", marginBottom: "14px" }, children: error }), _jsxs("div", { style: { display: "grid", gridTemplateColumns: "minmax(380px, 1.1fr) minmax(360px, 0.9fr)", gap: "16px", alignItems: "start" }, children: [_jsxs("div", { style: { border: "1px solid #222", borderRadius: "6px", overflow: "hidden", background: "#0d0d0d" }, children: [_jsxs("div", { style: { display: "grid", gridTemplateColumns: "1.5fr 0.8fr 0.8fr 0.7fr", gap: "10px", padding: "10px 12px", color: "#777", fontSize: "11px", borderBottom: "1px solid #222" }, children: [_jsx("div", { children: "Request" }), _jsx("div", { children: "Status" }), _jsx("div", { children: "Time" }), _jsx("div", { children: "Duration" })] }), loading ? (_jsx("div", { style: { padding: "32px", color: "#777", textAlign: "center" }, children: "Loading..." })) : runs.length === 0 ? (_jsx("div", { style: { padding: "32px", color: "#777", textAlign: "center" }, children: "No runs found." })) : (runs.map((run) => (_jsxs("button", { onClick: () => setSelectedId(run.id), style: {
+                                    width: "100%",
+                                    display: "grid",
+                                    gridTemplateColumns: "1.5fr 0.8fr 0.8fr 0.7fr",
+                                    gap: "10px",
+                                    alignItems: "center",
+                                    padding: "12px",
+                                    background: selectedId === run.id ? "#151515" : "transparent",
+                                    border: 0,
+                                    borderBottom: "1px solid #1f1f1f",
+                                    color: "#ddd",
+                                    textAlign: "left",
+                                    cursor: "pointer",
+                                }, children: [_jsxs("div", { style: { minWidth: 0 }, children: [_jsx("div", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "13px" }, children: run.intent }), _jsxs("div", { style: { color: "#666", fontSize: "11px", marginTop: "4px" }, children: [run.platform, " \u00B7 ", run.deviceName ?? run.shortDeviceId ?? "device", " \u00B7 ", run.requestKey ? "AI" : "manual"] })] }), _jsxs("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap" }, children: [_jsx(Badge, { value: run.status, palette: statusColors }), _jsx(Badge, { value: run.artifactState, palette: artifactColors })] }), _jsx("div", { style: { color: "#aaa", fontSize: "12px" }, children: formatDate(run.createdAt) }), _jsx("div", { style: { color: "#aaa", fontSize: "12px" }, children: duration(run) })] }, run.id))))] }), _jsx("div", { style: { border: "1px solid #222", borderRadius: "6px", background: "#0d0d0d", padding: "16px" }, children: detailLoading ? (_jsx("div", { style: { color: "#777", textAlign: "center", padding: "28px" }, children: "Loading timeline..." })) : selectedRun ? (_jsxs(_Fragment, { children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "12px", alignItems: "start", marginBottom: "14px" }, children: [_jsxs("div", { children: [_jsx("h2", { style: { color: "#fff", fontSize: "16px", margin: "0 0 6px" }, children: "Timeline" }), _jsx("div", { style: { color: "#777", fontSize: "12px" }, children: selectedRun.canonicalWorkflowId })] }), _jsx(Badge, { value: selectedRun.workflowStatus ?? selectedRun.status, palette: statusColors })] }), _jsx("div", { style: { display: "flex", flexDirection: "column", gap: "10px" }, children: (selectedRun.timeline ?? []).length === 0 ? (_jsx("div", { style: { color: "#777", padding: "18px", textAlign: "center" }, children: "No timeline available." })) : (selectedRun.timeline.map((step) => (_jsxs("div", { style: { display: "grid", gridTemplateColumns: "26px 1fr", gap: "10px" }, children: [_jsx("div", { style: { width: "24px", height: "24px", borderRadius: "50%", background: statusColors[step.status]?.bg ?? "#27272a", color: statusColors[step.status]?.color ?? "#d4d4d8", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px" }, children: step.index + 1 }), _jsxs("div", { style: { borderBottom: "1px solid #1f1f1f", paddingBottom: "10px" }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "10px" }, children: [_jsx("div", { style: { color: "#e5e7eb", fontSize: "13px" }, children: step.label }), _jsx(Badge, { value: step.status, palette: statusColors })] }), _jsx("div", { style: { color: "#666", fontSize: "11px", marginTop: "4px" }, children: step.id }), step.error && _jsx("div", { style: { color: "#f87171", fontSize: "12px", marginTop: "6px" }, children: step.error }), step.state && _jsx("div", { style: { color: "#fbbf24", fontSize: "11px", marginTop: "4px" }, children: step.state })] })] }, `${step.index}-${step.id}`)))) })] })) : (_jsx("div", { style: { color: "#777", textAlign: "center", padding: "28px" }, children: "Select a run." })) })] })] }));
+}

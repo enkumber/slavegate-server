@@ -54,7 +54,7 @@ function parsePagination(query: Record<string, unknown>): { page: number; pageSi
 
 function rowToAgencyWorkflowRun(row: Record<string, unknown>): Record<string, unknown> {
   const deviceId = row.device_id as string;
-  return {
+  const output: Record<string, unknown> = {
     id: row.id,
     clientId: row.client_id,
     accountId: row.account_id,
@@ -85,6 +85,93 @@ function rowToAgencyWorkflowRun(row: Record<string, unknown>): Record<string, un
     clientName: row.client_name ?? null,
     deviceName: row.device_name ?? null,
   };
+  if (row.include_timeline === true) {
+    output.artifactState = row.artifact_state ?? null;
+    output.workflowStatus = row.workflow_status ?? null;
+    output.timeline = buildAgencyWorkflowTimeline(row);
+  }
+  return output;
+}
+
+function normalizeJsonObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
+function normalizeJsonArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object" && !Array.isArray(entry))
+    : [];
+}
+
+function stepLabel(step: Record<string, unknown>, fallbackIndex: number): string {
+  const action = typeof step.action === "string" ? step.action : null;
+  const type = typeof step.type === "string" ? step.type : null;
+  const id = typeof step.id === "string" ? step.id : null;
+  return action ?? type ?? id ?? `Step ${fallbackIndex + 1}`;
+}
+
+function stepStatus(input: {
+  runStatus: string | null;
+  workflowStatus: string | null;
+  currentStep: number | null;
+  stepIndex: number;
+}): string {
+  const terminalStatus = input.workflowStatus ?? input.runStatus;
+  const completedCount = input.currentStep ?? 0;
+  if (terminalStatus === "completed") return "succeeded";
+  if (terminalStatus === "failed") {
+    if (input.stepIndex < Math.max(0, completedCount - 1)) return "succeeded";
+    if (input.stepIndex === Math.max(0, completedCount - 1)) return "failed";
+    return "pending";
+  }
+  if (terminalStatus === "running") {
+    if (input.stepIndex < Math.max(0, completedCount - 1)) return "succeeded";
+    if (input.stepIndex === Math.max(0, completedCount - 1)) return "running";
+    return "pending";
+  }
+  return input.stepIndex < completedCount ? "succeeded" : "pending";
+}
+
+function buildAgencyWorkflowTimeline(row: Record<string, unknown>): Record<string, unknown>[] {
+  const workflow = normalizeJsonObject(row.cached_workflow);
+  const compiledPlan = normalizeJsonObject(row.cached_compiled_plan);
+  const checkpoint = normalizeJsonObject(row.workflow_checkpoint);
+  const checkpointVariables = normalizeJsonObject(checkpoint.variables);
+  const steps = normalizeJsonArray(workflow.steps);
+  const planSteps = normalizeJsonArray(compiledPlan.steps);
+  const sourceSteps = steps.length > 0 ? steps : planSteps;
+  const totalSteps = typeof row.workflow_total_steps === "number"
+    ? row.workflow_total_steps
+    : typeof checkpoint.totalSteps === "number"
+      ? checkpoint.totalSteps
+      : sourceSteps.length;
+  const fallbackSteps: Record<string, unknown>[] = sourceSteps.length > 0
+    ? sourceSteps
+    : Array.from({ length: Math.max(0, totalSteps) }, (_, index) => ({ id: `step_${index + 1}` }));
+  const currentStep = typeof row.workflow_current_step === "number"
+    ? row.workflow_current_step
+    : typeof checkpoint.stepIndex === "number"
+      ? checkpoint.stepIndex
+      : null;
+  const runStatus = typeof row.status === "string" ? row.status : null;
+  const workflowStatus = typeof row.workflow_status === "string" ? row.workflow_status : null;
+  const workflowError = typeof row.workflow_error === "string" ? row.workflow_error : typeof row.error === "string" ? row.error : null;
+
+  return fallbackSteps.map((step, index) => {
+    const status = stepStatus({ runStatus, workflowStatus, currentStep, stepIndex: index });
+    return {
+      index,
+      id: typeof step.id === "string" ? step.id : `step_${index + 1}`,
+      label: stepLabel(step, index),
+      action: typeof step.action === "string" ? step.action : null,
+      type: typeof step.type === "string" ? step.type : null,
+      status,
+      durationMs: null,
+      error: status === "failed" ? workflowError : null,
+      state: status === "failed" ? checkpointVariables.screenState ?? checkpointVariables.currentScreen ?? null : null,
+    };
+  });
 }
 
 function cachedWorkflowLlmHappyPathRequests(cached: Record<string, unknown>): number | null {
@@ -120,12 +207,29 @@ function agencyWorkflowRunSelectSql(where: string): string {
                  a.username AS account_username,
                  a.platform AS account_platform,
                  c.name AS client_name,
-                 d.friendly_name AS device_name
+                 d.friendly_name AS device_name,
+                 w.status AS workflow_status,
+                 w.current_step AS workflow_current_step,
+                 w.total_steps AS workflow_total_steps,
+                 w.checkpoint AS workflow_checkpoint,
+                 w.error AS workflow_error,
+                 g.artifact_state,
+                 g.workflow AS cached_workflow,
+                 g.compiled_plan AS cached_compiled_plan
           FROM agency_workflow_runs r
           LEFT JOIN tasks t ON t.id = r.task_id
+          LEFT JOIN workflows w ON w.id = r.workflow_id
           LEFT JOIN accounts a ON a.id = r.account_id
           LEFT JOIN clients c ON c.id = r.client_id
           LEFT JOIN devices d ON d.id = r.device_id
+          LEFT JOIN LATERAL (
+            SELECT artifact_state, workflow, compiled_plan
+            FROM generated_workflow_plan_cache cache
+            WHERE (r.request_key IS NOT NULL AND cache.request_key = r.request_key)
+               OR (r.cache_key IS NOT NULL AND cache.cache_key = r.cache_key)
+            ORDER BY cache.updated_at DESC
+            LIMIT 1
+          ) g ON TRUE
           ${where ? `WHERE ${where.replace(/^WHERE\s+/i, "")}` : ""}`;
 }
 
@@ -1094,7 +1198,7 @@ router.get("/workflow-runs/:id", async (req: Request, res: Response) => {
   if (result.rows.length === 0) {
     return res.status(404).json({ ok: false, error: "Workflow run not found" });
   }
-  res.json({ ok: true, data: rowToAgencyWorkflowRun(result.rows[0]) });
+  res.json({ ok: true, data: rowToAgencyWorkflowRun({ ...result.rows[0], include_timeline: true }) });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

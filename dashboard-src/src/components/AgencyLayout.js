@@ -6,6 +6,7 @@ const navItems = [
     { path: "#/agency/materials", label: "Materials", icon: "📁" },
     { path: "#/agency/posts", label: "Posts", icon: "📝" },
     { path: "#/agency/tasks", label: "Tasks", icon: "⚡" },
+    { path: "#/agency/runs", label: "Run History", icon: "⏱" },
     { path: "#/agency/reports", label: "Reports", icon: "📊" },
 ];
 export function AgencyLayout({ children, currentRoute }) {

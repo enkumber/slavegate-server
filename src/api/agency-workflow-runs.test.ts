@@ -455,7 +455,22 @@ describe("agency workflow runs API", () => {
   });
 
   it("returns a workflow run by id with task and operator context", async () => {
-    const run = hydratedRun();
+    const run = hydratedRun({
+      status: "failed",
+      workflow_status: "failed",
+      workflow_current_step: 2,
+      workflow_total_steps: 3,
+      workflow_error: "RECOVERY_BUDGET_EXCEEDED",
+      workflow_checkpoint: { variables: { screenState: "gmail_login_wall" } },
+      artifact_state: "candidate",
+      cached_workflow: {
+        steps: [
+          { id: "open_gmail", action: "open_app" },
+          { id: "tap_create_account", action: "semantic_tap" },
+          { id: "fill_form", action: "type_text" },
+        ],
+      },
+    });
     mocks.db.query.mockResolvedValueOnce({ rows: [run] });
 
     const response = await getWorkflowRun(`/api/agency/workflow-runs/${run.id}`);
@@ -472,9 +487,48 @@ describe("agency workflow runs API", () => {
       accountUsername: "acct",
       clientName: "Client",
       deviceName: "Pixel",
+      artifactState: "candidate",
+      workflowStatus: "failed",
     });
+    expect(response.body.data.timeline).toEqual([
+      {
+        index: 0,
+        id: "open_gmail",
+        label: "open_app",
+        action: "open_app",
+        type: null,
+        status: "succeeded",
+        durationMs: null,
+        error: null,
+        state: null,
+      },
+      {
+        index: 1,
+        id: "tap_create_account",
+        label: "semantic_tap",
+        action: "semantic_tap",
+        type: null,
+        status: "failed",
+        durationMs: null,
+        error: "RECOVERY_BUDGET_EXCEEDED",
+        state: "gmail_login_wall",
+      },
+      {
+        index: 2,
+        id: "fill_form",
+        label: "type_text",
+        action: "type_text",
+        type: null,
+        status: "pending",
+        durationMs: null,
+        error: null,
+        state: null,
+      },
+    ]);
     expect(mocks.db.query.mock.calls[0][0]).toContain("FROM agency_workflow_runs r");
     expect(mocks.db.query.mock.calls[0][0]).toContain("r.id = $1");
+    expect(mocks.db.query.mock.calls[0][0]).toContain("LEFT JOIN workflows w");
+    expect(mocks.db.query.mock.calls[0][0]).toContain("LEFT JOIN LATERAL");
     expect(mocks.db.query.mock.calls[0][1]).toEqual([run.id]);
   });
 });

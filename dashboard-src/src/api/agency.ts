@@ -192,6 +192,53 @@ export interface AgencyWorkflowRun {
   completed_at: string | null;
 }
 
+export interface WorkflowRunTimelineStep {
+  index: number;
+  id: string;
+  label: string;
+  action: string | null;
+  type: string | null;
+  status: "succeeded" | "running" | "failed" | "pending" | string;
+  durationMs: number | null;
+  error: string | null;
+  state: string | null;
+}
+
+export interface WorkflowRun {
+  id: string;
+  clientId: string | null;
+  accountId: string | null;
+  deviceId: string | null;
+  shortDeviceId: string | null;
+  taskId: string | null;
+  workflowId: string | null;
+  platform: string;
+  intent: string;
+  safetyClass: string;
+  requestKey: string | null;
+  cacheKey: string | null;
+  canonicalWorkflowId: string;
+  canonicalWorkflowVersion: string;
+  compiledPlanHash: string;
+  status: string;
+  artifactState?: string | null;
+  workflowStatus?: string | null;
+  output: Record<string, unknown>;
+  tokenUsage: Record<string, unknown>;
+  recoveryRequests: number;
+  error: string | null;
+  context: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  accountUsername: string | null;
+  accountPlatform: string | null;
+  clientName: string | null;
+  deviceName: string | null;
+  timeline?: WorkflowRunTimelineStep[];
+}
+
 // ─── API ──────────────────────────────────────────────────────────────────────
 
 export const agencyApi = {
@@ -212,6 +259,20 @@ export const agencyApi = {
       });
     },
     getRun: (id: string) => api.get<AgencyWorkflowRun>(`/agency/workflow-runs/${id}`),
+  },
+
+  workflowRuns: {
+    list: (params?: { page?: number; pageSize?: number; status?: string; requestKey?: string; cacheKey?: string; deviceId?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.pageSize) query.set("pageSize", String(params.pageSize));
+      if (params?.status) query.set("status", params.status);
+      if (params?.requestKey) query.set("requestKey", params.requestKey);
+      if (params?.cacheKey) query.set("cacheKey", params.cacheKey);
+      if (params?.deviceId) query.set("deviceId", params.deviceId);
+      return api.get<PaginatedResponse<WorkflowRun>>(`/agency/workflow-runs?${query}`);
+    },
+    get: (id: string) => api.get<WorkflowRun>(`/agency/workflow-runs/${id}`),
   },
 
   // Clients

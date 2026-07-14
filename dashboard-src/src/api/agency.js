@@ -21,6 +21,25 @@ export const agencyApi = {
         },
         getRun: (id) => api.get(`/agency/workflow-runs/${id}`),
     },
+    workflowRuns: {
+        list: (params) => {
+            const query = new URLSearchParams();
+            if (params?.page)
+                query.set("page", String(params.page));
+            if (params?.pageSize)
+                query.set("pageSize", String(params.pageSize));
+            if (params?.status)
+                query.set("status", params.status);
+            if (params?.requestKey)
+                query.set("requestKey", params.requestKey);
+            if (params?.cacheKey)
+                query.set("cacheKey", params.cacheKey);
+            if (params?.deviceId)
+                query.set("deviceId", params.deviceId);
+            return api.get(`/agency/workflow-runs?${query}`);
+        },
+        get: (id) => api.get(`/agency/workflow-runs/${id}`),
+    },
     // Clients
     clients: {
         list: (params) => {
