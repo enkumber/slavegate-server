@@ -255,6 +255,7 @@ export interface StepLibraryEntry {
   status: "validated_step" | string;
   libraryState: "review_only" | string;
   reuseScope: string;
+  promotionScope: string | null;
   reusable: boolean;
   compilerEligible: boolean;
   confidence: number | null;
@@ -278,6 +279,11 @@ export interface StepLibraryEntry {
   deviceName: string | null;
   validatedBy: string | null;
   validatedAt: string | null;
+  promotionNote: string | null;
+  promotedBy: string | null;
+  promotedAt: string | null;
+  revokedBy: string | null;
+  revokedAt: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -394,6 +400,10 @@ export const agencyApi = {
       if (params?.intent) query.set("intent", params.intent);
       return api.get<PaginatedResponse<StepLibraryEntry>>(`/agency/step-library?${query}`);
     },
+    updatePromotion: (
+      id: string,
+      data: { action: "promote_limited" | "revoke"; scope?: string | null; note?: string | null }
+    ) => api.patch<StepLibraryEntry>(`/agency/step-library/${id}/promotion`, data),
   },
 
   // Clients

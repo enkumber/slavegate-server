@@ -66,6 +66,7 @@ export const agencyApi = {
                 query.set("intent", params.intent);
             return api.get(`/agency/step-library?${query}`);
         },
+        updatePromotion: (id, data) => api.patch(`/agency/step-library/${id}/promotion`, data),
     },
     // Clients
     clients: {

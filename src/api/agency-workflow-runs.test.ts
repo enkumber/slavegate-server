@@ -867,12 +867,12 @@ describe("agency workflow runs API", () => {
       reuseScope: "phase_3c_live_smoke",
       reusable: false,
       compilerEligible: false,
-      confidence: 1,
+      confidence: 0.9,
       readiness: {
         state: "review_ready",
-        score: 1,
+        score: 0.9,
         threshold: 0.9,
-        blockers: ["compiler_auto_use_disabled"],
+        blockers: ["limited_reuse_not_promoted", "compiler_auto_use_disabled"],
         gates: {
           validatedStep: true,
           preconditionsPresent: true,
@@ -882,6 +882,7 @@ describe("agency workflow runs API", () => {
           successfulSourceStep: true,
           successfulSourceRun: true,
           scopedReuse: true,
+          limitedReusePromoted: false,
           compilerAutoUseEnabled: false,
         },
       },
@@ -896,6 +897,178 @@ describe("agency workflow runs API", () => {
     });
     expect(mocks.db.query.mock.calls[0][0]).toContain("c.candidate_state = 'validated_step'");
     expect(mocks.db.query.mock.calls[0][0]).not.toContain("step_candidate'");
+  });
+
+  it("promotes a review-ready Step Library entry for limited reuse only", async () => {
+    const validated = {
+      id: "55555555-5555-4555-8555-555555555555",
+      run_id: "33333333-3333-4333-8333-333333333333",
+      step_index: 1,
+      step_id: "unlock",
+      label: "unlock",
+      action: "unlock",
+      type: null,
+      step_status: "succeeded",
+      candidate_state: "validated_step",
+      request_key: "c02c59dfbe512562f8c65c97",
+      cache_key: null,
+      canonical_workflow_id: "agent_generated_reddit_account_health_scan_v1",
+      canonical_workflow_version: "1.0.0",
+      last_good_step_index: 1,
+      step_snapshot: { index: 1 },
+      evidence: { source: "dashboard_partial_feedback" },
+      note: "second step looked good",
+      review_note: "contract ok",
+      reviewed_by: "dashboard",
+      reviewed_at: new Date("2026-05-22T10:08:00.000Z"),
+      validation_contract: {
+        scope: "phase_3c_live_smoke",
+        preconditions: ["screen is awake"],
+        postconditions: ["device is unlocked"],
+        compatibility: { serverVersion: "3.9.113" },
+      },
+      validation_evidence: { source: "dashboard_manual_validation" },
+      validated_by: "dashboard",
+      validated_at: new Date("2026-05-22T10:08:00.000Z"),
+      library_state: "review_only",
+      promotion_scope: null,
+      promotion_note: null,
+      promoted_by: null,
+      promoted_at: null,
+      revoked_by: null,
+      revoked_at: null,
+      run_status: "completed",
+      run_intent: "reddit_account_health_scan",
+      device_name: "Pixel",
+      created_at: new Date("2026-05-22T10:06:00.000Z"),
+      updated_at: new Date("2026-05-22T10:08:00.000Z"),
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [validated] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...validated,
+          library_state: "limited_reuse",
+          promotion_scope: "device:11111111-1111-4111-8111-111111111111",
+          promotion_note: "safe for this device only",
+          promoted_by: "dashboard",
+          promoted_at: new Date("2026-05-22T10:10:00.000Z"),
+        }],
+      });
+
+    const response = await patchAgency(
+      `/api/agency/step-library/${validated.id}/promotion`,
+      {
+        action: "promote_limited",
+        scope: "device:11111111-1111-4111-8111-111111111111",
+        note: "safe for this device only",
+      }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      id: validated.id,
+      libraryState: "limited_reuse",
+      promotionScope: "device:11111111-1111-4111-8111-111111111111",
+      reusable: true,
+      compilerEligible: false,
+      readiness: {
+        state: "limited_reuse_ready",
+        score: 1,
+        blockers: ["compiler_auto_use_disabled"],
+        gates: {
+          limitedReusePromoted: true,
+          compilerAutoUseEnabled: false,
+        },
+      },
+    });
+    expect(mocks.db.query.mock.calls[1][0]).toContain("library_state = 'limited_reuse'");
+    expect(mocks.db.query.mock.calls[1][0]).not.toContain("compiler");
+  });
+
+  it("does not allow global Step Library promotion scope", async () => {
+    const response = await patchAgency(
+      "/api/agency/step-library/55555555-5555-4555-8555-555555555555/promotion",
+      { action: "promote_limited", scope: "global" }
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("STEP_LIBRARY_GLOBAL_SCOPE_DISABLED");
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
+
+  it("revokes limited Step Library reuse without demoting validation", async () => {
+    const validated = {
+      id: "55555555-5555-4555-8555-555555555555",
+      run_id: "33333333-3333-4333-8333-333333333333",
+      step_index: 1,
+      step_id: "unlock",
+      label: "unlock",
+      action: "unlock",
+      type: null,
+      step_status: "succeeded",
+      candidate_state: "validated_step",
+      request_key: "c02c59dfbe512562f8c65c97",
+      cache_key: null,
+      canonical_workflow_id: "agent_generated_reddit_account_health_scan_v1",
+      canonical_workflow_version: "1.0.0",
+      last_good_step_index: 1,
+      step_snapshot: { index: 1 },
+      evidence: { source: "dashboard_partial_feedback" },
+      note: null,
+      review_note: null,
+      reviewed_by: "dashboard",
+      reviewed_at: new Date("2026-05-22T10:08:00.000Z"),
+      validation_contract: {
+        scope: "phase_3c_live_smoke",
+        preconditions: ["screen is awake"],
+        postconditions: ["device is unlocked"],
+        compatibility: { serverVersion: "3.9.113" },
+      },
+      validation_evidence: { source: "dashboard_manual_validation" },
+      validated_by: "dashboard",
+      validated_at: new Date("2026-05-22T10:08:00.000Z"),
+      library_state: "limited_reuse",
+      promotion_scope: "device:11111111-1111-4111-8111-111111111111",
+      promotion_note: "safe for this device only",
+      promoted_by: "dashboard",
+      promoted_at: new Date("2026-05-22T10:10:00.000Z"),
+      revoked_by: null,
+      revoked_at: null,
+      run_status: "completed",
+      run_intent: "reddit_account_health_scan",
+      device_name: "Pixel",
+      created_at: new Date("2026-05-22T10:06:00.000Z"),
+      updated_at: new Date("2026-05-22T10:10:00.000Z"),
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [validated] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...validated,
+          library_state: "revoked",
+          promotion_note: "scope no longer trusted",
+          revoked_by: "dashboard",
+          revoked_at: new Date("2026-05-22T10:12:00.000Z"),
+        }],
+      });
+
+    const response = await patchAgency(
+      `/api/agency/step-library/${validated.id}/promotion`,
+      { action: "revoke", note: "scope no longer trusted" }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      id: validated.id,
+      status: "validated_step",
+      libraryState: "revoked",
+      reusable: false,
+      compilerEligible: false,
+      revokedBy: "dashboard",
+    });
+    expect(mocks.db.query.mock.calls[1][0]).toContain("library_state = 'revoked'");
+    expect(mocks.db.query.mock.calls[1][0]).not.toContain("candidate_state =");
   });
 
   it("rejects a step candidate without promoting it", async () => {

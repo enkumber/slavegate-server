@@ -130,6 +130,13 @@ function rowToStepCandidate(row: Record<string, unknown>): Record<string, unknow
     validationEvidence: row.validation_evidence ?? {},
     validatedBy: row.validated_by ?? null,
     validatedAt: row.validated_at instanceof Date ? row.validated_at.toISOString() : row.validated_at ?? null,
+    libraryState: row.library_state ?? "review_only",
+    promotionScope: row.promotion_scope ?? null,
+    promotionNote: row.promotion_note ?? null,
+    promotedBy: row.promoted_by ?? null,
+    promotedAt: row.promoted_at instanceof Date ? row.promoted_at.toISOString() : row.promoted_at ?? null,
+    revokedBy: row.revoked_by ?? null,
+    revokedAt: row.revoked_at instanceof Date ? row.revoked_at.toISOString() : row.revoked_at ?? null,
     runStatus: row.run_status ?? null,
     runIntent: row.run_intent ?? null,
     deviceName: row.device_name ?? null,
@@ -141,13 +148,19 @@ function rowToStepCandidate(row: Record<string, unknown>): Record<string, unknow
 function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unknown> {
   const candidate = rowToStepCandidate(row);
   const contract = normalizeJsonObject(row.validation_contract);
-  const scope = typeof contract.scope === "string" && contract.scope.trim().length > 0
+  const contractScope = typeof contract.scope === "string" && contract.scope.trim().length > 0
     ? contract.scope.trim()
     : "manual_review";
+  const promotionScope = typeof row.promotion_scope === "string" && row.promotion_scope.trim().length > 0
+    ? row.promotion_scope.trim()
+    : null;
+  const libraryState = typeof row.library_state === "string" ? row.library_state : "review_only";
+  const effectiveScope = promotionScope ?? contractScope;
   const preconditions = nonEmptyStringArray(contract.preconditions);
   const postconditions = nonEmptyStringArray(contract.postconditions);
   const compatibility = normalizeJsonObject(contract.compatibility);
   const evidence = normalizeJsonObject(row.validation_evidence);
+  const limitedReuse = libraryState === "limited_reuse" && !!promotionScope;
   const gates = {
     validatedStep: row.candidate_state === "validated_step",
     contractPresent: Object.keys(contract).length > 0,
@@ -157,7 +170,8 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
     compatibilityDeclared: Object.keys(compatibility).length > 0,
     successfulSourceStep: row.step_status === "succeeded",
     successfulSourceRun: row.run_status === "completed",
-    scopedReuse: scope !== "manual_review",
+    scopedReuse: contractScope !== "manual_review",
+    limitedReusePromoted: limitedReuse,
     compilerAutoUseEnabled: false,
   };
   const blockers: string[] = [];
@@ -168,6 +182,8 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
   if (!gates.successfulSourceStep) blockers.push("source_step_not_succeeded");
   if (!gates.successfulSourceRun) blockers.push("source_run_not_completed");
   if (!gates.scopedReuse) blockers.push("reuse_scope_not_explicit");
+  if (!gates.limitedReusePromoted) blockers.push("limited_reuse_not_promoted");
+  if (libraryState === "revoked") blockers.push("limited_reuse_revoked");
   blockers.push("compiler_auto_use_disabled");
 
   const readyGateCount = [
@@ -180,10 +196,13 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
     gates.successfulSourceStep,
     gates.successfulSourceRun,
     gates.scopedReuse,
+    gates.limitedReusePromoted,
   ].filter(Boolean).length;
-  const readinessScore = Math.round((readyGateCount / 9) * 100) / 100;
+  const readinessScore = Math.round((readyGateCount / 10) * 100) / 100;
   const readinessState = blockers.length === 1 && blockers[0] === "compiler_auto_use_disabled"
-    ? "review_ready"
+    ? "limited_reuse_ready"
+    : blockers.length === 2 && blockers.includes("limited_reuse_not_promoted") && blockers.includes("compiler_auto_use_disabled")
+      ? "review_ready"
     : "needs_review";
   return {
     id: row.id,
@@ -192,9 +211,10 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
     action: row.action ?? null,
     type: row.type ?? null,
     status: "validated_step",
-    libraryState: "review_only",
-    reuseScope: scope,
-    reusable: false,
+    libraryState,
+    reuseScope: effectiveScope,
+    promotionScope,
+    reusable: limitedReuse,
     compilerEligible: false,
     confidence: readinessScore,
     readiness: {
@@ -204,8 +224,10 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
       gates,
       blockers,
       notes: [
-        "Step Library is read-only in this phase.",
-        "Compiler auto-use remains disabled until a later explicit promotion flow.",
+        limitedReuse
+          ? "Step is promoted for limited-scope reuse only."
+          : "Step is validated but still waiting for explicit limited-scope promotion.",
+        "Compiler auto-use remains disabled until a later explicit compiler policy.",
       ],
     },
     contract,
@@ -220,6 +242,11 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
     deviceName: row.device_name ?? null,
     validatedBy: row.validated_by ?? null,
     validatedAt: row.validated_at instanceof Date ? row.validated_at.toISOString() : row.validated_at ?? null,
+    promotionNote: row.promotion_note ?? null,
+    promotedBy: row.promoted_by ?? null,
+    promotedAt: row.promoted_at instanceof Date ? row.promoted_at.toISOString() : row.promoted_at ?? null,
+    revokedBy: row.revoked_by ?? null,
+    revokedAt: row.revoked_at instanceof Date ? row.revoked_at.toISOString() : row.revoked_at ?? null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at ?? null,
   };
@@ -322,6 +349,44 @@ function parseStepCandidateValidation(input: unknown): {
       postconditions,
     },
     evidence,
+    note: note.length > 0 ? note : null,
+  };
+}
+
+type StepLibraryPromotionAction = "promote_limited" | "revoke";
+
+function parseStepLibraryPromotion(input: unknown): {
+  action: StepLibraryPromotionAction;
+  scope: string | null;
+  note: string | null;
+} | { error: string; code: string } {
+  const body = normalizeJsonObject(input);
+  const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
+  if (!["promote_limited", "revoke"].includes(action)) {
+    return { error: "action must be one of promote_limited, revoke", code: "INVALID_STEP_LIBRARY_PROMOTION_ACTION" };
+  }
+
+  const rawScope = typeof body.scope === "string" ? body.scope.trim() : "";
+  if (action === "promote_limited") {
+    if (!rawScope) {
+      return { error: "scope is required for limited promotion", code: "STEP_LIBRARY_PROMOTION_SCOPE_REQUIRED" };
+    }
+    if (rawScope.length > 120) {
+      return { error: "scope must be 120 characters or fewer", code: "STEP_LIBRARY_PROMOTION_SCOPE_TOO_LONG" };
+    }
+    if (["global", "all", "compiler", "auto"].includes(rawScope.toLowerCase())) {
+      return { error: "global or compiler scope is not allowed in this phase", code: "STEP_LIBRARY_GLOBAL_SCOPE_DISABLED" };
+    }
+  }
+
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note.length > 1000) {
+    return { error: "note must be 1000 characters or fewer", code: "STEP_LIBRARY_PROMOTION_NOTE_TOO_LONG" };
+  }
+
+  return {
+    action: action as StepLibraryPromotionAction,
+    scope: action === "promote_limited" ? rawScope : null,
     note: note.length > 0 ? note : null,
   };
 }
@@ -1437,6 +1502,96 @@ router.get("/step-library", requireAdminAuth, async (req: Request, res: Response
       pageSize,
     },
   });
+});
+
+router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Request, res: Response) => {
+  const parsed = parseStepLibraryPromotion(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
+  }
+
+  const db = getDb();
+  const existing = await db.query(
+    `SELECT c.*,
+            r.status AS run_status,
+            r.intent AS run_intent,
+            d.friendly_name AS device_name
+     FROM agency_workflow_step_candidates c
+     LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
+     LEFT JOIN devices d ON d.id = r.device_id
+     WHERE c.id = $1`,
+    [req.params.id]
+  );
+  if (existing.rows.length === 0) {
+    return res.status(404).json({ ok: false, error: "Step Library entry not found", code: "STEP_LIBRARY_ENTRY_NOT_FOUND" });
+  }
+  if (existing.rows[0].candidate_state !== "validated_step") {
+    return res.status(409).json({
+      ok: false,
+      error: "Only validated_step entries can be promoted in Step Library",
+      code: "STEP_LIBRARY_ENTRY_NOT_VALIDATED",
+    });
+  }
+
+  if (parsed.action === "promote_limited") {
+    const entry = rowToStepLibraryEntry(existing.rows[0]) as Record<string, any>;
+    const readiness = normalizeJsonObject(entry.readiness);
+    const readinessScore = typeof readiness.score === "number" ? readiness.score : 0;
+    const readinessThreshold = typeof readiness.threshold === "number" ? readiness.threshold : 0.9;
+    const blockers = Array.isArray(readiness.blockers) ? readiness.blockers : [];
+    const allowedBlockers = new Set(["limited_reuse_not_promoted", "compiler_auto_use_disabled"]);
+    const hasUnexpectedBlocker = blockers.some((blocker) => typeof blocker !== "string" || !allowedBlockers.has(blocker));
+    if (readinessScore < readinessThreshold || hasUnexpectedBlocker) {
+      return res.status(409).json({
+        ok: false,
+        error: "Step Library entry is not ready for limited-scope promotion",
+        code: "STEP_LIBRARY_ENTRY_NOT_READY",
+        data: { readiness },
+      });
+    }
+  }
+
+  const updateSql = parsed.action === "promote_limited"
+    ? `WITH updated AS (
+         UPDATE agency_workflow_step_candidates
+         SET library_state = 'limited_reuse',
+             promotion_scope = $2,
+             promotion_note = $3,
+             promoted_by = 'dashboard',
+             promoted_at = NOW(),
+             revoked_by = NULL,
+             revoked_at = NULL,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *
+       )
+       SELECT updated.*,
+              r.status AS run_status,
+              r.intent AS run_intent,
+              d.friendly_name AS device_name
+       FROM updated
+       LEFT JOIN agency_workflow_runs r ON r.id = updated.run_id
+       LEFT JOIN devices d ON d.id = r.device_id`
+    : `WITH updated AS (
+         UPDATE agency_workflow_step_candidates
+         SET library_state = 'revoked',
+             promotion_note = $3,
+             revoked_by = 'dashboard',
+             revoked_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *
+       )
+       SELECT updated.*,
+              r.status AS run_status,
+              r.intent AS run_intent,
+              d.friendly_name AS device_name
+       FROM updated
+       LEFT JOIN agency_workflow_runs r ON r.id = updated.run_id
+       LEFT JOIN devices d ON d.id = r.device_id`;
+
+  const updated = await db.query(updateSql, [req.params.id, parsed.scope, parsed.note]);
+  return res.json({ ok: true, data: rowToStepLibraryEntry(updated.rows[0]) });
 });
 
 router.patch("/workflow-step-candidates/:id/review", requireAdminAuth, async (req: Request, res: Response) => {

@@ -39,6 +39,9 @@ export function StepLibraryPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [actionFilter, setActionFilter] = useState("");
   const [intentFilter, setIntentFilter] = useState("");
+  const [promotionScope, setPromotionScope] = useState("");
+  const [promotionNote, setPromotionNote] = useState("");
+  const [promotionBusy, setPromotionBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -69,9 +72,60 @@ export function StepLibraryPage() {
     void loadEntries();
   }, [loadEntries]);
 
+  useEffect(() => {
+    setPromotionScope(selected?.promotionScope ?? selected?.reuseScope ?? "");
+    setPromotionNote(selected?.promotionNote ?? "");
+  }, [selected?.id]);
+
+  const updateSelectedEntry = (updated: StepLibraryEntry) => {
+    setEntries((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
+    setSelectedId(updated.id);
+  };
+
+  const promoteLimited = async () => {
+    if (!selected || promotionBusy) return;
+    const scope = promotionScope.trim();
+    if (!scope) {
+      setError("Promotion scope is required.");
+      return;
+    }
+    setPromotionBusy(true);
+    setError(null);
+    try {
+      const updated = await agencyApi.stepLibrary.updatePromotion(selected.id, {
+        action: "promote_limited",
+        scope,
+        note: promotionNote.trim() || null,
+      });
+      updateSelectedEntry(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to promote Step Library entry");
+    } finally {
+      setPromotionBusy(false);
+    }
+  };
+
+  const revokeLimited = async () => {
+    if (!selected || promotionBusy) return;
+    setPromotionBusy(true);
+    setError(null);
+    try {
+      const updated = await agencyApi.stepLibrary.updatePromotion(selected.id, {
+        action: "revoke",
+        note: promotionNote.trim() || null,
+      });
+      updateSelectedEntry(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to revoke Step Library entry");
+    } finally {
+      setPromotionBusy(false);
+    }
+  };
+
   const validatedCount = entries.filter((entry) => entry.status === "validated_step").length;
   const compilerEligibleCount = entries.filter((entry) => entry.compilerEligible).length;
   const reviewReadyCount = entries.filter((entry) => entry.readiness?.state === "review_ready").length;
+  const limitedReuseCount = entries.filter((entry) => entry.libraryState === "limited_reuse").length;
 
   return (
     <AgencyLayout currentRoute="#/agency/step-library">
@@ -82,7 +136,7 @@ export function StepLibraryPage() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(130px, 1fr))", gap: "12px", marginBottom: "18px" }}>
         {([
           ["Validated", validatedCount, "#4ade80"],
-          ["Review-only", entries.filter((entry) => entry.libraryState === "review_only").length, "#fbbf24"],
+          ["Limited reuse", limitedReuseCount, limitedReuseCount === 0 ? "#a1a1aa" : "#4ade80"],
           ["Review ready", reviewReadyCount, reviewReadyCount === 0 ? "#a1a1aa" : "#60a5fa"],
           ["Compiler eligible", compilerEligibleCount, compilerEligibleCount === 0 ? "#a1a1aa" : "#60a5fa"],
         ] as Array<[string, number, string]>).map(([label, value, color]) => (
@@ -157,7 +211,10 @@ export function StepLibraryPage() {
                 </div>
                 <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
                   <Badge label="Validated" tone="green" />
-                  <Badge label={entry.compilerEligible ? "Compiler" : "Review-only"} tone={entry.compilerEligible ? "green" : "yellow"} />
+                  <Badge
+                    label={entry.libraryState === "limited_reuse" ? "Limited" : entry.compilerEligible ? "Compiler" : "Review-only"}
+                    tone={entry.libraryState === "limited_reuse" || entry.compilerEligible ? "green" : "yellow"}
+                  />
                 </div>
                 <div style={{ color: entry.readiness?.state === "review_ready" ? "#60a5fa" : "#fbbf24", fontSize: "12px" }}>
                   {formatPercent(entry.readiness?.score ?? entry.confidence)}
@@ -179,7 +236,10 @@ export function StepLibraryPage() {
                 </div>
                 <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end" }}>
                   <Badge label={selected.libraryState === "review_only" ? "Review-only" : selected.libraryState} tone="yellow" />
-                  <Badge label={selected.readiness?.state === "review_ready" ? "Review ready" : "Needs review"} tone={selected.readiness?.state === "review_ready" ? "green" : "yellow"} />
+                  <Badge
+                    label={selected.readiness?.state === "limited_reuse_ready" ? "Limited ready" : selected.readiness?.state === "review_ready" ? "Review ready" : "Needs review"}
+                    tone={selected.readiness?.state === "needs_review" ? "yellow" : "green"}
+                  />
                   <Badge label={selected.reusable ? "Reusable" : "Not reusable"} tone={selected.reusable ? "green" : "gray"} />
                   <Badge label={selected.compilerEligible ? "Compiler eligible" : "Compiler disabled"} tone={selected.compilerEligible ? "green" : "gray"} />
                 </div>
@@ -194,6 +254,7 @@ export function StepLibraryPage() {
                   ["Device", selected.deviceName ?? "-"],
                   ["Run intent", selected.runIntent ?? "-"],
                   ["Validated by", selected.validatedBy ?? "-"],
+                  ["Promoted by", selected.promotedBy ?? "-"],
                 ].map(([label, value]) => (
                   <div key={label} style={{ background: "#101010", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
                     <div style={{ color: "#777", fontSize: "11px", marginBottom: "5px" }}>{label}</div>
@@ -214,6 +275,42 @@ export function StepLibraryPage() {
                 </div>
                 <div style={{ color: "#aaa", fontSize: "12px" }}>
                   Blockers: {(selected.readiness?.blockers ?? []).join(", ") || "-"}
+                </div>
+              </div>
+
+              <div style={{ border: "1px solid #222", borderRadius: "6px", padding: "12px", marginBottom: "12px", background: "#101010" }}>
+                <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600, marginBottom: "8px" }}>Promotion Controls</div>
+                <div style={{ color: "#aaa", fontSize: "12px", marginBottom: "10px" }}>
+                  Limited reuse stays manual and scope-bound. Compiler auto-use remains disabled.
+                </div>
+                <input
+                  value={promotionScope}
+                  onChange={(event) => setPromotionScope(event.target.value)}
+                  placeholder="scope, e.g. device:..."
+                  style={{ width: "100%", boxSizing: "border-box", background: "#111", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", marginBottom: "8px" }}
+                />
+                <textarea
+                  value={promotionNote}
+                  onChange={(event) => setPromotionNote(event.target.value)}
+                  placeholder="review note"
+                  rows={2}
+                  style={{ width: "100%", boxSizing: "border-box", background: "#111", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", marginBottom: "10px", resize: "vertical" }}
+                />
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <button
+                    onClick={() => void promoteLimited()}
+                    disabled={promotionBusy || selected.libraryState === "limited_reuse"}
+                    style={{ background: selected.libraryState === "limited_reuse" ? "#1f1f1f" : "#166534", border: "1px solid #15803d", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.libraryState === "limited_reuse" ? "not-allowed" : "pointer" }}
+                  >
+                    Promote limited
+                  </button>
+                  <button
+                    onClick={() => void revokeLimited()}
+                    disabled={promotionBusy || selected.libraryState === "revoked"}
+                    style={{ background: selected.libraryState === "revoked" ? "#1f1f1f" : "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.libraryState === "revoked" ? "not-allowed" : "pointer" }}
+                  >
+                    Revoke
+                  </button>
                 </div>
               </div>
 
