@@ -346,6 +346,41 @@ export interface ToolCatalogResponse {
   };
 }
 
+export interface CompilerKnowledgeEntry {
+  id: string;
+  title: string;
+  type: string;
+  domain: string;
+  appliesTo: string[];
+  summary: string;
+  guidance: string[];
+  risk: "low" | "medium" | "high" | string;
+  source: string;
+  status: string;
+  policy: {
+    readOnly: true;
+    compilerVisible: false;
+    autoUseEnabled: false;
+    executionChanging: false;
+  };
+  evidence: {
+    required: string[];
+    examples: string[];
+  };
+  notes: string[];
+}
+
+export interface CompilerKnowledgeResponse {
+  items: CompilerKnowledgeEntry[];
+  total: number;
+  policy: {
+    compilerVisible: false;
+    autoUseEnabled: false;
+    executionChanging: false;
+    mode: string;
+  };
+}
+
 export interface WorkflowRun {
   id: string;
   clientId: string | null;
@@ -481,6 +516,17 @@ export const agencyApi = {
       if (params?.risk) query.set("risk", params.risk);
       if (params?.source) query.set("source", params.source);
       return api.get<ToolCatalogResponse>(`/agency/tool-catalog?${query}`);
+    },
+  },
+
+  compilerKnowledge: {
+    list: (params?: { type?: string; domain?: string; risk?: string; source?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.type) query.set("type", params.type);
+      if (params?.domain) query.set("domain", params.domain);
+      if (params?.risk) query.set("risk", params.risk);
+      if (params?.source) query.set("source", params.source);
+      return api.get<CompilerKnowledgeResponse>(`/agency/compiler-knowledge?${query}`);
     },
   },
 

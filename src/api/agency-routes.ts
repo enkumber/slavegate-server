@@ -11,6 +11,7 @@ import path from "path";
 import fs from "fs/promises";
 import { workflowEvents } from "../modules/workflow-events";
 import { listToolCatalog } from "../modules/tool-catalog/tool-catalog";
+import { listCompilerKnowledge } from "../modules/compiler-knowledge/compiler-knowledge-base";
 
 const router = Router();
 
@@ -1618,6 +1619,35 @@ router.get("/tool-catalog", requireAdminAuth, async (req: Request, res: Response
         compilerVisible: false,
         autoUseEnabled: false,
         mode: "read_only_catalog",
+      },
+    },
+  });
+});
+
+router.get("/compiler-knowledge", requireAdminAuth, async (req: Request, res: Response) => {
+  const type = typeof req.query.type === "string" && req.query.type.trim().length > 0
+    ? req.query.type.trim()
+    : undefined;
+  const domain = typeof req.query.domain === "string" && req.query.domain.trim().length > 0
+    ? req.query.domain.trim()
+    : undefined;
+  const risk = typeof req.query.risk === "string" && req.query.risk.trim().length > 0
+    ? req.query.risk.trim()
+    : undefined;
+  const source = typeof req.query.source === "string" && req.query.source.trim().length > 0
+    ? req.query.source.trim()
+    : undefined;
+  const items = listCompilerKnowledge({ type, domain, risk, source });
+  res.json({
+    ok: true,
+    data: {
+      items,
+      total: items.length,
+      policy: {
+        compilerVisible: false,
+        autoUseEnabled: false,
+        executionChanging: false,
+        mode: "read_only_knowledge_base",
       },
     },
   });

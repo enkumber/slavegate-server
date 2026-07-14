@@ -955,6 +955,62 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query).not.toHaveBeenCalled();
   });
 
+  it("lists the read-only Compiler Knowledge Base without enabling compiler auto-use", async () => {
+    const response = await getAgency("/api/agency/compiler-knowledge");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.total).toBeGreaterThan(5);
+    expect(response.body.data.policy).toEqual({
+      compilerVisible: false,
+      autoUseEnabled: false,
+      executionChanging: false,
+      mode: "read_only_knowledge_base",
+    });
+    expect(response.body.data.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "workflow-failure-never-promotes",
+          type: "rule",
+          domain: "workflow_lifecycle",
+          risk: "high",
+          policy: expect.objectContaining({
+            compilerVisible: false,
+            autoUseEnabled: false,
+            executionChanging: false,
+          }),
+        }),
+        expect.objectContaining({
+          id: "partial-feedback-creates-step-candidates-only",
+          type: "rule",
+          domain: "step_library",
+          source: "qa_guardrail",
+        }),
+        expect.objectContaining({
+          id: "login-wall-is-not-success",
+          type: "anti_pattern",
+          domain: "app_navigation",
+        }),
+      ])
+    );
+    expect(response.body.data.items.every((item: any) => item.policy.compilerVisible === false)).toBe(true);
+    expect(response.body.data.items.every((item: any) => item.policy.autoUseEnabled === false)).toBe(true);
+    expect(response.body.data.items.every((item: any) => item.policy.executionChanging === false)).toBe(true);
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
+
+  it("filters the Compiler Knowledge Base by domain and type", async () => {
+    const response = await getAgency("/api/agency/compiler-knowledge?domain=step_library&type=rule");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.items.length).toBeGreaterThan(0);
+    expect(response.body.data.items.every((item: any) => item.domain === "step_library")).toBe(true);
+    expect(response.body.data.items.every((item: any) => item.type === "rule")).toBe(true);
+    expect(response.body.data.items.map((item: any) => item.id)).toEqual(
+      expect.arrayContaining(["partial-feedback-creates-step-candidates-only"])
+    );
+    expect(mocks.db.query).not.toHaveBeenCalled();
+  });
+
   it("lists Step Library promotion audit events without enabling reuse", async () => {
     const event = {
       id: "66666666-6666-4666-8666-666666666666",

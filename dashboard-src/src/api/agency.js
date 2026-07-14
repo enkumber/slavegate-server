@@ -96,6 +96,20 @@ export const agencyApi = {
             return api.get(`/agency/tool-catalog?${query}`);
         },
     },
+    compilerKnowledge: {
+        list: (params) => {
+            const query = new URLSearchParams();
+            if (params?.type)
+                query.set("type", params.type);
+            if (params?.domain)
+                query.set("domain", params.domain);
+            if (params?.risk)
+                query.set("risk", params.risk);
+            if (params?.source)
+                query.set("source", params.source);
+            return api.get(`/agency/compiler-knowledge?${query}`);
+        },
+    },
     // Clients
     clients: {
         list: (params) => {
