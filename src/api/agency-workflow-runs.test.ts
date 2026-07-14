@@ -1477,6 +1477,12 @@ describe("agency workflow runs API", () => {
       wouldUse: false,
       reason: "compiler_auto_use_disabled",
     });
+    expect(response.body.data.decision).toMatchObject({
+      outcome: "blocked_by_policy",
+      wouldChangePlan: false,
+      wouldExecuteStepLibrary: false,
+      blockers: expect.arrayContaining(["compiler_auto_use_disabled"]),
+    });
     expect(response.body.data.candidates.tools.some((tool: any) => tool.id === "unlock" && tool.wouldUse === false)).toBe(true);
     expect(response.body.data.candidates.knowledge.every((entry: any) => entry.wouldApply === false)).toBe(true);
     expect(String(mocks.db.query.mock.calls[0][0])).toContain("c.candidate_state = 'validated_step'");
@@ -1484,6 +1490,7 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[1][1][0]).toBe("unlock device");
     expect(mocks.db.query.mock.calls[1][1][4]).toContain("\"autoUseEnabled\":false");
     expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"wouldUse\":false");
+    expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"outcome\":\"blocked_by_policy\"");
   });
 
   it("lists compiler awareness audit events without changing execution", async () => {
@@ -1506,6 +1513,12 @@ describe("agency workflow runs API", () => {
             tools: [{ id: "unlock", wouldUse: false }],
             steps: [{ id: "55555555-5555-4555-8555-555555555555", wouldUse: false }],
             knowledge: [{ id: "workflow-failure-never-promotes", wouldApply: false }],
+          },
+          decision: {
+            outcome: "blocked_by_policy",
+            wouldChangePlan: false,
+            wouldExecuteStepLibrary: false,
+            blockers: ["compiler_auto_use_disabled"],
           },
           actor: "dashboard",
           source: "dashboard",
@@ -1533,6 +1546,7 @@ describe("agency workflow runs API", () => {
       id: "77777777-7777-4777-8777-777777777777",
       intent: "unlock device",
       summary: { toolCandidates: 2, stepCandidates: 1, knowledgeCandidates: 3 },
+      decision: { outcome: "blocked_by_policy" },
       source: "dashboard",
     });
     expect(String(mocks.db.query.mock.calls[0][0])).toContain("agency_compiler_awareness_events");

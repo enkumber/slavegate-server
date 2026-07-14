@@ -80,6 +80,37 @@ function objectKeys(value: unknown): string[] {
   return value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : [];
 }
 
+function decisionFor(input: {
+  toolCandidates: Array<Record<string, unknown>>;
+  stepCandidates: Array<Record<string, unknown>>;
+  knowledgeCandidates: Array<Record<string, unknown>>;
+}): Record<string, unknown> {
+  const blockers = ["compiler_auto_use_disabled"];
+  if (input.stepCandidates.some((step) => step.libraryState === "revoked")) {
+    blockers.push("step_library_entry_revoked");
+  }
+  if (input.stepCandidates.some((step) => step.compilerEligible === false)) {
+    blockers.push("step_not_compiler_eligible");
+  }
+  if (input.stepCandidates.length === 0) {
+    blockers.push("no_matching_validated_step");
+  }
+
+  return {
+    outcome: "blocked_by_policy",
+    wouldChangePlan: false,
+    wouldExecuteStepLibrary: false,
+    selectedStepIds: [],
+    selectedToolIds: [],
+    blockers: Array.from(new Set(blockers)),
+    notes: [
+      "Awareness is observability-only.",
+      "Compiler auto-use remains disabled.",
+      "No workflow plan, cache, or execution path is changed.",
+    ],
+  };
+}
+
 export function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Record<string, unknown> {
   const terms = termsFor([input.intent, input.action].filter(Boolean).join(" "));
   const action = input.action?.trim();
@@ -163,6 +194,7 @@ export function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Reco
     wouldUse: false,
     reason: "compiler_auto_use_disabled",
   }));
+  const decision = decisionFor({ toolCandidates, stepCandidates, knowledgeCandidates });
 
   return {
     intent: input.intent ?? null,
@@ -184,6 +216,7 @@ export function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Reco
       steps: stepCandidates,
       knowledge: knowledgeCandidates,
     },
+    decision,
     guardrails: [
       "No compiler plan changes are made from awareness data.",
       "Step Library entries are not auto-used by compiler in this phase.",

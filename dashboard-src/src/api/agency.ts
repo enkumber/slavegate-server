@@ -420,6 +420,16 @@ export interface CompilerAwarenessResponse {
     steps: CompilerAwarenessCandidate[];
     knowledge: CompilerAwarenessCandidate[];
   };
+  decision: {
+    outcome?: string;
+    wouldChangePlan?: boolean;
+    wouldExecuteStepLibrary?: boolean;
+    selectedStepIds?: string[];
+    selectedToolIds?: string[];
+    blockers?: string[];
+    notes?: string[];
+    [key: string]: unknown;
+  };
   guardrails: string[];
 }
 
@@ -443,6 +453,13 @@ export interface CompilerAwarenessEvent {
     [key: string]: unknown;
   };
   candidates: Record<string, unknown>;
+  decision: {
+    outcome?: string;
+    wouldChangePlan?: boolean;
+    wouldExecuteStepLibrary?: boolean;
+    blockers?: string[];
+    [key: string]: unknown;
+  };
   actor: string | null;
   source: string | null;
   createdAt: string | null;

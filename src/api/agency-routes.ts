@@ -282,6 +282,7 @@ function rowToCompilerAwarenessEvent(row: Record<string, unknown>): Record<strin
     summary: row.summary ?? {},
     policy: row.policy ?? {},
     candidates: row.candidates ?? {},
+    decision: row.decision ?? {},
     actor: row.actor ?? null,
     source: row.source ?? null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
@@ -1780,6 +1781,7 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
       steps?: Array<{ id?: unknown; action?: unknown; libraryState?: unknown; compilerEligible?: unknown; wouldUse?: unknown; reason?: unknown }>;
       knowledge?: Array<{ id?: unknown; wouldApply?: unknown; reason?: unknown }>;
     };
+    decision?: Record<string, unknown>;
   };
   await db.query(
     `INSERT INTO agency_compiler_awareness_events (
@@ -1789,10 +1791,11 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
        summary,
        policy,
        candidates,
+       decision,
        actor,
        source
      )
-     VALUES ($1, $2, $3, $4, $5, $6, 'dashboard', 'dashboard')`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'dashboard', 'dashboard')`,
     [
       intent ?? null,
       action ?? null,
@@ -1819,6 +1822,7 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
           reason: entry.reason ?? null,
         })),
       }),
+      JSON.stringify(data.decision ?? {}),
     ]
   );
 

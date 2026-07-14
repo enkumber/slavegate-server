@@ -165,18 +165,30 @@ export function CompilerKnowledgePage() {
         ) : awarenessLoading ? (
           <div style={{ color: "#777", fontSize: "12px" }}>Loading awareness...</div>
         ) : awareness ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(150px, 1fr))", gap: "10px" }}>
-            {([
-              ["Tool candidates", awareness.summary.toolCandidates, awareness.candidates.tools.map((item) => item.id).join(", ")],
-              ["Step candidates", awareness.summary.stepCandidates, awareness.candidates.steps.map((item) => `${item.name ?? item.id} (${item.reason})`).join(", ")],
-              ["Knowledge candidates", awareness.summary.knowledgeCandidates, awareness.candidates.knowledge.map((item) => item.id).join(", ")],
-            ] as Array<[string, number, string]>).map(([label, value, detail]) => (
-              <div key={label} style={{ background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "12px", minWidth: 0 }}>
-                <div style={{ color: "#777", fontSize: "11px", marginBottom: "5px" }}>{label}</div>
-                <div style={{ color: "#e5e7eb", fontSize: "20px", fontWeight: 600 }}>{value}</div>
-                <div style={{ color: "#888", fontSize: "11px", marginTop: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail || "-"}</div>
+          <div style={{ display: "grid", gap: "10px" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(150px, 1fr))", gap: "10px" }}>
+              {([
+                ["Tool candidates", awareness.summary.toolCandidates, awareness.candidates.tools.map((item) => item.id).join(", ")],
+                ["Step candidates", awareness.summary.stepCandidates, awareness.candidates.steps.map((item) => `${item.name ?? item.id} (${item.reason})`).join(", ")],
+                ["Knowledge candidates", awareness.summary.knowledgeCandidates, awareness.candidates.knowledge.map((item) => item.id).join(", ")],
+              ] as Array<[string, number, string]>).map(([label, value, detail]) => (
+                <div key={label} style={{ background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "12px", minWidth: 0 }}>
+                  <div style={{ color: "#777", fontSize: "11px", marginBottom: "5px" }}>{label}</div>
+                  <div style={{ color: "#e5e7eb", fontSize: "20px", fontWeight: 600 }}>{value}</div>
+                  <div style={{ color: "#888", fontSize: "11px", marginTop: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail || "-"}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "12px" }}>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginBottom: "8px" }}>
+                <Badge label={`decision: ${awareness.decision.outcome ?? "unknown"}`} tone="yellow" />
+                <Badge label={`wouldChangePlan: ${String(awareness.decision.wouldChangePlan ?? false)}`} tone="gray" />
+                <Badge label={`wouldExecuteStepLibrary: ${String(awareness.decision.wouldExecuteStepLibrary ?? false)}`} tone="gray" />
               </div>
-            ))}
+              <div style={{ color: "#888", fontSize: "12px" }}>
+                Blockers: {(awareness.decision.blockers ?? []).join(", ") || "-"}
+              </div>
+            </div>
           </div>
         ) : null}
       </div>
@@ -194,7 +206,7 @@ export function CompilerKnowledgePage() {
         ) : (
           <div style={{ display: "grid", gap: "8px" }}>
             {awarenessEvents.map((event) => (
-              <div key={event.id} style={{ display: "grid", gridTemplateColumns: "1fr 0.8fr 0.8fr 0.8fr", gap: "10px", alignItems: "center", background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
+              <div key={event.id} style={{ display: "grid", gridTemplateColumns: "1fr 0.8fr 0.8fr 0.8fr 0.9fr", gap: "10px", alignItems: "center", background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ color: "#e5e7eb", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.intent || event.action || "awareness check"}</div>
                   <div style={{ color: "#666", fontSize: "11px", marginTop: "3px" }}>{event.createdAt ? new Date(event.createdAt).toLocaleString() : "-"}</div>
@@ -202,6 +214,7 @@ export function CompilerKnowledgePage() {
                 <div style={{ color: "#aaa", fontSize: "12px" }}>tools: {event.summary.toolCandidates ?? 0}</div>
                 <div style={{ color: "#aaa", fontSize: "12px" }}>steps: {event.summary.stepCandidates ?? 0}</div>
                 <div style={{ color: "#aaa", fontSize: "12px" }}>knowledge: {event.summary.knowledgeCandidates ?? 0}</div>
+                <div style={{ color: "#aaa", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.decision.outcome ?? "no decision"}</div>
               </div>
             ))}
           </div>
