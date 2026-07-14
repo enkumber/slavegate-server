@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, StepLibraryEntry } from "../api/agency";
+import { agencyApi, StepLibraryEntry, StepLibraryPromotionEvent } from "../api/agency";
 
 function formatDate(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString() : "-";
@@ -42,6 +42,9 @@ export function StepLibraryPage() {
   const [promotionScope, setPromotionScope] = useState("");
   const [promotionNote, setPromotionNote] = useState("");
   const [promotionBusy, setPromotionBusy] = useState(false);
+  const [promotionEvents, setPromotionEvents] = useState<StepLibraryPromotionEvent[]>([]);
+  const [promotionEventsTotal, setPromotionEventsTotal] = useState(0);
+  const [promotionEventsLoading, setPromotionEventsLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,9 +80,32 @@ export function StepLibraryPage() {
     setPromotionNote(selected?.promotionNote ?? "");
   }, [selected?.id]);
 
+  const loadPromotionEvents = useCallback(async (entryId: string | null) => {
+    if (!entryId) {
+      setPromotionEvents([]);
+      setPromotionEventsTotal(0);
+      return;
+    }
+    setPromotionEventsLoading(true);
+    try {
+      const data = await agencyApi.stepLibrary.listPromotionEvents({ entryId, pageSize: 20 });
+      setPromotionEvents(data.items);
+      setPromotionEventsTotal(data.total);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load promotion audit history");
+    } finally {
+      setPromotionEventsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPromotionEvents(selected?.id ?? null);
+  }, [loadPromotionEvents, selected?.id]);
+
   const updateSelectedEntry = (updated: StepLibraryEntry) => {
     setEntries((current) => current.map((entry) => entry.id === updated.id ? updated : entry));
     setSelectedId(updated.id);
+    void loadPromotionEvents(updated.id);
   };
 
   const promoteLimited = async () => {
@@ -312,6 +338,46 @@ export function StepLibraryPage() {
                     Revoke
                   </button>
                 </div>
+              </div>
+
+              <div style={{ border: "1px solid #222", borderRadius: "6px", padding: "12px", marginBottom: "12px", background: "#101010" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", marginBottom: "8px" }}>
+                  <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600 }}>Promotion Audit</div>
+                  <button
+                    onClick={() => void loadPromotionEvents(selected.id)}
+                    style={{ background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "5px 8px", cursor: "pointer", fontSize: "11px" }}
+                  >
+                    Refresh
+                  </button>
+                </div>
+                <div style={{ color: "#777", fontSize: "11px", marginBottom: "10px" }}>
+                  {promotionEventsTotal} event{promotionEventsTotal === 1 ? "" : "s"} · append-only history for manual promotion/revoke decisions
+                </div>
+                {promotionEventsLoading ? (
+                  <div style={{ color: "#777", fontSize: "12px" }}>Loading audit history...</div>
+                ) : promotionEvents.length === 0 ? (
+                  <div style={{ color: "#777", fontSize: "12px" }}>No promotion events yet.</div>
+                ) : (
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    {promotionEvents.map((event) => (
+                      <div key={event.id} style={{ border: "1px solid #242424", borderRadius: "6px", padding: "10px", background: "#0d0d0d" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", marginBottom: "6px" }}>
+                          <Badge
+                            label={event.action === "promote_limited" ? "Promote limited" : "Revoke"}
+                            tone={event.action === "promote_limited" ? "green" : "red"}
+                          />
+                          <span style={{ color: "#777", fontSize: "11px" }}>{formatDate(event.createdAt)}</span>
+                        </div>
+                        <div style={{ color: "#aaa", fontSize: "12px", marginBottom: "4px", overflowWrap: "anywhere" }}>
+                          Actor: {event.actor ?? "-"} · Scope: {event.promotionScope ?? "-"}
+                        </div>
+                        <div style={{ color: "#aaa", fontSize: "12px", overflowWrap: "anywhere" }}>
+                          Note: {event.note ?? "-"}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div style={{ border: "1px solid #222", borderRadius: "6px", padding: "12px", marginBottom: "12px", background: "#101010" }}>

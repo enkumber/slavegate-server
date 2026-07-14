@@ -955,6 +955,51 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query).not.toHaveBeenCalled();
   });
 
+  it("lists Step Library promotion audit events without enabling reuse", async () => {
+    const event = {
+      id: "66666666-6666-4666-8666-666666666666",
+      step_candidate_id: "55555555-5555-4555-8555-555555555555",
+      action: "promote_limited",
+      library_state: "limited_reuse",
+      promotion_scope: "device:11111111-1111-4111-8111-111111111111",
+      note: "safe for this device only",
+      actor: "dashboard",
+      metadata: { compilerEligible: false, autoUseEnabled: false },
+      created_at: new Date("2026-05-22T10:10:00.000Z"),
+      step_name: "unlock",
+      step_action: "unlock",
+      run_intent: "reddit_account_health_scan",
+      device_name: "Pixel",
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [event] })
+      .mockResolvedValueOnce({ rows: [{ count: "1" }] });
+
+    const response = await getAgency(
+      "/api/agency/step-library/promotion-events?entryId=55555555-5555-4555-8555-555555555555&pageSize=20"
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ total: 1, page: 1, pageSize: 20 });
+    expect(response.body.data.items[0]).toMatchObject({
+      id: event.id,
+      stepCandidateId: event.step_candidate_id,
+      action: "promote_limited",
+      libraryState: "limited_reuse",
+      promotionScope: event.promotion_scope,
+      actor: "dashboard",
+      stepName: "unlock",
+      runIntent: "reddit_account_health_scan",
+    });
+    expect(mocks.db.query.mock.calls[0][0]).toContain("agency_workflow_step_library_promotion_events e");
+    expect(mocks.db.query.mock.calls[0][0]).toContain("e.step_candidate_id = $1");
+    expect(mocks.db.query.mock.calls[0][1]).toEqual([
+      "55555555-5555-4555-8555-555555555555",
+      20,
+      0,
+    ]);
+  });
+
   it("promotes a review-ready Step Library entry for limited reuse only", async () => {
     const validated = {
       id: "55555555-5555-4555-8555-555555555555",
@@ -1040,6 +1085,19 @@ describe("agency workflow runs API", () => {
     });
     expect(mocks.db.query.mock.calls[1][0]).toContain("library_state = 'limited_reuse'");
     expect(mocks.db.query.mock.calls[1][0]).not.toContain("compiler");
+    expect(mocks.db.query.mock.calls[2][0]).toContain("agency_workflow_step_library_promotion_events");
+    expect(mocks.db.query.mock.calls[2][1]).toEqual([
+      validated.id,
+      "promote_limited",
+      "limited_reuse",
+      "device:11111111-1111-4111-8111-111111111111",
+      "safe for this device only",
+      JSON.stringify({
+        source: "dashboard",
+        compilerEligible: false,
+        autoUseEnabled: false,
+      }),
+    ]);
   });
 
   it("does not allow global Step Library promotion scope", async () => {
@@ -1131,6 +1189,19 @@ describe("agency workflow runs API", () => {
       "scope no longer trusted",
     ]);
     expect(mocks.db.query.mock.calls[1][0]).not.toContain("candidate_state =");
+    expect(mocks.db.query.mock.calls[2][0]).toContain("agency_workflow_step_library_promotion_events");
+    expect(mocks.db.query.mock.calls[2][1]).toEqual([
+      validated.id,
+      "revoke",
+      "revoked",
+      "device:11111111-1111-4111-8111-111111111111",
+      "scope no longer trusted",
+      JSON.stringify({
+        source: "dashboard",
+        compilerEligible: false,
+        autoUseEnabled: false,
+      }),
+    ]);
   });
 
   it("rejects a step candidate without promoting it", async () => {

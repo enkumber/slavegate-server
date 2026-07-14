@@ -288,6 +288,22 @@ export interface StepLibraryEntry {
   updatedAt: string | null;
 }
 
+export interface StepLibraryPromotionEvent {
+  id: string;
+  stepCandidateId: string;
+  action: "promote_limited" | "revoke" | string;
+  libraryState: "limited_reuse" | "revoked" | string;
+  promotionScope: string | null;
+  note: string | null;
+  actor: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string | null;
+  stepName: string | null;
+  stepAction: string | null;
+  runIntent: string | null;
+  deviceName: string | null;
+}
+
 export interface ToolCatalogEntry {
   id: string;
   name: string;
@@ -446,6 +462,16 @@ export const agencyApi = {
       id: string,
       data: { action: "promote_limited" | "revoke"; scope?: string | null; note?: string | null }
     ) => api.patch<StepLibraryEntry>(`/agency/step-library/${id}/promotion`, data),
+    listPromotionEvents: (params?: { page?: number; pageSize?: number; entryId?: string; action?: string; actor?: string; scope?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.pageSize) query.set("pageSize", String(params.pageSize));
+      if (params?.entryId) query.set("entryId", params.entryId);
+      if (params?.action) query.set("action", params.action);
+      if (params?.actor) query.set("actor", params.actor);
+      if (params?.scope) query.set("scope", params.scope);
+      return api.get<PaginatedResponse<StepLibraryPromotionEvent>>(`/agency/step-library/promotion-events?${query}`);
+    },
   },
 
   toolCatalog: {

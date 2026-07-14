@@ -67,6 +67,22 @@ export const agencyApi = {
             return api.get(`/agency/step-library?${query}`);
         },
         updatePromotion: (id, data) => api.patch(`/agency/step-library/${id}/promotion`, data),
+        listPromotionEvents: (params) => {
+            const query = new URLSearchParams();
+            if (params?.page)
+                query.set("page", String(params.page));
+            if (params?.pageSize)
+                query.set("pageSize", String(params.pageSize));
+            if (params?.entryId)
+                query.set("entryId", params.entryId);
+            if (params?.action)
+                query.set("action", params.action);
+            if (params?.actor)
+                query.set("actor", params.actor);
+            if (params?.scope)
+                query.set("scope", params.scope);
+            return api.get(`/agency/step-library/promotion-events?${query}`);
+        },
     },
     toolCatalog: {
         list: (params) => {

@@ -253,6 +253,24 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
   };
 }
 
+function rowToStepLibraryPromotionEvent(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id,
+    stepCandidateId: row.step_candidate_id,
+    action: row.action,
+    libraryState: row.library_state,
+    promotionScope: row.promotion_scope ?? null,
+    note: row.note ?? null,
+    actor: row.actor ?? null,
+    metadata: row.metadata ?? {},
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+    stepName: row.step_name ?? null,
+    stepAction: row.step_action ?? null,
+    runIntent: row.run_intent ?? null,
+    deviceName: row.device_name ?? null,
+  };
+}
+
 type WorkflowRunFeedbackRating = "ok" | "not_ok" | "partial";
 
 function parseWorkflowRunFeedback(input: unknown): {
@@ -1505,6 +1523,81 @@ router.get("/step-library", requireAdminAuth, async (req: Request, res: Response
   });
 });
 
+router.get("/step-library/promotion-events", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const { page, pageSize, offset } = parsePagination(req.query);
+  const entryId = typeof req.query.entryId === "string" && req.query.entryId.trim().length > 0
+    ? req.query.entryId.trim()
+    : null;
+  const rawAction = typeof req.query.action === "string" ? req.query.action.trim() : "";
+  const action = ["promote_limited", "revoke"].includes(rawAction) ? rawAction : null;
+  const actor = typeof req.query.actor === "string" && req.query.actor.trim().length > 0
+    ? req.query.actor.trim()
+    : null;
+  const scope = typeof req.query.scope === "string" && req.query.scope.trim().length > 0
+    ? req.query.scope.trim()
+    : null;
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (entryId) {
+    conditions.push(`e.step_candidate_id = $${idx++}`);
+    values.push(entryId);
+  }
+  if (action) {
+    conditions.push(`e.action = $${idx++}`);
+    values.push(action);
+  }
+  if (actor) {
+    conditions.push(`e.actor = $${idx++}`);
+    values.push(actor);
+  }
+  if (scope) {
+    conditions.push(`e.promotion_scope = $${idx++}`);
+    values.push(scope);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  values.push(pageSize, offset);
+
+  const [rows, count] = await Promise.all([
+    db.query(
+      `SELECT e.*,
+              c.label AS step_name,
+              c.action AS step_action,
+              r.intent AS run_intent,
+              d.friendly_name AS device_name
+       FROM agency_workflow_step_library_promotion_events e
+       LEFT JOIN agency_workflow_step_candidates c ON c.id = e.step_candidate_id
+       LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
+       LEFT JOIN devices d ON d.id = r.device_id
+       ${where}
+       ORDER BY e.created_at DESC, e.id DESC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      values
+    ),
+    db.query(
+      `SELECT COUNT(*)
+       FROM agency_workflow_step_library_promotion_events e
+       LEFT JOIN agency_workflow_step_candidates c ON c.id = e.step_candidate_id
+       LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
+       ${where}`,
+      values.slice(0, -2)
+    ),
+  ]);
+
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map(rowToStepLibraryPromotionEvent),
+      total: parseInt(count.rows[0].count, 10),
+      page,
+      pageSize,
+    },
+  });
+});
+
 router.get("/tool-catalog", requireAdminAuth, async (req: Request, res: Response) => {
   const category = typeof req.query.category === "string" && req.query.category.trim().length > 0
     ? req.query.category.trim()
@@ -1620,7 +1713,32 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
     ? [req.params.id, parsed.scope, parsed.note]
     : [req.params.id, parsed.note];
   const updated = await db.query(updateSql, updateValues);
-  return res.json({ ok: true, data: rowToStepLibraryEntry(updated.rows[0]) });
+  const updatedRow = updated.rows[0];
+  await db.query(
+    `INSERT INTO agency_workflow_step_library_promotion_events (
+       step_candidate_id,
+       action,
+       library_state,
+       promotion_scope,
+       note,
+       actor,
+       metadata
+     )
+     VALUES ($1, $2, $3, $4, $5, 'dashboard', $6)`,
+    [
+      req.params.id,
+      parsed.action,
+      parsed.action === "promote_limited" ? "limited_reuse" : "revoked",
+      updatedRow.promotion_scope ?? null,
+      parsed.note,
+      JSON.stringify({
+        source: "dashboard",
+        compilerEligible: false,
+        autoUseEnabled: false,
+      }),
+    ]
+  );
+  return res.json({ ok: true, data: rowToStepLibraryEntry(updatedRow) });
 });
 
 router.patch("/workflow-step-candidates/:id/review", requireAdminAuth, async (req: Request, res: Response) => {
