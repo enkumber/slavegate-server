@@ -1575,7 +1575,7 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
     : `WITH updated AS (
          UPDATE agency_workflow_step_candidates
          SET library_state = 'revoked',
-             promotion_note = $3,
+             promotion_note = $2,
              revoked_by = 'dashboard',
              revoked_at = NOW(),
              updated_at = NOW()
@@ -1590,7 +1590,10 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
        LEFT JOIN agency_workflow_runs r ON r.id = updated.run_id
        LEFT JOIN devices d ON d.id = r.device_id`;
 
-  const updated = await db.query(updateSql, [req.params.id, parsed.scope, parsed.note]);
+  const updateValues = parsed.action === "promote_limited"
+    ? [req.params.id, parsed.scope, parsed.note]
+    : [req.params.id, parsed.note];
+  const updated = await db.query(updateSql, updateValues);
   return res.json({ ok: true, data: rowToStepLibraryEntry(updated.rows[0]) });
 });
 

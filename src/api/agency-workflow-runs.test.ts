@@ -1068,6 +1068,12 @@ describe("agency workflow runs API", () => {
       revokedBy: "dashboard",
     });
     expect(mocks.db.query.mock.calls[1][0]).toContain("library_state = 'revoked'");
+    expect(mocks.db.query.mock.calls[1][0]).toContain("promotion_note = $2");
+    expect(mocks.db.query.mock.calls[1][0]).not.toContain("$3");
+    expect(mocks.db.query.mock.calls[1][1]).toEqual([
+      validated.id,
+      "scope no longer trusted",
+    ]);
     expect(mocks.db.query.mock.calls[1][0]).not.toContain("candidate_state =");
   });
 
