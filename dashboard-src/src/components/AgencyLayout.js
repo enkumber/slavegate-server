@@ -12,6 +12,7 @@ const navItems = [
     { path: "#/agency/compiler-knowledge", label: "Compiler Knowledge", icon: "◇" },
     { path: "#/agency/compiler-control-plane", label: "Compiler Control", icon: "▣" },
     { path: "#/agency/workflow-definitions", label: "Workflow Definitions", icon: "▤" },
+    { path: "#/agency/workflow-validation-pipeline", label: "Validation Pipeline", icon: "▥" },
     { path: "#/agency/reports", label: "Reports", icon: "📊" },
 ];
 export function AgencyLayout({ children, currentRoute }) {

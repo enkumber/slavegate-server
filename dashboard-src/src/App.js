@@ -18,6 +18,7 @@ import { ToolCatalogPage } from "./pages/ToolCatalogPage";
 import { CompilerKnowledgePage } from "./pages/CompilerKnowledgePage";
 import { CompilerControlPlanePage } from "./pages/CompilerControlPlanePage";
 import { WorkflowDefinitionsPage } from "./pages/WorkflowDefinitionsPage";
+import { WorkflowValidationPipelinePage } from "./pages/WorkflowValidationPipelinePage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TokenManagement } from "./pages/TokenManagement";
@@ -83,6 +84,9 @@ export function App() {
     }
     else if (route.startsWith("#/agency/workflow-definitions")) {
         page = _jsx(WorkflowDefinitionsPage, {});
+    }
+    else if (route.startsWith("#/agency/workflow-validation-pipeline")) {
+        page = _jsx(WorkflowValidationPipelinePage, {});
     }
     else if (route.startsWith("#/agency/reports")) {
         page = _jsx(ReportsPage, {});

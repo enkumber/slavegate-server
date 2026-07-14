@@ -743,6 +743,94 @@ export interface WorkflowDefinitionResolutionResponse {
   notes: string[];
 }
 
+export interface WorkflowValidationPipelineItem {
+  definition: WorkflowDefinition;
+  staticValidation: {
+    mode?: string;
+    state?: string;
+    checks?: Array<Record<string, unknown>>;
+    passed?: number;
+    failed?: number;
+    blockers?: string[];
+    notes?: string[];
+    [key: string]: unknown;
+  };
+  dryRun: {
+    mode?: string;
+    wouldUseDefinition?: false;
+    wouldChangePlan?: false;
+    wouldChangeWorkflowCache?: false;
+    wouldExecuteWorkflow?: false;
+    selectedDefinitionId?: null;
+    outcome?: string;
+    blockers?: string[];
+    policyGateSummary?: Record<string, unknown>;
+    notes?: string[];
+    [key: string]: unknown;
+  };
+  smokeReadiness: Record<string, unknown>;
+  canaryReadiness: Record<string, unknown>;
+  regressionReadiness: Record<string, unknown>;
+  decision: {
+    outcome?: string;
+    wouldPromoteDefinition?: false;
+    wouldUseDefinition?: false;
+    wouldExecuteWorkflow?: false;
+    wouldChangePlan?: false;
+    wouldChangeWorkflowCache?: false;
+    safeToAutoApply?: false;
+    selectedDefinitionId?: null;
+    blockers?: string[];
+    policyGateSummary?: Record<string, unknown>;
+    notes?: string[];
+    [key: string]: unknown;
+  };
+}
+
+export interface WorkflowValidationPipelineResponse {
+  intent: string | null;
+  platform: string | null;
+  key: string | null;
+  policy: Record<string, unknown>;
+  policyGateSummary: Record<string, unknown>;
+  items: WorkflowValidationPipelineItem[];
+  summary: {
+    definitions?: number;
+    staticPassed?: number;
+    staticBlocked?: number;
+    dryRunBlocked?: number;
+    smokeReady?: number;
+    canaryReady?: number;
+    regressionReady?: number;
+    wouldPromoteDefinition?: number;
+    wouldUseDefinition?: number;
+    wouldExecuteWorkflow?: number;
+    safeToAutoApply?: number;
+    [key: string]: unknown;
+  };
+  guardrails: string[];
+}
+
+export interface WorkflowValidationEvent {
+  id: string;
+  definitionId: string | null;
+  definitionKey: string | null;
+  definitionVersion: number | null;
+  intent: string | null;
+  platform: string | null;
+  summary: Record<string, unknown>;
+  policy: Record<string, unknown>;
+  staticValidation: Record<string, unknown>;
+  dryRun: Record<string, unknown>;
+  smokeReadiness: Record<string, unknown>;
+  canaryReadiness: Record<string, unknown>;
+  regressionReadiness: Record<string, unknown>;
+  decision: Record<string, unknown>;
+  actor: string | null;
+  source: string | null;
+  createdAt: string | null;
+}
+
 export interface WorkflowRun {
   id: string;
   clientId: string | null;
@@ -956,6 +1044,25 @@ export const agencyApi = {
       if (params?.platform) query.set("platform", params.platform);
       if (params?.key) query.set("key", params.key);
       return api.get<WorkflowDefinitionResolutionResponse>(`/agency/workflow-definitions/resolve?${query}`);
+    },
+  },
+
+  workflowValidationPipeline: {
+    get: (params?: { intent?: string; platform?: string; key?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.intent) query.set("intent", params.intent);
+      if (params?.platform) query.set("platform", params.platform);
+      if (params?.key) query.set("key", params.key);
+      return api.get<WorkflowValidationPipelineResponse>(`/agency/workflow-validation-pipeline?${query}`);
+    },
+    listEvents: (params?: { page?: number; pageSize?: number; intent?: string; platform?: string; key?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.pageSize) query.set("pageSize", String(params.pageSize));
+      if (params?.intent) query.set("intent", params.intent);
+      if (params?.platform) query.set("platform", params.platform);
+      if (params?.key) query.set("key", params.key);
+      return api.get<PaginatedResponse<WorkflowValidationEvent> & { policy: Record<string, unknown> }>(`/agency/workflow-validation-pipeline/events?${query}`);
     },
   },
 

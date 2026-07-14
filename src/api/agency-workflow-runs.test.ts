@@ -1865,6 +1865,151 @@ describe("agency workflow runs API", () => {
     expect(String(mocks.db.query.mock.calls[1][0])).toContain("agency_compiler_policy_gate_config");
   });
 
+  it("previews Workflow Validation Pipeline without promotion, cache, or execution changes", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: "99999999-9999-4999-8999-999999999999",
+          definition_key: "reddit_account_health_scan",
+          version: 1,
+          status: "active",
+          title: "Reddit account health scan",
+          description: "Read-only workflow definition",
+          platform: "reddit",
+          intent: "reddit_account_health_scan",
+          goal: "Classify Reddit account health without side effects",
+          source: "static_seed",
+          definition: { steps: ["open_reddit", "classify_reddit_health_scan"] },
+          success_criteria: ["loggedIn classified"],
+          allowed_tools: ["open_app", "ui_tree_dump"],
+          required_capabilities: ["device.online_or_approved"],
+          constraints: ["read_only_only"],
+          fallback_rules: ["if login wall detected classify expected_failure"],
+          rollback: { required: false },
+          policy: {},
+          created_by: "migration",
+          created_at: new Date("2026-05-22T11:00:00.000Z"),
+          updated_at: new Date("2026-05-22T11:00:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          gate_id: "compiler_auto_use",
+          state: "blocked",
+          version: 1,
+          owner: "product",
+          risk: "high",
+          config: {},
+          updated_by: "migration",
+          updated_at: new Date("2026-05-22T11:00:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await getAgency("/api/agency/workflow-validation-pipeline?intent=reddit_account_health_scan&platform=reddit");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.policy).toMatchObject({
+      readOnly: true,
+      validationOnly: true,
+      autoPromotionEnabled: false,
+      compilerVisible: false,
+      autoUseEnabled: false,
+      executionChanging: false,
+      workflowCacheChanging: false,
+      mode: "workflow_validation_pipeline_read_only",
+    });
+    expect(response.body.data.summary).toMatchObject({
+      definitions: 1,
+      staticPassed: 1,
+      dryRunBlocked: 1,
+      wouldPromoteDefinition: 0,
+      wouldUseDefinition: 0,
+      wouldExecuteWorkflow: 0,
+      safeToAutoApply: 0,
+    });
+    expect(response.body.data.items[0]).toMatchObject({
+      definition: expect.objectContaining({
+        key: "reddit_account_health_scan",
+        platform: "reddit",
+      }),
+      staticValidation: expect.objectContaining({
+        state: "passed",
+      }),
+      dryRun: expect.objectContaining({
+        mode: "workflow_definition_dry_run_preview",
+        wouldUseDefinition: false,
+        wouldChangePlan: false,
+        wouldChangeWorkflowCache: false,
+        wouldExecuteWorkflow: false,
+        selectedDefinitionId: null,
+        outcome: "blocked_by_policy",
+      }),
+      decision: expect.objectContaining({
+        outcome: "blocked_by_policy",
+        wouldPromoteDefinition: false,
+        wouldUseDefinition: false,
+        wouldExecuteWorkflow: false,
+        wouldChangePlan: false,
+        wouldChangeWorkflowCache: false,
+        safeToAutoApply: false,
+        selectedDefinitionId: null,
+      }),
+    });
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("agency_workflow_definitions");
+    expect(String(mocks.db.query.mock.calls[1][0])).toContain("agency_compiler_policy_gate_config");
+    expect(String(mocks.db.query.mock.calls[2][0])).toContain("agency_workflow_validation_events");
+    expect(mocks.db.query.mock.calls[2][1][6]).toContain("\"autoPromotionEnabled\":false");
+    expect(mocks.db.query.mock.calls[2][1][8]).toContain("\"wouldExecuteWorkflow\":false");
+    expect(mocks.db.query.mock.calls[2][1][12]).toContain("\"wouldPromoteDefinition\":false");
+  });
+
+  it("lists Workflow Validation Pipeline events without enabling execution", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: "88888888-8888-4888-8888-888888888888",
+          definition_id: "99999999-9999-4999-8999-999999999999",
+          definition_key: "reddit_account_health_scan",
+          definition_version: 1,
+          intent: "reddit_account_health_scan",
+          platform: "reddit",
+          summary: { definitions: 1, safeToAutoApply: 0 },
+          policy: { readOnly: true, autoPromotionEnabled: false },
+          static_validation: { state: "passed" },
+          dry_run: { wouldExecuteWorkflow: false },
+          smoke_readiness: { state: "blocked" },
+          canary_readiness: { state: "blocked" },
+          regression_readiness: { state: "blocked" },
+          decision: { outcome: "blocked_by_policy", wouldPromoteDefinition: false },
+          actor: "dashboard",
+          source: "dashboard",
+          created_at: new Date("2026-05-22T11:15:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ count: "1" }] });
+
+    const response = await getAgency("/api/agency/workflow-validation-pipeline/events?key=reddit_account_health_scan");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.policy).toMatchObject({
+      readOnly: true,
+      autoPromotionEnabled: false,
+      autoUseEnabled: false,
+      executionChanging: false,
+      workflowCacheChanging: false,
+    });
+    expect(response.body.data.items[0]).toMatchObject({
+      definitionKey: "reddit_account_health_scan",
+      definitionVersion: 1,
+      dryRun: expect.objectContaining({ wouldExecuteWorkflow: false }),
+      decision: expect.objectContaining({ wouldPromoteDefinition: false }),
+    });
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("agency_workflow_validation_events");
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("definition_key = $1");
+    expect(mocks.db.query.mock.calls[0][1]).toEqual(["reddit_account_health_scan", 50, 0]);
+  });
+
   it("lists compiler awareness audit events without changing execution", async () => {
     mocks.db.query
       .mockResolvedValueOnce({

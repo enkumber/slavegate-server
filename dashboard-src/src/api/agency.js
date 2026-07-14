@@ -200,6 +200,32 @@ export const agencyApi = {
             return api.get(`/agency/workflow-definitions/resolve?${query}`);
         },
     },
+    workflowValidationPipeline: {
+        get: (params) => {
+            const query = new URLSearchParams();
+            if (params?.intent)
+                query.set("intent", params.intent);
+            if (params?.platform)
+                query.set("platform", params.platform);
+            if (params?.key)
+                query.set("key", params.key);
+            return api.get(`/agency/workflow-validation-pipeline?${query}`);
+        },
+        listEvents: (params) => {
+            const query = new URLSearchParams();
+            if (params?.page)
+                query.set("page", String(params.page));
+            if (params?.pageSize)
+                query.set("pageSize", String(params.pageSize));
+            if (params?.intent)
+                query.set("intent", params.intent);
+            if (params?.platform)
+                query.set("platform", params.platform);
+            if (params?.key)
+                query.set("key", params.key);
+            return api.get(`/agency/workflow-validation-pipeline/events?${query}`);
+        },
+    },
     // Clients
     clients: {
         list: (params) => {

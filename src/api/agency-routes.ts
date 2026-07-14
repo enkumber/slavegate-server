@@ -20,6 +20,10 @@ import {
   rowToWorkflowDefinition,
   workflowDefinitionRegistryPolicy,
 } from "../modules/workflow-definition-registry/workflow-definition-registry";
+import {
+  buildWorkflowValidationPipeline,
+  workflowValidationPipelinePolicy,
+} from "../modules/workflow-validation-pipeline/workflow-validation-pipeline";
 
 const router = Router();
 
@@ -358,6 +362,28 @@ function rowToCompilerControlPlaneEvent(row: Record<string, unknown>): Record<st
     dryRun: row.dry_run ?? {},
     capabilityManifest: row.capability_manifest ?? {},
     limitedReusePlan: row.limited_reuse_plan ?? {},
+    actor: row.actor ?? null,
+    source: row.source ?? null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+  };
+}
+
+function rowToWorkflowValidationEvent(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id,
+    definitionId: row.definition_id ?? null,
+    definitionKey: row.definition_key ?? null,
+    definitionVersion: row.definition_version ?? null,
+    intent: row.intent ?? null,
+    platform: row.platform ?? null,
+    summary: row.summary ?? {},
+    policy: row.policy ?? {},
+    staticValidation: row.static_validation ?? {},
+    dryRun: row.dry_run ?? {},
+    smokeReadiness: row.smoke_readiness ?? {},
+    canaryReadiness: row.canary_readiness ?? {},
+    regressionReadiness: row.regression_readiness ?? {},
+    decision: row.decision ?? {},
     actor: row.actor ?? null,
     source: row.source ?? null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
@@ -1890,6 +1916,165 @@ router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Reques
   });
 
   res.json({ ok: true, data: resolution });
+});
+
+router.get("/workflow-validation-pipeline/events", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const { page, pageSize, offset } = parsePagination(req.query);
+  const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
+    ? req.query.intent.trim()
+    : null;
+  const platform = typeof req.query.platform === "string" && req.query.platform.trim().length > 0
+    ? req.query.platform.trim()
+    : null;
+  const key = typeof req.query.key === "string" && req.query.key.trim().length > 0
+    ? req.query.key.trim()
+    : null;
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (intent) {
+    conditions.push(`intent ILIKE $${idx++}`);
+    values.push(`%${intent}%`);
+  }
+  if (platform) {
+    conditions.push(`platform = $${idx++}`);
+    values.push(platform);
+  }
+  if (key) {
+    conditions.push(`definition_key = $${idx++}`);
+    values.push(key);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  values.push(pageSize, offset);
+
+  const [rows, count] = await Promise.all([
+    db.query(
+      `SELECT *
+       FROM agency_workflow_validation_events
+       ${where}
+       ORDER BY created_at DESC, id DESC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      values
+    ),
+    db.query(
+      `SELECT COUNT(*)
+       FROM agency_workflow_validation_events
+       ${where}`,
+      values.slice(0, -2)
+    ),
+  ]);
+
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map(rowToWorkflowValidationEvent),
+      total: parseInt(count.rows[0].count, 10),
+      page,
+      pageSize,
+      policy: workflowValidationPipelinePolicy(),
+    },
+  });
+});
+
+router.get("/workflow-validation-pipeline", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
+    ? req.query.intent.trim()
+    : undefined;
+  const platform = typeof req.query.platform === "string" && req.query.platform.trim().length > 0
+    ? req.query.platform.trim()
+    : undefined;
+  const key = typeof req.query.key === "string" && req.query.key.trim().length > 0
+    ? req.query.key.trim()
+    : undefined;
+
+  const conditions = ["status IN ('active', 'draft')"];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (intent) {
+    conditions.push(`intent = $${idx++}`);
+    values.push(intent);
+  }
+  if (platform) {
+    conditions.push(`platform = $${idx++}`);
+    values.push(platform);
+  }
+  if (key) {
+    conditions.push(`definition_key = $${idx++}`);
+    values.push(key);
+  }
+
+  const [definitions, gates] = await Promise.all([
+    db.query(
+      `SELECT *
+       FROM agency_workflow_definitions
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY
+         CASE status
+           WHEN 'active' THEN 1
+           WHEN 'draft' THEN 2
+           ELSE 3
+         END,
+         definition_key ASC,
+         version DESC
+       LIMIT 50`,
+      values
+    ),
+    getCompilerPolicyGates(db),
+  ]);
+
+  const pipeline = buildWorkflowValidationPipeline({
+    intent,
+    platform,
+    key,
+    definitions: definitions.rows.map(rowToWorkflowDefinition),
+    policyGates: gates,
+  });
+  const data = pipeline as Record<string, any>;
+  const firstItem = Array.isArray(data.items) ? data.items[0] as Record<string, any> | undefined : undefined;
+  const firstDefinition = firstItem?.definition as Record<string, unknown> | undefined;
+
+  await db.query(
+    `INSERT INTO agency_workflow_validation_events (
+       definition_id,
+       definition_key,
+       definition_version,
+       intent,
+       platform,
+       summary,
+       policy,
+       static_validation,
+       dry_run,
+       smoke_readiness,
+       canary_readiness,
+       regression_readiness,
+       decision,
+       actor,
+       source
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'dashboard', 'dashboard')`,
+    [
+      firstDefinition?.id ?? null,
+      firstDefinition?.key ?? key ?? null,
+      firstDefinition?.version ?? null,
+      intent ?? firstDefinition?.intent ?? null,
+      platform ?? firstDefinition?.platform ?? null,
+      JSON.stringify(data.summary ?? {}),
+      JSON.stringify(data.policy ?? {}),
+      JSON.stringify(firstItem?.staticValidation ?? {}),
+      JSON.stringify(firstItem?.dryRun ?? {}),
+      JSON.stringify(firstItem?.smokeReadiness ?? {}),
+      JSON.stringify(firstItem?.canaryReadiness ?? {}),
+      JSON.stringify(firstItem?.regressionReadiness ?? {}),
+      JSON.stringify(firstItem?.decision ?? {}),
+    ]
+  );
+
+  res.json({ ok: true, data: pipeline });
 });
 
 router.get("/compiler-control-plane/events", requireAdminAuth, async (req: Request, res: Response) => {
