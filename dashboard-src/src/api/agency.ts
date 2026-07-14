@@ -433,6 +433,15 @@ export interface CompilerAwarenessCandidate {
     state?: string;
     gates?: Record<string, boolean>;
     blockers?: string[];
+    policyGates?: Array<{
+      id?: string;
+      category?: string;
+      state?: string;
+      risk?: string;
+      owner?: string;
+      safeToAutoApply?: boolean;
+      [key: string]: unknown;
+    }>;
     remediation?: {
       state?: string;
       nextActions?: string[];
@@ -472,6 +481,15 @@ export interface CompilerAwarenessResponse {
     selectedStepIds?: string[];
     selectedToolIds?: string[];
     blockers?: string[];
+    policyGateSummary?: Array<{
+      id?: string;
+      category?: string;
+      state?: string;
+      risk?: string;
+      owner?: string;
+      safeToAutoApply?: boolean;
+      [key: string]: unknown;
+    }>;
     remediation?: {
       state?: string;
       nextActions?: string[];

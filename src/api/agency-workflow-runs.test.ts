@@ -1544,6 +1544,10 @@ describe("agency workflow runs API", () => {
           autoUseEnabled: false,
         },
         blockers: expect.arrayContaining(["compiler_auto_use_disabled", "step_not_compiler_eligible"]),
+        policyGates: expect.arrayContaining([
+          expect.objectContaining({ id: "compiler_auto_use", state: "blocked", safeToAutoApply: false }),
+          expect.objectContaining({ id: "step_compiler_eligibility", state: "blocked", safeToAutoApply: false }),
+        ]),
         remediation: {
           state: "manual_review_required",
           safeToAutoApply: false,
@@ -1560,6 +1564,9 @@ describe("agency workflow runs API", () => {
       wouldChangePlan: false,
       wouldExecuteStepLibrary: false,
       blockers: expect.arrayContaining(["compiler_auto_use_disabled"]),
+      policyGateSummary: expect.arrayContaining([
+        expect.objectContaining({ id: "compiler_auto_use", state: "blocked", safeToAutoApply: false }),
+      ]),
       remediation: {
         state: "manual_review_required",
         safeToAutoApply: false,
@@ -1574,9 +1581,11 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[1][1][4]).toContain("\"autoUseEnabled\":false");
     expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"wouldUse\":false");
     expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"eligibility\"");
+    expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"policyGates\"");
     expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"remediation\"");
     expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"step_not_compiler_eligible\"");
     expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"outcome\":\"blocked_by_policy\"");
+    expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"policyGateSummary\"");
     expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"safeToAutoApply\":false");
   });
 

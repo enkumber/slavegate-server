@@ -54,8 +54,20 @@ function remediationActions(item: { eligibility?: { remediation?: { nextActions?
   return item.eligibility?.remediation?.nextActions?.length ? item.eligibility.remediation.nextActions : [];
 }
 
+function eligibilityPolicyGates(item: { eligibility?: { policyGates?: Array<{ id?: string }> } }) {
+  return item.eligibility?.policyGates?.length
+    ? item.eligibility.policyGates.map((gate) => gate.id).filter(Boolean).join(", ")
+    : "-";
+}
+
 function decisionRemediation(decision: CompilerAwarenessResponse["decision"]) {
   return decision.remediation?.nextActions?.length ? decision.remediation.nextActions : [];
+}
+
+function decisionPolicyGates(decision: CompilerAwarenessResponse["decision"]) {
+  return decision.policyGateSummary?.length
+    ? decision.policyGateSummary.map((gate) => gate.id).filter(Boolean).join(", ")
+    : "-";
 }
 
 export function CompilerKnowledgePage() {
@@ -261,6 +273,9 @@ export function CompilerKnowledgePage() {
                 Blockers: {(awareness.decision.blockers ?? []).join(", ") || "-"}
               </div>
               <div style={{ color: "#888", fontSize: "12px", marginTop: "8px" }}>
+                Policy gates: {decisionPolicyGates(awareness.decision)}
+              </div>
+              <div style={{ color: "#888", fontSize: "12px", marginTop: "8px" }}>
                 Remediation: {decisionRemediation(awareness.decision).slice(0, 2).join(" · ") || "-"}
               </div>
             </div>
@@ -280,6 +295,9 @@ export function CompilerKnowledgePage() {
                         </div>
                         <div style={{ color: "#666", fontSize: "10px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: "2px" }}>
                           {(remediationActions(item)[0] ?? "No remediation hint.")}
+                        </div>
+                        <div style={{ color: "#555", fontSize: "10px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: "2px" }}>
+                          Gates: {eligibilityPolicyGates(item)}
                         </div>
                       </div>
                     ))}

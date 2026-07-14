@@ -1,4 +1,5 @@
 import { listCompilerKnowledge } from "../compiler-knowledge/compiler-knowledge-base";
+import { CompilerPolicyGate, listCompilerPolicyGates } from "../compiler-policy-gates/compiler-policy-gates";
 import { listToolCatalog } from "../tool-catalog/tool-catalog";
 
 export interface CompilerAwarenessStepRow {
@@ -80,6 +81,24 @@ function objectKeys(value: unknown): string[] {
   return value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : [];
 }
 
+function policyGateSummary(gate: CompilerPolicyGate): Record<string, unknown> {
+  return {
+    id: gate.id,
+    category: gate.category,
+    state: gate.state,
+    risk: gate.risk,
+    owner: gate.owner,
+    safeToAutoApply: gate.remediation.safeToAutoApply,
+  };
+}
+
+function policyGatesForBlockers(blockers: string[]): Record<string, unknown>[] {
+  const uniqueBlockers = new Set(blockers);
+  return listCompilerPolicyGates()
+    .filter((gate) => gate.blocks.some((blocker) => uniqueBlockers.has(blocker)))
+    .map(policyGateSummary);
+}
+
 function remediationForBlockers(blockers: string[]): Record<string, unknown> {
   const uniqueBlockers = Array.from(new Set(blockers));
   const nextActions = uniqueBlockers.flatMap((blocker) => {
@@ -143,6 +162,7 @@ function eligibilityForTool(tool: { policy?: Record<string, unknown> }): Record<
       executionChangingAllowed: false,
     },
     blockers,
+    policyGates: policyGatesForBlockers(blockers),
     remediation: remediationForBlockers(blockers),
     notes: [
       "Tool Catalog is visible for awareness only.",
@@ -165,6 +185,7 @@ function eligibilityForKnowledge(entry: { policy?: Record<string, unknown> }): R
       executionChangingAllowed: false,
     },
     blockers,
+    policyGates: policyGatesForBlockers(blockers),
     remediation: remediationForBlockers(blockers),
     notes: [
       "Knowledge Base entries are guidance only in this phase.",
@@ -191,10 +212,13 @@ function eligibilityForStep(step: CompilerAwarenessStepRow): Record<string, unkn
   if (!gates.scopedReuseDeclared) blockers.push("scope_not_declared");
   if (!gates.compilerEligiblePolicy) blockers.push("step_not_compiler_eligible");
 
+  const uniqueBlockers = Array.from(new Set(blockers));
+
   return {
     state: "blocked",
     gates,
-    blockers: Array.from(new Set(blockers)),
+    blockers: uniqueBlockers,
+    policyGates: policyGatesForBlockers(uniqueBlockers),
     remediation: remediationForBlockers(blockers),
     notes: [
       "Step Library candidate is evaluated for awareness only.",
@@ -227,6 +251,7 @@ function decisionFor(input: {
     selectedStepIds: [],
     selectedToolIds: [],
     blockers: uniqueBlockers,
+    policyGateSummary: policyGatesForBlockers(uniqueBlockers),
     remediation: remediationForBlockers(uniqueBlockers),
     notes: [
       "Awareness is observability-only.",
