@@ -104,7 +104,7 @@ describe("attemptRecovery", () => {
     vi.mocked(sendJobToDevice).mockReturnValue(true);
     vi.mocked(sendDeviceExecutionJobToDevice).mockResolvedValue({
       decision: "dispatched",
-      root: undefined,
+      root: null,
       operation: undefined,
       handle: undefined,
       reason: undefined,
