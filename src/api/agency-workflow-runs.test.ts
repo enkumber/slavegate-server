@@ -2238,6 +2238,72 @@ describe("agency workflow runs API", () => {
     expect(String(mocks.client.query.mock.calls[5][0])).toContain("agency_workflow_definition_version_events");
   });
 
+  it("promotes an existing generated workflow artifact as a no-code Workflow Definition executable", async () => {
+    const definition = workflowDefinitionRow({
+      promotion_state: "limited_reuse",
+      promotion_scope: "auto_use:test:reddit:reddit_account_health_scan:v1",
+      promotion_confidence: 0.85,
+      promotion_readiness: { state: "auto_use_bootstrap_ready" },
+      policy: {
+        compilerVisible: true,
+        autoUseEnabled: true,
+        executionChanging: true,
+        workflowCacheChanging: true,
+      },
+    });
+    const artifact = cachedArtifact({ artifact_state: "candidate" });
+    const promoted = {
+      ...artifact,
+      artifact_state: "promoted",
+      source_metadata: {
+        ...(artifact.source_metadata as Record<string, unknown>),
+        source: "workflow_definition_executable_artifact",
+        definitionId: definition.id,
+        definitionKey: definition.definition_key,
+        definitionVersion: definition.version,
+      },
+    };
+
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [definition] })
+      .mockResolvedValueOnce({ rows: [artifact] })
+      .mockResolvedValueOnce({ rows: [] });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [promoted] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await postAgency(
+      `/api/agency/workflow-definitions/${definition.id}/executable-artifact`,
+      {
+        cacheKey: artifact.cache_key,
+        note: "promote candidate artifact for no-code auto-use",
+      }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      definition: {
+        id: definition.id,
+        key: definition.definition_key,
+        version: definition.version,
+      },
+      artifact: {
+        cacheKey: artifact.cache_key,
+        requestKey: artifact.request_key,
+        artifactState: "promoted",
+      },
+      policy: {
+        noCodeExecutableArtifact: true,
+        requiresServerUpdateForWorkflow: false,
+        workflowCacheChanging: true,
+      },
+    });
+    expect(String(mocks.client.query.mock.calls[1][0])).toContain("UPDATE generated_workflow_plan_cache");
+    expect(String(mocks.client.query.mock.calls[2][0])).toContain("executable_artifact_promoted");
+  });
+
   it("previews Workflow Validation Pipeline without promotion, cache, or execution changes", async () => {
     mocks.db.query
       .mockResolvedValueOnce({

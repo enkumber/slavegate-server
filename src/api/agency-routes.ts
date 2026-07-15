@@ -28,7 +28,7 @@ import {
   workflowValidationPipelinePolicy,
 } from "../modules/workflow-validation-pipeline/workflow-validation-pipeline";
 import { workflowService } from "../modules/workflows/workflow.service";
-import { compileGeneratedWorkflowTemplate } from "../modules/workflows/workflow-validator";
+import { compileGeneratedWorkflowTemplate, computeGeneratedWorkflowCompiledPlanHash } from "../modules/workflows/workflow-validator";
 import { taskRunnerService } from "../modules/task-runner";
 
 const router = Router();
@@ -1137,6 +1137,30 @@ function cachedWorkflowIntent(cached: Record<string, unknown>): string | null {
 function cachedWorkflowPlatform(cached: Record<string, unknown>): string | null {
   const workflow = cached.workflow as Record<string, unknown> | null;
   return (cached.platform ?? workflow?.platform ?? null) as string | null;
+}
+
+async function findPromotedWorkflowDefinitionArtifact(db: ReturnType<typeof getDb>, definition: ReturnType<typeof rowToWorkflowDefinition>): Promise<Record<string, unknown> | null> {
+  const rows = await db.query<Record<string, unknown>>(
+    `SELECT *
+     FROM generated_workflow_plan_cache
+     WHERE artifact_state = 'promoted'
+       AND (
+         source_metadata ->> 'definitionId' = $1
+         OR (
+           source_metadata ->> 'definitionKey' = $2
+           AND source_metadata ->> 'definitionVersion' = $3
+         )
+       )
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [definition.id, definition.key, String(definition.version)]
+  );
+  return rows.rows[0] ?? null;
+}
+
+function workflowTemplateFromCachedArtifact(cached: Record<string, unknown>): any | null {
+  const workflow = cached.workflow;
+  return workflow && typeof workflow === "object" && !Array.isArray(workflow) ? workflow : null;
 }
 
 function agencyWorkflowRunSelectSql(where: string): string {
@@ -2714,56 +2738,78 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
     });
   }
 
-  const template = workflowDefinitionToExecutableTemplate(definition);
-  if (!template) {
-    return res.status(409).json({
-      ok: false,
-      code: "WORKFLOW_DEFINITION_EXECUTABLE_TEMPLATE_UNAVAILABLE",
-      error: "this workflow definition does not yet have a deterministic executable template",
-      data: {
-        definition: { id: definition.id, key: definition.key, version: definition.version },
-        resolution,
-      },
-    });
-  }
-
-  const compiledPlan = compileGeneratedWorkflowTemplate(template);
-  const requestKey = computeWorkflowDefinitionAutoUseRequestKey({
+  let cached = await findPromotedWorkflowDefinitionArtifact(db, definition);
+  let template = cached ? workflowTemplateFromCachedArtifact(cached) : null;
+  let requestKey = (cached?.request_key as string | null | undefined) ?? computeWorkflowDefinitionAutoUseRequestKey({
     definitionId: definition.id,
     definitionVersion: definition.version,
     deviceId,
     accountId,
   });
+
+  if (!cached) {
+    template = workflowDefinitionToExecutableTemplate(definition);
+    if (template) {
+      const compiledPlan = compileGeneratedWorkflowTemplate(template);
+      await workflowService.saveTemplate(template);
+      await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+        artifactState: "promoted",
+        sourceMetadata: {
+          source: "workflow_definition_auto_use",
+          definitionId: definition.id,
+          definitionKey: definition.key,
+          definitionVersion: definition.version,
+          promotionScope: scope,
+          autoUseEnabled: true,
+          safeToAutoApply: true,
+        },
+      });
+      cached = {
+        cache_key: compiledPlan.cacheKey,
+        request_key: requestKey,
+        canonical_workflow_id: template.id,
+        canonical_workflow_version: template.version,
+        compiled_plan_hash: computeGeneratedWorkflowCompiledPlanHash(compiledPlan),
+        artifact_state: "promoted",
+        workflow: template,
+        compiled_plan: compiledPlan,
+        platform: template.platform,
+      };
+    }
+  }
+
+  if (!cached || !template) {
+    return res.status(409).json({
+      ok: false,
+      code: "WORKFLOW_DEFINITION_EXECUTABLE_TEMPLATE_UNAVAILABLE",
+      error: "this workflow definition does not yet have a promoted executable artifact",
+      data: {
+        definition: { id: definition.id, key: definition.key, version: definition.version },
+        resolution,
+        nextAction: "promote a generated workflow cache artifact for this definition",
+      },
+    });
+  }
+
   await workflowService.saveTemplate(template);
-  await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
-    artifactState: "promoted",
-    sourceMetadata: {
-      source: "workflow_definition_auto_use",
-      definitionId: definition.id,
-      definitionKey: definition.key,
-      definitionVersion: definition.version,
-      promotionScope: scope,
-      autoUseEnabled: true,
-      safeToAutoApply: true,
-    },
-  });
 
   const client = await db.connect();
   try {
     await client.query("BEGIN");
-    const cacheRows = await client.query<Record<string, unknown>>(
+    const lockedCacheRows = await client.query<Record<string, unknown>>(
       `SELECT * FROM generated_workflow_plan_cache
        WHERE cache_key = $1
-         AND artifact_state = 'promoted'`,
-      [compiledPlan.cacheKey]
+         AND artifact_state = 'promoted'
+       FOR UPDATE`,
+      [cached.cache_key]
     );
-    const cached = cacheRows.rows[0];
+    cached = lockedCacheRows.rows[0] ?? null;
     if (!cached) {
       await client.query("ROLLBACK");
       return res.status(404).json({
         ok: false,
         code: "WORKFLOW_DEFINITION_AUTO_USE_CACHE_MISS",
-        error: "promoted generated workflow artifact was not found after auto-use compile",
+        error: "promoted generated workflow artifact was not found for auto-use",
       });
     }
 
@@ -2880,6 +2926,176 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
   } finally {
     client.release();
   }
+});
+
+router.post("/workflow-definitions/:id/executable-artifact", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const body = normalizeJsonObject(req.body);
+  const cacheKey = typeof body.cacheKey === "string" && body.cacheKey.trim().length > 0 ? body.cacheKey.trim() : null;
+  const requestKey = typeof body.requestKey === "string" && body.requestKey.trim().length > 0 ? body.requestKey.trim() : null;
+  const note = typeof body.note === "string" && body.note.trim().length > 0 ? body.note.trim() : null;
+
+  if ((cacheKey ? 1 : 0) + (requestKey ? 1 : 0) !== 1) {
+    return res.status(400).json({
+      ok: false,
+      code: "EXACTLY_ONE_CANONICAL_KEY_REQUIRED",
+      error: "exactly one of cacheKey or requestKey required",
+    });
+  }
+  if (cacheKey && !GENERATED_WORKFLOW_KEY_RE.test(cacheKey)) {
+    return res.status(400).json({ ok: false, code: "CACHE_KEY_INVALID", error: "cacheKey must be a 24-character lowercase hex string" });
+  }
+  if (requestKey && !GENERATED_WORKFLOW_KEY_RE.test(requestKey)) {
+    return res.status(400).json({ ok: false, code: "REQUEST_KEY_INVALID", error: "requestKey must be a 24-character lowercase hex string" });
+  }
+
+  const definitionRow = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  if (!definitionRow) {
+    return res.status(404).json({ ok: false, code: "WORKFLOW_DEFINITION_NOT_FOUND", error: "Workflow definition not found" });
+  }
+  const definition = rowToWorkflowDefinition(definitionRow);
+  const artifactRows = await db.query<Record<string, unknown>>(
+    cacheKey
+      ? `SELECT * FROM generated_workflow_plan_cache
+         WHERE cache_key = $1
+           AND artifact_state = ANY($2::text[])
+         ORDER BY updated_at DESC
+         LIMIT 1`
+      : `SELECT * FROM generated_workflow_plan_cache
+         WHERE request_key = $1
+           AND artifact_state = ANY($2::text[])
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+    [cacheKey ?? requestKey, ["candidate", "promoted"]]
+  );
+  const artifact = artifactRows.rows[0];
+  if (!artifact) {
+    return res.status(404).json({
+      ok: false,
+      code: "GENERATED_WORKFLOW_ARTIFACT_NOT_FOUND",
+      error: "generated workflow artifact not found for cacheKey/requestKey",
+    });
+  }
+
+  const artifactIntent = cachedWorkflowIntent(artifact);
+  const artifactPlatform = cachedWorkflowPlatform(artifact);
+  if (artifactIntent && artifactIntent !== definition.intent) {
+    return res.status(400).json({
+      ok: false,
+      code: "WORKFLOW_DEFINITION_ARTIFACT_INTENT_MISMATCH",
+      error: "artifact intent does not match workflow definition intent",
+      data: { artifactIntent, definitionIntent: definition.intent },
+    });
+  }
+  if (artifactPlatform && artifactPlatform !== definition.platform) {
+    return res.status(400).json({
+      ok: false,
+      code: "WORKFLOW_DEFINITION_ARTIFACT_PLATFORM_MISMATCH",
+      error: "artifact platform does not match workflow definition platform",
+      data: { artifactPlatform, definitionPlatform: definition.platform },
+    });
+  }
+  if (cachedWorkflowLlmHappyPathRequests(artifact) !== 0) {
+    return res.status(400).json({
+      ok: false,
+      code: "WORKFLOW_DEFINITION_ARTIFACT_LLM_BUDGET_NOT_SAFE",
+      error: "artifact happy path must avoid LLM calls before it can be promoted as a workflow definition executable",
+    });
+  }
+
+  const template = workflowTemplateFromCachedArtifact(artifact);
+  if (!template) {
+    return res.status(400).json({
+      ok: false,
+      code: "WORKFLOW_DEFINITION_ARTIFACT_TEMPLATE_MISSING",
+      error: "artifact does not contain a workflow template",
+    });
+  }
+
+  const client = await db.connect();
+  let updatedArtifact;
+  try {
+    await client.query("BEGIN");
+    const updated = await client.query<Record<string, unknown>>(
+      `UPDATE generated_workflow_plan_cache
+       SET artifact_state = 'promoted',
+           source_metadata = source_metadata || $2::jsonb,
+           updated_at = NOW()
+       WHERE cache_key = $1
+       RETURNING *`,
+      [
+        artifact.cache_key,
+        JSON.stringify({
+          source: "workflow_definition_executable_artifact",
+          definitionId: definition.id,
+          definitionKey: definition.key,
+          definitionVersion: definition.version,
+          promotedBy: "dashboard",
+          promotedAt: new Date().toISOString(),
+          promotionScope: definition.promotion.scope,
+        }),
+      ]
+    );
+    updatedArtifact = updated.rows[0];
+    await client.query(
+      `INSERT INTO agency_workflow_definition_version_events (
+         definition_id, definition_key, definition_version, action, previous_status, next_status,
+         note, actor, diff, impact_preview, policy
+       )
+       VALUES ($1, $2, $3, 'executable_artifact_promoted', $4, $4, $5, 'dashboard', '{}'::jsonb, $6, $7)`,
+      [
+        definition.id,
+        definition.key,
+        definition.version,
+        definition.status,
+        note ?? `Promoted executable artifact ${artifact.cache_key}`,
+        JSON.stringify({
+          cacheKey: artifact.cache_key,
+          requestKey: artifact.request_key ?? null,
+          canonicalWorkflowId: artifact.canonical_workflow_id ?? null,
+          compiledPlanHash: artifact.compiled_plan_hash ?? null,
+          previousArtifactState: artifact.artifact_state ?? null,
+        }),
+        JSON.stringify({
+          noCodeExecutableArtifact: true,
+          autoUseEnabled: definition.promotion.autoUseEnabled,
+          executionChanging: false,
+          workflowCacheChanging: true,
+          safeToAutoApply: false,
+          mode: "workflow_definition_executable_artifact_promotion",
+        }),
+      ]
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  await workflowService.saveTemplate(template);
+  return res.json({
+    ok: true,
+    data: {
+      definition: { id: definition.id, key: definition.key, version: definition.version },
+      artifact: {
+        cacheKey: updatedArtifact.cache_key,
+        requestKey: updatedArtifact.request_key ?? null,
+        artifactState: updatedArtifact.artifact_state,
+        canonicalWorkflowId: updatedArtifact.canonical_workflow_id,
+        canonicalWorkflowVersion: updatedArtifact.canonical_workflow_version,
+        compiledPlanHash: updatedArtifact.compiled_plan_hash,
+      },
+      policy: {
+        noCodeExecutableArtifact: true,
+        requiresServerUpdateForWorkflow: false,
+        executionChanging: false,
+        workflowCacheChanging: true,
+        mode: "workflow_definition_executable_artifact_promotion",
+      },
+    },
+  });
 });
 
 router.get("/workflow-definitions/:id/versions", requireAdminAuth, async (req: Request, res: Response) => {
