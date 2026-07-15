@@ -33,6 +33,7 @@ import { visionService } from "../modules/vision/vision.service";
 import { workflowEvents } from "../modules/workflow-events";
 import { llmComplete } from "../utils/llm";
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
+import { requireDeviceExecutionLeaseContext, type DeviceExecutionLeaseContext } from "../modules/device-execution/device-execution-lease.service";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -193,7 +194,8 @@ export class DirectWsServer {
    * Send a job to a device. Returns true if sent, false if device not connected.
    * Does NOT wait for result — use waitForJobResult() for that.
    */
-  sendJob(deviceId: string, payload: JobDispatchPayload): boolean {
+  sendJob(deviceId: string, payload: JobDispatchPayload, leaseContext: DeviceExecutionLeaseContext): boolean {
+    requireDeviceExecutionLeaseContext(deviceId, leaseContext);
     const conn = this.connections.get(deviceId);
     if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
 
@@ -204,6 +206,8 @@ export class DirectWsServer {
       params:  payload.params,
       timeoutMs: payload.timeoutMs,
       requiresRoot: payload.requiresRoot,
+      leaseOwner: leaseContext.ownerId,
+      fencingToken: leaseContext.fencingToken,
     });
     console.log(`[direct-ws] sendJob: device=${deviceId.slice(0,8)} jobId=${payload.jobId?.slice(0,8)} type=${payload.type}`);
     return true;

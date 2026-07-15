@@ -7,15 +7,16 @@
 
 import { directWsServer } from "../ws/direct-ws.server";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
+import type { DeviceExecutionLeaseContext } from "../modules/device-execution/device-execution-lease.service";
 
 /**
  * Send a job to a device via DirectWS transport.
  * Returns true if sent successfully, false if device unreachable.
  */
-export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
+export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload, leaseContext?: DeviceExecutionLeaseContext): boolean {
   // DirectWs only
   if (directWsServer.isDeviceOnline(deviceId)) {
-    return directWsServer.sendJob(deviceId, payload);
+    return directWsServer.sendJob(deviceId, payload, leaseContext as DeviceExecutionLeaseContext);
   }
   
   return false;
