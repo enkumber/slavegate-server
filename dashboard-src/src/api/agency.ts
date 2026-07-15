@@ -681,6 +681,8 @@ export interface WorkflowDefinition {
   intent: string;
   goal: string;
   source: string;
+  parentDefinitionId: string | null;
+  versionNote: string | null;
   definition: Record<string, unknown>;
   successCriteria: unknown[];
   allowedTools: string[];
@@ -689,6 +691,9 @@ export interface WorkflowDefinition {
   fallbackRules: string[];
   rollback: Record<string, unknown>;
   policy: Record<string, unknown>;
+  telemetrySummary: Record<string, unknown>;
+  confidenceDecay: Record<string, unknown>;
+  promotionHardening: Record<string, unknown>;
   promotion: {
     state: string;
     scope: string | null;
@@ -817,15 +822,54 @@ export interface WorkflowDefinitionResolutionResponse {
     definition: WorkflowDefinition;
     score: number;
   }>;
-  wouldUseDefinition: false;
-  wouldChangePlan: false;
+  requestedScope?: string | null;
+  wouldUseDefinition: boolean;
+  wouldChangePlan: boolean;
   wouldChangeWorkflowCache: false;
   wouldExecuteWorkflow: false;
-  selectedDefinitionId: null;
+  selectedDefinitionId: string | null;
   blockers: string[];
   policyGateSummary: Record<string, unknown>;
   rollbackPreview: Record<string, unknown>;
+  controlledDecision?: Record<string, unknown>;
   notes: string[];
+}
+
+export interface WorkflowDefinitionVersionEvent {
+  id: string;
+  definitionId: string | null;
+  definitionKey: string | null;
+  definitionVersion: number | null;
+  action: "create_version" | "archive" | "deprecate" | "activate" | "draft" | "hardening_preview" | string;
+  previousStatus: string | null;
+  nextStatus: string | null;
+  targetDefinitionId: string | null;
+  note: string | null;
+  actor: string | null;
+  diff: Record<string, unknown>;
+  impactPreview: Record<string, unknown>;
+  policy: Record<string, unknown>;
+  createdAt: string | null;
+}
+
+export interface WorkflowDefinitionVersionResponse {
+  definition: WorkflowDefinition;
+  diff: Record<string, unknown>;
+  impactPreview: Record<string, unknown>;
+  policy: Record<string, unknown>;
+}
+
+export interface CompilerPolicyGateEvent {
+  id: string;
+  gateId: string;
+  previousState: string | null;
+  nextState: string;
+  version: number;
+  note: string | null;
+  actor: string | null;
+  config: Record<string, unknown>;
+  policy: Record<string, unknown>;
+  createdAt: string | null;
 }
 
 export interface WorkflowValidationPipelineItem {
@@ -1074,6 +1118,15 @@ export const agencyApi = {
       if (params?.owner) query.set("owner", params.owner);
       return api.get<CompilerPolicyGatesResponse>(`/agency/compiler-policy-gates?${query}`);
     },
+    update: (gateId: string, data: { state: "blocked" | "review_ready" | "enabled"; note?: string | null; config?: Record<string, unknown> }) =>
+      api.patch<{ gate: CompilerPolicyGate; previousState: string; nextState: string; policy: Record<string, unknown> }>(`/agency/compiler-policy-gates/${gateId}`, data),
+    listEvents: (params?: { page?: number; pageSize?: number; gateId?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.pageSize) query.set("pageSize", String(params.pageSize));
+      if (params?.gateId) query.set("gateId", params.gateId);
+      return api.get<PaginatedResponse<CompilerPolicyGateEvent>>(`/agency/compiler-policy-gates/events?${query}`);
+    },
   },
 
   compilerAwareness: {
@@ -1123,13 +1176,44 @@ export const agencyApi = {
       if (params?.key) query.set("key", params.key);
       return api.get<WorkflowDefinitionRegistryResponse>(`/agency/workflow-definitions?${query}`);
     },
-    resolve: (params?: { intent?: string; platform?: string; key?: string }) => {
+    resolve: (params?: { intent?: string; platform?: string; key?: string; scope?: string }) => {
       const query = new URLSearchParams();
       if (params?.intent) query.set("intent", params.intent);
       if (params?.platform) query.set("platform", params.platform);
       if (params?.key) query.set("key", params.key);
+      if (params?.scope) query.set("scope", params.scope);
       return api.get<WorkflowDefinitionResolutionResponse>(`/agency/workflow-definitions/resolve?${query}`);
     },
+    versions: (id: string) =>
+      api.get<{ items: WorkflowDefinition[]; total: number; policy: Record<string, unknown> }>(`/agency/workflow-definitions/${id}/versions`),
+    createVersion: (id: string, data: {
+      status?: "draft" | "active";
+      title?: string;
+      description?: string | null;
+      goal?: string;
+      note?: string | null;
+      definition?: Record<string, unknown>;
+      successCriteria?: unknown[];
+      allowedTools?: string[];
+      requiredCapabilities?: string[];
+      constraints?: string[];
+      fallbackRules?: string[];
+      rollback?: Record<string, unknown>;
+    }) => api.post<WorkflowDefinitionVersionResponse>(`/agency/workflow-definitions/${id}/versions`, data),
+    diff: (id: string, targetId?: string) => {
+      const query = new URLSearchParams();
+      if (targetId) query.set("targetId", targetId);
+      return api.get<Record<string, unknown>>(`/agency/workflow-definitions/${id}/diff?${query}`);
+    },
+    impactPreview: (id: string) =>
+      api.get<Record<string, unknown>>(`/agency/workflow-definitions/${id}/impact-preview`),
+    hardening: (id: string, scope?: string) => {
+      const query = new URLSearchParams();
+      if (scope) query.set("scope", scope);
+      return api.get<Record<string, unknown>>(`/agency/workflow-definitions/${id}/promotion-hardening?${query}`);
+    },
+    lifecycle: (id: string, data: { action: "archive" | "deprecate" | "activate" | "draft"; note?: string | null }) =>
+      api.patch<{ definition: WorkflowDefinition; action: string; previousStatus: string; nextStatus: string; impactPreview: Record<string, unknown>; policy: Record<string, unknown> }>(`/agency/workflow-definitions/${id}/lifecycle`, data),
     promote: (id: string, data: { action: "promote_limited" | "revoke"; scope?: string | null; note?: string | null }) =>
       api.patch<WorkflowDefinitionPromotionResponse>(`/agency/workflow-definitions/${id}/promotion`, data),
     rollback: (id: string, data: { targetDefinitionId?: string | null; note?: string | null }) =>
@@ -1145,6 +1229,16 @@ export const agencyApi = {
       if (params?.action) query.set("action", params.action);
       if (params?.actor) query.set("actor", params.actor);
       return api.get<PaginatedResponse<WorkflowDefinitionPromotionEvent> & { policy: Record<string, unknown> }>(`/agency/workflow-definitions/promotion-events?${query}`);
+    },
+    listVersionEvents: (params?: { page?: number; pageSize?: number; definitionId?: string; key?: string; action?: string; actor?: string }) => {
+      const query = new URLSearchParams();
+      if (params?.page) query.set("page", String(params.page));
+      if (params?.pageSize) query.set("pageSize", String(params.pageSize));
+      if (params?.definitionId) query.set("definitionId", params.definitionId);
+      if (params?.key) query.set("key", params.key);
+      if (params?.action) query.set("action", params.action);
+      if (params?.actor) query.set("actor", params.actor);
+      return api.get<PaginatedResponse<WorkflowDefinitionVersionEvent> & { policy: Record<string, unknown> }>(`/agency/workflow-definitions/version-events?${query}`);
     },
   },
 

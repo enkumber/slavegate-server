@@ -123,6 +123,17 @@ export const agencyApi = {
                 query.set("owner", params.owner);
             return api.get(`/agency/compiler-policy-gates?${query}`);
         },
+        update: (gateId, data) => api.patch(`/agency/compiler-policy-gates/${gateId}`, data),
+        listEvents: (params) => {
+            const query = new URLSearchParams();
+            if (params?.page)
+                query.set("page", String(params.page));
+            if (params?.pageSize)
+                query.set("pageSize", String(params.pageSize));
+            if (params?.gateId)
+                query.set("gateId", params.gateId);
+            return api.get(`/agency/compiler-policy-gates/events?${query}`);
+        },
     },
     compilerAwareness: {
         get: (params) => {
@@ -197,8 +208,26 @@ export const agencyApi = {
                 query.set("platform", params.platform);
             if (params?.key)
                 query.set("key", params.key);
+            if (params?.scope)
+                query.set("scope", params.scope);
             return api.get(`/agency/workflow-definitions/resolve?${query}`);
         },
+        versions: (id) => api.get(`/agency/workflow-definitions/${id}/versions`),
+        createVersion: (id, data) => api.post(`/agency/workflow-definitions/${id}/versions`, data),
+        diff: (id, targetId) => {
+            const query = new URLSearchParams();
+            if (targetId)
+                query.set("targetId", targetId);
+            return api.get(`/agency/workflow-definitions/${id}/diff?${query}`);
+        },
+        impactPreview: (id) => api.get(`/agency/workflow-definitions/${id}/impact-preview`),
+        hardening: (id, scope) => {
+            const query = new URLSearchParams();
+            if (scope)
+                query.set("scope", scope);
+            return api.get(`/agency/workflow-definitions/${id}/promotion-hardening?${query}`);
+        },
+        lifecycle: (id, data) => api.patch(`/agency/workflow-definitions/${id}/lifecycle`, data),
         promote: (id, data) => api.patch(`/agency/workflow-definitions/${id}/promotion`, data),
         rollback: (id, data) => api.post(`/agency/workflow-definitions/${id}/rollback`, data),
         rollbackPreview: (id) => api.get(`/agency/workflow-definitions/${id}/rollback-preview`),
@@ -217,6 +246,22 @@ export const agencyApi = {
             if (params?.actor)
                 query.set("actor", params.actor);
             return api.get(`/agency/workflow-definitions/promotion-events?${query}`);
+        },
+        listVersionEvents: (params) => {
+            const query = new URLSearchParams();
+            if (params?.page)
+                query.set("page", String(params.page));
+            if (params?.pageSize)
+                query.set("pageSize", String(params.pageSize));
+            if (params?.definitionId)
+                query.set("definitionId", params.definitionId);
+            if (params?.key)
+                query.set("key", params.key);
+            if (params?.action)
+                query.set("action", params.action);
+            if (params?.actor)
+                query.set("actor", params.actor);
+            return api.get(`/agency/workflow-definitions/version-events?${query}`);
         },
     },
     workflowValidationPipeline: {

@@ -15,6 +15,8 @@ export interface WorkflowDefinition {
   intent: string;
   goal: string;
   source: string;
+  parentDefinitionId: string | null;
+  versionNote: string | null;
   definition: JsonObject;
   successCriteria: unknown[];
   allowedTools: string[];
@@ -41,6 +43,9 @@ export interface WorkflowDefinition {
     wouldUseDefinition: false;
     autoUseEnabled: false;
   };
+  telemetrySummary: JsonObject;
+  confidenceDecay: JsonObject;
+  promotionHardening: JsonObject;
   summary: {
     successCriteria: number;
     allowedTools: number;
@@ -57,6 +62,7 @@ export interface WorkflowDefinitionResolutionInput {
   intent?: string;
   platform?: string;
   key?: string;
+  requestedScope?: string;
   definitions: WorkflowDefinition[];
   policyGates: CompilerPolicyGate[];
 }
@@ -113,6 +119,8 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
     intent: String(row.intent),
     goal: String(row.goal),
     source: String(row.source ?? "unknown"),
+    parentDefinitionId: typeof row.parent_definition_id === "string" ? row.parent_definition_id : null,
+    versionNote: typeof row.version_note === "string" ? row.version_note : null,
     definition: objectValue(row.definition),
     successCriteria,
     allowedTools,
@@ -142,6 +150,9 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
       wouldUseDefinition: false,
       autoUseEnabled: false,
     },
+    telemetrySummary: objectValue(row.telemetry_summary),
+    confidenceDecay: objectValue(row.confidence_decay),
+    promotionHardening: objectValue(row.promotion_hardening),
     summary: {
       successCriteria: successCriteria.length,
       allowedTools: allowedTools.length,
@@ -210,6 +221,73 @@ function gateSummary(policyGates: CompilerPolicyGate[]): JsonObject {
   };
 }
 
+function gateEnabled(policyGates: CompilerPolicyGate[], id: string): boolean {
+  return policyGates.find((gate) => gate.id === id)?.state === "enabled";
+}
+
+function scopeMatches(requestedScope: string | undefined, promotionScope: string | null): boolean {
+  if (!requestedScope || !promotionScope) return false;
+  if (requestedScope === promotionScope) return true;
+  const [requestedType, ...requestedParts] = requestedScope.split(":");
+  const [promotionType, ...promotionParts] = promotionScope.split(":");
+  if (!requestedType || !promotionType || requestedType !== promotionType) return false;
+  const requestedValue = requestedParts.join(":");
+  const promotionValue = promotionParts.join(":");
+  return !!requestedValue && !!promotionValue && requestedValue === promotionValue;
+}
+
+function controlledAutoUseDecision(input: {
+  definition: WorkflowDefinition | null;
+  requestedScope?: string;
+  policyGates: CompilerPolicyGate[];
+}): JsonObject {
+  const blockers: string[] = [];
+  const gates = {
+    compilerVisibility: gateEnabled(input.policyGates, "compiler_knowledge_application"),
+    limitedReuseScopeMatch: gateEnabled(input.policyGates, "limited_reuse_scope_match"),
+    autoUse: gateEnabled(input.policyGates, "compiler_auto_use"),
+    executionPathChange: gateEnabled(input.policyGates, "execution_path_change"),
+  };
+  if (!input.definition) blockers.push("workflow_definition_not_found");
+  if (!gates.compilerVisibility) blockers.push("compiler_visibility_gate_disabled");
+  if (!gates.limitedReuseScopeMatch) blockers.push("limited_reuse_scope_gate_disabled");
+  if (!gates.autoUse) blockers.push("compiler_auto_use_disabled");
+  if (!gates.executionPathChange) blockers.push("execution_changing_disabled");
+  if (input.definition) {
+    if (input.definition.status !== "active") blockers.push("workflow_definition_not_active");
+    if (input.definition.promotion.state !== "limited_reuse") blockers.push("workflow_definition_not_limited_reuse");
+    if (!scopeMatches(input.requestedScope, input.definition.promotion.scope)) blockers.push("limited_reuse_scope_mismatch");
+    if (Number(input.definition.promotion.confidence ?? 0) < 0.6) blockers.push("promotion_confidence_below_threshold");
+    const readinessState = typeof input.definition.promotion.readiness.state === "string"
+      ? input.definition.promotion.readiness.state
+      : null;
+    if (!["manual_limited_promotion_ready", "manual_rollback_applied"].includes(readinessState ?? "")) {
+      blockers.push("promotion_readiness_not_ready");
+    }
+  }
+
+  const uniqueBlockers = Array.from(new Set(blockers));
+  const mayUseDefinition = uniqueBlockers.filter((blocker) => blocker !== "execution_changing_disabled").length === 0;
+
+  return {
+    gates,
+    requestedScope: input.requestedScope ?? null,
+    scopeMatched: !!input.definition && scopeMatches(input.requestedScope, input.definition.promotion.scope),
+    wouldUseDefinition: mayUseDefinition,
+    wouldChangePlan: mayUseDefinition,
+    wouldChangeWorkflowCache: false,
+    wouldExecuteWorkflow: false,
+    safeToAutoApply: false,
+    selectedDefinitionId: mayUseDefinition ? input.definition?.id ?? null : null,
+    outcome: mayUseDefinition ? "would_use_definition_dry_run_only" : "blocked_by_policy",
+    blockers: uniqueBlockers,
+    notes: [
+      "Controlled auto-use is a dry-run decision only.",
+      "Execution and workflow cache changes remain disabled until canary/smoke gates are implemented and approved.",
+    ],
+  };
+}
+
 export function buildWorkflowDefinitionResolution(input: WorkflowDefinitionResolutionInput): JsonObject {
   const searchTerms = terms(input);
   const candidates = input.definitions
@@ -220,34 +298,37 @@ export function buildWorkflowDefinitionResolution(input: WorkflowDefinitionResol
     .filter((candidate) => candidate.score > 0)
     .sort((left, right) => right.score - left.score || right.definition.version - left.definition.version);
   const best = candidates[0]?.definition ?? null;
+  const controlledDecision = controlledAutoUseDecision({
+    definition: best,
+    requestedScope: input.requestedScope,
+    policyGates: input.policyGates,
+  });
 
   return {
     intent: input.intent ?? null,
     platform: input.platform ?? null,
     key: input.key ?? null,
+    requestedScope: input.requestedScope ?? null,
     policy: registryPolicy(),
-    outcome: best ? "blocked_by_policy" : "no_matching_definition",
+    outcome: best ? controlledDecision.outcome : "no_matching_definition",
     candidateDefinition: best,
     candidateDefinitions: candidates.slice(0, 5).map((candidate) => ({
       definition: candidate.definition,
       score: candidate.score,
     })),
-    wouldUseDefinition: false,
-    wouldChangePlan: false,
+    wouldUseDefinition: controlledDecision.wouldUseDefinition === true,
+    wouldChangePlan: controlledDecision.wouldChangePlan === true,
     wouldChangeWorkflowCache: false,
     wouldExecuteWorkflow: false,
-    selectedDefinitionId: null,
+    selectedDefinitionId: controlledDecision.selectedDefinitionId ?? null,
     blockers: best
-      ? [
-          "workflow_definition_registry_read_only",
-          "compiler_auto_use_disabled",
-          "execution_changing_disabled",
-        ]
+      ? Array.isArray(controlledDecision.blockers) ? controlledDecision.blockers : []
       : [
           "workflow_definition_not_found",
-          "workflow_definition_registry_read_only",
+          "workflow_definition_registry_controlled",
         ],
     policyGateSummary: gateSummary(input.policyGates),
+    controlledDecision,
     rollbackPreview: best
       ? {
           available: true,
@@ -264,9 +345,9 @@ export function buildWorkflowDefinitionResolution(input: WorkflowDefinitionResol
           reason: "No candidate definition matched the query.",
         },
     notes: [
-      "Workflow Definition Registry is declarative and read-only.",
-      "Resolution preview does not alter compiler plans, workflow cache, or execution path.",
-      "Definitions require explicit policy gate changes before compiler use.",
+      "Workflow Definition Registry is declarative and controlled by policy gates.",
+      "Resolution preview does not alter workflow cache or execution path.",
+      "A true wouldUseDefinition is still dry-run only unless execution gates and canary/smoke checks are separately approved.",
     ],
   };
 }

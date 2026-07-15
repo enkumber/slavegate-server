@@ -89,6 +89,51 @@ function hydratedRun(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function workflowDefinitionRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "99999999-9999-4999-8999-999999999999",
+    definition_key: "reddit_account_health_scan",
+    version: 1,
+    status: "active",
+    title: "Reddit account health scan",
+    description: "Read-only workflow definition",
+    platform: "reddit",
+    intent: "reddit_account_health_scan",
+    goal: "Classify Reddit account health without side effects",
+    source: "static_seed",
+    parent_definition_id: null,
+    version_note: null,
+    definition: {
+      steps: ["open_reddit", "classify_reddit_health_scan"],
+      terminalStates: ["success", "expected_failure", "quarantined"],
+      sideEffects: [],
+    },
+    success_criteria: ["loggedIn classified", "screenState is one of the known Reddit states"],
+    allowed_tools: ["open_app", "ui_tree_dump"],
+    required_capabilities: ["device.online_or_approved"],
+    constraints: ["read_only_only"],
+    fallback_rules: ["if login wall detected classify expected_failure"],
+    rollback: { required: false },
+    policy: {},
+    promotion_state: "not_promoted",
+    promotion_scope: null,
+    promotion_confidence: null,
+    promotion_readiness: {},
+    promotion_scope_details: {},
+    rollback_preview: { available: false, wouldRollbackNow: false },
+    rollback_definition_id: null,
+    telemetry_summary: {},
+    confidence_decay: {},
+    promotion_hardening: {},
+    promoted_at: null,
+    promoted_by: null,
+    created_by: "migration",
+    created_at: new Date("2026-05-22T11:00:00.000Z"),
+    updated_at: new Date("2026-05-22T11:00:00.000Z"),
+    ...overrides,
+  };
+}
+
 function tokenHash(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
@@ -1086,6 +1131,143 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 
+  it("updates Compiler Policy Gates with explicit audit and no execution enablement", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({
+        rows: [{
+          gate_id: "compiler_auto_use",
+          state: "blocked",
+          version: 2,
+          owner: "product",
+          risk: "high",
+          config: {},
+          updated_by: "migration",
+          updated_at: new Date("2026-05-22T10:30:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          gate_id: "compiler_auto_use",
+          state: "enabled",
+          version: 3,
+          owner: "product",
+          risk: "high",
+          config: { explicitApproval: true },
+          updated_by: "dashboard",
+          updated_at: new Date("2026-05-22T10:35:00.000Z"),
+        }],
+      });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ gate_id: "compiler_auto_use", state: "enabled", version: 3 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await patchAgency(
+      "/api/agency/compiler-policy-gates/compiler_auto_use",
+      { state: "enabled", note: "Dry-run only approval", config: { explicitApproval: true } }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      previousState: "blocked",
+      nextState: "enabled",
+      policy: expect.objectContaining({
+        manualOnly: true,
+        editableGates: true,
+        autoUseEnabled: true,
+        executionChanging: false,
+        workflowCacheChanging: false,
+        wouldExecuteWorkflow: false,
+        safeToAutoApply: false,
+      }),
+      gate: expect.objectContaining({
+        id: "compiler_auto_use",
+        state: "enabled",
+        version: 3,
+        remediation: expect.objectContaining({ safeToAutoApply: false }),
+      }),
+    });
+    expect(String(mocks.client.query.mock.calls[1][0])).toContain("agency_compiler_policy_gate_config");
+    expect(String(mocks.client.query.mock.calls[2][0])).toContain("agency_compiler_policy_gate_events");
+    expect(mocks.client.query.mock.calls[3][0]).toBe("COMMIT");
+  });
+
+  it("creates a new Workflow Definition version with diff and impact preview only", async () => {
+    const source = workflowDefinitionRow();
+    const created = workflowDefinitionRow({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      version: 2,
+      status: "draft",
+      title: "Reddit account health scan v2",
+      parent_definition_id: source.id,
+      version_note: "Tighten read-only classifier",
+      allowed_tools: ["open_app", "ui_tree_dump", "wait_for_idle"],
+      source: "dashboard_version",
+      created_by: "dashboard",
+    });
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [source] })
+      .mockResolvedValueOnce({ rows: [{ next_version: "2" }] })
+      .mockResolvedValueOnce({ rows: [
+        { id: created.id, version: 2, status: "draft", promotion_state: "not_promoted", promotion_scope: null, promotion_confidence: null, updated_at: created.updated_at },
+        { id: source.id, version: 1, status: "active", promotion_state: "not_promoted", promotion_scope: null, promotion_confidence: null, updated_at: source.updated_at },
+      ] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [created] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await postAgency(
+      `/api/agency/workflow-definitions/${source.id}/versions`,
+      {
+        status: "draft",
+        title: "Reddit account health scan v2",
+        note: "Tighten read-only classifier",
+        allowedTools: ["open_app", "ui_tree_dump", "wait_for_idle"],
+      }
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      definition: {
+        id: created.id,
+        version: 2,
+        status: "draft",
+        parentDefinitionId: source.id,
+        versionNote: "Tighten read-only classifier",
+      },
+      diff: {
+        mode: "workflow_definition_version_diff",
+        summary: expect.objectContaining({
+          changedFields: expect.any(Number),
+          allowedToolDelta: ["wait_for_idle"],
+        }),
+        wouldExecuteWorkflow: false,
+        wouldChangeWorkflowCache: false,
+      },
+      impactPreview: expect.objectContaining({
+        mode: "workflow_definition_impact_preview",
+        wouldExecuteWorkflow: false,
+        wouldChangeWorkflowCache: false,
+      }),
+      policy: expect.objectContaining({
+        versioningEnabled: true,
+        autoUseEnabled: false,
+        executionChanging: false,
+        workflowCacheChanging: false,
+        wouldExecuteWorkflow: false,
+        safeToAutoApply: false,
+      }),
+    });
+    expect(String(mocks.client.query.mock.calls[1][0])).toContain("INSERT INTO agency_workflow_definitions");
+    expect(String(mocks.client.query.mock.calls[2][0])).toContain("agency_workflow_definition_version_events");
+    expect(mocks.client.query.mock.calls[3][0]).toBe("COMMIT");
+  });
+
   it("lists Step Library promotion audit events without enabling reuse", async () => {
     const event = {
       id: "66666666-6666-4666-8666-666666666666",
@@ -1849,9 +2031,11 @@ describe("agency workflow runs API", () => {
       wouldExecuteWorkflow: false,
       selectedDefinitionId: null,
       blockers: expect.arrayContaining([
-        "workflow_definition_registry_read_only",
+        "compiler_visibility_gate_disabled",
+        "limited_reuse_scope_gate_disabled",
         "compiler_auto_use_disabled",
         "execution_changing_disabled",
+        "workflow_definition_not_limited_reuse",
       ]),
       candidateDefinition: expect.objectContaining({
         key: "reddit_account_health_scan",
@@ -1864,9 +2048,84 @@ describe("agency workflow runs API", () => {
       policyGateSummary: expect.objectContaining({
         safeToAutoApply: 0,
       }),
+      controlledDecision: expect.objectContaining({
+        wouldUseDefinition: false,
+        wouldExecuteWorkflow: false,
+        safeToAutoApply: false,
+      }),
     });
     expect(String(mocks.db.query.mock.calls[0][0])).toContain("agency_workflow_definitions");
     expect(String(mocks.db.query.mock.calls[1][0])).toContain("agency_compiler_policy_gate_config");
+  });
+
+  it("can dry-run a controlled Workflow Definition auto-use decision without execution or cache changes", async () => {
+    const definition = workflowDefinitionRow({
+      promotion_state: "limited_reuse",
+      promotion_scope: "device:pixel-1",
+      promotion_confidence: "0.86",
+      promotion_readiness: { state: "manual_limited_promotion_ready", validation: "passed" },
+      promotion_scope_details: { type: "device", value: "pixel-1", globalBlocked: true },
+      rollback_preview: { available: true, wouldRollbackNow: false },
+      promoted_at: new Date("2026-05-22T11:30:00.000Z"),
+      promoted_by: "dashboard",
+    });
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [definition] })
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            gate_id: "compiler_knowledge_application",
+            state: "enabled",
+            version: 2,
+            owner: "product",
+            risk: "medium",
+            config: { explicitApproval: true },
+            updated_by: "dashboard",
+            updated_at: new Date("2026-05-22T11:35:00.000Z"),
+          },
+          {
+            gate_id: "limited_reuse_scope_match",
+            state: "enabled",
+            version: 2,
+            owner: "product",
+            risk: "medium",
+            config: { explicitApproval: true },
+            updated_by: "dashboard",
+            updated_at: new Date("2026-05-22T11:35:00.000Z"),
+          },
+          {
+            gate_id: "compiler_auto_use",
+            state: "enabled",
+            version: 2,
+            owner: "product",
+            risk: "high",
+            config: { explicitApproval: true },
+            updated_by: "dashboard",
+            updated_at: new Date("2026-05-22T11:35:00.000Z"),
+          },
+        ],
+      });
+
+    const response = await getAgency(
+      "/api/agency/workflow-definitions/resolve?intent=reddit_account_health_scan&platform=reddit&scope=device:pixel-1"
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      outcome: "would_use_definition_dry_run_only",
+      requestedScope: "device:pixel-1",
+      wouldUseDefinition: true,
+      wouldChangePlan: true,
+      wouldChangeWorkflowCache: false,
+      wouldExecuteWorkflow: false,
+      selectedDefinitionId: definition.id,
+      blockers: ["execution_changing_disabled"],
+      controlledDecision: expect.objectContaining({
+        wouldUseDefinition: true,
+        wouldExecuteWorkflow: false,
+        safeToAutoApply: false,
+      }),
+    });
   });
 
   it("previews Workflow Validation Pipeline without promotion, cache, or execution changes", async () => {

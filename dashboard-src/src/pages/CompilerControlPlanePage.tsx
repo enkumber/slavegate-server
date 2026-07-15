@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, CompilerControlPlaneEvent, CompilerControlPlaneResponse } from "../api/agency";
+import { agencyApi, CompilerControlPlaneEvent, CompilerControlPlaneResponse, CompilerPolicyGateEvent } from "../api/agency";
 
 function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gray" | "red" | "blue" }) {
   const palette = {
@@ -35,6 +35,8 @@ export function CompilerControlPlanePage() {
   const [scope, setScope] = useState("device:test-device");
   const [data, setData] = useState<CompilerControlPlaneResponse | null>(null);
   const [events, setEvents] = useState<CompilerControlPlaneEvent[]>([]);
+  const [gateEvents, setGateEvents] = useState<CompilerPolicyGateEvent[]>([]);
+  const [gateNote, setGateNote] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -42,12 +44,14 @@ export function CompilerControlPlanePage() {
     setLoading(true);
     setError(null);
     try {
-      const [controlPlane, eventPage] = await Promise.all([
+      const [controlPlane, eventPage, policyEvents] = await Promise.all([
         agencyApi.compilerControlPlane.get({ intent: intent || undefined, scope: scope || undefined }),
         agencyApi.compilerControlPlane.listEvents({ pageSize: 5 }),
+        agencyApi.compilerPolicyGates.listEvents({ pageSize: 6 }),
       ]);
       setData(controlPlane);
       setEvents(eventPage.items);
+      setGateEvents(policyEvents.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load Compiler Control Plane");
     } finally {
@@ -64,6 +68,23 @@ export function CompilerControlPlanePage() {
   const dryRun = data?.dryRun;
   const reuseSummary = data?.limitedReusePlan.summary;
   const visibleTools = useMemo(() => (manifest?.tools ?? []).slice(0, 10), [manifest?.tools]);
+
+  const updateGate = useCallback(async (gateId: string, state: "blocked" | "review_ready" | "enabled", risk?: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      await agencyApi.compilerPolicyGates.update(gateId, {
+        state,
+        note: gateNote || null,
+        config: state === "enabled" && risk === "high" ? { explicitApproval: true } : {},
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update policy gate");
+    } finally {
+      setLoading(false);
+    }
+  }, [gateNote, load]);
 
   return (
     <AgencyLayout currentRoute="#/agency/compiler-control-plane">
@@ -180,6 +201,16 @@ export function CompilerControlPlanePage() {
 
       <section style={{ border: "1px solid #222", borderRadius: "6px", background: "#101010", padding: "14px", marginBottom: "14px" }}>
         <div style={{ color: "#fff", fontSize: "15px", fontWeight: 600, marginBottom: "10px" }}>Policy Gate State</div>
+        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginBottom: "10px" }}>
+          <input
+            value={gateNote}
+            onChange={(event) => setGateNote(event.target.value)}
+            placeholder="Gate audit note"
+            style={{ background: "#0a0a0a", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", minWidth: "260px" }}
+          />
+          <Badge label="policy updates are audited" tone="blue" />
+          <Badge label="wouldExecuteWorkflow: false" tone="gray" />
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(190px, 1fr))", gap: "10px" }}>
           {data?.policyGates.items.map((gate) => (
             <div key={gate.id} style={{ background: "#0d0d0d", border: "1px solid #222", borderRadius: "6px", padding: "12px", minWidth: 0 }}>
@@ -190,8 +221,28 @@ export function CompilerControlPlanePage() {
                 <Badge label={`v${gate.version ?? 1}`} tone="blue" />
                 <Badge label={gate.risk} tone={gate.risk === "high" ? "red" : gate.risk === "medium" ? "yellow" : "green"} />
               </div>
+              <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "10px" }}>
+                <button onClick={() => void updateGate(gate.id, "blocked", gate.risk)} disabled={loading || gate.state === "blocked"} style={{ background: "#1f1f1f", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "6px 8px", cursor: loading || gate.state === "blocked" ? "not-allowed" : "pointer", fontSize: "11px" }}>Block</button>
+                <button onClick={() => void updateGate(gate.id, "review_ready", gate.risk)} disabled={loading || gate.state === "review_ready"} style={{ background: "#332b12", border: "1px solid #854d0e", color: "#fef3c7", borderRadius: "6px", padding: "6px 8px", cursor: loading || gate.state === "review_ready" ? "not-allowed" : "pointer", fontSize: "11px" }}>Review</button>
+                <button onClick={() => void updateGate(gate.id, "enabled", gate.risk)} disabled={loading || gate.state === "enabled"} style={{ background: "#0f3323", border: "1px solid #166534", color: "#dcfce7", borderRadius: "6px", padding: "6px 8px", cursor: loading || gate.state === "enabled" ? "not-allowed" : "pointer", fontSize: "11px" }}>Enable</button>
+              </div>
             </div>
           ))}
+        </div>
+      </section>
+
+      <section style={{ border: "1px solid #222", borderRadius: "6px", background: "#101010", padding: "14px", marginBottom: "14px" }}>
+        <div style={{ color: "#fff", fontSize: "15px", fontWeight: 600, marginBottom: "10px" }}>Policy Gate Audit</div>
+        <div style={{ display: "grid", gap: "8px" }}>
+          {gateEvents.map((event) => (
+            <div key={event.id} style={{ display: "grid", gridTemplateColumns: "1fr 110px 110px 140px", gap: "10px", alignItems: "center", borderBottom: "1px solid #1f1f1f", paddingBottom: "8px" }}>
+              <div style={{ color: "#e5e7eb", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.gateId}</div>
+              <Badge label={event.previousState ?? "-"} tone={toneForState(event.previousState ?? undefined)} />
+              <Badge label={event.nextState} tone={toneForState(event.nextState)} />
+              <div style={{ color: "#666", fontSize: "11px" }}>{event.createdAt ? new Date(event.createdAt).toLocaleString() : "-"}</div>
+            </div>
+          ))}
+          {!gateEvents.length && <div style={{ color: "#777", fontSize: "12px" }}>No policy gate updates yet.</div>}
         </div>
       </section>
 

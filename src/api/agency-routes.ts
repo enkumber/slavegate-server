@@ -588,6 +588,84 @@ function parseWorkflowDefinitionRollback(input: unknown): {
   };
 }
 
+function parseWorkflowDefinitionVersion(input: unknown): {
+  note: string | null;
+  status: string;
+  title: string | null;
+  description: string | null | undefined;
+  goal: string | null;
+  definition: Record<string, unknown> | null;
+  successCriteria: unknown[] | null;
+  allowedTools: string[] | null;
+  requiredCapabilities: string[] | null;
+  constraints: string[] | null;
+  fallbackRules: string[] | null;
+  rollback: Record<string, unknown> | null;
+} | { error: string; code: string } {
+  const body = normalizeJsonObject(input);
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note.length > 1000) return { error: "note must be 1000 characters or fewer", code: "WORKFLOW_DEFINITION_VERSION_NOTE_TOO_LONG" };
+  const status = typeof body.status === "string" && body.status.trim().length > 0 ? body.status.trim() : "draft";
+  if (!["draft", "active"].includes(status)) return { error: "new version status must be draft or active", code: "WORKFLOW_DEFINITION_VERSION_STATUS_INVALID" };
+  const title = typeof body.title === "string" && body.title.trim().length > 0 ? body.title.trim() : null;
+  const description = typeof body.description === "string" ? body.description.trim() || null : undefined;
+  const goal = typeof body.goal === "string" && body.goal.trim().length > 0 ? body.goal.trim() : null;
+  const definition = body.definition && typeof body.definition === "object" && !Array.isArray(body.definition) ? body.definition as Record<string, unknown> : null;
+  const successCriteria = Array.isArray(body.successCriteria) ? body.successCriteria : null;
+  const allowedTools = Array.isArray(body.allowedTools) ? body.allowedTools.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()) : null;
+  const requiredCapabilities = Array.isArray(body.requiredCapabilities) ? body.requiredCapabilities.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()) : null;
+  const constraints = Array.isArray(body.constraints) ? body.constraints.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()) : null;
+  const fallbackRules = Array.isArray(body.fallbackRules) ? body.fallbackRules.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()) : null;
+  const rollback = body.rollback && typeof body.rollback === "object" && !Array.isArray(body.rollback) ? body.rollback as Record<string, unknown> : null;
+  return {
+    note: note.length > 0 ? note : null,
+    status,
+    title,
+    description,
+    goal,
+    definition,
+    successCriteria,
+    allowedTools,
+    requiredCapabilities,
+    constraints,
+    fallbackRules,
+    rollback,
+  };
+}
+
+function parseWorkflowDefinitionLifecycle(input: unknown): {
+  action: "archive" | "deprecate" | "activate" | "draft";
+  note: string | null;
+} | { error: string; code: string } {
+  const body = normalizeJsonObject(input);
+  const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
+  if (!["archive", "deprecate", "activate", "draft"].includes(action)) {
+    return { error: "action must be one of archive, deprecate, activate, draft", code: "WORKFLOW_DEFINITION_LIFECYCLE_ACTION_INVALID" };
+  }
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note.length > 1000) return { error: "note must be 1000 characters or fewer", code: "WORKFLOW_DEFINITION_LIFECYCLE_NOTE_TOO_LONG" };
+  return { action: action as "archive" | "deprecate" | "activate" | "draft", note: note.length > 0 ? note : null };
+}
+
+function parseCompilerPolicyGateUpdate(input: unknown): {
+  state: "blocked" | "review_ready" | "enabled";
+  note: string | null;
+  config: Record<string, unknown>;
+} | { error: string; code: string } {
+  const body = normalizeJsonObject(input);
+  const state = typeof body.state === "string" ? body.state.trim() : "";
+  if (!["blocked", "review_ready", "enabled"].includes(state)) {
+    return { error: "state must be one of blocked, review_ready, enabled", code: "COMPILER_POLICY_GATE_STATE_INVALID" };
+  }
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note.length > 1000) return { error: "note must be 1000 characters or fewer", code: "COMPILER_POLICY_GATE_NOTE_TOO_LONG" };
+  return {
+    state: state as "blocked" | "review_ready" | "enabled",
+    note: note.length > 0 ? note : null,
+    config: normalizeJsonObject(body.config),
+  };
+}
+
 function parseStepLibraryPromotion(input: unknown): {
   action: StepLibraryPromotionAction;
   scope: string | null;
@@ -722,6 +800,141 @@ function workflowDefinitionPromotionMetadata(input: {
       ],
     },
     scopeDetails: workflowDefinitionScopeDetails(input.scope),
+  };
+}
+
+function workflowDefinitionDiff(left: ReturnType<typeof rowToWorkflowDefinition>, right: ReturnType<typeof rowToWorkflowDefinition>): Record<string, unknown> {
+  const fields: Array<[string, unknown, unknown]> = [
+    ["status", left.status, right.status],
+    ["title", left.title, right.title],
+    ["description", left.description, right.description],
+    ["platform", left.platform, right.platform],
+    ["intent", left.intent, right.intent],
+    ["goal", left.goal, right.goal],
+    ["definition", left.definition, right.definition],
+    ["successCriteria", left.successCriteria, right.successCriteria],
+    ["allowedTools", left.allowedTools, right.allowedTools],
+    ["requiredCapabilities", left.requiredCapabilities, right.requiredCapabilities],
+    ["constraints", left.constraints, right.constraints],
+    ["fallbackRules", left.fallbackRules, right.fallbackRules],
+    ["rollback", left.rollback, right.rollback],
+  ];
+  const changes = fields
+    .filter(([, before, after]) => JSON.stringify(before) !== JSON.stringify(after))
+    .map(([field, before, after]) => ({ field, before, after }));
+  return {
+    mode: "workflow_definition_version_diff",
+    left: { id: left.id, key: left.key, version: left.version, status: left.status },
+    right: { id: right.id, key: right.key, version: right.version, status: right.status },
+    changes,
+    summary: {
+      changedFields: changes.length,
+      allowedToolDelta: right.allowedTools.filter((tool) => !left.allowedTools.includes(tool)),
+      removedTools: left.allowedTools.filter((tool) => !right.allowedTools.includes(tool)),
+      capabilityDelta: right.requiredCapabilities.filter((capability) => !left.requiredCapabilities.includes(capability)),
+    },
+    wouldChangeWorkflowCache: false,
+    wouldExecuteWorkflow: false,
+  };
+}
+
+async function workflowDefinitionImpactPreview(db: ReturnType<typeof getDb>, definition: ReturnType<typeof rowToWorkflowDefinition>): Promise<Record<string, unknown>> {
+  const [versions, promotions, validations] = await Promise.all([
+    db.query(
+      `SELECT id, version, status, promotion_state, promotion_scope, promotion_confidence, updated_at
+       FROM agency_workflow_definitions
+       WHERE definition_key = $1
+       ORDER BY version DESC`,
+      [definition.key]
+    ),
+    db.query(
+      `SELECT action, previous_state, next_state, promotion_scope, created_at
+       FROM agency_workflow_definition_promotion_events
+       WHERE definition_key = $1
+       ORDER BY created_at DESC
+       LIMIT 20`,
+      [definition.key]
+    ),
+    db.query(
+      `SELECT summary, decision, created_at
+       FROM agency_workflow_validation_events
+       WHERE definition_key = $1
+       ORDER BY created_at DESC
+       LIMIT 5`,
+      [definition.key]
+    ),
+  ]);
+  return {
+    mode: "workflow_definition_impact_preview",
+    definition: { id: definition.id, key: definition.key, version: definition.version, status: definition.status },
+    versionCount: versions.rows.length,
+    versions: versions.rows.map((row: Record<string, unknown>) => ({
+      id: row.id,
+      version: row.version,
+      status: row.status,
+      promotionState: row.promotion_state,
+      promotionScope: row.promotion_scope,
+      confidence: Number(row.promotion_confidence ?? 0),
+      updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at ?? null,
+    })),
+    promotionEvents: promotions.rows,
+    validationEvents: validations.rows,
+    wouldChangeWorkflowCache: false,
+    wouldExecuteWorkflow: false,
+    notes: [
+      "Impact preview is advisory only.",
+      "Version lifecycle changes do not mutate workflow cache or execution paths.",
+    ],
+  };
+}
+
+function workflowDefinitionHardeningPreview(definition: ReturnType<typeof rowToWorkflowDefinition>, scope: string | null): Record<string, unknown> {
+  const confidence = Number(definition.promotion.confidence ?? 0);
+  const telemetry = normalizeJsonObject(definition.telemetrySummary);
+  const attempts = Number(telemetry.attempts ?? 0);
+  const failures = Number(telemetry.failures ?? 0);
+  const ageDays = definition.promotion.promotedAt
+    ? Math.max(0, Math.floor((Date.now() - new Date(definition.promotion.promotedAt).getTime()) / 86_400_000))
+    : null;
+  const failurePenalty = attempts > 0 ? Math.min(0.4, failures / Math.max(1, attempts)) : 0;
+  const agePenalty = ageDays === null ? 0.05 : Math.min(0.25, ageDays * 0.01);
+  const decayedConfidence = Math.max(0, Math.round((confidence - failurePenalty - agePenalty) * 100) / 100);
+  const scopeDetails = workflowDefinitionScopeDetails(scope ?? definition.promotion.scope);
+  const scopeMatched = !!scope && scope === definition.promotion.scope;
+  const blockers = [
+    ...(definition.promotion.state !== "limited_reuse" ? ["workflow_definition_not_limited_reuse"] : []),
+    ...(definition.status !== "active" ? ["workflow_definition_not_active"] : []),
+    ...(!scopeMatched ? ["limited_reuse_scope_mismatch"] : []),
+    ...(decayedConfidence < 0.6 ? ["confidence_below_controlled_threshold"] : []),
+    "execution_changing_disabled",
+  ];
+  return {
+    mode: "workflow_definition_promotion_hardening",
+    definitionId: definition.id,
+    definitionKey: definition.key,
+    version: definition.version,
+    telemetry: {
+      attempts,
+      failures,
+      successRate: attempts > 0 ? Math.round(((attempts - failures) / attempts) * 100) / 100 : null,
+      source: "workflow_definition_telemetry_summary",
+    },
+    confidenceDecay: {
+      originalConfidence: confidence,
+      decayedConfidence,
+      ageDays,
+      failurePenalty,
+      agePenalty,
+      threshold: 0.6,
+    },
+    scope: scopeDetails,
+    scopeMatched,
+    autoDemoteRecommendation: blockers.includes("confidence_below_controlled_threshold") ? "quarantine_or_revalidate" : "keep_limited_reuse",
+    safeToAutoApply: false,
+    wouldUseDefinition: blockers.length === 1 && blockers[0] === "execution_changing_disabled",
+    wouldExecuteWorkflow: false,
+    wouldChangeWorkflowCache: false,
+    blockers,
   };
 }
 
@@ -2037,6 +2250,129 @@ router.get("/compiler-policy-gates", requireAdminAuth, async (req: Request, res:
   });
 });
 
+router.get("/compiler-policy-gates/events", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const { page, pageSize, offset } = parsePagination(req.query);
+  const gateId = typeof req.query.gateId === "string" && req.query.gateId.trim().length > 0
+    ? req.query.gateId.trim()
+    : null;
+  const where = gateId ? "WHERE gate_id = $1" : "";
+  const values = gateId ? [gateId, pageSize, offset] : [pageSize, offset];
+  const limitIndex = gateId ? 2 : 1;
+  const [rows, count] = await Promise.all([
+    db.query(
+      `SELECT *
+       FROM agency_compiler_policy_gate_events
+       ${where}
+       ORDER BY created_at DESC, id DESC
+       LIMIT $${limitIndex} OFFSET $${limitIndex + 1}`,
+      values
+    ),
+    db.query(
+      `SELECT COUNT(*)
+       FROM agency_compiler_policy_gate_events
+       ${where}`,
+      gateId ? [gateId] : []
+    ),
+  ]);
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map((row: Record<string, unknown>) => ({
+        id: row.id,
+        gateId: row.gate_id,
+        previousState: row.previous_state ?? null,
+        nextState: row.next_state,
+        version: row.version,
+        note: row.note ?? null,
+        actor: row.actor ?? null,
+        config: row.config ?? {},
+        policy: row.policy ?? {},
+        createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+      })),
+      total: parseInt(count.rows[0].count, 10),
+      page,
+      pageSize,
+    },
+  });
+});
+
+router.patch("/compiler-policy-gates/:gateId", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const parsed = parseCompilerPolicyGateUpdate(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
+  }
+  const gates = await getCompilerPolicyGates(db);
+  const gate = gates.find((item) => item.id === req.params.gateId);
+  if (!gate) {
+    return res.status(404).json({ ok: false, error: "Compiler policy gate not found", code: "COMPILER_POLICY_GATE_NOT_FOUND" });
+  }
+  if (parsed.state === "enabled" && gate.risk === "high" && parsed.config.explicitApproval !== true) {
+    return res.status(400).json({
+      ok: false,
+      error: "High-risk gates require config.explicitApproval=true",
+      code: "COMPILER_POLICY_GATE_EXPLICIT_APPROVAL_REQUIRED",
+    });
+  }
+  const nextVersion = Number(gate.version ?? 1) + 1;
+  const policy = {
+    manualOnly: true,
+    editableGates: true,
+    compilerVisible: parsed.state === "enabled" && ["compiler_knowledge_application", "limited_reuse_scope_match", "compiler_auto_use"].includes(gate.id),
+    autoUseEnabled: parsed.state === "enabled" && gate.id === "compiler_auto_use",
+    executionChanging: false,
+    workflowCacheChanging: false,
+    wouldExecuteWorkflow: false,
+    safeToAutoApply: false,
+    mode: "compiler_policy_gate_manual_update",
+  };
+  const client = await db.connect();
+  let updatedRows;
+  try {
+    await client.query("BEGIN");
+    updatedRows = await client.query(
+      `INSERT INTO agency_compiler_policy_gate_config (gate_id, state, version, owner, risk, config, updated_by, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'dashboard', NOW())
+       ON CONFLICT (gate_id)
+       DO UPDATE SET state = EXCLUDED.state,
+                     version = EXCLUDED.version,
+                     owner = EXCLUDED.owner,
+                     risk = EXCLUDED.risk,
+                     config = EXCLUDED.config,
+                     updated_by = 'dashboard',
+                     updated_at = NOW()
+       RETURNING *`,
+      [gate.id, parsed.state, nextVersion, gate.owner, gate.risk, JSON.stringify(parsed.config)]
+    );
+    await client.query(
+      `INSERT INTO agency_compiler_policy_gate_events (
+         gate_id, previous_state, next_state, version, note, actor, config, policy
+       )
+       VALUES ($1, $2, $3, $4, $5, 'dashboard', $6, $7)`,
+      [gate.id, gate.state, parsed.state, nextVersion, parsed.note, JSON.stringify(parsed.config), JSON.stringify(policy)]
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  const updated = (await getCompilerPolicyGates(db)).find((item) => item.id === gate.id) ?? gate;
+  res.json({
+    ok: true,
+    data: {
+      gate: updated,
+      config: updatedRows.rows[0],
+      previousState: gate.state,
+      nextState: parsed.state,
+      policy,
+    },
+  });
+});
+
 router.get("/workflow-definitions/promotion-events", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
   const { page, pageSize, offset } = parsePagination(req.query);
@@ -2107,6 +2443,83 @@ router.get("/workflow-definitions/promotion-events", requireAdminAuth, async (re
         executionChanging: false,
         workflowCacheChanging: false,
         mode: "workflow_definition_promotion_events_read_only",
+      },
+    },
+  });
+});
+
+router.get("/workflow-definitions/version-events", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const { page, pageSize, offset } = parsePagination(req.query);
+  const definitionId = typeof req.query.definitionId === "string" && req.query.definitionId.trim().length > 0
+    ? req.query.definitionId.trim()
+    : null;
+  const key = typeof req.query.key === "string" && req.query.key.trim().length > 0
+    ? req.query.key.trim()
+    : null;
+  const action = typeof req.query.action === "string" && req.query.action.trim().length > 0
+    ? req.query.action.trim()
+    : null;
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+  if (definitionId) {
+    conditions.push(`definition_id = $${idx++}`);
+    values.push(definitionId);
+  }
+  if (key) {
+    conditions.push(`definition_key = $${idx++}`);
+    values.push(key);
+  }
+  if (action) {
+    conditions.push(`action = $${idx++}`);
+    values.push(action);
+  }
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+  values.push(pageSize, offset);
+  const [rows, count] = await Promise.all([
+    db.query(
+      `SELECT *
+       FROM agency_workflow_definition_version_events
+       ${where}
+       ORDER BY created_at DESC, id DESC
+       LIMIT $${idx++} OFFSET $${idx}`,
+      values
+    ),
+    db.query(
+      `SELECT COUNT(*)
+       FROM agency_workflow_definition_version_events
+       ${where}`,
+      values.slice(0, -2)
+    ),
+  ]);
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map((row: Record<string, unknown>) => ({
+        id: row.id,
+        definitionId: row.definition_id ?? null,
+        definitionKey: row.definition_key,
+        definitionVersion: row.definition_version,
+        action: row.action,
+        previousStatus: row.previous_status ?? null,
+        nextStatus: row.next_status ?? null,
+        targetDefinitionId: row.target_definition_id ?? null,
+        note: row.note ?? null,
+        actor: row.actor ?? null,
+        diff: row.diff ?? {},
+        impactPreview: row.impact_preview ?? {},
+        policy: row.policy ?? {},
+        createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
+      })),
+      total: parseInt(count.rows[0].count, 10),
+      page,
+      pageSize,
+      policy: {
+        auditOnly: true,
+        autoUseEnabled: false,
+        executionChanging: false,
+        workflowCacheChanging: false,
       },
     },
   });
@@ -2193,6 +2606,9 @@ router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Reques
   const key = typeof req.query.key === "string" && req.query.key.trim().length > 0
     ? req.query.key.trim()
     : undefined;
+  const requestedScope = typeof req.query.scope === "string" && req.query.scope.trim().length > 0
+    ? req.query.scope.trim()
+    : undefined;
 
   const [definitions, gates] = await Promise.all([
     db.query(
@@ -2208,11 +2624,244 @@ router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Reques
     intent,
     platform,
     key,
+    requestedScope,
     definitions: definitions.rows.map(rowToWorkflowDefinition),
     policyGates: gates,
   });
 
   res.json({ ok: true, data: resolution });
+});
+
+router.get("/workflow-definitions/:id/versions", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const row = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
+  const definition = rowToWorkflowDefinition(row);
+  const rows = await db.query(
+    `SELECT *
+     FROM agency_workflow_definitions
+     WHERE definition_key = $1
+     ORDER BY version DESC`,
+    [definition.key]
+  );
+  res.json({
+    ok: true,
+    data: {
+      items: rows.rows.map(rowToWorkflowDefinition),
+      total: rows.rows.length,
+      policy: {
+        versioningEnabled: true,
+        executionChanging: false,
+        workflowCacheChanging: false,
+      },
+    },
+  });
+});
+
+router.post("/workflow-definitions/:id/versions", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const parsed = parseWorkflowDefinitionVersion(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
+  }
+  const row = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
+  const source = rowToWorkflowDefinition(row);
+  const versionRow = await db.query(
+    `SELECT COALESCE(MAX(version), 0) + 1 AS next_version
+     FROM agency_workflow_definitions
+     WHERE definition_key = $1`,
+    [source.key]
+  );
+  const nextVersion = Number(versionRow.rows[0].next_version ?? source.version + 1);
+  const client = await db.connect();
+  let created;
+  let diff: Record<string, unknown> = {};
+  let impactPreview: Record<string, unknown> = {};
+  const policy = {
+    versioningEnabled: true,
+    manualOnly: true,
+    compilerVisible: false,
+    autoUseEnabled: false,
+    executionChanging: false,
+    workflowCacheChanging: false,
+    wouldExecuteWorkflow: false,
+    safeToAutoApply: false,
+    mode: "workflow_definition_version_create_manual",
+  };
+  try {
+    await client.query("BEGIN");
+    const inserted = await client.query(
+      `INSERT INTO agency_workflow_definitions (
+         definition_key, version, status, title, description, platform, intent, goal, source,
+         parent_definition_id, version_note, definition, success_criteria, allowed_tools,
+         required_capabilities, constraints, fallback_rules, rollback, policy, created_by
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'dashboard_version',
+               $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'dashboard')
+       RETURNING *`,
+      [
+        source.key,
+        nextVersion,
+        parsed.status,
+        parsed.title ?? source.title,
+        parsed.description === undefined ? source.description : parsed.description,
+        source.platform,
+        source.intent,
+        parsed.goal ?? source.goal,
+        source.id,
+        parsed.note,
+        JSON.stringify(parsed.definition ?? source.definition),
+        JSON.stringify(parsed.successCriteria ?? source.successCriteria),
+        JSON.stringify(parsed.allowedTools ?? source.allowedTools),
+        JSON.stringify(parsed.requiredCapabilities ?? source.requiredCapabilities),
+        JSON.stringify(parsed.constraints ?? source.constraints),
+        JSON.stringify(parsed.fallbackRules ?? source.fallbackRules),
+        JSON.stringify(parsed.rollback ?? source.rollback),
+        JSON.stringify(source.policy),
+      ]
+    );
+    created = rowToWorkflowDefinition(inserted.rows[0]);
+    diff = workflowDefinitionDiff(source, created);
+    impactPreview = await workflowDefinitionImpactPreview(db, created);
+    await client.query(
+      `INSERT INTO agency_workflow_definition_version_events (
+         definition_id, definition_key, definition_version, action, previous_status, next_status,
+         target_definition_id, note, actor, diff, impact_preview, policy
+       )
+       VALUES ($1, $2, $3, 'create_version', $4, $5, $6, $7, 'dashboard', $8, $9, $10)`,
+      [
+        created.id,
+        created.key,
+        created.version,
+        source.status,
+        created.status,
+        source.id,
+        parsed.note,
+        JSON.stringify(diff),
+        JSON.stringify(impactPreview),
+        JSON.stringify(policy),
+      ]
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  res.status(201).json({ ok: true, data: { definition: created, diff, impactPreview, policy } });
+});
+
+router.get("/workflow-definitions/:id/diff", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const rows = await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id]);
+  const sourceRow = rows.rows[0];
+  if (!sourceRow) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
+  const source = rowToWorkflowDefinition(sourceRow);
+  let targetRow = null;
+  if (typeof req.query.targetId === "string" && req.query.targetId.trim().length > 0) {
+    targetRow = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.query.targetId.trim()])).rows[0] ?? null;
+  } else {
+    targetRow = (await db.query(
+      `SELECT * FROM agency_workflow_definitions WHERE definition_key = $1 AND id <> $2 ORDER BY version DESC LIMIT 1`,
+      [source.key, source.id]
+    )).rows[0] ?? null;
+  }
+  if (!targetRow) return res.status(404).json({ ok: false, error: "Workflow definition diff target not found", code: "WORKFLOW_DEFINITION_DIFF_TARGET_NOT_FOUND" });
+  const target = rowToWorkflowDefinition(targetRow);
+  if (target.key !== source.key) {
+    return res.status(400).json({ ok: false, error: "Diff target must use the same definition key", code: "WORKFLOW_DEFINITION_DIFF_KEY_MISMATCH" });
+  }
+  res.json({ ok: true, data: { ...workflowDefinitionDiff(source, target), policy: { readOnly: true, executionChanging: false, workflowCacheChanging: false } } });
+});
+
+router.get("/workflow-definitions/:id/impact-preview", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const row = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
+  const definition = rowToWorkflowDefinition(row);
+  res.json({ ok: true, data: await workflowDefinitionImpactPreview(db, definition) });
+});
+
+router.get("/workflow-definitions/:id/promotion-hardening", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const row = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
+  const scope = typeof req.query.scope === "string" && req.query.scope.trim().length > 0 ? req.query.scope.trim() : null;
+  const definition = rowToWorkflowDefinition(row);
+  const hardening = workflowDefinitionHardeningPreview(definition, scope);
+  await db.query(
+    `INSERT INTO agency_workflow_definition_version_events (
+       definition_id, definition_key, definition_version, action, previous_status, next_status,
+       note, actor, diff, impact_preview, policy
+     )
+     VALUES ($1, $2, $3, 'hardening_preview', $4, $4, NULL, 'dashboard', '{}'::jsonb, $5, $6)`,
+    [
+      definition.id,
+      definition.key,
+      definition.version,
+      definition.status,
+      JSON.stringify(hardening),
+      JSON.stringify({
+        hardeningPreview: true,
+        autoUseEnabled: false,
+        executionChanging: false,
+        workflowCacheChanging: false,
+      }),
+    ]
+  );
+  res.json({ ok: true, data: hardening });
+});
+
+router.patch("/workflow-definitions/:id/lifecycle", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const parsed = parseWorkflowDefinitionLifecycle(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
+  }
+  const row = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
+  const definition = rowToWorkflowDefinition(row);
+  const nextStatus = parsed.action === "archive" ? "archived" : parsed.action === "deprecate" ? "deprecated" : parsed.action === "activate" ? "active" : "draft";
+  const impactPreview = await workflowDefinitionImpactPreview(db, definition);
+  const policy = {
+    lifecycleAction: parsed.action,
+    manualOnly: true,
+    autoUseEnabled: false,
+    executionChanging: false,
+    workflowCacheChanging: false,
+    wouldExecuteWorkflow: false,
+    safeToAutoApply: false,
+  };
+  const client = await db.connect();
+  let updated;
+  try {
+    await client.query("BEGIN");
+    const updatedRows = await client.query(
+      `UPDATE agency_workflow_definitions
+       SET status = $2, version_note = $3, updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [definition.id, nextStatus, parsed.note]
+    );
+    updated = rowToWorkflowDefinition(updatedRows.rows[0]);
+    await client.query(
+      `INSERT INTO agency_workflow_definition_version_events (
+         definition_id, definition_key, definition_version, action, previous_status, next_status,
+         note, actor, diff, impact_preview, policy
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'dashboard', '{}'::jsonb, $8, $9)`,
+      [definition.id, definition.key, definition.version, parsed.action, definition.status, nextStatus, parsed.note, JSON.stringify(impactPreview), JSON.stringify(policy)]
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+  res.json({ ok: true, data: { definition: updated, previousStatus: definition.status, nextStatus, impactPreview, policy } });
 });
 
 router.get("/workflow-definitions/:id/rollback-preview", requireAdminAuth, async (req: Request, res: Response) => {

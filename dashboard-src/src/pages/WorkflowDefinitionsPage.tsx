@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, WorkflowDefinition, WorkflowDefinitionPromotionEvent, WorkflowDefinitionResolutionResponse, WorkflowDefinitionRollbackPreviewResponse } from "../api/agency";
+import {
+  agencyApi,
+  WorkflowDefinition,
+  WorkflowDefinitionPromotionEvent,
+  WorkflowDefinitionResolutionResponse,
+  WorkflowDefinitionRollbackPreviewResponse,
+  WorkflowDefinitionVersionEvent,
+} from "../api/agency";
 
 function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gray" | "red" | "blue" }) {
   const palette = {
@@ -90,6 +97,7 @@ export function WorkflowDefinitionsPage() {
   const [platform, setPlatform] = useState("");
   const [intent, setIntent] = useState("reddit_account_health_scan");
   const [resolvePlatform, setResolvePlatform] = useState("reddit");
+  const [resolveScope, setResolveScope] = useState("device:test-device");
   const [resolution, setResolution] = useState<WorkflowDefinitionResolutionResponse | null>(null);
   const [selected, setSelected] = useState<WorkflowDefinition | null>(null);
   const [promotionScope, setPromotionScope] = useState("definition:limited-review");
@@ -97,6 +105,10 @@ export function WorkflowDefinitionsPage() {
   const [rollbackTargetId, setRollbackTargetId] = useState("");
   const [promotionBusy, setPromotionBusy] = useState(false);
   const [promotionEvents, setPromotionEvents] = useState<WorkflowDefinitionPromotionEvent[]>([]);
+  const [versionEvents, setVersionEvents] = useState<WorkflowDefinitionVersionEvent[]>([]);
+  const [versions, setVersions] = useState<WorkflowDefinition[]>([]);
+  const [impactPreview, setImpactPreview] = useState<Record<string, unknown> | null>(null);
+  const [hardeningPreview, setHardeningPreview] = useState<Record<string, unknown> | null>(null);
   const [rollbackPreview, setRollbackPreview] = useState<WorkflowDefinitionRollbackPreviewResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -129,6 +141,7 @@ export function WorkflowDefinitionsPage() {
       const response = await agencyApi.workflowDefinitions.resolve({
         intent: intent || undefined,
         platform: resolvePlatform || undefined,
+        scope: resolveScope || undefined,
       });
       setResolution(response);
     } catch (err) {
@@ -136,7 +149,7 @@ export function WorkflowDefinitionsPage() {
     } finally {
       setLoading(false);
     }
-  }, [intent, resolvePlatform]);
+  }, [intent, resolvePlatform, resolveScope]);
 
   const loadPromotionEvents = useCallback(async (definitionId?: string | null) => {
     if (!definitionId) {
@@ -155,6 +168,26 @@ export function WorkflowDefinitionsPage() {
     const response = await agencyApi.workflowDefinitions.rollbackPreview(definitionId);
     setRollbackPreview(response);
   }, []);
+
+  const loadVersioning = useCallback(async (definition?: WorkflowDefinition | null) => {
+    if (!definition) {
+      setVersions([]);
+      setVersionEvents([]);
+      setImpactPreview(null);
+      setHardeningPreview(null);
+      return;
+    }
+    const [versionPage, eventPage, impact, hardening] = await Promise.all([
+      agencyApi.workflowDefinitions.versions(definition.id),
+      agencyApi.workflowDefinitions.listVersionEvents({ definitionId: definition.id, pageSize: 10 }),
+      agencyApi.workflowDefinitions.impactPreview(definition.id),
+      agencyApi.workflowDefinitions.hardening(definition.id, promotionScope || undefined),
+    ]);
+    setVersions(versionPage.items);
+    setVersionEvents(eventPage.items);
+    setImpactPreview(impact);
+    setHardeningPreview(hardening);
+  }, [promotionScope]);
 
   const promoteSelected = useCallback(async () => {
     if (!selected) return;
@@ -217,6 +250,45 @@ export function WorkflowDefinitionsPage() {
     }
   }, [load, loadPromotionEvents, loadRollbackPreview, promotionNote, rollbackTargetId, selected]);
 
+  const createVersionSelected = useCallback(async () => {
+    if (!selected) return;
+    setPromotionBusy(true);
+    setError(null);
+    try {
+      const response = await agencyApi.workflowDefinitions.createVersion(selected.id, {
+        status: "draft",
+        title: `${selected.title} v${selected.version + 1}`,
+        note: promotionNote || "Manual dashboard version",
+      });
+      setSelected(response.definition);
+      await load();
+      await loadVersioning(response.definition);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create workflow definition version");
+    } finally {
+      setPromotionBusy(false);
+    }
+  }, [load, loadVersioning, promotionNote, selected]);
+
+  const lifecycleSelected = useCallback(async (action: "archive" | "deprecate" | "activate" | "draft") => {
+    if (!selected) return;
+    setPromotionBusy(true);
+    setError(null);
+    try {
+      const response = await agencyApi.workflowDefinitions.lifecycle(selected.id, {
+        action,
+        note: promotionNote || null,
+      });
+      setSelected(response.definition);
+      await load();
+      await loadVersioning(response.definition);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update workflow definition lifecycle");
+    } finally {
+      setPromotionBusy(false);
+    }
+  }, [load, loadVersioning, promotionNote, selected]);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -228,8 +300,9 @@ export function WorkflowDefinitionsPage() {
   useEffect(() => {
     void loadPromotionEvents(selected?.id);
     void loadRollbackPreview(selected?.id);
+    void loadVersioning(selected);
     setRollbackTargetId("");
-  }, [loadPromotionEvents, loadRollbackPreview, selected?.id]);
+  }, [loadPromotionEvents, loadRollbackPreview, loadVersioning, selected]);
 
   return (
     <AgencyLayout currentRoute="#/agency/workflow-definitions">
@@ -281,13 +354,15 @@ export function WorkflowDefinitionsPage() {
         <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginBottom: "12px" }}>
           <input value={intent} onChange={(event) => setIntent(event.target.value)} placeholder="Intent" style={{ background: "#0a0a0a", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", minWidth: "220px" }} />
           <input value={resolvePlatform} onChange={(event) => setResolvePlatform(event.target.value)} placeholder="Platform" style={{ background: "#0a0a0a", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", minWidth: "160px" }} />
-          <button onClick={() => void resolve()} style={{ background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "8px 12px", cursor: "pointer" }}>Resolve read-only</button>
+          <input value={resolveScope} onChange={(event) => setResolveScope(event.target.value)} placeholder="Scope" style={{ background: "#0a0a0a", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", minWidth: "190px" }} />
+          <button onClick={() => void resolve()} style={{ background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "8px 12px", cursor: "pointer" }}>Resolve dry-run</button>
         </div>
         <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }}>
           <Badge label={`outcome: ${resolution?.outcome ?? "-"}`} tone={resolution?.candidateDefinition ? "red" : "yellow"} />
-          <Badge label="wouldUseDefinition: false" tone="gray" />
-          <Badge label="wouldChangePlan: false" tone="gray" />
+          <Badge label={`wouldUseDefinition: ${String(resolution?.wouldUseDefinition ?? false)}`} tone={resolution?.wouldUseDefinition ? "yellow" : "gray"} />
+          <Badge label={`wouldChangePlan: ${String(resolution?.wouldChangePlan ?? false)}`} tone={resolution?.wouldChangePlan ? "yellow" : "gray"} />
           <Badge label="wouldChangeWorkflowCache: false" tone="gray" />
+          <Badge label="wouldExecuteWorkflow: false" tone="gray" />
         </div>
         <div style={{ color: "#e5e7eb", fontSize: "13px", marginBottom: "6px" }}>
           Candidate: {resolution?.candidateDefinition ? `${resolution.candidateDefinition.key}@v${resolution.candidateDefinition.version}` : "-"}
@@ -378,6 +453,72 @@ export function WorkflowDefinitionsPage() {
                 <button onClick={() => void rollbackSelected()} disabled={promotionBusy || !rollbackPreview?.available} style={{ background: rollbackPreview?.available ? "#1f2937" : "#1f1f1f", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || !rollbackPreview?.available ? "not-allowed" : "pointer" }}>Rollback manual</button>
                 <Badge label={`wouldChangeWorkflowCache: ${String(rollbackPreview?.wouldChangeWorkflowCache ?? false)}`} tone="gray" />
                 <Badge label={`wouldExecuteWorkflow: ${String(rollbackPreview?.wouldExecuteWorkflow ?? false)}`} tone="gray" />
+              </div>
+            </div>
+            <div style={{ border: "1px solid #222", borderRadius: "6px", background: "#0a0a0a", padding: "10px", marginBottom: "12px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", marginBottom: "8px" }}>
+                <div>
+                  <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600 }}>Versioning & Lifecycle</div>
+                  <div style={{ color: "#777", fontSize: "12px", marginTop: "3px" }}>
+                    Create drafts, archive or deprecate definitions, and preview impact without touching execution.
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                  <Badge label={`versions: ${versions.length}`} tone="blue" />
+                  <Badge label="workflowCacheChanging: false" tone="gray" />
+                  <Badge label="wouldExecuteWorkflow: false" tone="gray" />
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginBottom: "10px" }}>
+                <button onClick={() => void createVersionSelected()} disabled={promotionBusy} style={{ background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}>Create draft version</button>
+                <button onClick={() => void lifecycleSelected("activate")} disabled={promotionBusy || selected.status === "active"} style={{ background: "#0f3323", border: "1px solid #166534", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.status === "active" ? "not-allowed" : "pointer" }}>Activate</button>
+                <button onClick={() => void lifecycleSelected("deprecate")} disabled={promotionBusy || selected.status === "deprecated"} style={{ background: "#332b12", border: "1px solid #854d0e", color: "#fef3c7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.status === "deprecated" ? "not-allowed" : "pointer" }}>Deprecate</button>
+                <button onClick={() => void lifecycleSelected("archive")} disabled={promotionBusy || selected.status === "archived"} style={{ background: "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.status === "archived" ? "not-allowed" : "pointer" }}>Archive</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(160px, 1fr))", gap: "8px", marginBottom: "10px" }}>
+                <div style={{ background: "#050505", border: "1px solid #1f1f1f", borderRadius: "6px", padding: "10px" }}>
+                  <div style={{ color: "#777", fontSize: "11px", marginBottom: "5px" }}>Impact Preview</div>
+                  <div style={{ color: "#e5e7eb", fontSize: "12px", overflowWrap: "anywhere" }}>
+                    versions {String(impactPreview?.versionCount ?? versions.length)} · promotions {Array.isArray(impactPreview?.promotionEvents) ? impactPreview.promotionEvents.length : 0}
+                  </div>
+                </div>
+                <div style={{ background: "#050505", border: "1px solid #1f1f1f", borderRadius: "6px", padding: "10px" }}>
+                  <div style={{ color: "#777", fontSize: "11px", marginBottom: "5px" }}>Hardening</div>
+                  <div style={{ color: "#e5e7eb", fontSize: "12px", overflowWrap: "anywhere" }}>
+                    recommendation: {String(hardeningPreview?.recommendation ?? "-")}
+                  </div>
+                </div>
+                <div style={{ background: "#050505", border: "1px solid #1f1f1f", borderRadius: "6px", padding: "10px" }}>
+                  <div style={{ color: "#777", fontSize: "11px", marginBottom: "5px" }}>Hardening Blockers</div>
+                  <div style={{ color: "#e5e7eb", fontSize: "12px", overflowWrap: "anywhere" }}>
+                    {shortList(Array.isArray(hardeningPreview?.blockers) ? hardeningPreview.blockers : [], 4)}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(180px, 1fr))", gap: "8px" }}>
+                <div>
+                  <div style={{ color: "#e5e7eb", fontSize: "12px", fontWeight: 600, marginBottom: "6px" }}>Versions</div>
+                  <div style={{ display: "grid", gap: "6px" }}>
+                    {versions.slice(0, 5).map((version) => (
+                      <div key={version.id} style={{ display: "flex", justifyContent: "space-between", gap: "8px", background: "#050505", border: "1px solid #1f1f1f", borderRadius: "6px", padding: "8px" }}>
+                        <span style={{ color: "#ddd", fontSize: "12px" }}>{version.key}@v{version.version}</span>
+                        <Badge label={version.status} tone={statusTone(version.status)} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ color: "#e5e7eb", fontSize: "12px", fontWeight: 600, marginBottom: "6px" }}>Version Audit</div>
+                  <div style={{ display: "grid", gap: "6px" }}>
+                    {versionEvents.slice(0, 5).map((event) => (
+                      <div key={event.id} style={{ background: "#050505", border: "1px solid #1f1f1f", borderRadius: "6px", padding: "8px" }}>
+                        <div style={{ color: "#ddd", fontSize: "12px" }}>{event.action} · v{event.definitionVersion ?? "-"}</div>
+                        <div style={{ color: "#777", fontSize: "11px", marginTop: "3px" }}>{event.previousStatus ?? "-"} → {event.nextStatus ?? "-"} · {event.createdAt ? new Date(event.createdAt).toLocaleString() : "-"}</div>
+                      </div>
+                    ))}
+                    {!versionEvents.length && <div style={{ color: "#777", fontSize: "12px" }}>No version events yet.</div>}
+                  </div>
+                </div>
               </div>
             </div>
             <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600, marginBottom: "8px" }}>Promotion Audit</div>
