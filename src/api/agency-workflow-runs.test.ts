@@ -2384,6 +2384,146 @@ describe("agency workflow runs API", () => {
     });
   });
 
+  it("rolls back workflow definition promotion metadata without changing execution", async () => {
+    const current = {
+      id: "99999999-9999-4999-8999-999999999999",
+      definition_key: "device_unlock",
+      version: 2,
+      status: "active",
+      title: "Device unlock",
+      description: "Unlock device definition",
+      platform: "android",
+      intent: "device_unlock",
+      goal: "Unlock the device without changing workflow cache",
+      source: "static_seed",
+      definition: {
+        steps: ["wake_device", "swipe_unlock", "verify_home"],
+        terminalStates: ["success", "expected_failure", "needs_review", "quarantined"],
+        sideEffects: [],
+      },
+      success_criteria: ["home screen visible", "no challenge detected"],
+      allowed_tools: ["wake_device", "gesture_swipe", "ui_tree_dump"],
+      required_capabilities: ["device.online_or_approved"],
+      constraints: ["read_only_validation", "limited_scope_only"],
+      fallback_rules: ["if device unavailable or timeout classify needs_review"],
+      rollback: { required: true },
+      policy: {},
+      promotion_state: "limited_reuse",
+      promotion_scope: "device:test-device",
+      promotion_note: "Manual approval",
+      promotion_confidence: 0.83,
+      promotion_readiness: { state: "manual_limited_promotion_ready" },
+      promotion_scope_details: { scopeType: "device" },
+      rollback_preview: {},
+      created_by: "migration",
+      created_at: new Date("2026-05-22T11:00:00.000Z"),
+      updated_at: new Date("2026-05-22T11:10:00.000Z"),
+    };
+    const previous = {
+      ...current,
+      id: "88888888-8888-4888-8888-888888888888",
+      version: 1,
+      promotion_state: "review_only",
+      promotion_scope: null,
+      promotion_confidence: 0.5,
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [current] })
+      .mockResolvedValueOnce({ rows: [previous] })
+      .mockResolvedValueOnce({ rows: [previous] });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...current,
+          promotion_state: "revoked",
+          promotion_scope: null,
+          promotion_note: "Rollback after review",
+          promotion_confidence: 0,
+          promotion_readiness: { state: "rolled_back_from" },
+          promotion_scope_details: { globalScopeAllowed: false },
+          rollback_definition_id: previous.id,
+          rollback_preview: { available: true, wouldRollbackNow: false },
+          revoked_by: "dashboard",
+          revoked_at: new Date("2026-05-22T11:20:00.000Z"),
+          updated_at: new Date("2026-05-22T11:20:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          ...previous,
+          promotion_state: "limited_reuse",
+          promotion_scope: "device:test-device",
+          promotion_note: "Rollback after review",
+          promotion_confidence: 0.5,
+          promotion_readiness: { state: "manual_rollback_applied" },
+          promotion_scope_details: { scopeType: "device", globalScopeAllowed: false },
+          rollback_preview: { available: true, wouldRollbackNow: false },
+          promoted_by: "dashboard",
+          promoted_at: new Date("2026-05-22T11:20:00.000Z"),
+          updated_at: new Date("2026-05-22T11:20:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await postAgency(
+      "/api/agency/workflow-definitions/99999999-9999-4999-8999-999999999999/rollback",
+      { note: "Rollback after review" }
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      action: "rollback",
+      previousState: "limited_reuse",
+      nextState: "limited_reuse",
+      sourceDefinition: expect.objectContaining({
+        promotion: expect.objectContaining({
+          state: "revoked",
+          rollbackDefinitionId: previous.id,
+          compilerEligible: false,
+          wouldUseDefinition: false,
+        }),
+      }),
+      targetDefinition: expect.objectContaining({
+        id: previous.id,
+        promotion: expect.objectContaining({
+          state: "limited_reuse",
+          scope: "device:test-device",
+          compilerEligible: false,
+          wouldUseDefinition: false,
+        }),
+      }),
+      policy: expect.objectContaining({
+        manualOnly: true,
+        rollbackAction: true,
+        autoUseEnabled: false,
+        executionChanging: false,
+        workflowCacheChanging: false,
+        wouldChangePlan: false,
+        wouldChangeWorkflowCache: false,
+        wouldExecuteWorkflow: false,
+        safeToAutoApply: false,
+      }),
+      promotionReadiness: expect.objectContaining({
+        state: "manual_rollback_applied",
+        safeToAutoApply: false,
+      }),
+      rollbackPreview: expect.objectContaining({
+        available: true,
+        wouldRollbackNow: false,
+      }),
+    });
+    expect(mocks.client.query.mock.calls[0][0]).toBe("BEGIN");
+    expect(String(mocks.client.query.mock.calls[1][0])).toContain("rollback_definition_id = $5");
+    expect(String(mocks.client.query.mock.calls[2][0])).toContain("promotion_state = 'limited_reuse'");
+    expect(String(mocks.client.query.mock.calls[3][0])).toContain("agency_workflow_definition_promotion_events");
+    expect(mocks.client.query.mock.calls[3][1][3]).toBe("limited_reuse");
+    expect(mocks.client.query.mock.calls[3][1][6]).toContain("\"rollbackAction\":true");
+    expect(mocks.client.query.mock.calls[3][1][7]).toContain("\"wouldExecuteWorkflow\":false");
+    expect(mocks.client.query.mock.calls[4][0]).toBe("COMMIT");
+  });
+
   it("lists workflow definition promotion audit events without enabling auto-use", async () => {
     mocks.db.query
       .mockResolvedValueOnce({

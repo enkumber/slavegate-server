@@ -567,6 +567,27 @@ function parseWorkflowDefinitionPromotion(input: unknown): {
   };
 }
 
+function parseWorkflowDefinitionRollback(input: unknown): {
+  targetDefinitionId: string | null;
+  note: string | null;
+} | { error: string; code: string } {
+  const body = normalizeJsonObject(input);
+  const targetDefinitionId = typeof body.targetDefinitionId === "string" ? body.targetDefinitionId.trim() : "";
+  if (targetDefinitionId && targetDefinitionId.length > 120) {
+    return { error: "targetDefinitionId must be 120 characters or fewer", code: "WORKFLOW_DEFINITION_ROLLBACK_TARGET_TOO_LONG" };
+  }
+
+  const note = typeof body.note === "string" ? body.note.trim() : "";
+  if (note.length > 1000) {
+    return { error: "note must be 1000 characters or fewer", code: "WORKFLOW_DEFINITION_ROLLBACK_NOTE_TOO_LONG" };
+  }
+
+  return {
+    targetDefinitionId: targetDefinitionId.length > 0 ? targetDefinitionId : null,
+    note: note.length > 0 ? note : null,
+  };
+}
+
 function parseStepLibraryPromotion(input: unknown): {
   action: StepLibraryPromotionAction;
   scope: string | null;
@@ -2468,6 +2489,251 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
         wouldExecuteWorkflow: false,
         safeToAutoApply: false,
       },
+    },
+  });
+});
+
+router.post("/workflow-definitions/:id/rollback", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const parsed = parseWorkflowDefinitionRollback(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
+  }
+
+  const rows = await db.query(
+    `SELECT *
+     FROM agency_workflow_definitions
+     WHERE id = $1`,
+    [req.params.id]
+  );
+  const currentRow = rows.rows[0];
+  if (!currentRow) {
+    return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
+  }
+
+  const definition = rowToWorkflowDefinition(currentRow);
+  const preview = await workflowDefinitionRollbackPreview(db, definition);
+  const previewTarget = normalizeJsonObject(preview.selectedTarget);
+  const targetId = parsed.targetDefinitionId ?? (typeof previewTarget.id === "string" ? previewTarget.id : null);
+  if (!targetId) {
+    return res.status(400).json({
+      ok: false,
+      error: "No previous workflow definition version is available for rollback",
+      code: "WORKFLOW_DEFINITION_ROLLBACK_TARGET_UNAVAILABLE",
+      data: { rollbackPreview: preview },
+    });
+  }
+
+  const targetRows = await db.query(
+    `SELECT *
+     FROM agency_workflow_definitions
+     WHERE id = $1`,
+    [targetId]
+  );
+  const targetRow = targetRows.rows[0];
+  if (!targetRow) {
+    return res.status(404).json({ ok: false, error: "Rollback target workflow definition not found", code: "WORKFLOW_DEFINITION_ROLLBACK_TARGET_NOT_FOUND" });
+  }
+  const targetDefinition = rowToWorkflowDefinition(targetRow);
+  if (targetDefinition.key !== definition.key) {
+    return res.status(400).json({
+      ok: false,
+      error: "Rollback target must use the same workflow definition key",
+      code: "WORKFLOW_DEFINITION_ROLLBACK_KEY_MISMATCH",
+    });
+  }
+  if (targetDefinition.version >= definition.version) {
+    return res.status(400).json({
+      ok: false,
+      error: "Rollback target must be an older workflow definition version",
+      code: "WORKFLOW_DEFINITION_ROLLBACK_TARGET_NOT_OLDER",
+    });
+  }
+
+  const rollbackScope = definition.promotion.scope ?? `definition:${definition.key}:v${targetDefinition.version}`;
+  const rollbackScopeDetails = workflowDefinitionScopeDetails(rollbackScope);
+  const rollbackReadiness = {
+    state: "manual_rollback_applied",
+    manualOnly: true,
+    sourceDefinitionId: definition.id,
+    sourceVersion: definition.version,
+    targetDefinitionId: targetDefinition.id,
+    targetVersion: targetDefinition.version,
+    linkedPreview: preview,
+    blockers: [
+      "compiler_auto_use_disabled",
+      "manual_review_required_before_repromotion",
+    ],
+    wouldUseDefinition: false,
+    wouldExecuteWorkflow: false,
+    wouldChangePlan: false,
+    wouldChangeWorkflowCache: false,
+    safeToAutoApply: false,
+  };
+  const rollbackPolicy = {
+    manualOnly: true,
+    rollbackAction: true,
+    rollbackPreviewRequired: true,
+    compilerVisible: false,
+    autoUseEnabled: false,
+    executionChanging: false,
+    workflowCacheChanging: false,
+    wouldUseDefinition: false,
+    wouldChangePlan: false,
+    wouldChangeWorkflowCache: false,
+    wouldExecuteWorkflow: false,
+    safeToAutoApply: false,
+    mode: "workflow_definition_manual_rollback_audited",
+  };
+  const rollbackSnapshot = {
+    source: {
+      id: definition.id,
+      key: definition.key,
+      version: definition.version,
+      previousState: definition.promotion.state,
+    },
+    target: {
+      id: targetDefinition.id,
+      key: targetDefinition.key,
+      version: targetDefinition.version,
+      previousState: targetDefinition.promotion.state,
+    },
+    preview,
+    decision: {
+      outcome: "manual_rollback_applied",
+      wouldUseDefinition: false,
+      wouldExecuteWorkflow: false,
+      wouldChangePlan: false,
+      wouldChangeWorkflowCache: false,
+      safeToAutoApply: false,
+    },
+  };
+
+  const client = await db.connect();
+  let updatedSource;
+  let updatedTarget;
+  try {
+    await client.query("BEGIN");
+    const sourceUpdate = await client.query(
+      `UPDATE agency_workflow_definitions
+       SET promotion_state = 'revoked',
+           promotion_scope = NULL,
+           promotion_note = $2,
+           promotion_confidence = 0,
+           promotion_readiness = $3,
+           promotion_scope_details = $4,
+           rollback_definition_id = $5,
+           rollback_preview = $6,
+           revoked_by = 'dashboard',
+           revoked_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [
+        definition.id,
+        parsed.note,
+        JSON.stringify({
+          ...rollbackReadiness,
+          state: "rolled_back_from",
+          targetDefinitionId: targetDefinition.id,
+          targetVersion: targetDefinition.version,
+        }),
+        JSON.stringify(workflowDefinitionScopeDetails(null)),
+        targetDefinition.id,
+        JSON.stringify(preview),
+      ]
+    );
+    const targetUpdate = await client.query(
+      `UPDATE agency_workflow_definitions
+       SET promotion_state = 'limited_reuse',
+           promotion_scope = $2,
+           promotion_note = $3,
+           promotion_confidence = $4,
+           promotion_readiness = $5,
+           promotion_scope_details = $6,
+           rollback_definition_id = NULL,
+           rollback_preview = $7,
+           promoted_by = 'dashboard',
+           promoted_at = NOW(),
+           revoked_by = NULL,
+           revoked_at = NULL,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [
+        targetDefinition.id,
+        rollbackScope,
+        parsed.note,
+        Math.max(0, Math.min(0.99, targetDefinition.promotion.confidence || definition.promotion.confidence || 0)),
+        JSON.stringify(rollbackReadiness),
+        JSON.stringify(rollbackScopeDetails),
+        JSON.stringify(preview),
+      ]
+    );
+    updatedSource = rowToWorkflowDefinition(sourceUpdate.rows[0]);
+    updatedTarget = rowToWorkflowDefinition(targetUpdate.rows[0]);
+
+    await client.query(
+      `INSERT INTO agency_workflow_definition_promotion_events (
+         definition_id,
+         definition_key,
+         definition_version,
+         action,
+         previous_state,
+         next_state,
+         promotion_scope,
+         note,
+         actor,
+         policy,
+         validation_snapshot,
+         promotion_confidence,
+         promotion_readiness,
+         promotion_scope_details,
+         rollback_preview
+       )
+       VALUES ($1, $2, $3, 'rollback', $4, 'limited_reuse', $5, $6, 'dashboard', $7, $8, $9, $10, $11, $12)`,
+      [
+        definition.id,
+        definition.key,
+        definition.version,
+        definition.promotion.state,
+        rollbackScope,
+        parsed.note,
+        JSON.stringify(rollbackPolicy),
+        JSON.stringify(rollbackSnapshot),
+        updatedTarget.promotion.confidence,
+        JSON.stringify(rollbackReadiness),
+        JSON.stringify(rollbackScopeDetails),
+        JSON.stringify(preview),
+      ]
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  res.json({
+    ok: true,
+    data: {
+      action: "rollback",
+      previousState: definition.promotion.state,
+      nextState: "limited_reuse",
+      sourceDefinition: updatedSource,
+      targetDefinition: updatedTarget,
+      rollbackTarget: {
+        id: targetDefinition.id,
+        key: targetDefinition.key,
+        version: targetDefinition.version,
+      },
+      validationSnapshot: rollbackSnapshot,
+      promotionConfidence: updatedTarget.promotion.confidence,
+      promotionReadiness: rollbackReadiness,
+      promotionScopeDetails: rollbackScopeDetails,
+      rollbackPreview: preview,
+      policy: rollbackPolicy,
     },
   });
 });

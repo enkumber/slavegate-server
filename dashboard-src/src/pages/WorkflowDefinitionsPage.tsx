@@ -94,6 +94,7 @@ export function WorkflowDefinitionsPage() {
   const [selected, setSelected] = useState<WorkflowDefinition | null>(null);
   const [promotionScope, setPromotionScope] = useState("definition:limited-review");
   const [promotionNote, setPromotionNote] = useState("");
+  const [rollbackTargetId, setRollbackTargetId] = useState("");
   const [promotionBusy, setPromotionBusy] = useState(false);
   const [promotionEvents, setPromotionEvents] = useState<WorkflowDefinitionPromotionEvent[]>([]);
   const [rollbackPreview, setRollbackPreview] = useState<WorkflowDefinitionRollbackPreviewResponse | null>(null);
@@ -196,6 +197,26 @@ export function WorkflowDefinitionsPage() {
     }
   }, [load, loadPromotionEvents, loadRollbackPreview, promotionNote, selected]);
 
+  const rollbackSelected = useCallback(async () => {
+    if (!selected) return;
+    setPromotionBusy(true);
+    setError(null);
+    try {
+      const response = await agencyApi.workflowDefinitions.rollback(selected.id, {
+        targetDefinitionId: rollbackTargetId || null,
+        note: promotionNote || null,
+      });
+      setSelected(response.targetDefinition);
+      await load();
+      await loadPromotionEvents(selected.id);
+      await loadRollbackPreview(selected.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to roll back workflow definition");
+    } finally {
+      setPromotionBusy(false);
+    }
+  }, [load, loadPromotionEvents, loadRollbackPreview, promotionNote, rollbackTargetId, selected]);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -207,6 +228,7 @@ export function WorkflowDefinitionsPage() {
   useEffect(() => {
     void loadPromotionEvents(selected?.id);
     void loadRollbackPreview(selected?.id);
+    setRollbackTargetId("");
   }, [loadPromotionEvents, loadRollbackPreview, selected?.id]);
 
   return (
@@ -334,12 +356,36 @@ export function WorkflowDefinitionsPage() {
                 </div>
               </div>
             </div>
+            <div style={{ border: "1px solid #222", borderRadius: "6px", background: "#0a0a0a", padding: "10px", marginBottom: "12px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", marginBottom: "8px" }}>
+                <div>
+                  <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600 }}>Manual Rollback</div>
+                  <div style={{ color: "#777", fontSize: "12px", marginTop: "3px" }}>
+                    Switch limited reuse metadata to an older definition version. No compiler, cache, or execution path changes.
+                  </div>
+                </div>
+                <Badge label="rollback: manual/audited" tone="blue" />
+              </div>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                <select value={rollbackTargetId} onChange={(event) => setRollbackTargetId(event.target.value)} style={{ background: "#050505", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", minWidth: "260px" }}>
+                  <option value="">Preview target: {rollbackPreview?.selectedTarget ? `${String(rollbackPreview.selectedTarget.key)}@v${String(rollbackPreview.selectedTarget.version)}` : "none"}</option>
+                  {(rollbackPreview?.candidateTargets ?? []).map((target) => (
+                    <option key={String(target.id)} value={String(target.id)}>
+                      {String(target.key)}@v{String(target.version)} · {String(target.status)} · {String(target.promotionState)}
+                    </option>
+                  ))}
+                </select>
+                <button onClick={() => void rollbackSelected()} disabled={promotionBusy || !rollbackPreview?.available} style={{ background: rollbackPreview?.available ? "#1f2937" : "#1f1f1f", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || !rollbackPreview?.available ? "not-allowed" : "pointer" }}>Rollback manual</button>
+                <Badge label={`wouldChangeWorkflowCache: ${String(rollbackPreview?.wouldChangeWorkflowCache ?? false)}`} tone="gray" />
+                <Badge label={`wouldExecuteWorkflow: ${String(rollbackPreview?.wouldExecuteWorkflow ?? false)}`} tone="gray" />
+              </div>
+            </div>
             <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600, marginBottom: "8px" }}>Promotion Audit</div>
             <div style={{ display: "grid", gap: "8px" }}>
               {promotionEvents.map((event) => (
                 <div key={event.id} style={{ border: "1px solid #242424", borderRadius: "6px", padding: "10px", background: "#0d0d0d" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", marginBottom: "5px" }}>
-                    <Badge label={event.action === "promote_limited" ? "Promote limited" : "Revoke"} tone={event.action === "promote_limited" ? "green" : "red"} />
+                    <Badge label={event.action === "promote_limited" ? "Promote limited" : event.action === "rollback" ? "Rollback" : "Revoke"} tone={event.action === "promote_limited" ? "green" : event.action === "rollback" ? "blue" : "red"} />
                     <span style={{ color: "#777", fontSize: "11px" }}>{event.createdAt ? new Date(event.createdAt).toLocaleString() : "-"}</span>
                   </div>
                   <div style={{ color: "#aaa", fontSize: "12px", overflowWrap: "anywhere" }}>State: {event.previousState ?? "-"} → {event.nextState ?? "-"}</div>
