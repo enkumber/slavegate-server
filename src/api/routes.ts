@@ -275,7 +275,6 @@ async function queueHumanAgencyWorkflowRun(input: {
     }
     const taskParams: Record<string, unknown> = {
       cacheKey: cached.cache_key,
-      requestKey: input.requestKey,
       clientId: input.target.client_id,
       platform: input.target.account_platform,
       agencyWorkflowRunId: runId,

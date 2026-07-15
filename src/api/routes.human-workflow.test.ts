@@ -2008,7 +2008,6 @@ describe("dashboard human workflow routes", () => {
     expect(taskInsert).toBeDefined();
     expect(taskInsert?.[1][2]).toBe(JSON.stringify({
       cacheKey: cacheKey(),
-      requestKey: requestKey(),
       clientId: CLIENT_ID,
       platform: "reddit",
       agencyWorkflowRunId: RUN_ID,
@@ -2066,7 +2065,6 @@ describe("dashboard human workflow routes", () => {
     const taskInsert = mocks.client.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO tasks"));
     expect(taskInsert?.[1][2]).toBe(JSON.stringify({
       cacheKey: cacheKey(),
-      requestKey: requestKey(),
       clientId: null,
       platform: "reddit",
       agencyWorkflowRunId: RUN_ID,
