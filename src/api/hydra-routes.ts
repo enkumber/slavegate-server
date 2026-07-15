@@ -23,15 +23,24 @@ import {
   type ParsedTarget 
 } from "../modules/skills/target-parser";
 import { isElementFixed } from "../modules/skills/fixed-elements/fixed-elements";
-import type { OcrFindTapParams } from "../../shared/protocol/messages";
+import type { JobDispatchPayload, OcrFindTapParams } from "../../shared/protocol/messages";
 import { skillDbService, coordCacheService } from "../modules/skills/skill-db.service";
 import { checkpointService } from "../modules/checkpoints/checkpoint.service";
 
-import { sendJobToDevice, isDeviceOnline, waitForResult } from "../transport/transport";
+import { sendStandaloneJobToDevice, isDeviceOnline, waitForResult } from "../transport/transport";
 import { directWsServer } from "../ws/direct-ws.server";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 
 const router = Router();
+
+async function sendStandaloneOrThrow(deviceId: string, payload: JobDispatchPayload): Promise<void> {
+  const result = await sendStandaloneJobToDevice(deviceId, payload);
+  if (!result.sent) {
+    throw new Error(
+      `Standalone job ${payload.jobId} was not dispatched (${result.decision}${result.reason ? `: ${result.reason}` : ""})`
+    );
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPER: Find element by text in UI tree (recursive search)
@@ -121,7 +130,7 @@ async function performVerification(
       params: {},
       timeoutMs: 30000,
     });
-    sendJobToDevice(deviceId, {
+    await sendStandaloneOrThrow(deviceId, {
       jobId: verifyScreenshot.jobId,
       type: "screenshot_for_vlm",
       params: {},
@@ -167,7 +176,7 @@ async function executeTapAtCoords(
       params: { x: pixelX, y: pixelY },
       timeoutMs: 30000,
     });
-    sendJobToDevice(deviceId, {
+    await sendStandaloneOrThrow(deviceId, {
       jobId: tapJob.jobId,
       type: "tap",
       params: { x: pixelX, y: pixelY },
@@ -295,7 +304,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             params: { x: pixelX, y: pixelY },
             timeoutMs: 30000,
           });
-          sendJobToDevice(deviceId, {
+          await sendStandaloneOrThrow(deviceId, {
             jobId: tapJob.jobId,
             type: "tap",
             params: { x: pixelX, y: pixelY },
@@ -345,7 +354,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(deviceId, {
+        await sendStandaloneOrThrow(deviceId, {
           jobId: uiJob.jobId,
           type: "ui_tree_dump",
           params: {},
@@ -413,7 +422,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: { searchText: parsedTarget.value, partialMatch: true } as unknown as OcrFindTapParams,
           timeoutMs: 30000,
         });
-        sendJobToDevice(deviceId, {
+        await sendStandaloneOrThrow(deviceId, {
           jobId: ocrJob.jobId,
           type: "ocr_find_tap",
           params: { searchText: parsedTarget.value, partialMatch: true } as unknown as OcrFindTapParams,
@@ -471,7 +480,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(deviceId, {
+        await sendStandaloneOrThrow(deviceId, {
           jobId: screenshotJob.jobId,
           type: "screenshot_for_vlm",
           params: {},
@@ -588,7 +597,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
         params: {},
         timeoutMs: 30000,
       });
-      sendJobToDevice(deviceId, {
+      await sendStandaloneOrThrow(deviceId, {
         jobId: preCheckJob.jobId,
         type: "ui_tree_dump",
         params: {},
@@ -642,7 +651,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           timeoutMs: 30000,
         });
         // IMPORTANT: Send job to device via DirectWS (dispatch only creates DB record)
-        sendJobToDevice(devId, {
+        await sendStandaloneOrThrow(devId, {
           jobId: job.jobId,
           type: "ui_tree_dump",
           params: {},
@@ -659,7 +668,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: { searchText, partialMatch: false } as unknown as OcrFindTapParams,
           timeoutMs: 30000,
         });
-        sendJobToDevice(devId, {
+        await sendStandaloneOrThrow(devId, {
           jobId: ocrJob.jobId,
           type: "ocr_find_tap",
           params: { searchText, partialMatch: false } as unknown as OcrFindTapParams,
@@ -682,7 +691,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(devId, {
+        await sendStandaloneOrThrow(devId, {
           jobId: screenshotResult.jobId,
           type: "screenshot_for_vlm",
           params: {},
@@ -725,7 +734,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
             params: { x: pixelX, y: pixelY },
             timeoutMs: 30000,
           });
-          sendJobToDevice(devId, {
+          await sendStandaloneOrThrow(devId, {
             jobId: job.jobId,
             type: "tap",
             params: { x: pixelX, y: pixelY },
@@ -762,7 +771,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(deviceId, {
+        await sendStandaloneOrThrow(deviceId, {
           jobId: uiJob.jobId,
           type: "ui_tree_dump",
           params: {},
@@ -798,7 +807,7 @@ router.post("/cascade-tap", async (req: Request, res: Response) => {
                   params: { key: "back" },
                   timeoutMs: 3000,
                 });
-                sendJobToDevice(deviceId, {
+                await sendStandaloneOrThrow(deviceId, {
                   jobId: backJob.jobId,
                   type: "press_key",
                   params: { key: "back" },
@@ -863,7 +872,7 @@ router.post("/verify-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(devId, {
+        await sendStandaloneOrThrow(devId, {
           jobId: job.jobId,
           type: "ui_tree_dump",
           params: {},
@@ -879,7 +888,7 @@ router.post("/verify-tap", async (req: Request, res: Response) => {
           params: {},
           timeoutMs: 30000,
         });
-        sendJobToDevice(devId, {
+        await sendStandaloneOrThrow(devId, {
           jobId: screenshotResult.jobId,
           type: "screenshot_for_vlm",
           params: {},
@@ -932,7 +941,7 @@ router.post("/screenshot-to-file", async (req: Request, res: Response) => {
       params: {},
       timeoutMs: 30000,
     });
-    sendJobToDevice(deviceId, {
+    await sendStandaloneOrThrow(deviceId, {
       jobId: screenshotJob.jobId,
       type: "screenshot_for_vlm",
       params: {},
@@ -989,7 +998,7 @@ router.post("/analyze-screen", async (req: Request, res: Response) => {
       params: {},
       timeoutMs: 30000,
     });
-    sendJobToDevice(deviceId, {
+    await sendStandaloneOrThrow(deviceId, {
       jobId: screenshotJob.jobId,
       type: "screenshot_for_vlm",
       params: {},
@@ -1463,7 +1472,7 @@ router.post("/rustdesk/enable", async (req: Request, res: Response) => {
       });
       // Register waiter BEFORE sending — result can arrive before await
       const resultPromise = waitForResult(job.jobId, timeoutMs);
-      sendJobToDevice(deviceId, {
+      await sendStandaloneOrThrow(deviceId, {
         jobId: job.jobId,
         type: type as any,
         params,
@@ -1714,7 +1723,7 @@ router.post("/rustdesk/enable-cascade", async (req: Request, res: Response) => {
         timeoutMs,
       });
       const resultPromise = waitForResult(job.jobId, timeoutMs);
-      sendJobToDevice(deviceId, {
+      await sendStandaloneOrThrow(deviceId, {
         jobId: job.jobId,
         type: type as any,
         params,
@@ -1952,7 +1961,7 @@ router.post("/rustdesk/enable-cascade-fast", async (req: Request, res: Response)
     async function dispatchAndWait(type: string, params: Record<string, unknown>, timeoutMs: number): Promise<any> {
       const job = await dispatcherService.dispatch({ deviceId, type: type as any, params, timeoutMs });
       const rp = waitForResult(job.jobId, timeoutMs);
-      sendJobToDevice(deviceId, { jobId: job.jobId, type: type as any, params, timeoutMs });
+      await sendStandaloneOrThrow(deviceId, { jobId: job.jobId, type: type as any, params, timeoutMs });
       return await rp;
     }
     
@@ -2079,7 +2088,7 @@ router.post("/workflow/:workflowName/dispatch", async (req: Request, res: Respon
       timeoutMs: 300000, // 5 min timeout
     });
     
-    sendJobToDevice(deviceId, {
+    await sendStandaloneOrThrow(deviceId, {
       jobId: job.jobId,
       type: "workflow_execute",
       params: { workflow },
@@ -2184,7 +2193,7 @@ router.post("/tap-raw", async (req: Request, res: Response) => {
             params: { x, y },
             timeoutMs: 15000,
         });
-        sendJobToDevice(deviceId, {
+        await sendStandaloneOrThrow(deviceId, {
             jobId: job.jobId,
             type: "tap",
             params: { x, y },

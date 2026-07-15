@@ -233,10 +233,11 @@ class FakeClient {
     }
 
     if (normalized.startsWith("UPDATE device_execution_operations")) {
-      const [toState, ownerGeneration, metadata, operationKind, operationId, fromStates] = params as [
+      const [toState, ownerGeneration, metadata, wireHandle, operationKind, operationId, fromStates] = params as [
         DeviceExecutionOperationState,
         number | null,
         string,
+        string | null,
         DeviceExecutionOperationKind,
         string,
         DeviceExecutionOperationState[],
@@ -245,6 +246,7 @@ class FakeClient {
       if (!found) return { rows: [], rowCount: 0 };
       found.state = toState;
       if (ownerGeneration !== null) found.owner_generation = ownerGeneration;
+      if (wireHandle !== null) found.wire_handle = JSON.parse(wireHandle) as Record<string, unknown>;
       found.metadata = { ...found.metadata, ...(JSON.parse(metadata) as Record<string, unknown>) };
       found.updated_at = new Date("2026-07-15T19:31:00.000Z");
       return { rows: [found], rowCount: 1 };
@@ -525,6 +527,83 @@ describe("DeviceExecutionArbiter observe mode", () => {
       "implicit_admission",
       "root_dispatching",
       "root_dispatched",
+    ]);
+  });
+
+  it("authorizes standalone job egress only for the FIFO head and sends with a typed permit", async () => {
+    const client = new FakeClient();
+    client.roots.push(
+      root({ id: "older-root", external_id: "job-older", fifo_sequence: 1 }),
+      root({ id: "later-root", external_id: "job-later", fifo_sequence: 2 }),
+    );
+    const order: string[] = [];
+
+    const later = await arbiterFor(client).runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "job-later",
+      registerWaiter: () => {
+        order.push("later-waiter");
+      },
+      wireDispatch: () => {
+        order.push("later-wire");
+        return true;
+      },
+    });
+    expect(later).toMatchObject({ decision: "would_wait", sent: false, reason: "older_queued_root_exists" });
+    expect(order).toEqual([]);
+    expect(client.roots.find((item) => item.id === "later-root")?.state).toBe("queued");
+
+    const older = await arbiterFor(client).runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "job-older",
+      registerWaiter: (permit) => {
+        order.push(`waiter:${permit.kind}:${permit.handle.ownerGeneration}`);
+        expect(permit.wireHandle).toEqual(encodeDeviceExecutionHandle(permit.handle));
+      },
+      wireDispatch: (permit) => {
+        order.push(`wire:${permit.handle.operationId}:${permit.handle.ownerGeneration}`);
+        return true;
+      },
+    });
+
+    expect(older.decision).toBe("dispatched");
+    expect(older.sent).toBe(true);
+    expect(order).toEqual([
+      "waiter:device_execution_job_dispatch_permit:1",
+      "wire:job-older:1",
+    ]);
+    expect(client.roots.find((item) => item.id === "older-root")).toMatchObject({ state: "dispatched", owner_generation: 1 });
+    expect(decodeDeviceExecutionHandle(client.operations.find((item) => item.operation_id === "job-older")?.wire_handle)).toMatchObject({
+      rootId: "older-root",
+      operationId: "job-older",
+      ownerGeneration: 1,
+    });
+  });
+
+  it("blocks a standalone job root when raw dispatch fails after the waiter is registered", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({ id: "root-1", external_id: "job-1", fifo_sequence: 1 }));
+    const order: string[] = [];
+
+    const result = await arbiterFor(client).runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "job-1",
+      registerWaiter: () => {
+        order.push("waiter");
+      },
+      wireDispatch: () => {
+        order.push("wire");
+        return false;
+      },
+    });
+
+    expect(result).toMatchObject({ decision: "offline", sent: false });
+    expect(order).toEqual(["waiter", "wire"]);
+    expect(client.roots[0].state).toBe("blocked");
+    expect(client.operations[0].state).toBe("blocked");
+    expect(client.events.map((event) => event.event_type)).toEqual([
+      "root_dispatching",
+      "egress_not_sent_fail_closed",
     ]);
   });
 

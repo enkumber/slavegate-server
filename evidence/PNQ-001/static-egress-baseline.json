@@ -13,12 +13,6 @@
   },
   {
     "file": "src/api/routes.ts",
-    "kind": "sendJobToDevice",
-    "count": 1,
-    "classification": "transport-adapter"
-  },
-  {
-    "file": "src/api/routes.ts",
     "kind": "sendToDevice",
     "count": 2,
     "classification": "generic-sendto-device-match"

@@ -50,7 +50,6 @@ const excludedFiles = [
 
 const reviewedRawImportBoundaries = new Set([
   "src/api/hydra-routes.ts\tdirectWsServer\tdirect-ws",
-  "src/api/routes.ts\tsendJobToDevice\ttransport",
   "src/api/routes.ts\tdirectWsServer\tdirect-ws",
   "src/index.ts\tdirectWsServer\tdirect-ws",
   "src/modules/agents/orchestrator.ts\tsendJobToDevice\ttransport",

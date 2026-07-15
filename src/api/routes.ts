@@ -16,7 +16,7 @@ import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { authService } from "../modules/auth/auth.service";
 import { directWsServer } from "../ws/direct-ws.server";
 
-import { sendJobToDevice, isDeviceOnline } from "../transport/transport";
+import { sendStandaloneJobToDevice, isDeviceOnline } from "../transport/transport";
 import { loadMap } from "../modules/app-mapping/recorder.service";
 import { validateAppMapQuality, type AppMap, type AppMapQualityReport } from "../modules/app-mapping/schema";
 import { workflowService, type GeneratedWorkflowPlanCacheRecord } from "../modules/workflows/workflow.service";
@@ -679,13 +679,18 @@ router.post("/jobs", async (req, res) => {
   }
   try {
     const { jobId, timeoutMs } = await dispatcherService.dispatch(body);
-    await transport.sendJob(body.deviceId, {
+    const sendResult = await sendStandaloneJobToDevice(body.deviceId, {
       jobId,
       type: body.type,
       params: body.params,
       timeoutMs,
       requiresRoot: body.confirmRoot,
     });
+    if (!sendResult.sent && sendResult.decision !== "would_wait") {
+      console.warn(
+        `[jobs] standalone job accepted but not sent: jobId=${jobId.slice(0, 8)} decision=${sendResult.decision} reason=${sendResult.reason ?? "none"}`
+      );
+    }
     // Audit log INSERT is done by dispatcherService.dispatch() — do NOT insert here.
     // Double INSERT was a bug: dispatcher writes the row; ws.server.handleJobResult() UPDATEs it.
 
@@ -1843,13 +1848,11 @@ export function setWsServerRef(srv: import("../ws/ws.server").WsServer) { _wsSer
  */
 type TransportHandle = {
   isDeviceOnline: (id: string) => boolean;
-  sendJob: (id: string, payload: import("../../shared/protocol/messages").JobDispatchPayload) => boolean;
 };
 
 function getActiveTransport(_deviceId?: string): TransportHandle {
   return {
     isDeviceOnline: (id) => isDeviceOnline(id),
-    sendJob:        (id, p) => sendJobToDevice(id, p),
   };
 }
 

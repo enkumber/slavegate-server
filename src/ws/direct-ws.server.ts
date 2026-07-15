@@ -26,7 +26,12 @@ import type { Duplex } from "stream";
 import { getDb } from "../db/client";
 import { scalabilityConfig } from "../config/scalability.config";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
-import { deviceExecutionArbiter, type DeviceExecutionRootKind } from "../modules/device-execution";
+import {
+  decodeDeviceExecutionHandle,
+  deviceExecutionArbiter,
+  type DeviceExecutionJobDispatchPermit,
+  type DeviceExecutionRootKind,
+} from "../modules/device-execution";
 import { devicesService } from "../modules/devices/devices.service";
 import { devicesConnected, deviceOfflineEvents, recordDeviceHealth } from "../modules/observability/metrics";
 import { alerting } from "../modules/observability/alerts";
@@ -124,9 +129,12 @@ interface ConnectedDevice {
 }
 
 interface PendingJob {
+  promise: Promise<JobResult>;
   resolve: (result: JobResult) => void;
   reject:  (err: Error) => void;
   timer:   ReturnType<typeof setTimeout>;
+  deviceId?: string;
+  permit?: DeviceExecutionJobDispatchPermit;
 }
 
 interface PendingBatch {
@@ -220,6 +228,18 @@ export class DirectWsServer {
     // Reject all pending jobs
     for (const [jobId, pending] of this.pendingJobs) {
       clearTimeout(pending.timer);
+      if (pending.permit) {
+        deviceExecutionArbiter.markAmbiguous({
+          deviceId: pending.permit.handle.deviceId,
+          handle: pending.permit.handle,
+          reason: "direct_ws_server_shutdown_before_result",
+          actor: "direct_ws_close",
+          state: "blocked",
+          metadata: { handle: pending.permit.wireHandle },
+        }).catch((err) => {
+          console.error("[device-execution] shutdown ambiguity mark failed:", (err as Error).message);
+        });
+      }
       pending.reject(new Error("Server shutting down"));
       this.pendingJobs.delete(jobId);
     }
@@ -253,18 +273,128 @@ export class DirectWsServer {
     return true;
   }
 
+  sendJobWithPermit(permit: DeviceExecutionJobDispatchPermit, payload: JobDispatchPayload): boolean {
+    if (permit.kind !== "device_execution_job_dispatch_permit") {
+      throw new Error("DirectWS JOB send requires a PNQ device-execution permit");
+    }
+    if (permit.handle.rootKind !== "job" || permit.handle.operationKind !== "job") {
+      throw new Error("DirectWS JOB permit must target a standalone job operation");
+    }
+    if (permit.handle.operationId !== payload.jobId) {
+      throw new Error("DirectWS JOB permit operation id does not match payload jobId");
+    }
+
+    const deviceId = permit.handle.deviceId;
+    const conn = this.connections.get(deviceId);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+
+    this._send(conn.ws, {
+      type:    "JOB",
+      jobId:   payload.jobId,
+      jobType: payload.type,
+      params:  payload.params,
+      timeoutMs: payload.timeoutMs,
+      requiresRoot: payload.requiresRoot,
+      pnqHandle: permit.wireHandle,
+    });
+    console.log(`[direct-ws] sendJobWithPermit: device=${deviceId.slice(0,8)} jobId=${payload.jobId?.slice(0,8)} type=${payload.type} gen=${permit.handle.ownerGeneration}`);
+    return true;
+  }
+
+  registerJobWaiterWithPermit(
+    permit: DeviceExecutionJobDispatchPermit,
+    timeoutMs = 300_000,
+  ): Promise<JobResult> {
+    return this.registerJobWaiter(permit.handle.operationId, timeoutMs, permit);
+  }
+
+  rejectJobWaiterWithPermit(permit: DeviceExecutionJobDispatchPermit, reason: string): boolean {
+    const jobId = permit.handle.operationId;
+    const pending = this.pendingJobs.get(jobId);
+    if (
+      !pending?.permit ||
+      pending.permit.handle.rootId !== permit.handle.rootId ||
+      pending.permit.handle.ownerGeneration !== permit.handle.ownerGeneration
+    ) {
+      return false;
+    }
+
+    clearTimeout(pending.timer);
+    this.pendingJobs.delete(jobId);
+    pending.reject(new Error(reason));
+    return true;
+  }
+
   /**
    * Returns a Promise that resolves when JOB_RESULT arrives for this jobId.
    * Rejects after timeoutMs (default: 5 min).
    */
   waitForJobResult(jobId: string, timeoutMs = 300_000): Promise<JobResult> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingJobs.delete(jobId);
-        reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
-      this.pendingJobs.set(jobId, { resolve, reject, timer });
+    return this.registerJobWaiter(jobId, timeoutMs);
+  }
+
+  private registerJobWaiter(
+    jobId: string,
+    timeoutMs: number,
+    permit?: DeviceExecutionJobDispatchPermit,
+  ): Promise<JobResult> {
+    const existing = this.pendingJobs.get(jobId);
+    if (existing) {
+      if (permit && !existing.permit) {
+        clearTimeout(existing.timer);
+        existing.permit = permit;
+        existing.deviceId = permit.handle.deviceId;
+        existing.timer = this.createJobTimeout(jobId, timeoutMs, existing.reject, permit);
+      }
+      return existing.promise;
+    }
+
+    let resolve!: (result: JobResult) => void;
+    let reject!: (err: Error) => void;
+    const promise = new Promise<JobResult>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
     });
+    promise.catch(() => {});
+
+    const timer = this.createJobTimeout(jobId, timeoutMs, reject, permit);
+
+    this.pendingJobs.set(jobId, {
+      promise,
+      resolve,
+      reject,
+      timer,
+      deviceId: permit?.handle.deviceId,
+      permit,
+    });
+    return promise;
+  }
+
+  private createJobTimeout(
+    jobId: string,
+    timeoutMs: number,
+    reject: (err: Error) => void,
+    permit?: DeviceExecutionJobDispatchPermit,
+  ): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      this.pendingJobs.delete(jobId);
+      if (permit) {
+        deviceExecutionArbiter.markAmbiguous({
+          deviceId: permit.handle.deviceId,
+          handle: permit.handle,
+          reason: "job_result_timeout",
+          actor: "direct_ws_waiter_timeout",
+          state: "blocked",
+          metadata: {
+            timeoutMs,
+            handle: permit.wireHandle,
+          },
+        }).catch((err) => {
+          console.error("[device-execution] timeout ambiguity mark failed:", (err as Error).message);
+        });
+      }
+      reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
   }
 
   /**
@@ -507,7 +637,7 @@ export class DirectWsServer {
 
       // ── Route by type ─────────────────────────────────────────────────
       switch (type) {
-        case "JOB_RESULT":      this._handleJobResult(deviceConn, msg);   break;
+        case "JOB_RESULT":      await this._handleJobResult(deviceConn, msg);   break;
         case "BATCH_RESULT":    this._handleBatchResult(deviceConn, msg); break;
         case "HEARTBEAT":       await this._handleHeartbeat(deviceConn, msg); break;
         case "PING":            this._send(ws, { type: "PONG" });          break;
@@ -530,7 +660,20 @@ export class DirectWsServer {
 
         // Reject any pending jobs for this device
         for (const [jobId, pending] of this.pendingJobs) {
+          if (pending.deviceId && pending.deviceId !== deviceConn.deviceId) continue;
           clearTimeout(pending.timer);
+          if (pending.permit) {
+            deviceExecutionArbiter.markAmbiguous({
+              deviceId: deviceConn.deviceId,
+              handle: pending.permit.handle,
+              reason: "device_disconnected_before_job_result",
+              actor: "direct_ws_disconnect",
+              state: "blocked",
+              metadata: { handle: pending.permit.wireHandle, closeCode: code, closeReason: String(reason) },
+            }).catch((err) => {
+              console.error("[device-execution] disconnect ambiguity mark failed:", (err as Error).message);
+            });
+          }
           pending.reject(new Error(`Device ${deviceConn!.deviceId} disconnected`));
           this.pendingJobs.delete(jobId);
         }
@@ -732,19 +875,58 @@ export class DirectWsServer {
 
   // ─── Message handlers ─────────────────────────────────────────────────────
 
-  private _handleJobResult(conn: ConnectedDevice, msg: Record<string, unknown>): void {
+  private async _handleJobResult(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {
     const jobId = msg.jobId as string;
     if (!jobId) return;
     console.log(`[direct-ws] JOB_RESULT received: jobId=${jobId.slice(0,8)} success=${msg.success} error=${msg.error || 'none'} device=${conn.deviceId.slice(0,8)}`);
 
     const pending = this.pendingJobs.get(jobId);
+    const status = Boolean(msg.success) ? "completed" : "failed";
+    const durationMs = (msg.durationMs as number | undefined) ?? 0;
+    const wireHandle = isRecord(msg.pnqHandle) ? msg.pnqHandle : null;
+    const handle = pending?.permit?.handle ?? decodeDeviceExecutionHandle(wireHandle);
+
+    if (pending?.permit || handle) {
+      try {
+        const terminal = await deviceExecutionArbiter.observeTerminal({
+          deviceId: conn.deviceId,
+          rootKind: handle?.rootKind ?? "job",
+          externalId: jobId,
+          handle: handle ?? undefined,
+          status,
+          actor: "direct_ws",
+          reason: (msg.error as string | undefined) ?? status,
+          metadata: {
+            durationMs,
+            observeSource: "directWsServer.handleJobResult",
+            handle: pending?.permit?.wireHandle ?? wireHandle,
+          },
+        });
+        if (terminal.decision !== "terminal") {
+          console.warn(
+            `[direct-ws] JOB_RESULT rejected by PNQ CAS: jobId=${jobId.slice(0,8)} decision=${terminal.decision} reason=${terminal.reason ?? "none"}`
+          );
+          this._send(conn.ws, { type: "ACK", ref: jobId });
+          return;
+        }
+      } catch (err) {
+        console.error("[device-execution] enforced JOB terminal CAS failed:", (err as Error).message);
+        return;
+      }
+    } else {
+      observeRootTerminal("job", conn.deviceId, jobId, status, msg.error as string | undefined, {
+        durationMs,
+        observeSource: "directWsServer.handleJobResult",
+      });
+    }
+
     if (pending) {
       clearTimeout(pending.timer);
       this.pendingJobs.delete(jobId);
       pending.resolve({
         jobId,
         success: Boolean(msg.success),
-        status:  Boolean(msg.success) ? "completed" : "failed",
+        status,
         output:  msg.output,
         error:   msg.error as string | undefined,
       });
@@ -753,10 +935,10 @@ export class DirectWsServer {
     // ── Resolve workflow executor's pending promise (critical for blocking workflows) ──
     const { resolveJobResult } = require("../modules/workflows/workflow.executor");
     const resolved = resolveJobResult(jobId, {
-      status:     Boolean(msg.success) ? "completed" : "failed",
+      status,
       output:     msg.output,
       error:      msg.error as string | undefined,
-      durationMs: (msg.durationMs as number | undefined) ?? 0,
+      durationMs,
     });
     if (resolved) {
       console.log(`[direct-ws] JOB_RESULT resolved for workflow executor: jobId=${jobId.slice(0,8)}`);
@@ -766,10 +948,10 @@ export class DirectWsServer {
     dispatcherService.handleJobResult({
       jobId,
       deviceId:   conn.deviceId,
-      status:     msg.success ? "completed" : "failed",
+      status,
       output:     msg.output as Record<string, unknown>,
       error:      msg.error as string | undefined,
-      durationMs: (msg.durationMs as number | undefined) ?? 0,
+      durationMs,
     }).catch(err => console.error("[direct-ws] handleJobResult error:", err.message));
 
     // ACK

@@ -5,7 +5,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import { sendJobToDevice } from '../../transport/transport';
+import { sendStandaloneJobToDevice, waitForResult } from '../../transport/transport';
 import { visionService } from '../vision/vision.service';
 import { getDb } from '../../db/client';
 import { UiTreeDetector } from './detectors/ui-tree.detector';
@@ -104,6 +104,53 @@ export function resolveOcrResult(
     pending.resolve(null);
   }
   return true;
+}
+
+function resultOutput(result: { output?: unknown }): Record<string, unknown> | null {
+  return result.output && typeof result.output === 'object' && !Array.isArray(result.output)
+    ? result.output as Record<string, unknown>
+    : null;
+}
+
+function uiTreeNodesFromResult(result: { status: string; output?: unknown }): UiNode[] | null {
+  const output = resultOutput(result);
+  if (result.status !== 'completed' || !output) return null;
+
+  let nodes: UiNode[] = [];
+  const rawUiTree = output.uiTree;
+  if (typeof rawUiTree === 'string') {
+    try {
+      const parsed = JSON.parse(rawUiTree) as UiNode | UiNode[];
+      nodes = Array.isArray(parsed) ? parsed : [parsed];
+    } catch (err) {
+      console.warn(`[screen-detection] failed to parse uiTree JSON string: ${(err as Error).message}`);
+      nodes = [];
+    }
+  } else if (rawUiTree && typeof rawUiTree === 'object') {
+    nodes = Array.isArray(rawUiTree) ? rawUiTree as UiNode[] : [rawUiTree as UiNode];
+  } else {
+    const fallback = output.nodes ?? output.tree ?? output.data ?? [];
+    nodes = Array.isArray(fallback) ? fallback as UiNode[] : [];
+  }
+
+  return nodes.length > 0 ? nodes : null;
+}
+
+function ocrFromResult(result: { status: string; output?: unknown }): OcrResult | null {
+  const output = resultOutput(result);
+  if (result.status !== 'completed' || !output) return null;
+
+  const blocks = (output.blocks ?? []) as OcrResult['blocks'];
+  const fullText = (output.fullText ?? output.full_text ?? '') as string;
+  return { blocks: Array.isArray(blocks) ? blocks : [], fullText: String(fullText) };
+}
+
+function screenshotFromResult(result: { status: string; output?: unknown }): string | null {
+  const output = resultOutput(result);
+  if (result.status !== 'completed' || !output) return null;
+
+  const base64 = output.image_base64 ?? output.base64 ?? output.imageBase64;
+  return typeof base64 === 'string' && base64.length > 0 ? base64 : null;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -356,99 +403,65 @@ export class ScreenDetectionService {
   private async fetchUiTree(deviceId: string, timeoutMs: number): Promise<UiNode[]> {
     const jobId = uuidv4();
 
-    const result = await new Promise<UiNode[] | null>((resolve) => {
-      const timer = setTimeout(() => {
-        pendingUiTree.delete(jobId);
-        resolve(null);
-      }, timeoutMs);
-      pendingUiTree.set(jobId, { resolve, timer });
-
-      // Send job to device via DirectWS transport
-      const sent = sendJobToDevice(deviceId, {
-        jobId,
-        type: 'ui_tree_dump' as import('../../../shared/protocol/messages').JobType,
-        params: { format: 'json' } as Record<string, unknown>,
-        timeoutMs,
-      });
-      if (!sent) {
-        clearTimeout(timer);
-        pendingUiTree.delete(jobId);
-        resolve(null);
-      }
+    const resultPromise = waitForResult(jobId, timeoutMs);
+    const sendResult = await sendStandaloneJobToDevice(deviceId, {
+      jobId,
+      type: 'ui_tree_dump' as import('../../../shared/protocol/messages').JobType,
+      params: { format: 'json' } as Record<string, unknown>,
+      timeoutMs,
     });
+    if (!sendResult.sent) throw new Error(`ui_tree_dump not dispatched (${sendResult.decision}${sendResult.reason ? `: ${sendResult.reason}` : ''})`);
 
-    if (!result) throw new Error(`ui_tree_dump timed out (${timeoutMs}ms) for device ${deviceId.slice(0, 8)}`);
-    return result;
+    const result = await resultPromise;
+    const nodes = uiTreeNodesFromResult(result);
+
+    if (!nodes) throw new Error(`ui_tree_dump timed out (${timeoutMs}ms) for device ${deviceId.slice(0, 8)}`);
+    return nodes;
   }
 
   private async fetchOcr(deviceId: string, timeoutMs: number): Promise<OcrResult> {
     const jobId = uuidv4();
 
-    const result = await new Promise<OcrResult | null>((resolve) => {
-      const timer = setTimeout(() => {
-        pendingOcr.delete(jobId);
-        resolve(null);
-      }, timeoutMs);
-      pendingOcr.set(jobId, { resolve, timer });
-
-      // Send job to device via DirectWS transport
-      const sent = sendJobToDevice(deviceId, {
-        jobId,
-        type: 'ocr_full' as import('../../../shared/protocol/messages').JobType,
-        params: {} as Record<string, unknown>,
-        timeoutMs,
-      });
-      if (!sent) {
-        clearTimeout(timer);
-        pendingOcr.delete(jobId);
-        resolve(null);
-      }
+    const resultPromise = waitForResult(jobId, timeoutMs);
+    const sendResult = await sendStandaloneJobToDevice(deviceId, {
+      jobId,
+      type: 'ocr_full' as import('../../../shared/protocol/messages').JobType,
+      params: {} as Record<string, unknown>,
+      timeoutMs,
     });
+    if (!sendResult.sent) throw new Error(`ocr_full not dispatched (${sendResult.decision}${sendResult.reason ? `: ${sendResult.reason}` : ''})`);
 
+    const result = ocrFromResult(await resultPromise);
     if (!result) throw new Error(`ocr_full timed out (${timeoutMs}ms) for device ${deviceId.slice(0, 8)}`);
     return result;
   }
 
   private async fetchScreenshot(deviceId: string, timeoutMs: number): Promise<string> {
-    // Re-use the orchestrator pattern — send a screenshot job and await resolution
-    // The orchestrator's resolveScreenshotResult will handle this via ws.server.ts
     const jobId = uuidv4();
 
-    const result = await new Promise<string | null>((resolve) => {
-      const timer = setTimeout(() => {
-        pendingScreenshots.delete(jobId);
-        resolve(null);
-      }, timeoutMs);
-      pendingScreenshots.set(jobId, { resolve, timer });
-
-      // Send job to device via DirectWS transport
-      // Send job to device via DirectWS transport
-      const sent = sendJobToDevice(deviceId, {
-        jobId,
-        type: 'screenshot_for_vlm' as import('../../../shared/protocol/messages').JobType,
-        params: { quality: 85, maxWidth: 540 } as Record<string, unknown>,
-        timeoutMs,
-      });
-      if (!sent) {
-        clearTimeout(timer);
-        pendingScreenshots.delete(jobId);
-        resolve(null);
-      }
+    const resultPromise = waitForResult(jobId, timeoutMs);
+    const sendResult = await sendStandaloneJobToDevice(deviceId, {
+      jobId,
+      type: 'screenshot_for_vlm' as import('../../../shared/protocol/messages').JobType,
+      params: { quality: 85, maxWidth: 540 } as Record<string, unknown>,
+      timeoutMs,
     });
+    if (!sendResult.sent) throw new Error(`screenshot_for_vlm not dispatched (${sendResult.decision}${sendResult.reason ? `: ${sendResult.reason}` : ''})`);
 
+    const result = screenshotFromResult(await resultPromise);
     if (!result) throw new Error(`screenshot timed out (${timeoutMs}ms) for device ${deviceId.slice(0, 8)}`);
     return result;
   }
 
   private async pressBack(deviceId: string): Promise<void> {
     const jobId = uuidv4();
-    // Send job to device via DirectWS transport
-    sendJobToDevice(deviceId, {
+    const sendResult = await sendStandaloneJobToDevice(deviceId, {
       jobId,
       type: 'press_key' as import('../../../shared/protocol/messages').JobType,
       params: { key: 'back' } as Record<string, unknown>,
       timeoutMs: 3_000,
     });
+    if (!sendResult.sent) throw new Error(`press_key back not dispatched (${sendResult.decision}${sendResult.reason ? `: ${sendResult.reason}` : ''})`);
     await sleep(300);
   }
 

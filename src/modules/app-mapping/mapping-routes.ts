@@ -7,7 +7,7 @@ import { Router, Request, Response } from "express";
 import fs from "fs/promises";
 import path from "path";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { isDeviceOnline, sendJobToDevice, waitForResult } from "../../transport/transport";
+import { isDeviceOnline, sendStandaloneJobToDevice, waitForResult } from "../../transport/transport";
 import { buildPageDetection } from "./page-fingerprint";
 import { filterRelevantElements, generateElementId } from "./element-filter";
 import {
@@ -53,13 +53,15 @@ async function dispatchAndAwaitRefresh(
     timeoutMs,
   });
   const resultPromise = waitForResult(job.jobId, timeoutMs);
-  const sent = sendJobToDevice(deviceId, {
+  const sendResult = await sendStandaloneJobToDevice(deviceId, {
     jobId: job.jobId,
     type: type as any,
     params,
     timeoutMs,
   });
-  if (!sent) throw new Error(`Device ${deviceId} is not connected`);
+  if (!sendResult.sent) {
+    throw new Error(`Job ${job.jobId} was not dispatched (${sendResult.decision}${sendResult.reason ? `: ${sendResult.reason}` : ""})`);
+  }
   return resultPromise;
 }
 

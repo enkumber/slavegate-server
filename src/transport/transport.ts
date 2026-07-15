@@ -7,7 +7,15 @@
 
 import { directWsServer } from "../ws/direct-ws.server";
 import { deviceExecutionArbiter } from "../modules/device-execution";
+import type { DeviceExecutionStandaloneJobEgressResult } from "../modules/device-execution";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
+
+export type StandaloneJobSendResult = Pick<
+  DeviceExecutionStandaloneJobEgressResult,
+  "decision" | "root" | "operation" | "handle" | "reason" | "sent"
+> & {
+  queued: boolean;
+};
 
 /**
  * Send a job to a device via DirectWS transport.
@@ -23,6 +31,52 @@ export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): 
 
   observeJobDispatch(deviceId, payload, false);
   return false;
+}
+
+/**
+ * G2 production lane for standalone JOB roots.
+ *
+ * PostgreSQL authorizes and moves the job root into dispatching before DirectWS
+ * receives a typed permit. The waiter is registered before the raw frame is
+ * serialized, and the arbiter CASes the root into dispatched only after send.
+ */
+export async function sendStandaloneJobToDevice(
+  deviceId: string,
+  payload: JobDispatchPayload,
+): Promise<StandaloneJobSendResult> {
+  const result = await deviceExecutionArbiter.runStandaloneJobEgress({
+    deviceId,
+    jobId: payload.jobId,
+    requestKey: payload.jobId,
+    actor: "transport.g2",
+    metadata: {
+      jobType: payload.type,
+      timeoutMs: payload.timeoutMs ?? null,
+      requiresRoot: payload.requiresRoot ?? false,
+      observeSource: "transport.sendStandaloneJobToDevice",
+    },
+    registerWaiter: (permit) => {
+      directWsServer.registerJobWaiterWithPermit(permit, payload.timeoutMs ?? 300_000);
+    },
+    wireDispatch: (permit) => directWsServer.sendJobWithPermit(permit, payload),
+  });
+
+  if (!result.sent && result.permit) {
+    directWsServer.rejectJobWaiterWithPermit(
+      result.permit,
+      `Job ${payload.jobId} was not sent (${result.decision}${result.reason ? `: ${result.reason}` : ""})`,
+    );
+  }
+
+  return {
+    decision: result.decision,
+    root: result.root,
+    operation: result.operation,
+    handle: result.handle,
+    reason: result.reason,
+    sent: result.sent,
+    queued: result.decision === "would_wait" || (result.root?.state === "queued" && !result.sent),
+  };
 }
 
 /**

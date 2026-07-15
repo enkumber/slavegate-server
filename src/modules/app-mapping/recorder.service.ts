@@ -12,7 +12,7 @@
  * 3. Queue empty → save map
  */
 
-import { sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
+import { sendStandaloneJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
 import { getDb } from "../../db/client";
 import fs from "fs/promises";
@@ -70,12 +70,15 @@ async function dispatchAndAwait(deviceId: string, type: string, params: Record<s
     timeoutMs,
   });
 
-  sendJobToDevice(deviceId, {
+  const sendResult = await sendStandaloneJobToDevice(deviceId, {
     jobId: job.jobId,
     type: type as any,
     params,
     timeoutMs,
   });
+  if (!sendResult.sent) {
+    throw new Error(`Job ${job.jobId} was not dispatched (${sendResult.decision}${sendResult.reason ? `: ${sendResult.reason}` : ""})`);
+  }
 
   return waitForResult(job.jobId, timeoutMs);
 }
