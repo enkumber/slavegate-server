@@ -23,6 +23,7 @@ import { authService } from "../modules/auth/auth.service";
 import { devicesService } from "../modules/devices/devices.service";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { getDb } from "../db/client";
+import { decodeDeviceExecutionHandle, deviceExecutionArbiter } from "../modules/device-execution";
 import {
   devicesConnected, deviceOfflineEvents, recordDeviceHealth,
 } from "../modules/observability/metrics";
@@ -514,6 +515,29 @@ export class WsServer {
     payload: JobResultPayload,
     deviceId: string
   ): Promise<void> {
+    const wireHandle = (payload as JobResultPayload & { pnqHandle?: unknown }).pnqHandle;
+    const handle = decodeDeviceExecutionHandle(wireHandle);
+    const accepted = await deviceExecutionArbiter.acceptJobResult({
+      deviceId,
+      jobId: payload.jobId,
+      handle,
+      status: payload.status,
+      actor: "ws",
+      reason: payload.error ?? payload.status,
+      metadata: {
+        durationMs: payload.durationMs,
+        verification: payload.verification ?? null,
+        observeSource: "wsServer.handleJobResult",
+        handle: wireHandle ?? null,
+      },
+    });
+    if (!accepted.accepted) {
+      console.warn(
+        `[ws] JOB_RESULT rejected by PNQ ingress: jobId=${payload.jobId.slice(0, 8)} decision=${accepted.decision} reason=${accepted.reason ?? "none"}`
+      );
+      return;
+    }
+
     await dispatcherService.handleJobResult({
       jobId:      payload.jobId,
       deviceId,
@@ -597,6 +621,9 @@ export class WsServer {
         console.warn("[ws] ban-detector analyze error:", (e as Error).message);
       }
     })();
+    void import("../transport/transport")
+      .then(({ dispatchQueuedJobsForDevice }) => dispatchQueuedJobsForDevice(deviceId, "ws.job_result_queue_pump"))
+      .catch(err => console.error("[device-execution] ws queue pump error:", (err as Error).message));
   }
 
   // ─── Vision request handler ──────────────────────────────────────────────

@@ -7,6 +7,7 @@
 
 import { directWsServer } from "../ws/direct-ws.server";
 import { deviceExecutionArbiter } from "../modules/device-execution";
+import { getDb } from "../db/client";
 import type {
   DeviceExecutionBoundaryKind,
   DeviceExecutionOperationKind,
@@ -91,6 +92,7 @@ export async function sendDeviceExecutionJobToDevice(
       jobType: payload.type,
       timeoutMs: payload.timeoutMs ?? null,
       requiresRoot: payload.requiresRoot ?? false,
+      dispatchEnvelope: payload,
       observeSource: options.metadata?.observeSource ?? "transport.sendDeviceExecutionJobToDevice",
     },
     registerWaiter: (permit) => {
@@ -115,6 +117,45 @@ export async function sendDeviceExecutionJobToDevice(
     sent: result.sent,
     queued: result.decision === "would_wait" || (result.root?.state === "queued" && !result.sent),
   };
+}
+
+export async function dispatchQueuedJobsForDevice(
+  deviceId: string,
+  actor = "transport.queue_pump",
+): Promise<{ attempted: number; sent: number }> {
+  if (!directWsServer.isDeviceOnline(deviceId)) return { attempted: 0, sent: 0 };
+
+  let attempted = 0;
+  let sent = 0;
+  while (directWsServer.isDeviceOnline(deviceId)) {
+    const envelope = await nextQueuedJobEnvelope(deviceId);
+    if (!envelope) break;
+    attempted += 1;
+    const result = await sendDeviceExecutionJobToDevice(deviceId, envelope, {
+      boundary: "standalone_job",
+      rootKind: "job",
+      requestKey: envelope.jobId,
+      actor,
+      metadata: { observeSource: "transport.dispatchQueuedJobsForDevice" },
+    });
+    if (!result.sent) break;
+    sent += 1;
+  }
+  return { attempted, sent };
+}
+
+export async function sweepQueuedJobsForOnlineDevices(
+  actor = "transport.queue_sweep",
+): Promise<{ devices: number; attempted: number; sent: number }> {
+  const deviceIds = directWsServer.getConnectedDeviceIds();
+  let attempted = 0;
+  let sent = 0;
+  for (const deviceId of deviceIds) {
+    const result = await dispatchQueuedJobsForDevice(deviceId, actor);
+    attempted += result.attempted;
+    sent += result.sent;
+  }
+  return { devices: deviceIds.length, attempted, sent };
 }
 
 /**
@@ -155,4 +196,27 @@ function observeJobDispatch(deviceId: string, payload: JobDispatchPayload, sent:
   }).catch((err) => {
     console.error("[device-execution] observe job dispatch failed:", (err as Error).message);
   });
+}
+
+async function nextQueuedJobEnvelope(deviceId: string): Promise<JobDispatchPayload | null> {
+  const result = await getDb().query<{ metadata: Record<string, unknown> }>(
+    `
+    SELECT operations.metadata
+    FROM device_execution_roots roots
+    JOIN device_execution_operations operations ON operations.root_id = roots.id
+    WHERE roots.device_id = $1
+      AND roots.root_kind = 'job'
+      AND roots.state = 'queued'
+      AND operations.operation_kind = 'job'
+    ORDER BY roots.fifo_sequence ASC
+    LIMIT 1
+    `,
+    [deviceId]
+  );
+  const envelope = result.rows[0]?.metadata?.dispatchEnvelope;
+  return isJobDispatchPayload(envelope) ? envelope : null;
+}
+
+function isJobDispatchPayload(value: unknown): value is JobDispatchPayload {
+  return !!value && typeof value === "object" && typeof (value as JobDispatchPayload).jobId === "string";
 }

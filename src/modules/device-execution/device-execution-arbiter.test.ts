@@ -181,11 +181,13 @@ class FakeClient {
       const existing = this.operations.find((item) => item.operation_kind === operationKind && item.operation_id === operationId);
       if (existing) {
         if (existing.root_id === rootId) {
-          existing.owner_generation = Number(ownerGeneration);
-          if (!["completed", "failed", "cancelled"].includes(existing.state)) existing.state = state;
+          if (existing.state === "registered") {
+            existing.owner_generation = Number(ownerGeneration);
+            existing.state = state;
+            existing.wire_handle = JSON.parse(wireHandle) as Record<string, unknown>;
+          }
           existing.egress_lane = egressLane;
           existing.wire_type = wireType ?? existing.wire_type;
-          existing.wire_handle = JSON.parse(wireHandle) as Record<string, unknown>;
           existing.metadata = { ...existing.metadata, ...(JSON.parse(metadata) as Record<string, unknown>) };
           existing.updated_at = new Date("2026-07-15T19:31:00.000Z");
           return { rows: [existing], rowCount: 1 };
@@ -605,6 +607,76 @@ describe("DeviceExecutionArbiter observe mode", () => {
       "root_dispatching",
       "egress_not_sent_fail_closed",
     ]);
+  });
+
+  it("accepts a job result only for the current dispatched owner", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({
+      id: "root-accepted",
+      external_id: "job-accepted",
+      state: "dispatched",
+      owner_generation: 3,
+    }));
+    client.operations.push(operation({
+      root_id: "root-accepted",
+      operation_id: "job-accepted",
+      state: "dispatched",
+      owner_generation: 3,
+      wire_handle: encodeDeviceExecutionHandle({
+        rootId: "root-accepted",
+        deviceId: DEVICE_A,
+        rootKind: "job",
+        ownerGeneration: 3,
+        operationKind: "job",
+        operationId: "job-accepted",
+      }) as unknown as Record<string, unknown>,
+    }));
+
+    const result = await arbiterFor(client).acceptJobResult({
+      deviceId: DEVICE_A,
+      jobId: "job-accepted",
+      status: "completed",
+      actor: "test",
+    });
+
+    expect(result).toMatchObject({ accepted: true, decision: "terminal" });
+    expect(client.roots[0]).toMatchObject({ state: "completed", owner_generation: 3 });
+    expect(client.operations[0]).toMatchObject({ state: "completed", owner_generation: 3 });
+    expect(client.events.map((event) => event.event_type)).toEqual(["job_result_accepted"]);
+  });
+
+  it("rejects duplicate, late, or wrong-device job results without mutating ledgers", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({
+      id: "root-late",
+      device_id: DEVICE_A,
+      external_id: "job-late",
+      state: "completed",
+      owner_generation: 2,
+    }));
+    client.operations.push(operation({
+      root_id: "root-late",
+      device_id: DEVICE_A,
+      operation_id: "job-late",
+      state: "completed",
+      owner_generation: 2,
+    }));
+
+    const before = JSON.stringify({ roots: client.roots, operations: client.operations, events: client.events });
+    const result = await arbiterFor(client).acceptJobResult({
+      deviceId: DEVICE_B,
+      jobId: "job-late",
+      status: "failed",
+      actor: "test",
+    });
+    const after = JSON.stringify({ roots: client.roots, operations: client.operations, events: client.events });
+
+    expect(result).toMatchObject({
+      accepted: false,
+      decision: "rejected",
+      reason: "job_result_not_current_dispatched_owner",
+    });
+    expect(after).toBe(before);
   });
 
   it("fails closed by reconciling in-flight roots at startup", async () => {

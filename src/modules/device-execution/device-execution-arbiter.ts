@@ -301,6 +301,15 @@ export interface DeviceExecutionStandaloneJobEgressResult extends DeviceExecutio
   permit?: DeviceExecutionJobDispatchPermit;
 }
 
+export interface DeviceExecutionAcceptedJobResult {
+  accepted: boolean;
+  decision: DeviceExecutionDecision;
+  root: DeviceExecutionRoot | null;
+  operation?: DeviceExecutionOperation;
+  handle?: DeviceExecutionHandle;
+  reason?: string;
+}
+
 type DbPool = Pick<Pool, "connect" | "query">;
 type DbClient = Pick<PoolClient, "query" | "release">;
 type Queryable = Pick<Pool, "query"> | Pick<PoolClient, "query">;
@@ -817,7 +826,7 @@ export class DeviceExecutionArbiter {
       const dispatchingOperation = await updateOperationState(client, {
         operationKind,
         operationId: input.jobId,
-        fromStates: ["registered", "dispatching", "rejected"],
+        fromStates: ["registered"],
         toState: "dispatching",
         ownerGeneration: toNumber(current.owner_generation),
         wireHandle: encodeDeviceExecutionHandle(rootToHandle(current, operationKind, input.jobId)),
@@ -825,7 +834,27 @@ export class DeviceExecutionArbiter {
           ...metadata,
           handle: encodeDeviceExecutionHandle(rootToHandle(current, operationKind, input.jobId)),
         },
-      }) ?? operation;
+      });
+      if (!dispatchingOperation) {
+        await insertEvent(client, {
+          rootId: current.id,
+          deviceId: current.device_id,
+          eventType: "operation_dispatching_cas_missed",
+          previousState: current.state,
+          newState: current.state,
+          actor,
+          reason: "operation_not_registered",
+          metadata,
+        });
+        return {
+          decision: "rejected" as const,
+          root: rowToRoot(current),
+          operation: rowToOperation(operation),
+          handle: operationRowToHandle(operation),
+          sent: false,
+          reason: "operation_not_registered",
+        };
+      }
       const handle = operationRowToHandle(dispatchingOperation);
       const permit: DeviceExecutionJobDispatchPermit = {
         kind: "device_execution_job_dispatch_permit",
@@ -1799,6 +1828,126 @@ export class DeviceExecutionArbiter {
     });
   }
 
+  async acceptJobResult(input: {
+    deviceId: string;
+    jobId: string;
+    handle?: DeviceExecutionHandle | null;
+    status: "completed" | "failed" | "cancelled" | string;
+    actor?: string;
+    reason?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<DeviceExecutionAcceptedJobResult> {
+    const terminalState = normalizeTerminalState(input.status);
+    return this.withTransaction(async (client) => {
+      await lockDevice(client, input.deviceId);
+      const operationKind = input.handle?.operationKind ?? "job";
+      const operationId = input.handle?.operationId ?? input.jobId;
+      const operation = await selectOperationByIdentity(client, operationKind, operationId, true);
+      if (!operation) {
+        return { accepted: false, decision: "missing", root: null, reason: "no_matching_operation" };
+      }
+
+      const root = await selectRoot(client, {
+        rootId: input.handle?.rootId ?? operation.root_id,
+        rootKind: input.handle?.rootKind ?? operation.root_kind,
+        forUpdate: true,
+      });
+      if (!root) {
+        return { accepted: false, decision: "missing", root: null, reason: "no_matching_root" };
+      }
+
+      const handle = operationRowToHandle(operation);
+      const expectedGeneration = input.handle?.ownerGeneration ?? toNumber(operation.owner_generation);
+      if (
+        operation.operation_id !== input.jobId ||
+        operation.operation_kind !== "job" ||
+        operation.root_id !== root.id ||
+        root.device_id !== input.deviceId ||
+        operation.device_id !== input.deviceId ||
+        toNumber(root.owner_generation) !== expectedGeneration ||
+        toNumber(operation.owner_generation) !== expectedGeneration ||
+        operation.state !== "dispatched" ||
+        root.state !== "dispatched"
+      ) {
+        return {
+          accepted: false,
+          decision: "rejected",
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          handle,
+          reason: "job_result_not_current_dispatched_owner",
+        };
+      }
+
+      if (
+        input.handle &&
+        (input.handle.rootId !== root.id ||
+          input.handle.deviceId !== input.deviceId ||
+          input.handle.rootKind !== root.root_kind ||
+          input.handle.operationKind !== operation.operation_kind ||
+          input.handle.operationId !== operation.operation_id)
+      ) {
+        return {
+          accepted: false,
+          decision: "rejected",
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          handle,
+          reason: "job_result_handle_mismatch",
+        };
+      }
+
+      const terminal = await updateRootTerminal(client, {
+        rootId: root.id,
+        deviceId: input.deviceId,
+        ownerGeneration: expectedGeneration,
+        toState: terminalState,
+        reason: input.reason ?? input.status,
+        metadata: input.metadata,
+      });
+      if (!terminal) {
+        return {
+          accepted: false,
+          decision: "rejected",
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          handle,
+          reason: "terminal_cas_missed",
+        };
+      }
+
+      const terminalOperation = await updateOperationState(client, {
+        operationKind: operation.operation_kind,
+        operationId: operation.operation_id,
+        fromStates: ["dispatched"],
+        toState: terminalState,
+        ownerGeneration: expectedGeneration,
+        metadata: input.metadata,
+      }) ?? operation;
+      await insertEvent(client, {
+        rootId: terminal.id,
+        deviceId: terminal.device_id,
+        eventType: "job_result_accepted",
+        previousState: root.state,
+        newState: terminal.state,
+        actor: input.actor ?? "transport",
+        reason: input.reason ?? input.status,
+        metadata: {
+          jobId: input.jobId,
+          handle: encodeDeviceExecutionHandle(operationRowToHandle(terminalOperation)),
+          ...(input.metadata ?? {}),
+        },
+      });
+      return {
+        accepted: true,
+        decision: "terminal",
+        root: rowToRoot(terminal),
+        operation: rowToOperation(terminalOperation),
+        handle: operationRowToHandle(terminalOperation),
+      };
+    });
+  }
+
   async markAmbiguous(input: {
     deviceId: string;
     rootKind?: DeviceExecutionRootKind;
@@ -2181,14 +2330,20 @@ async function upsertOperation(
        (root_id, device_id, root_kind, operation_kind, operation_id, owner_generation, state, egress_lane, wire_type, wire_handle, metadata)
      VALUES ($1, $2, $3, $4, $5, $6::bigint, $7, $8, $9, $10::jsonb, $11::jsonb)
      ON CONFLICT (operation_kind, operation_id) DO UPDATE
-       SET owner_generation = EXCLUDED.owner_generation,
+       SET owner_generation = CASE
+             WHEN device_execution_operations.state = 'registered' THEN EXCLUDED.owner_generation
+             ELSE device_execution_operations.owner_generation
+           END,
            state = CASE
-             WHEN device_execution_operations.state IN ('completed', 'failed', 'cancelled') THEN device_execution_operations.state
-             ELSE EXCLUDED.state
+             WHEN device_execution_operations.state = 'registered' THEN EXCLUDED.state
+             ELSE device_execution_operations.state
            END,
            egress_lane = EXCLUDED.egress_lane,
            wire_type = COALESCE(EXCLUDED.wire_type, device_execution_operations.wire_type),
-           wire_handle = EXCLUDED.wire_handle,
+           wire_handle = CASE
+             WHEN device_execution_operations.state = 'registered' THEN EXCLUDED.wire_handle
+             ELSE device_execution_operations.wire_handle
+           END,
            metadata = device_execution_operations.metadata || EXCLUDED.metadata,
            updated_at = NOW()
        WHERE device_execution_operations.root_id = EXCLUDED.root_id

@@ -865,6 +865,9 @@ export class DirectWsServer {
       });
       console.log(`[direct-ws] Device ${finalDeviceId.slice(0,8)} authenticated (status=${finalStatus}) from ${remoteIp}`);
       onAuth(conn);
+      void import("../transport/transport")
+        .then(({ dispatchQueuedJobsForDevice }) => dispatchQueuedJobsForDevice(finalDeviceId, "direct_ws.reconnect_queue_pump"))
+        .catch(err => console.error("[device-execution] reconnect queue pump error:", (err as Error).message));
 
     } catch (err) {
       console.error("[direct-ws] Auth DB error:", (err as Error).message);
@@ -886,38 +889,30 @@ export class DirectWsServer {
     const wireHandle = isRecord(msg.pnqHandle) ? msg.pnqHandle : null;
     const handle = pending?.permit?.handle ?? decodeDeviceExecutionHandle(wireHandle);
 
-    if (pending?.permit || handle) {
-      try {
-        const terminal = await deviceExecutionArbiter.observeTerminal({
-          deviceId: conn.deviceId,
-          rootKind: handle?.rootKind ?? "job",
-          externalId: jobId,
-          handle: handle ?? undefined,
-          status,
-          actor: "direct_ws",
-          reason: (msg.error as string | undefined) ?? status,
-          metadata: {
-            durationMs,
-            observeSource: "directWsServer.handleJobResult",
-            handle: pending?.permit?.wireHandle ?? wireHandle,
-          },
-        });
-        if (terminal.decision !== "terminal") {
-          console.warn(
-            `[direct-ws] JOB_RESULT rejected by PNQ CAS: jobId=${jobId.slice(0,8)} decision=${terminal.decision} reason=${terminal.reason ?? "none"}`
-          );
-          this._send(conn.ws, { type: "ACK", ref: jobId });
-          return;
-        }
-      } catch (err) {
-        console.error("[device-execution] enforced JOB terminal CAS failed:", (err as Error).message);
+    try {
+      const accepted = await deviceExecutionArbiter.acceptJobResult({
+        deviceId: conn.deviceId,
+        jobId,
+        handle,
+        status,
+        actor: "direct_ws",
+        reason: (msg.error as string | undefined) ?? status,
+        metadata: {
+          durationMs,
+          observeSource: "directWsServer.handleJobResult",
+          handle: pending?.permit?.wireHandle ?? wireHandle,
+        },
+      });
+      if (!accepted.accepted) {
+        console.warn(
+          `[direct-ws] JOB_RESULT rejected by PNQ ingress: jobId=${jobId.slice(0,8)} decision=${accepted.decision} reason=${accepted.reason ?? "none"}`
+        );
+        this._send(conn.ws, { type: "ACK", ref: jobId });
         return;
       }
-    } else {
-      observeRootTerminal("job", conn.deviceId, jobId, status, msg.error as string | undefined, {
-        durationMs,
-        observeSource: "directWsServer.handleJobResult",
-      });
+    } catch (err) {
+      console.error("[device-execution] enforced JOB result ingress failed:", (err as Error).message);
+      return;
     }
 
     if (pending) {
@@ -956,6 +951,9 @@ export class DirectWsServer {
 
     // ACK
     this._send(conn.ws, { type: "ACK", ref: jobId });
+    void import("../transport/transport")
+      .then(({ dispatchQueuedJobsForDevice }) => dispatchQueuedJobsForDevice(conn.deviceId, "direct_ws.job_result_queue_pump"))
+      .catch(err => console.error("[device-execution] direct-ws queue pump error:", (err as Error).message));
   }
 
   // ─── Batch result handler ────────────────────────────────────────────────
