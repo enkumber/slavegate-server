@@ -1,0 +1,158 @@
+[
+  {
+    "file": "src/api/hydra-routes.ts",
+    "kind": "sendJobToDevice",
+    "count": 22,
+    "classification": "device-job-ingress"
+  },
+  {
+    "file": "src/api/routes.ts",
+    "kind": "directWsServer.sendToDevice",
+    "count": 2,
+    "classification": "device-control-egress"
+  },
+  {
+    "file": "src/api/routes.ts",
+    "kind": "directWsServer.sendWorkflowCancel",
+    "count": 1,
+    "classification": "workflow-control-egress"
+  },
+  {
+    "file": "src/api/routes.ts",
+    "kind": "sendJobToDevice",
+    "count": 1,
+    "classification": "transport-adapter"
+  },
+  {
+    "file": "src/api/routes.ts",
+    "kind": "sendToDevice",
+    "count": 2,
+    "classification": "generic-sendto-device-match"
+  },
+  {
+    "file": "src/api/routes.ts",
+    "kind": "transport.sendJob",
+    "count": 1,
+    "classification": "raw-job-ingress"
+  },
+  {
+    "file": "src/modules/agents/orchestrator.ts",
+    "kind": "sendJobToDevice",
+    "count": 16,
+    "classification": "orchestrator-device-jobs"
+  },
+  {
+    "file": "src/modules/app-mapping/mapping-routes.ts",
+    "kind": "sendJobToDevice",
+    "count": 1,
+    "classification": "app-mapping-device-job"
+  },
+  {
+    "file": "src/modules/app-mapping/recorder.service.ts",
+    "kind": "sendJobToDevice",
+    "count": 1,
+    "classification": "app-mapping-device-job"
+  },
+  {
+    "file": "src/modules/screen-detection/screen-detection.service.ts",
+    "kind": "sendJobToDevice",
+    "count": 4,
+    "classification": "screen-detection-device-jobs"
+  },
+  {
+    "file": "src/modules/skills/skill.cascade.ts",
+    "kind": "adapter.sendJob",
+    "count": 9,
+    "classification": "skill-cascade-adapter-jobs"
+  },
+  {
+    "file": "src/modules/skills/skill.cascade.ts",
+    "kind": "sendJobToDevice",
+    "count": 1,
+    "classification": "skill-cascade-transport-adapter"
+  },
+  {
+    "file": "src/modules/workflow-compiler/recovery.service.ts",
+    "kind": "sendJobToDevice",
+    "count": 4,
+    "classification": "workflow-recovery-device-jobs"
+  },
+  {
+    "file": "src/modules/workflow-compiler/runner.service.ts",
+    "kind": "directWsServer.sendBatch",
+    "count": 1,
+    "classification": "compiled-workflow-batch-egress"
+  },
+  {
+    "file": "src/modules/workflow-compiler/runner.service.ts",
+    "kind": "sendJobToDevice",
+    "count": 10,
+    "classification": "compiled-workflow-device-jobs"
+  },
+  {
+    "file": "src/modules/workflow-events/workflow-event.service.ts",
+    "kind": "ws.send",
+    "count": 2,
+    "classification": "dashboard-event-websocket-egress"
+  },
+  {
+    "file": "src/modules/workflows/generated-workflow-execution.service.ts",
+    "kind": "directWsServer.sendWorkflowStart",
+    "count": 1,
+    "classification": "generated-edge-workflow-egress"
+  },
+  {
+    "file": "src/modules/workflows/workflow-dispatch.service.ts",
+    "kind": "sendJobToDevice",
+    "count": 3,
+    "classification": "workflow-dispatch-device-jobs"
+  },
+  {
+    "file": "src/modules/workflows/workflow.executor.ts",
+    "kind": "directWsServer.sendBatch",
+    "count": 1,
+    "classification": "workflow-executor-batch-egress"
+  },
+  {
+    "file": "src/modules/workflows/workflow.executor.ts",
+    "kind": "sendJobToDevice",
+    "count": 3,
+    "classification": "workflow-executor-device-jobs"
+  },
+  {
+    "file": "src/transport/transport.ts",
+    "kind": "sendJobToDevice",
+    "count": 1,
+    "classification": "transport-facade"
+  },
+  {
+    "file": "src/ws/direct-ws.server.ts",
+    "kind": "sendToDevice",
+    "count": 1,
+    "classification": "direct-ws-generic-device-send"
+  },
+  {
+    "file": "src/ws/direct-ws.server.ts",
+    "kind": "ws.send",
+    "count": 1,
+    "classification": "direct-ws-serializer"
+  },
+  {
+    "file": "src/ws/gateway.ts",
+    "kind": "ws.send",
+    "count": 1,
+    "classification": "legacy-gateway-serializer"
+  },
+  {
+    "file": "src/ws/ws.server.ts",
+    "kind": "sendToDevice",
+    "count": 6,
+    "classification": "legacy-ws-device-send"
+  },
+  {
+    "file": "src/ws/ws.server.ts",
+    "kind": "ws.send",
+    "count": 2,
+    "classification": "legacy-ws-serializer"
+  }
+]
