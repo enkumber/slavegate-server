@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   decodeDeviceExecutionHandle,
   DeviceExecutionArbiter,
+  DEVICE_EXECUTION_BOUNDARY_MATRIX,
   DeviceExecutionSchemaError,
   type DeviceExecutionJobDispatchPermit,
   type DeviceExecutionState,
@@ -183,6 +184,144 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     expect(operation!.wire_handle).toEqual(result.permit!.wireHandle);
     expect(decodeDeviceExecutionHandle(operation!.wire_handle)).toEqual(result.handle);
     expect(await eventTypes(pool)).toEqual(["implicit_admission", "root_dispatching", "root_dispatched"]);
+  });
+
+  it("uses canonical DB/wire handles for BATCH and WORKFLOW roots", async () => {
+    await insertDevice(pool, DEVICE_A, "pnq-boundary-a");
+    const observed: Array<{ kind: "waiter" | "wire"; operationId: string; handle: unknown }> = [];
+
+    for (const boundary of ["edge_batch", "server_workflow_root"] as const) {
+      const policy = DEVICE_EXECUTION_BOUNDARY_MATRIX[boundary];
+      const operationId = `${boundary}-operation`;
+      const result = await arbiter.runObservedEgress({
+        deviceId: DEVICE_A,
+        boundary,
+        operationId,
+        wireType: boundary === "edge_batch" ? "BATCH_START" : "WORKFLOW_START",
+        actor: `${boundary}-test`,
+        metadata: { boundaryEvidence: true },
+        registerWaiter: (handle) => {
+          observed.push({ kind: "waiter", operationId, handle });
+        },
+        wireDispatch: (handle) => {
+          observed.push({ kind: "wire", operationId, handle });
+          return true;
+        },
+      });
+
+      expect(result).toMatchObject({ decision: "dispatched", sent: true });
+      expect(result.handle).toEqual({
+        rootId: result.root!.id,
+        deviceId: DEVICE_A,
+        rootKind: policy.rootKind,
+        ownerGeneration: result.root!.ownerGeneration,
+        operationKind: policy.operationKind,
+        operationId,
+      });
+      expect(decodeDeviceExecutionHandle(result.operation!.wireHandle)).toEqual(result.handle);
+      expect(result.operation).toMatchObject({
+        rootId: result.root!.id,
+        deviceId: DEVICE_A,
+        rootKind: policy.rootKind,
+        operationKind: policy.operationKind,
+        operationId,
+        ownerGeneration: result.root!.ownerGeneration,
+        state: "dispatched",
+        egressLane: "device_execution",
+      });
+
+      await expect(arbiter.observeTerminal({
+        deviceId: DEVICE_A,
+        handle: result.handle!,
+        status: "completed",
+        actor: `${boundary}-terminal`,
+      })).resolves.toMatchObject({ decision: "terminal" });
+    }
+
+    expect(observed.map((entry) => `${entry.operationId}:${entry.kind}`)).toEqual([
+      "edge_batch-operation:waiter",
+      "edge_batch-operation:wire",
+      "server_workflow_root-operation:waiter",
+      "server_workflow_root-operation:wire",
+    ]);
+    expect(observed[0]!.handle).toEqual(observed[1]!.handle);
+    expect(observed[2]!.handle).toEqual(observed[3]!.handle);
+  });
+
+  it("keeps mixed JOB/BATCH/WORKFLOW roots FIFO and non-overlapping on one device", async () => {
+    await insertDevice(pool, DEVICE_A, "pnq-mixed-fifo-a");
+    const roots = [
+      { rootKind: "server_workflow" as const, externalId: "workflow-root" },
+      { rootKind: "batch" as const, externalId: "batch-root" },
+      { rootKind: "job" as const, externalId: "job-root" },
+    ];
+
+    for (const root of roots) {
+      await expect(arbiter.observeAdmission({ deviceId: DEVICE_A, ...root })).resolves.toMatchObject({ decision: "admitted" });
+    }
+
+    expect(await rootExternalIdsByFifo(pool, DEVICE_A)).toEqual(roots.map((root) => root.externalId));
+
+    for (const root of roots) {
+      const permit = await arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: `${root.externalId}-worker` });
+      expect(permit).not.toBeNull();
+      expect(await externalIdForRoot(pool, permit!.rootId)).toBe(root.externalId);
+      expect(await activeRootCount(pool, DEVICE_A)).toBe(1);
+      await expect(arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: `${root.externalId}-overlap-worker` })).resolves.toBeNull();
+      await expect(arbiter.observeTerminal({
+        deviceId: DEVICE_A,
+        rootId: permit!.rootId,
+        rootKind: root.rootKind,
+        status: "completed",
+        actor: `${root.externalId}-terminal`,
+      })).resolves.toMatchObject({ decision: "terminal" });
+      expect(await activeRootCount(pool, DEVICE_A)).toBe(0);
+    }
+  });
+
+  it("serializes multi-worker races across BATCH and WORKFLOW roots", async () => {
+    await insertDevice(pool, DEVICE_A, "pnq-mixed-race-a");
+    await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "batch", externalId: "race-batch" });
+    await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "server_workflow", externalId: "race-workflow" });
+
+    const workers = Array.from({ length: 8 }, (_, index) => new DeviceExecutionArbiter(() => pool)
+      .claimNextRoot({ deviceId: DEVICE_A, actor: `mixed-race-worker-${index}` }));
+    const results = await Promise.all(workers);
+
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await externalIdForRoot(pool, results.find(Boolean)!.rootId)).toBe("race-batch");
+    expect(await stateForExternalId(pool, "race-batch")).toBe("claimed");
+    expect(await stateForExternalId(pool, "race-workflow")).toBe("queued");
+    expect(await activeRootCount(pool, DEVICE_A)).toBe(1);
+  });
+
+  it("fails closed after waiter registration when observed WORKFLOW wire send times out", async () => {
+    await insertDevice(pool, DEVICE_A, "pnq-observed-timeout-a");
+    const order: string[] = [];
+
+    const result = await arbiter.runObservedEgress({
+      deviceId: DEVICE_A,
+      boundary: "server_workflow_root",
+      operationId: "timeout-workflow-root",
+      wireType: "WORKFLOW_START",
+      actor: "workflow-timeout-test",
+      registerWaiter: () => {
+        order.push("waiter");
+      },
+      wireDispatch: () => {
+        order.push("wire");
+        throw new Error("workflow_send_timeout");
+      },
+    });
+
+    expect(order).toEqual(["waiter", "wire"]);
+    expect(result).toMatchObject({ decision: "offline", sent: false, reason: "workflow_send_timeout" });
+    expect(result.root).toMatchObject({ state: "dispatching" });
+    expect(result.operation).toMatchObject({ state: "rejected" });
+    await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "job", externalId: "timeout-successor" });
+    await expect(arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: "after-timeout-worker" })).resolves.toBeNull();
+    expect(await stateForExternalId(pool, "timeout-successor")).toBe("queued");
+    expect(await activeRootCount(pool, DEVICE_A)).toBe(1);
   });
 
   it("keeps a queued successor blocked across a crash/restart ambiguity", async () => {

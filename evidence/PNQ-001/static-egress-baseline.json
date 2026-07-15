@@ -36,22 +36,10 @@
     "classification": "skill-cascade-transport-adapter"
   },
   {
-    "file": "src/modules/workflow-compiler/recovery.service.ts",
-    "kind": "sendJobToDevice",
-    "count": 4,
-    "classification": "workflow-recovery-device-jobs"
-  },
-  {
     "file": "src/modules/workflow-compiler/runner.service.ts",
     "kind": "directWsServer.sendBatch",
     "count": 1,
     "classification": "compiled-workflow-batch-egress"
-  },
-  {
-    "file": "src/modules/workflow-compiler/runner.service.ts",
-    "kind": "sendJobToDevice",
-    "count": 10,
-    "classification": "compiled-workflow-device-jobs"
   },
   {
     "file": "src/modules/workflow-events/workflow-event.service.ts",
@@ -68,7 +56,7 @@
   {
     "file": "src/modules/workflows/workflow-dispatch.service.ts",
     "kind": "sendJobToDevice",
-    "count": 3,
+    "count": 1,
     "classification": "workflow-dispatch-device-jobs"
   },
   {
@@ -76,12 +64,6 @@
     "kind": "directWsServer.sendBatch",
     "count": 1,
     "classification": "workflow-executor-batch-egress"
-  },
-  {
-    "file": "src/modules/workflows/workflow.executor.ts",
-    "kind": "sendJobToDevice",
-    "count": 3,
-    "classification": "workflow-executor-device-jobs"
   },
   {
     "file": "src/transport/transport.ts",

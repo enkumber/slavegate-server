@@ -2,6 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
+import {
+  DEVICE_EXECUTION_BOUNDARY_MATRIX,
+  DEVICE_EXECUTION_MULTI_WORKER_POLICY,
+} from "../../src/modules/device-execution/device-execution-arbiter";
 
 type BaselineEntry = {
   file: string;
@@ -54,12 +58,9 @@ const reviewedRawImportBoundaries = new Set([
   "src/index.ts\tdirectWsServer\tdirect-ws",
   "src/modules/agents/orchestrator.ts\tsendJobToDevice\ttransport",
   "src/modules/skills/skill.cascade.ts\tsendJobToDevice\ttransport",
-  "src/modules/workflow-compiler/recovery.service.ts\tsendJobToDevice\ttransport",
-  "src/modules/workflow-compiler/runner.service.ts\tsendJobToDevice\ttransport",
   "src/modules/workflow-compiler/runner.service.ts\tdirectWsServer\tdirect-ws",
   "src/modules/workflows/generated-workflow-execution.service.ts\tdirectWsServer\tdirect-ws",
   "src/modules/workflows/workflow-dispatch.service.ts\tsendJobToDevice\ttransport",
-  "src/modules/workflows/workflow.executor.ts\tsendJobToDevice\ttransport",
   "src/modules/workflows/workflow.executor.ts\tdirectWsServer\tdirect-ws",
   "src/transport/transport.ts\tdirectWsServer\tdirect-ws",
 ]);
@@ -483,6 +484,51 @@ describe("PNQ-001 production egress inventory guard", () => {
     expect(handler).not.toBeNull();
     expect(handler).toContain("res.status(202).json");
     expect(handler).toContain('status: "queued"');
+  });
+
+  it("pins semantic queue boundaries for batch, workflow, and recovery children", () => {
+    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.edge_batch).toMatchObject({
+      rootKind: "batch",
+      operationKind: "batch",
+      retainsRootUntilTerminal: true,
+      requiresExistingRootHandle: false,
+      egressLane: "device_execution",
+      mayBypassDeviceQueue: false,
+    });
+    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.edge_workflow).toMatchObject({
+      rootKind: "edge_workflow",
+      operationKind: "workflow",
+      retainsRootUntilTerminal: true,
+      requiresExistingRootHandle: false,
+      egressLane: "device_execution",
+      mayBypassDeviceQueue: false,
+    });
+    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.server_workflow_root).toMatchObject({
+      rootKind: "server_workflow",
+      operationKind: "workflow",
+      retainsRootUntilTerminal: true,
+      requiresExistingRootHandle: false,
+      egressLane: "device_execution",
+      mayBypassDeviceQueue: false,
+    });
+
+    for (const childBoundary of ["generated_child", "self_healing_child", "prestep_child", "recovery_child"] as const) {
+      expect(DEVICE_EXECUTION_BOUNDARY_MATRIX[childBoundary]).toMatchObject({
+        rootKind: "server_workflow",
+        operationKind: "job",
+        retainsRootUntilTerminal: false,
+        requiresExistingRootHandle: true,
+        egressLane: "device_execution",
+        mayBypassDeviceQueue: false,
+      });
+    }
+
+    expect(DEVICE_EXECUTION_MULTI_WORKER_POLICY).toEqual({
+      authority: "postgres",
+      ownershipToken: "root_id_device_id_owner_generation",
+      terminalCas: "device_root_generation",
+      websocketOwnership: "single_active_connection_observed",
+    });
   });
 
   it("ignores comments and string literals that merely mention sender names", () => {
