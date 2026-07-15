@@ -32,6 +32,7 @@ import { runMigrations } from "./db/migrate";
 import { startTaskRunner } from "./modules/task-runner";
 import { dashboardWorkflowWsServer } from "./modules/workflow-events/dashboard-ws.server";
 import { deviceExecutionArbiter } from "./modules/device-execution";
+import { sweepQueuedJobsForOnlineDevices } from "./transport/transport";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
@@ -209,6 +210,14 @@ async function bootstrap(): Promise<void> {
   });
   console.log("[server] DirectWs transport attached on /ws-direct");
   console.log("[server] Dashboard workflow stream attached on /ws-dashboard");
+  sweepQueuedJobsForOnlineDevices("startup.queue_pump").catch(err =>
+    console.error("[device-execution] startup queue pump error:", (err as Error).message)
+  );
+  setInterval(() => {
+    sweepQueuedJobsForOnlineDevices("periodic.queue_sweep").catch(err =>
+      console.error("[device-execution] periodic queue sweep error:", (err as Error).message)
+    );
+  }, 30_000);
 
   // ─── Startup check: warn if no openclaw_agent API token ────────────────────
   {
