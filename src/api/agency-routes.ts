@@ -4,6 +4,7 @@
  */
 
 import { Router, Request, Response } from "express";
+import crypto from "crypto";
 import { requireAdminAuth } from "./auth.middleware";
 import { getDb } from "../db/client";
 import multer from "multer";
@@ -18,24 +19,30 @@ import { listCompilerPolicyGatesWithConfig } from "../modules/compiler-policy-ga
 import {
   buildWorkflowDefinitionResolution,
   rowToWorkflowDefinition,
+  workflowDefinitionScopeFor,
+  workflowDefinitionToExecutableTemplate,
   workflowDefinitionRegistryPolicy,
 } from "../modules/workflow-definition-registry/workflow-definition-registry";
 import {
   buildWorkflowValidationPipeline,
   workflowValidationPipelinePolicy,
 } from "../modules/workflow-validation-pipeline/workflow-validation-pipeline";
+import { workflowService } from "../modules/workflows/workflow.service";
+import { compileGeneratedWorkflowTemplate } from "../modules/workflows/workflow-validator";
+import { taskRunnerService } from "../modules/task-runner";
 
 const router = Router();
 
 const SPRINT_2_READ_ONLY_INTENTS = new Set(["reddit_account_health_scan"]);
 
 const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function publishAgencyWorkflowQueued(input: {
   agencyWorkflowRunId: string;
   taskId: string;
-  clientId: string;
-  accountId: string;
+  clientId?: string | null;
+  accountId?: string | null;
   deviceId: string;
   intent: string;
   platform?: string;
@@ -45,8 +52,8 @@ function publishAgencyWorkflowQueued(input: {
     event: "queued",
     taskId: input.taskId,
     agencyWorkflowRunId: input.agencyWorkflowRunId,
-    clientId: input.clientId,
-    accountId: input.accountId,
+    clientId: input.clientId ?? undefined,
+    accountId: input.accountId ?? undefined,
     deviceId: input.deviceId,
     mode: "edge",
     status: "queued",
@@ -56,6 +63,25 @@ function publishAgencyWorkflowQueued(input: {
       platform: input.platform,
     },
   });
+}
+
+function computeWorkflowDefinitionAutoUseRequestKey(input: {
+  definitionId: string;
+  definitionVersion: number;
+  deviceId: string;
+  accountId?: string | null;
+}): string {
+  return crypto
+    .createHash("sha256")
+    .update([
+      "workflow-definition-auto-use",
+      input.definitionId,
+      String(input.definitionVersion),
+      input.deviceId,
+      input.accountId ?? "device",
+    ].join(":"))
+    .digest("hex")
+    .slice(0, 24);
 }
 
 // ─── Pagination helper ────────────────────────────────────────────────────────
@@ -900,14 +926,16 @@ function workflowDefinitionHardeningPreview(definition: ReturnType<typeof rowToW
   const agePenalty = ageDays === null ? 0.05 : Math.min(0.25, ageDays * 0.01);
   const decayedConfidence = Math.max(0, Math.round((confidence - failurePenalty - agePenalty) * 100) / 100);
   const scopeDetails = workflowDefinitionScopeDetails(scope ?? definition.promotion.scope);
-  const scopeMatched = !!scope && scope === definition.promotion.scope;
+  const scopeMatched = scope ? scope === definition.promotion.scope : !!definition.promotion.scope;
+  const executionEnabled = definition.policy.executionChanging === true && definition.policy.autoUseEnabled === true;
   const blockers = [
     ...(definition.promotion.state !== "limited_reuse" ? ["workflow_definition_not_limited_reuse"] : []),
     ...(definition.status !== "active" ? ["workflow_definition_not_active"] : []),
     ...(!scopeMatched ? ["limited_reuse_scope_mismatch"] : []),
     ...(decayedConfidence < 0.6 ? ["confidence_below_controlled_threshold"] : []),
-    "execution_changing_disabled",
+    ...(!executionEnabled ? ["execution_changing_disabled"] : []),
   ];
+  const canAutoUse = blockers.length === 0;
   return {
     mode: "workflow_definition_promotion_hardening",
     definitionId: definition.id,
@@ -930,10 +958,10 @@ function workflowDefinitionHardeningPreview(definition: ReturnType<typeof rowToW
     scope: scopeDetails,
     scopeMatched,
     autoDemoteRecommendation: blockers.includes("confidence_below_controlled_threshold") ? "quarantine_or_revalidate" : "keep_limited_reuse",
-    safeToAutoApply: false,
-    wouldUseDefinition: blockers.length === 1 && blockers[0] === "execution_changing_disabled",
-    wouldExecuteWorkflow: false,
-    wouldChangeWorkflowCache: false,
+    safeToAutoApply: canAutoUse,
+    wouldUseDefinition: canAutoUse,
+    wouldExecuteWorkflow: canAutoUse,
+    wouldChangeWorkflowCache: canAutoUse,
     blockers,
   };
 }
@@ -2630,6 +2658,223 @@ router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Reques
   });
 
   res.json({ ok: true, data: resolution });
+});
+
+router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (req: Request, res: Response) => {
+  const db = getDb();
+  const body = normalizeJsonObject(req.body);
+  const deviceId = typeof body.deviceId === "string" && body.deviceId.trim().length > 0 ? body.deviceId.trim() : "";
+  const accountId = typeof body.accountId === "string" && body.accountId.trim().length > 0 ? body.accountId.trim() : null;
+  const clientId = typeof body.clientId === "string" && body.clientId.trim().length > 0 ? body.clientId.trim() : null;
+  const requestedScope = typeof body.scope === "string" && body.scope.trim().length > 0 ? body.scope.trim() : undefined;
+  const scheduledTime = typeof body.scheduledTime === "string" && body.scheduledTime.trim().length > 0
+    ? body.scheduledTime.trim()
+    : new Date().toISOString();
+
+  if (!UUID_RE.test(deviceId)) {
+    return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "deviceId must be a UUID" });
+  }
+  if (accountId !== null && !UUID_RE.test(accountId)) {
+    return res.status(400).json({ ok: false, code: "ACCOUNT_ID_INVALID", error: "accountId must be a UUID when provided" });
+  }
+  if (clientId !== null && !UUID_RE.test(clientId)) {
+    return res.status(400).json({ ok: false, code: "CLIENT_ID_INVALID", error: "clientId must be a UUID when provided" });
+  }
+
+  const [definitionRows, gates] = await Promise.all([
+    db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id]),
+    getCompilerPolicyGates(db),
+  ]);
+  const row = definitionRows.rows[0];
+  if (!row) {
+    return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
+  }
+
+  const definition = rowToWorkflowDefinition(row);
+  const scope = requestedScope ?? definition.promotion.scope ?? workflowDefinitionScopeFor(definition);
+  const resolution = buildWorkflowDefinitionResolution({
+    key: definition.key,
+    intent: definition.intent,
+    platform: definition.platform,
+    requestedScope: scope,
+    definitions: [definition],
+    policyGates: gates,
+  }) as Record<string, any>;
+
+  if (resolution.wouldExecuteWorkflow !== true || resolution.safeToAutoApply !== true) {
+    return res.status(409).json({
+      ok: false,
+      code: "WORKFLOW_DEFINITION_AUTO_USE_BLOCKED",
+      error: "workflow definition auto-use is blocked by policy, scope, readiness, or confidence",
+      data: { resolution },
+    });
+  }
+
+  const template = workflowDefinitionToExecutableTemplate(definition);
+  if (!template) {
+    return res.status(409).json({
+      ok: false,
+      code: "WORKFLOW_DEFINITION_EXECUTABLE_TEMPLATE_UNAVAILABLE",
+      error: "this workflow definition does not yet have a deterministic executable template",
+      data: {
+        definition: { id: definition.id, key: definition.key, version: definition.version },
+        resolution,
+      },
+    });
+  }
+
+  const compiledPlan = compileGeneratedWorkflowTemplate(template);
+  const requestKey = computeWorkflowDefinitionAutoUseRequestKey({
+    definitionId: definition.id,
+    definitionVersion: definition.version,
+    deviceId,
+    accountId,
+  });
+  await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+    artifactState: "promoted",
+    sourceMetadata: {
+      source: "workflow_definition_auto_use",
+      definitionId: definition.id,
+      definitionKey: definition.key,
+      definitionVersion: definition.version,
+      promotionScope: scope,
+      autoUseEnabled: true,
+      safeToAutoApply: true,
+    },
+  });
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const cacheRows = await client.query<Record<string, unknown>>(
+      `SELECT * FROM generated_workflow_plan_cache
+       WHERE cache_key = $1
+         AND artifact_state = 'promoted'`,
+      [compiledPlan.cacheKey]
+    );
+    const cached = cacheRows.rows[0];
+    if (!cached) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({
+        ok: false,
+        code: "WORKFLOW_DEFINITION_AUTO_USE_CACHE_MISS",
+        error: "promoted generated workflow artifact was not found after auto-use compile",
+      });
+    }
+
+    const runContext = {
+      source: "workflow_definition_auto_use",
+      clientId,
+      accountId,
+      deviceId,
+      intent: definition.intent,
+      definitionId: definition.id,
+      definitionKey: definition.key,
+      definitionVersion: definition.version,
+      promotionScope: scope,
+      resolution,
+      autoUseEnabled: true,
+      safeToAutoApply: true,
+    };
+    const runResult = await client.query<{ id: string }>(
+      `INSERT INTO agency_workflow_runs
+         (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
+          canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, status, context)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10, 'queued', $11)
+       RETURNING id`,
+      [
+        clientId,
+        accountId,
+        deviceId,
+        definition.platform,
+        definition.intent,
+        template.safetyClass ?? "standard",
+        cached.cache_key,
+        cached.canonical_workflow_id,
+        cached.canonical_workflow_version,
+        cached.compiled_plan_hash,
+        JSON.stringify(runContext),
+      ]
+    );
+    const runId = runResult.rows[0].id;
+    const taskParams = {
+      cacheKey: cached.cache_key,
+      clientId,
+      agencyWorkflowRunId: runId,
+      workflowRunId: runId,
+      intent: definition.intent,
+      source: "workflow_definition_auto_use",
+      definitionId: definition.id,
+      definitionKey: definition.key,
+      definitionVersion: definition.version,
+      promotionScope: scope,
+    };
+    const taskResult = await client.query<{ id: string }>(
+      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
+       VALUES ($1, $2, 'generated_workflow', $3, $4, 'queued')
+       RETURNING id`,
+      [accountId, deviceId, JSON.stringify(taskParams), scheduledTime]
+    );
+    const taskId = taskResult.rows[0].id;
+    await client.query(`UPDATE agency_workflow_runs SET task_id = $1, updated_at = NOW() WHERE id = $2`, [taskId, runId]);
+    await client.query(
+      `INSERT INTO agency_workflow_definition_version_events (
+         definition_id, definition_key, definition_version, action, previous_status, next_status,
+         note, actor, diff, impact_preview, policy
+       )
+       VALUES ($1, $2, $3, 'auto_use_execution_queued', $4, $4, $5, 'api', '{}'::jsonb, $6, $7)`,
+      [
+        definition.id,
+        definition.key,
+        definition.version,
+        definition.status,
+        `Queued auto-use run ${runId}`,
+        JSON.stringify({ runId, taskId, cacheKey: cached.cache_key, requestKey, scope, resolution }),
+        JSON.stringify({
+          autoUseEnabled: true,
+          executionChanging: true,
+          workflowCacheChanging: true,
+          safeToAutoApply: true,
+          mode: "controlled_auto_use_execution_v1",
+        }),
+      ]
+    );
+    const hydrated = await hydrateAgencyWorkflowRun(client as unknown as ReturnType<typeof getDb>, runId);
+    await client.query("COMMIT");
+    publishAgencyWorkflowQueued({
+      agencyWorkflowRunId: runId,
+      taskId,
+      clientId,
+      accountId,
+      deviceId,
+      intent: definition.intent,
+      platform: definition.platform,
+    });
+    taskRunnerService.pollNow().catch((err) => console.error("[workflow-definition-auto-use] immediate task runner poll failed:", err));
+    return res.status(201).json({
+      ok: true,
+      data: {
+        run: rowToAgencyWorkflowRun(hydrated!),
+        definition: { id: definition.id, key: definition.key, version: definition.version },
+        taskId,
+        cacheKey: cached.cache_key,
+        requestKey,
+        resolution,
+        policy: {
+          autoUseEnabled: true,
+          executionChanging: true,
+          workflowCacheChanging: true,
+          safeToAutoApply: true,
+          mode: "controlled_auto_use_execution_v1",
+        },
+      },
+    });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 });
 
 router.get("/workflow-definitions/:id/versions", requireAdminAuth, async (req: Request, res: Response) => {

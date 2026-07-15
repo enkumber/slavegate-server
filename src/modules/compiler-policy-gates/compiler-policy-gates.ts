@@ -14,7 +14,7 @@ export interface CompilerPolicyGate {
   remediation: {
     state: "manual_review_required";
     nextActions: string[];
-    safeToAutoApply: false;
+    safeToAutoApply: boolean;
   };
   guardrails: string[];
   notes: string[];
@@ -228,7 +228,8 @@ export function applyCompilerPolicyGateConfig(
       updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at ?? null,
       remediation: {
         ...gate.remediation,
-        safeToAutoApply: false,
+        state: configuredState === "enabled" ? "manual_review_required" : gate.remediation.state,
+        safeToAutoApply: configuredState === "enabled" && configObject(row.config).killSwitch !== true,
       },
     };
   });

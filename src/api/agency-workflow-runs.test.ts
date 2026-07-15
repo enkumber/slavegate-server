@@ -17,6 +17,10 @@ vi.mock("../db/client", () => ({
   getDb: vi.fn(() => mocks.db),
 }));
 
+vi.mock("../modules/task-runner", () => ({
+  taskRunnerService: { pollNow: vi.fn(() => Promise.resolve()) },
+}));
+
 function app() {
   const app = express();
   app.use(express.json());
@@ -1185,7 +1189,7 @@ describe("agency workflow runs API", () => {
         id: "compiler_auto_use",
         state: "enabled",
         version: 3,
-        remediation: expect.objectContaining({ safeToAutoApply: false }),
+        remediation: expect.objectContaining({ safeToAutoApply: true }),
       }),
     });
     expect(String(mocks.client.query.mock.calls[1][0])).toContain("agency_compiler_policy_gate_config");
@@ -2103,6 +2107,16 @@ describe("agency workflow runs API", () => {
             updated_by: "dashboard",
             updated_at: new Date("2026-05-22T11:35:00.000Z"),
           },
+          {
+            gate_id: "execution_path_change",
+            state: "enabled",
+            version: 2,
+            owner: "security",
+            risk: "high",
+            config: { explicitApproval: true },
+            updated_by: "dashboard",
+            updated_at: new Date("2026-05-22T11:35:00.000Z"),
+          },
         ],
       });
 
@@ -2112,20 +2126,116 @@ describe("agency workflow runs API", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.data).toMatchObject({
-      outcome: "would_use_definition_dry_run_only",
+      outcome: "auto_use_execution_allowed",
       requestedScope: "device:pixel-1",
       wouldUseDefinition: true,
       wouldChangePlan: true,
-      wouldChangeWorkflowCache: false,
-      wouldExecuteWorkflow: false,
+      wouldChangeWorkflowCache: true,
+      wouldExecuteWorkflow: true,
+      safeToAutoApply: true,
       selectedDefinitionId: definition.id,
-      blockers: ["execution_changing_disabled"],
+      blockers: [],
       controlledDecision: expect.objectContaining({
         wouldUseDefinition: true,
-        wouldExecuteWorkflow: false,
-        safeToAutoApply: false,
+        wouldExecuteWorkflow: true,
+        safeToAutoApply: true,
       }),
     });
+  });
+
+  it("queues a simple Workflow Definition auto-use execution through generated_workflow", async () => {
+    const definition = workflowDefinitionRow({
+      definition_key: "device_unlock",
+      title: "Unlock device",
+      platform: "android",
+      intent: "device_unlock",
+      goal: "Wake and unlock a device",
+      promotion_state: "limited_reuse",
+      promotion_scope: "auto_use:test:android:device_unlock:v1",
+      promotion_confidence: 0.85,
+      promotion_readiness: { state: "auto_use_bootstrap_ready" },
+      policy: {
+        compilerVisible: true,
+        autoUseEnabled: true,
+        executionChanging: true,
+        workflowCacheChanging: true,
+      },
+    });
+    const run = hydratedRun({
+      account_id: null,
+      client_id: null,
+      platform: "android",
+      intent: "device_unlock",
+      safety_class: "standard",
+      cache_key: "0123456789abcdef01234567",
+      request_key: null,
+      context: { source: "workflow_definition_auto_use" },
+    });
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [definition] })
+      .mockResolvedValueOnce({
+        rows: [
+          { gate_id: "compiler_knowledge_application", state: "enabled", version: 2, owner: "product", risk: "medium", config: { explicitApproval: true } },
+          { gate_id: "limited_reuse_scope_match", state: "enabled", version: 2, owner: "qa", risk: "high", config: { explicitApproval: true } },
+          { gate_id: "compiler_auto_use", state: "enabled", version: 2, owner: "product", risk: "high", config: { explicitApproval: true } },
+          { gate_id: "execution_path_change", state: "enabled", version: 2, owner: "security", risk: "high", config: { explicitApproval: true } },
+        ],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [cachedArtifact({
+        platform: "android",
+        cache_key: "0123456789abcdef01234567",
+        canonical_workflow_id: "workflow_definition_device_unlock_v1",
+        canonical_workflow_version: "1.0.0",
+        workflow: {
+          id: "workflow_definition_device_unlock_v1",
+          version: "1.0.0",
+          platform: "android",
+          safetyClass: "standard",
+          intent: "device_unlock",
+          steps: [],
+        },
+        source_metadata: { source: "workflow_definition_auto_use", safetyClass: "standard", intent: "device_unlock" },
+        compiled_plan: { metadata: { safetyClass: "standard", intent: "device_unlock" }, llmBudget: { happyPathRequests: 0 } },
+      })] })
+      .mockResolvedValueOnce({ rows: [{ id: run.id }] })
+      .mockResolvedValueOnce({ rows: [{ id: run.task_id }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [run] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await postAgency(
+      `/api/agency/workflow-definitions/${definition.id}/auto-use-run`,
+      { deviceId: "11111111-1111-4111-8111-111111111111" }
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      taskId: run.task_id,
+      cacheKey: "0123456789abcdef01234567",
+      definition: {
+        id: definition.id,
+        key: "device_unlock",
+        version: 1,
+      },
+      resolution: expect.objectContaining({
+        outcome: "auto_use_execution_allowed",
+        wouldUseDefinition: true,
+        wouldExecuteWorkflow: true,
+        safeToAutoApply: true,
+      }),
+      policy: expect.objectContaining({
+        autoUseEnabled: true,
+        executionChanging: true,
+        workflowCacheChanging: true,
+      }),
+    });
+    expect(String(mocks.client.query.mock.calls[3][0])).toContain("INSERT INTO tasks");
+    expect(String(mocks.client.query.mock.calls[5][0])).toContain("agency_workflow_definition_version_events");
   });
 
   it("previews Workflow Validation Pipeline without promotion, cache, or execution changes", async () => {

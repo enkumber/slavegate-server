@@ -239,6 +239,7 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
 ] as const;
 
 const GENERATED_WORKFLOW_INTENTS = [
+  "device_unlock",
   "reddit_account_health_scan",
 ] as const;
 
@@ -476,6 +477,22 @@ function validateRedditAccountHealthIntent(candidate: Partial<WorkflowTemplate>,
       errors.push(`workflow.outputSchema.properties.${key}.type must be boolean or string`);
     }
   }
+}
+
+function validateDeviceUnlockIntent(candidate: Partial<WorkflowTemplate>, errors: string[]): void {
+  if (candidate.intent !== "device_unlock") return;
+  if (candidate.platform !== "android") {
+    errors.push("workflow.intent=device_unlock requires workflow.platform=android");
+  }
+  if (candidate.safetyClass !== "standard") {
+    errors.push("workflow.intent=device_unlock requires workflow.safetyClass=standard");
+  }
+  const steps = Array.isArray(candidate.steps) ? candidate.steps : [];
+  const actions = steps
+    .filter((step) => isRecord(step) && step.type === "action")
+    .map((step) => String((step as unknown as Record<string, unknown>).action ?? ""));
+  if (!actions.includes("screen_wake")) errors.push("workflow.intent=device_unlock requires a screen_wake action");
+  if (!actions.includes("unlock")) errors.push("workflow.intent=device_unlock requires an unlock action");
 }
 
 function validateRangeObject(
@@ -828,7 +845,7 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
       errors.push(`workflow.safetyClass must be one of: ${GENERATED_WORKFLOW_SAFETY_CLASSES.join(", ")}`);
     }
   }
-  if ((candidate.intent || candidate.outputSchema || candidate.allowedRecoveryRequests) && candidate.safetyClass !== "read_only") {
+  if ((candidate.outputSchema || candidate.allowedRecoveryRequests) && candidate.safetyClass !== "read_only") {
     errors.push("generated workflow marketing metadata requires workflow.safetyClass=read_only");
   }
   if (candidate.outputSchema !== undefined) {
@@ -867,6 +884,7 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
     );
   }
   validateRedditAccountHealthIntent(candidate, errors);
+  validateDeviceUnlockIntent(candidate, errors);
   validateGeneratedWorkflowReadOnlySemantics(candidate, errors);
 
   return errors.length > 0

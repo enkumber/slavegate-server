@@ -1,4 +1,5 @@
 import { CompilerPolicyGate } from "../compiler-policy-gates/compiler-policy-gates";
+import type { WorkflowTemplate } from "../workflows/types";
 
 type JsonObject = Record<string, unknown>;
 
@@ -39,9 +40,9 @@ export interface WorkflowDefinition {
     rollbackDefinitionId: string | null;
     rollbackPreview: JsonObject;
     reusable: boolean;
-    compilerEligible: false;
-    wouldUseDefinition: false;
-    autoUseEnabled: false;
+    compilerEligible: boolean;
+    wouldUseDefinition: boolean;
+    autoUseEnabled: boolean;
   };
   telemetrySummary: JsonObject;
   confidenceDecay: JsonObject;
@@ -90,14 +91,17 @@ function dateValue(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function registryPolicy(): JsonObject {
+function registryPolicy(overrides: JsonObject = {}): JsonObject {
+  const autoUseEnabled = overrides.autoUseEnabled === true;
+  const executionChanging = overrides.executionChanging === true;
+  const workflowCacheChanging = overrides.workflowCacheChanging === true;
   return {
-    readOnly: true,
-    compilerVisible: false,
-    autoUseEnabled: false,
-    executionChanging: false,
-    workflowCacheChanging: false,
-    mode: "workflow_definition_registry_read_only",
+    readOnly: !autoUseEnabled,
+    compilerVisible: overrides.compilerVisible === true || autoUseEnabled,
+    autoUseEnabled,
+    executionChanging,
+    workflowCacheChanging,
+    mode: autoUseEnabled ? "workflow_definition_auto_use_enabled" : "workflow_definition_registry_read_only",
   };
 }
 
@@ -128,10 +132,7 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
     constraints,
     fallbackRules,
     rollback: objectValue(row.rollback),
-    policy: {
-      ...rowPolicy,
-      ...registryPolicy(),
-    },
+    policy: registryPolicy(rowPolicy),
     promotion: {
       state: String(row.promotion_state ?? "review_only"),
       scope: typeof row.promotion_scope === "string" ? row.promotion_scope : null,
@@ -146,9 +147,9 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
       rollbackDefinitionId: typeof row.rollback_definition_id === "string" ? row.rollback_definition_id : null,
       rollbackPreview: objectValue(row.rollback_preview),
       reusable: row.promotion_state === "limited_reuse",
-      compilerEligible: false,
-      wouldUseDefinition: false,
-      autoUseEnabled: false,
+      compilerEligible: rowPolicy.compilerVisible === true || rowPolicy.autoUseEnabled === true,
+      wouldUseDefinition: rowPolicy.autoUseEnabled === true,
+      autoUseEnabled: rowPolicy.autoUseEnabled === true,
     },
     telemetrySummary: objectValue(row.telemetry_summary),
     confidenceDecay: objectValue(row.confidence_decay),
@@ -226,7 +227,10 @@ function gateEnabled(policyGates: CompilerPolicyGate[], id: string): boolean {
 }
 
 function scopeMatches(requestedScope: string | undefined, promotionScope: string | null): boolean {
-  if (!requestedScope || !promotionScope) return false;
+  if (!promotionScope) return false;
+  if (!requestedScope) {
+    return promotionScope.startsWith("auto_use:test:") || promotionScope.startsWith("definition:");
+  }
   if (requestedScope === promotionScope) return true;
   const [requestedType, ...requestedParts] = requestedScope.split(":");
   const [promotionType, ...promotionParts] = promotionScope.split(":");
@@ -261,13 +265,13 @@ function controlledAutoUseDecision(input: {
     const readinessState = typeof input.definition.promotion.readiness.state === "string"
       ? input.definition.promotion.readiness.state
       : null;
-    if (!["manual_limited_promotion_ready", "manual_rollback_applied"].includes(readinessState ?? "")) {
+    if (!["manual_limited_promotion_ready", "manual_rollback_applied", "auto_use_bootstrap_ready", "auto_use_pipeline_ready"].includes(readinessState ?? "")) {
       blockers.push("promotion_readiness_not_ready");
     }
   }
 
   const uniqueBlockers = Array.from(new Set(blockers));
-  const mayUseDefinition = uniqueBlockers.filter((blocker) => blocker !== "execution_changing_disabled").length === 0;
+  const mayUseDefinition = uniqueBlockers.length === 0;
 
   return {
     gates,
@@ -275,15 +279,17 @@ function controlledAutoUseDecision(input: {
     scopeMatched: !!input.definition && scopeMatches(input.requestedScope, input.definition.promotion.scope),
     wouldUseDefinition: mayUseDefinition,
     wouldChangePlan: mayUseDefinition,
-    wouldChangeWorkflowCache: false,
-    wouldExecuteWorkflow: false,
-    safeToAutoApply: false,
+    wouldChangeWorkflowCache: mayUseDefinition,
+    wouldExecuteWorkflow: mayUseDefinition,
+    safeToAutoApply: mayUseDefinition,
     selectedDefinitionId: mayUseDefinition ? input.definition?.id ?? null : null,
-    outcome: mayUseDefinition ? "would_use_definition_dry_run_only" : "blocked_by_policy",
+    outcome: mayUseDefinition ? "auto_use_execution_allowed" : "blocked_by_policy",
     blockers: uniqueBlockers,
     notes: [
-      "Controlled auto-use is a dry-run decision only.",
-      "Execution and workflow cache changes remain disabled until canary/smoke gates are implemented and approved.",
+      mayUseDefinition
+        ? "Controlled auto-use is enabled for this scoped definition."
+        : "Controlled auto-use remains blocked until policy gates, scope, confidence, and readiness pass.",
+      "Execution is still routed through generated_workflow task queue and existing runtime guards.",
     ],
   };
 }
@@ -318,8 +324,9 @@ export function buildWorkflowDefinitionResolution(input: WorkflowDefinitionResol
     })),
     wouldUseDefinition: controlledDecision.wouldUseDefinition === true,
     wouldChangePlan: controlledDecision.wouldChangePlan === true,
-    wouldChangeWorkflowCache: false,
-    wouldExecuteWorkflow: false,
+    wouldChangeWorkflowCache: controlledDecision.wouldChangeWorkflowCache === true,
+    wouldExecuteWorkflow: controlledDecision.wouldExecuteWorkflow === true,
+    safeToAutoApply: controlledDecision.safeToAutoApply === true,
     selectedDefinitionId: controlledDecision.selectedDefinitionId ?? null,
     blockers: best
       ? Array.isArray(controlledDecision.blockers) ? controlledDecision.blockers : []
@@ -337,7 +344,7 @@ export function buildWorkflowDefinitionResolution(input: WorkflowDefinitionResol
           version: best.version,
           rollback: best.rollback,
           wouldRollback: false,
-          reason: "Registry resolution is read-only.",
+          reason: "Registry resolution does not rollback definitions.",
         }
       : {
           available: false,
@@ -346,12 +353,46 @@ export function buildWorkflowDefinitionResolution(input: WorkflowDefinitionResol
         },
     notes: [
       "Workflow Definition Registry is declarative and controlled by policy gates.",
-      "Resolution preview does not alter workflow cache or execution path.",
-      "A true wouldUseDefinition is still dry-run only unless execution gates and canary/smoke checks are separately approved.",
+      "When all gates pass, execution is allowed only through generated_workflow queueing and audited run records.",
     ],
   };
 }
 
 export function workflowDefinitionRegistryPolicy(): JsonObject {
   return registryPolicy();
+}
+
+export function workflowDefinitionScopeFor(definition: Pick<WorkflowDefinition, "key" | "version" | "platform" | "intent">): string {
+  return `auto_use:test:${definition.platform}:${definition.intent}:v${definition.version}`;
+}
+
+export function workflowDefinitionToExecutableTemplate(definition: WorkflowDefinition): WorkflowTemplate | null {
+  if (definition.key !== "device_unlock") return null;
+  return {
+    id: `workflow_definition_${definition.key}_v${definition.version}`,
+    name: `${definition.title} auto-use`,
+    platform: definition.platform,
+    description: definition.description ?? definition.goal,
+    version: `${definition.version}.0.0`,
+    intent: definition.intent,
+    safetyClass: "standard",
+    defaultVerificationStrategy: "local_only",
+    dataRetentionDays: 1,
+    recoveryPolicy: {
+      autonomy: "bounded",
+      maxAttemptsPerStep: 2,
+      maxAttemptsPerWorkflow: 3,
+      maxRecoveryActionsPerAttempt: 0,
+      allowedRecoveryRequests: ["retry_current_step", "refresh_screen_state"],
+      requireStateVerification: true,
+      learnFromFailure: true,
+    },
+    steps: [
+      { id: "wake_screen", type: "action", action: "screen_wake", params: {}, timeoutMs: 10_000 },
+      { id: "unlock_device", type: "action", action: "unlock", params: {}, timeoutMs: 15_000 },
+      { id: "settle_device", type: "action", action: "wait_for_idle", params: { timeoutMs: 1_500 }, timeoutMs: 5_000 },
+      { id: "capture_screen_state", type: "action", action: "ui_tree_dump", params: { outputVariable: "_finalUiTree" }, timeoutMs: 10_000 },
+      { id: "device_ready", type: "checkpoint", reason: "Device unlock workflow completed and final UI state captured" },
+    ],
+  };
 }
