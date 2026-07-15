@@ -16,6 +16,7 @@ import { getDb } from "../../db/client";
 import { agentOrchestrator } from "../agents/orchestrator";
 import { isDeviceOnline } from "../../transport/transport";
 import type { TaskResult } from "../agents/types";
+import { llmJson } from "../../utils/llm";
 import {
   generatedWorkflowCacheLookups,
   generatedWorkflowExecutions,
@@ -24,11 +25,13 @@ import {
 } from "../observability/metrics";
 import { dispatchGeneratedWorkflowTemplate } from "../workflows/generated-workflow-execution.service";
 import type { GeneratedWorkflowControlPlaneContext } from "../workflows/generated-workflow-execution.service";
+import type { WorkflowTemplate } from "../workflows/types";
 import {
   workflowService,
   type GeneratedWorkflowPlanCacheRecord,
   type WorkflowRecord,
 } from "../workflows/workflow.service";
+import { compileGeneratedWorkflowTemplate } from "../workflows/workflow-validator";
 import { workflowEvents } from "../workflow-events";
 import { assertHumanWorkflowMeaningful } from "../human-workflow/human-workflow-compiler.service";
 import { normalizeCachedHumanWorkflowTemplate } from "../human-workflow/human-workflow-normalization";
@@ -418,6 +421,175 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
   }
 }
 
+type WorkflowRepairResponse = {
+  workflow?: WorkflowTemplate;
+  rationale?: string;
+  expectedFix?: string;
+  confidence?: number;
+};
+
+function compactWorkflowForRepair(workflow: WorkflowTemplate): Record<string, unknown> {
+  return {
+    id: workflow.id,
+    name: workflow.name,
+    platform: workflow.platform,
+    description: workflow.description,
+    version: workflow.version,
+    intent: workflow.intent,
+    safetyClass: workflow.safetyClass,
+    outputSchema: workflow.outputSchema,
+    allowedRecoveryRequests: workflow.allowedRecoveryRequests,
+    recoveryPolicy: workflow.recoveryPolicy,
+    defaultVerificationStrategy: workflow.defaultVerificationStrategy,
+    dataRetentionDays: workflow.dataRetentionDays,
+    compatibleAppVersions: workflow.compatibleAppVersions,
+    steps: workflow.steps,
+  };
+}
+
+function normalizeRepairedWorkflow(candidate: unknown, base: WorkflowTemplate): WorkflowTemplate | null {
+  if (!candidate || typeof candidate !== "object") return null;
+  const record = candidate as Partial<WorkflowTemplate>;
+  const versionParts = String(base.version || "1.0.0").split(".");
+  const major = Number(versionParts[0] ?? 1) || 1;
+  const minor = Number(versionParts[1] ?? 0) || 0;
+  const patch = (Number(versionParts[2] ?? 0) || 0) + 1;
+  const repairedId = typeof record.id === "string" && record.id.trim()
+    ? record.id.trim()
+    : `${base.id}_repair_${Date.now()}`;
+  const repairedVersion = typeof record.version === "string" && record.version.trim()
+    ? record.version.trim()
+    : `${major}.${minor}.${patch}`;
+  return {
+    ...base,
+    ...record,
+    id: repairedId,
+    name: typeof record.name === "string" && record.name.trim()
+      ? record.name.trim()
+      : `${base.name} repaired`,
+    platform: typeof record.platform === "string" && record.platform.trim() ? record.platform.trim() : base.platform,
+    description: typeof record.description === "string" && record.description.trim()
+      ? record.description.trim()
+      : `${base.description} Repaired after failed execution.`,
+    version: repairedId === base.id && repairedVersion === base.version ? `${major}.${minor}.${patch}` : repairedVersion,
+    intent: typeof record.intent === "string" ? record.intent : base.intent,
+    safetyClass: record.safetyClass === "read_only" || record.safetyClass === "standard" ? record.safetyClass : base.safetyClass,
+    outputSchema: record.outputSchema ?? base.outputSchema,
+    allowedRecoveryRequests: Array.isArray(record.allowedRecoveryRequests)
+      ? record.allowedRecoveryRequests
+      : base.allowedRecoveryRequests,
+    recoveryPolicy: record.recoveryPolicy ?? base.recoveryPolicy,
+    defaultVerificationStrategy: record.defaultVerificationStrategy ?? base.defaultVerificationStrategy,
+    dataRetentionDays: typeof record.dataRetentionDays === "number" ? record.dataRetentionDays : base.dataRetentionDays,
+    compatibleAppVersions: Array.isArray(record.compatibleAppVersions)
+      ? record.compatibleAppVersions
+      : base.compatibleAppVersions,
+    steps: Array.isArray(record.steps) ? record.steps : base.steps,
+  };
+}
+
+function buildWorkflowRepairPrompt(
+  cached: GeneratedWorkflowPlanCacheRecord,
+  task: TaskRow,
+  result: TaskRunnerResult,
+): string {
+  const failure = {
+    failReason: result.failReason ?? "Unknown error",
+    failedStep: result.failedStep ?? null,
+    stepsCompleted: result.stepsCompleted ?? null,
+    totalSteps: result.totalSteps ?? null,
+    output: result.output ?? result.generatedWorkflow?.output ?? {},
+    taskParams: task.params,
+  };
+  return [
+    "A generated Android workflow failed. Create a repaired workflow artifact that can be retried deterministically.",
+    "",
+    "Hard requirements:",
+    "- Return ONLY JSON.",
+    "- JSON shape: {\"workflow\": WorkflowTemplate, \"rationale\": string, \"expectedFix\": string, \"confidence\": number}.",
+    "- Preserve the user's original intent and output schema.",
+    "- Happy path must remain deterministic: no LLM/VLM actions in workflow steps.",
+    "- Use only safe generated workflow actions already present in the existing workflow DSL.",
+    "- Prefer UI tree observation, app open, wait, navigation, retryable taps, and checkpoint steps.",
+    "- Do not post, submit, send messages, purchase, delete, change password, or perform irreversible social actions unless the original workflow already required it.",
+    "- Add verification/evidence steps near the failure point when needed.",
+    "",
+    `Original source metadata: ${JSON.stringify(cached.sourceMetadata)}`,
+    `Failure: ${JSON.stringify(failure)}`,
+    `Current workflow: ${JSON.stringify(compactWorkflowForRepair(cached.workflow))}`,
+  ].join("\n");
+}
+
+async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerResult): Promise<void> {
+  if (task.routine !== GENERATED_WORKFLOW_ROUTINE || result.success) return;
+  const cacheKey = result.generatedWorkflow?.cacheKey;
+  if (!cacheKey) return;
+
+  let cached: GeneratedWorkflowPlanCacheRecord | null = null;
+  try {
+    cached = await workflowService.getGeneratedPlanCacheForRepair(cacheKey);
+  } catch (err) {
+    console.error("[task-runner] generated workflow repair lookup failed:", err);
+    return;
+  }
+  if (!cached?.requestKey) return;
+
+  const learning = cached.sourceMetadata?.workflowLearning as Record<string, unknown> | undefined;
+  const repair = cached.sourceMetadata?.workflowRepair as Record<string, unknown> | undefined;
+  if (repair?.status === "candidate_generated" && repair?.sourceCacheKey === cacheKey) return;
+  if (typeof learning?.failureCount === "number" && learning.failureCount > 3) return;
+
+  try {
+    const response = await llmJson<WorkflowRepairResponse>(
+      buildWorkflowRepairPrompt(cached, task, result),
+      undefined,
+      {
+        max_tokens: 4096,
+        timeoutMs: 90_000,
+        temperature: 0.1,
+        system: "You repair failed Android generated workflow templates. Respond only with valid JSON.",
+      },
+    );
+    const repaired = normalizeRepairedWorkflow(response.workflow ?? response, cached.workflow);
+    if (!repaired) {
+      throw new Error("repair response did not include a workflow object");
+    }
+    const compiledPlan = compileGeneratedWorkflowTemplate(repaired);
+    await workflowService.saveTemplate(repaired);
+    await workflowService.saveGeneratedPlanCache(repaired, compiledPlan, cached.requestKey, {
+      artifactState: "candidate",
+      replaceRequestKeyArtifacts: false,
+      sourceMetadata: {
+        ...cached.sourceMetadata,
+        source: "llm_repair",
+        repairOfCacheKey: cached.cacheKey,
+        repairOfWorkflowId: cached.workflow.id,
+        workflowRepair: {
+          status: "candidate_generated",
+          sourceCacheKey: cached.cacheKey,
+          sourceWorkflowId: cached.workflow.id,
+          sourceWorkflowVersion: cached.workflow.version,
+          repairedWorkflowId: repaired.id,
+          repairedWorkflowVersion: repaired.version,
+          repairedCacheKey: compiledPlan.cacheKey,
+          reason: result.failReason ?? result.generatedWorkflow?.failureCode ?? "Unknown error",
+          taskId: task.id,
+          workflowId: result.generatedWorkflow?.workflowId ?? null,
+          agencyWorkflowRunId: agencyWorkflowRunIdFromTask(task),
+          rationale: response.rationale ?? null,
+          expectedFix: response.expectedFix ?? null,
+          confidence: typeof response.confidence === "number" ? response.confidence : null,
+          generatedAt: new Date().toISOString(),
+          nextAction: "retry_task_with_repaired_candidate",
+        },
+      },
+    });
+    console.log(`[task-runner] Generated repaired workflow candidate ${compiledPlan.cacheKey} for failed cache ${cacheKey}`);
+  } catch (err) {
+    console.error("[task-runner] generated workflow repair failed:", (err as Error).message);
+  }
+}
+
 async function failAgencyWorkflowRunWithError(task: TaskRow, error: Error): Promise<void> {
   const runId = agencyWorkflowRunIdFromTask(task);
   if (!runId) return;
@@ -689,6 +861,7 @@ async function executeTask(task: TaskRow): Promise<void> {
       `, [taskId, JSON.stringify(resultJson), result.failReason || "Unknown error", newRetryCount]);
       await completeAgencyWorkflowRun(task, result);
       await recordGeneratedWorkflowLearning(task, result);
+      await attemptGeneratedWorkflowRepair(task, result);
       publishGeneratedWorkflowTaskEvent(task, "task_failed", {
         workflowId: result.generatedWorkflow?.workflowId,
         stepsCompleted: result.stepsCompleted,
@@ -1186,6 +1359,7 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
     );
     await completeAgencyWorkflowRun(task, taskResult);
     await recordGeneratedWorkflowLearning(task, taskResult);
+    await attemptGeneratedWorkflowRepair(task, taskResult);
     publishGeneratedWorkflowTaskEvent(task, taskResult.success ? "task_completed" : "task_failed", {
       workflowId: taskResult.generatedWorkflow?.workflowId,
       stepsCompleted: taskResult.stepsCompleted,

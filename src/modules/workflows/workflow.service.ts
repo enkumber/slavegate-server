@@ -75,6 +75,7 @@ export type GeneratedWorkflowArtifactState = GeneratedWorkflowPlanCacheRecord["a
 export interface SaveGeneratedPlanCacheOptions {
   sourceMetadata?: Record<string, unknown>;
   artifactState?: GeneratedWorkflowArtifactState;
+  replaceRequestKeyArtifacts?: boolean;
 }
 
 export interface GeneratedWorkflowCacheLookupOptions {
@@ -358,7 +359,7 @@ export class WorkflowService {
       allowedRecoveryRequests: compiledPlan.metadata.allowedRecoveryRequests,
       ...options.sourceMetadata,
     };
-    if (requestKey) {
+    if (requestKey && options.replaceRequestKeyArtifacts !== false) {
       await db.query("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1 AND cache_key <> $2", [
         requestKey,
         compiledPlan.cacheKey,
@@ -437,6 +438,21 @@ export class WorkflowService {
        )
        RETURNING *`,
       [requestKey, allowedArtifactStates(options)]
+    );
+    if (result.rows.length === 0) return null;
+    return rowToGeneratedPlanCache(result.rows[0]);
+  }
+
+  async getGeneratedPlanCacheForRepair(
+    cacheKey: string
+  ): Promise<GeneratedWorkflowPlanCacheRecord | null> {
+    const db = getDb();
+    const result = await db.query(
+      `SELECT *
+       FROM generated_workflow_plan_cache
+       WHERE cache_key = $1
+       LIMIT 1`,
+      [cacheKey]
     );
     if (result.rows.length === 0) return null;
     return rowToGeneratedPlanCache(result.rows[0]);

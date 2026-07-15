@@ -17,7 +17,12 @@ const mocks = vi.hoisted(() => ({
   workflowEventsPublish: vi.fn(),
   getGeneratedPlanCache: vi.fn(),
   getGeneratedPlanCacheByRequestKey: vi.fn(),
+  getGeneratedPlanCacheForRepair: vi.fn(),
+  recordGeneratedPlanCacheOutcome: vi.fn(),
+  saveTemplate: vi.fn(),
+  saveGeneratedPlanCache: vi.fn(),
   getWorkflow: vi.fn(),
+  llmJson: vi.fn(),
 }));
 
 vi.mock("../../db/client", () => ({
@@ -47,8 +52,16 @@ vi.mock("../workflows/workflow.service", () => ({
   workflowService: {
     getGeneratedPlanCache: mocks.getGeneratedPlanCache,
     getGeneratedPlanCacheByRequestKey: mocks.getGeneratedPlanCacheByRequestKey,
+    getGeneratedPlanCacheForRepair: mocks.getGeneratedPlanCacheForRepair,
+    recordGeneratedPlanCacheOutcome: mocks.recordGeneratedPlanCacheOutcome,
+    saveTemplate: mocks.saveTemplate,
+    saveGeneratedPlanCache: mocks.saveGeneratedPlanCache,
     get: mocks.getWorkflow,
   },
+}));
+
+vi.mock("../../utils/llm", () => ({
+  llmJson: mocks.llmJson,
 }));
 
 vi.mock("../workflow-events", () => ({
@@ -205,6 +218,23 @@ function completedWorkflow(variables: Record<string, unknown> = REDDIT_ACCOUNT_H
   };
 }
 
+function failedWorkflow(error = "RECOVERY_BUDGET_EXCEEDED") {
+  return {
+    ...completedWorkflow({}),
+    status: "failed",
+    currentStep: 1,
+    totalSteps: 3,
+    error,
+    checkpoint: {
+      ...completedWorkflow({}).checkpoint,
+      stepIndex: 1,
+      variables: {
+        _finalUiTree: { uiTree: "package=com.google.android.gm text=Add account Something went wrong" },
+      },
+    },
+  };
+}
+
 function task(params: Record<string, unknown>, overrides: Partial<TaskRow> = {}): TaskRow {
   return {
     id: TASK_ID,
@@ -239,6 +269,11 @@ describe("task-runner generated_workflow routine", () => {
       templateId: "agent_generated_reddit_account_health_scan_v1",
     });
     mocks.getWorkflow.mockResolvedValue(completedWorkflow());
+    mocks.recordGeneratedPlanCacheOutcome.mockResolvedValue(null);
+    mocks.getGeneratedPlanCacheForRepair.mockResolvedValue(null);
+    mocks.saveTemplate.mockResolvedValue(undefined);
+    mocks.saveGeneratedPlanCache.mockResolvedValue(undefined);
+    mocks.llmJson.mockReset();
   });
 
   it("dispatches a cached generated workflow by requestKey and preserves task account/device linkage", async () => {
@@ -554,6 +589,117 @@ describe("task-runner generated_workflow routine", () => {
       output: finalOutput,
       generatedWorkflow: { output: finalOutput },
     });
+  });
+
+  it("generates a repaired candidate artifact after a generated workflow failure", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "Deschide Gmail si verifica inbox",
+        workflowLearning: {
+          failureCount: 1,
+          lastOutcome: "failure",
+        },
+      },
+    });
+    const repairedWorkflow: WorkflowTemplate = {
+      ...cached.workflow,
+      id: "agent_generated_gmail_inbox_repair_v2",
+      name: "Gmail inbox repair",
+      platform: "android",
+      intent: "gmail_open_inbox",
+      version: "1.0.1",
+      steps: [
+        { type: "action", id: "wake_screen", action: "screen_wake", params: {} },
+        { type: "action", id: "unlock_device", action: "unlock", params: {} },
+        { type: "action", id: "open_gmail", action: "open_app", params: { packageName: "com.google.android.gm" } },
+        { type: "checkpoint", id: "gmail_opened" },
+      ],
+    };
+    mockTaskDb(task({
+      requestKey: REQUEST_KEY,
+      source: "dashboard_human",
+      allowCandidateArtifact: true,
+      agencyWorkflowRunId: TASK_ID,
+      intent: "Deschide Gmail si verifica inbox",
+    }), "android");
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(failedWorkflow("RECOVERY_BUDGET_EXCEEDED"));
+    mocks.recordGeneratedPlanCacheOutcome.mockResolvedValue({
+      ...cached,
+      artifactState: "failed",
+      sourceMetadata: {
+        ...cached.sourceMetadata,
+        workflowLearning: {
+          failureCount: 2,
+          lastOutcome: "failure",
+        },
+      },
+    });
+    mocks.getGeneratedPlanCacheForRepair.mockResolvedValue({
+      ...cached,
+      artifactState: "failed",
+      sourceMetadata: {
+        ...cached.sourceMetadata,
+        workflowLearning: {
+          failureCount: 2,
+          lastOutcome: "failure",
+        },
+      },
+    });
+    mocks.llmJson.mockResolvedValue({
+      workflow: repairedWorkflow,
+      rationale: "Open the native Gmail app after unlock and checkpoint the reached inbox surface.",
+      expectedFix: "Avoid retrying the old failing navigation path.",
+      confidence: 0.82,
+    });
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: false,
+      failReason: "RECOVERY_BUDGET_EXCEEDED",
+      generatedWorkflow: expect.objectContaining({
+        cacheKey: CACHE_KEY,
+        requestKey: REQUEST_KEY,
+      }),
+    });
+    expect(mocks.recordGeneratedPlanCacheOutcome).toHaveBeenCalledWith(expect.objectContaining({
+      cacheKey: CACHE_KEY,
+      success: false,
+      reason: "RECOVERY_BUDGET_EXCEEDED",
+      taskId: TASK_ID,
+      workflowId: WORKFLOW_ID,
+    }));
+    expect(mocks.llmJson).toHaveBeenCalledWith(
+      expect.stringContaining("A generated Android workflow failed"),
+      undefined,
+      expect.objectContaining({ system: expect.stringContaining("repair failed Android") }),
+    );
+    expect(mocks.saveTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      id: "agent_generated_gmail_inbox_repair_v2",
+    }));
+    expect(mocks.saveGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "agent_generated_gmail_inbox_repair_v2" }),
+      expect.objectContaining({
+        cacheKey: expect.any(String),
+        llmBudget: { happyPathRequests: 0, recoveryRequests: "only_on_failure" },
+      }),
+      REQUEST_KEY,
+      expect.objectContaining({
+        artifactState: "candidate",
+        replaceRequestKeyArtifacts: false,
+        sourceMetadata: expect.objectContaining({
+          source: "llm_repair",
+          repairOfCacheKey: CACHE_KEY,
+          workflowRepair: expect.objectContaining({
+            status: "candidate_generated",
+            nextAction: "retry_task_with_repaired_candidate",
+            reason: "RECOVERY_BUDGET_EXCEEDED",
+          }),
+        }),
+      }),
+    );
   });
 
   it("fails dashboard human AskReddit workflows without final UI evidence", async () => {
