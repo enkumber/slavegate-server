@@ -2025,12 +2025,12 @@ describe("dashboard human workflow routes", () => {
       "reddit",
       INTENT,
       "read_only",
-      requestKey(),
+      null,
       cacheKey(),
       "dashboard_human_reddit_preview_v1",
       "1.0.0",
       "a".repeat(64),
-      expect.any(String),
+      expect.stringContaining(`"requestKey":"${requestKey()}"`),
     ]);
   });
 
@@ -2083,12 +2083,12 @@ describe("dashboard human workflow routes", () => {
       "reddit",
       INTENT,
       "read_only",
-      requestKey(),
+      null,
       cacheKey(),
       "dashboard_human_reddit_preview_v1",
       "1.0.0",
       "a".repeat(64),
-      expect.any(String),
+      expect.stringContaining(`"requestKey":"${requestKey()}"`),
     ]);
   });
 

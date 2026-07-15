@@ -213,14 +213,16 @@ async function queueHumanAgencyWorkflowRun(input: {
     const existingRunResult = await client.query<{ id: string; task_id: string | null; status: string }>(
       `SELECT id, task_id, status
        FROM agency_workflow_runs
-       WHERE request_key = $1
+       WHERE cache_key = $1
          AND device_id = $2
          AND account_id IS NOT DISTINCT FROM $3
-         AND context ->> 'source' = 'dashboard_human' AND status IN ('queued', 'running')
+         AND context ->> 'source' = 'dashboard_human'
+         AND context ->> 'requestKey' = $4
+         AND status IN ('queued', 'running')
        ORDER BY created_at ASC
        LIMIT 1
        FOR UPDATE`,
-      [input.requestKey, input.target.device_id, input.target.account_id],
+      [cached.cache_key, input.target.device_id, input.target.account_id, input.requestKey],
     );
     const existingRun = existingRunResult.rows[0];
     if (existingRun?.task_id) {
@@ -244,6 +246,7 @@ async function queueHumanAgencyWorkflowRun(input: {
       deviceId: input.target.device_id,
       accountUsername: input.target.account_username,
       accountPlatform: input.target.account_platform,
+      requestKey: input.requestKey,
     };
     let runId = existingRun?.id;
     if (!runId) {
@@ -260,7 +263,7 @@ async function queueHumanAgencyWorkflowRun(input: {
           input.target.account_platform,
           input.intent,
           safetyClass,
-          input.requestKey,
+          null,
           cached.cache_key,
           cached.canonical_workflow_id,
           cached.canonical_workflow_version,
