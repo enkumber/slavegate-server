@@ -342,17 +342,26 @@ function normalizeGeneratedWorkflowRecoveryPlan(raw: unknown): GeneratedWorkflow
   };
 }
 
+function normalizeGeneratedWorkflowRecoveryStep(step: WorkflowStep, index: number): WorkflowStep {
+  if (!step || typeof step !== "object" || Array.isArray(step)) return step;
+  const normalized = {
+    id: (step as { id?: string }).id ?? `ai_recovery_step_${index + 1}`,
+    ...step,
+  } as WorkflowStep & { duration?: unknown; condition?: unknown };
+  if (normalized.type === "wait" && normalized.duration === undefined && normalized.condition === undefined) {
+    normalized.duration = { min: 1000, max: 2000, distribution: "uniform" };
+  }
+  return normalized;
+}
+
 function validateGeneratedWorkflowRecoverySteps(
   template: WorkflowTemplate,
   policy: GeneratedWorkflowRuntimeRecoveryPolicy,
   steps: WorkflowStep[],
 ): { ok: true; steps: WorkflowStep[] } | { ok: false; error: string } {
-  const bounded = steps.slice(0, policy.maxRecoveryActionsPerAttempt).map((step, index) => {
-    if (step && typeof step === "object" && !Array.isArray(step)) {
-      return { id: (step as { id?: string }).id ?? `ai_recovery_step_${index + 1}`, ...step };
-    }
-    return step;
-  });
+  const bounded = steps
+    .slice(0, policy.maxRecoveryActionsPerAttempt)
+    .map((step, index) => normalizeGeneratedWorkflowRecoveryStep(step, index));
   const candidate: WorkflowTemplate = {
     id: `${template.id}_ai_recovery_plan`,
     name: `${template.name} AI recovery plan`,
