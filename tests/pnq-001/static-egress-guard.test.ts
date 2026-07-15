@@ -10,6 +10,25 @@ type BaselineEntry = {
   classification: string;
 };
 
+type ImportBinding = {
+  importedName: string;
+  moduleSpecifier: string;
+};
+
+type RawImportBoundary = {
+  file: string;
+  importedName: string;
+  sourceKind: "transport" | "direct-ws";
+};
+
+type EgressFinding = {
+  file: string;
+  kind: string;
+  callee: string;
+  importedName?: string;
+  sourceKind?: "transport" | "direct-ws";
+};
+
 const repoRoot = path.resolve(__dirname, "../..");
 
 const directWsServerMethods = new Set([
@@ -27,6 +46,27 @@ const excludedFiles = [
   /\.map$/,
   /\/db\/migrations\//,
 ];
+
+const reviewedRawImportBoundaries = new Set([
+  "src/api/hydra-routes.ts\tsendJobToDevice\ttransport",
+  "src/api/hydra-routes.ts\tdirectWsServer\tdirect-ws",
+  "src/api/routes.ts\tsendJobToDevice\ttransport",
+  "src/api/routes.ts\tdirectWsServer\tdirect-ws",
+  "src/index.ts\tdirectWsServer\tdirect-ws",
+  "src/modules/agents/orchestrator.ts\tsendJobToDevice\ttransport",
+  "src/modules/app-mapping/mapping-routes.ts\tsendJobToDevice\ttransport",
+  "src/modules/app-mapping/recorder.service.ts\tsendJobToDevice\ttransport",
+  "src/modules/screen-detection/screen-detection.service.ts\tsendJobToDevice\ttransport",
+  "src/modules/skills/skill.cascade.ts\tsendJobToDevice\ttransport",
+  "src/modules/workflow-compiler/recovery.service.ts\tsendJobToDevice\ttransport",
+  "src/modules/workflow-compiler/runner.service.ts\tsendJobToDevice\ttransport",
+  "src/modules/workflow-compiler/runner.service.ts\tdirectWsServer\tdirect-ws",
+  "src/modules/workflows/generated-workflow-execution.service.ts\tdirectWsServer\tdirect-ws",
+  "src/modules/workflows/workflow-dispatch.service.ts\tsendJobToDevice\ttransport",
+  "src/modules/workflows/workflow.executor.ts\tsendJobToDevice\ttransport",
+  "src/modules/workflows/workflow.executor.ts\tdirectWsServer\tdirect-ws",
+  "src/transport/transport.ts\tdirectWsServer\tdirect-ws",
+]);
 
 function walkProductionTs(dir: string, files: string[] = []): string[] {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -72,31 +112,92 @@ function currentEgressBaseline(): Array<Omit<BaselineEntry, "classification">> {
 }
 
 function scanSourceText(sourceText: string, fileName: string): string[] {
+  return scanSource(sourceText, fileName).findings.map((finding) => finding.kind);
+}
+
+function scanSource(sourceText: string, fileName: string): {
+  findings: EgressFinding[];
+  rawImports: RawImportBoundary[];
+} {
   const sourceFile = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  const findings: string[] = [];
+  const importBindings = collectImportBindings(sourceFile);
+  const findings: EgressFinding[] = [];
+  const rawImports = collectRawImportBoundaries(fileName, importBindings);
 
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
-      findings.push(...classifyCall(node, sourceFile));
+      findings.push(...classifyCall(node, sourceFile, importBindings, fileName));
     } else if (ts.isFunctionDeclaration(node)) {
-      findings.push(...classifyFunctionDeclaration(node));
+      findings.push(...classifyFunctionDeclaration(node, fileName));
     } else if (ts.isMethodDeclaration(node)) {
-      findings.push(...classifyMethodDeclaration(node));
+      findings.push(...classifyMethodDeclaration(node, fileName));
     }
 
     ts.forEachChild(node, visit);
   };
 
   visit(sourceFile);
-  return findings;
+  return { findings, rawImports };
 }
 
-function classifyCall(node: ts.CallExpression, sourceFile: ts.SourceFile): string[] {
+function collectImportBindings(sourceFile: ts.SourceFile): Map<string, ImportBinding> {
+  const bindings = new Map<string, ImportBinding>();
+
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    if (!ts.isStringLiteral(statement.moduleSpecifier)) continue;
+
+    const moduleSpecifier = statement.moduleSpecifier.text;
+    const namedBindings = statement.importClause?.namedBindings;
+    if (!namedBindings || !ts.isNamedImports(namedBindings)) continue;
+
+    for (const element of namedBindings.elements) {
+      bindings.set(element.name.text, {
+        importedName: element.propertyName?.text ?? element.name.text,
+        moduleSpecifier,
+      });
+    }
+  }
+
+  return bindings;
+}
+
+function collectRawImportBoundaries(
+  file: string,
+  importBindings: Map<string, ImportBinding>,
+): RawImportBoundary[] {
+  const imports: RawImportBoundary[] = [];
+
+  for (const binding of importBindings.values()) {
+    const sourceKind = rawSourceKind(binding.moduleSpecifier);
+    if (!sourceKind) continue;
+    if (binding.importedName !== "sendJobToDevice" && binding.importedName !== "directWsServer") continue;
+    imports.push({ file, importedName: binding.importedName, sourceKind });
+  }
+
+  return imports;
+}
+
+function rawSourceKind(moduleSpecifier: string): RawImportBoundary["sourceKind"] | null {
+  const normalized = moduleSpecifier.replaceAll("\\", "/");
+  if (normalized.endsWith("/transport/transport") || normalized === "../transport/transport") return "transport";
+  if (normalized.endsWith("/ws/direct-ws.server") || normalized === "../ws/direct-ws.server") return "direct-ws";
+  return null;
+}
+
+function classifyCall(
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  importBindings: Map<string, ImportBinding>,
+  file: string,
+): EgressFinding[] {
   const callee = node.expression;
 
   if (ts.isIdentifier(callee)) {
-    if (callee.text === "sendJobToDevice") return ["sendJobToDevice"];
-    if (callee.text === "sendToDevice") return ["sendToDevice"];
+    if (callee.text === "sendJobToDevice") {
+      return [findingForIdentifier(file, "sendJobToDevice", callee.text, importBindings)];
+    }
+    if (callee.text === "sendToDevice") return [{ file, kind: "sendToDevice", callee: callee.text }];
     return [];
   }
 
@@ -104,33 +205,116 @@ function classifyCall(node: ts.CallExpression, sourceFile: ts.SourceFile): strin
 
   const receiver = callee.expression.getText(sourceFile);
   const method = callee.name.text;
-  const findings: string[] = [];
+  const findings: EgressFinding[] = [];
 
   if (receiver === "directWsServer" && directWsServerMethods.has(method)) {
-    findings.push(`directWsServer.${method}`);
+    findings.push(findingForProperty(file, `directWsServer.${method}`, receiver, method, importBindings));
   }
   if (receiver === "transport" && method === "sendJob") {
-    findings.push("transport.sendJob");
+    findings.push({ file, kind: "transport.sendJob", callee: `${receiver}.${method}` });
   }
   if (method === "sendJob" && /\b\w*Adapter$/.test(receiver)) {
-    findings.push("adapter.sendJob");
+    findings.push({ file, kind: "adapter.sendJob", callee: `${receiver}.${method}` });
   }
   if (method === "sendToDevice") {
-    findings.push("sendToDevice");
+    findings.push({ file, kind: "sendToDevice", callee: `${receiver}.${method}` });
   }
   if (receiver === "ws" && method === "send") {
-    findings.push("ws.send");
+    findings.push({ file, kind: "ws.send", callee: `${receiver}.${method}` });
   }
 
   return findings;
 }
 
-function classifyFunctionDeclaration(node: ts.FunctionDeclaration): string[] {
-  return node.name?.text === "sendJobToDevice" ? ["sendJobToDevice"] : [];
+function findingForIdentifier(
+  file: string,
+  kind: string,
+  callee: string,
+  importBindings: Map<string, ImportBinding>,
+): EgressFinding {
+  const binding = importBindings.get(callee);
+  return {
+    file,
+    kind,
+    callee,
+    importedName: binding?.importedName,
+    sourceKind: binding ? rawSourceKind(binding.moduleSpecifier) ?? undefined : undefined,
+  };
 }
 
-function classifyMethodDeclaration(node: ts.MethodDeclaration): string[] {
-  return ts.isIdentifier(node.name) && node.name.text === "sendToDevice" ? ["sendToDevice"] : [];
+function findingForProperty(
+  file: string,
+  kind: string,
+  receiver: string,
+  method: string,
+  importBindings: Map<string, ImportBinding>,
+): EgressFinding {
+  const binding = importBindings.get(receiver);
+  return {
+    file,
+    kind,
+    callee: `${receiver}.${method}`,
+    importedName: binding?.importedName,
+    sourceKind: binding ? rawSourceKind(binding.moduleSpecifier) ?? undefined : undefined,
+  };
+}
+
+function classifyFunctionDeclaration(node: ts.FunctionDeclaration, file: string): EgressFinding[] {
+  return node.name?.text === "sendJobToDevice"
+    ? [{ file, kind: "sendJobToDevice", callee: "function sendJobToDevice" }]
+    : [];
+}
+
+function classifyMethodDeclaration(node: ts.MethodDeclaration, file: string): EgressFinding[] {
+  return ts.isIdentifier(node.name) && node.name.text === "sendToDevice"
+    ? [{ file, kind: "sendToDevice", callee: "method sendToDevice" }]
+    : [];
+}
+
+function currentSemanticBoundary(): {
+  findings: EgressFinding[];
+  rawImports: RawImportBoundary[];
+} {
+  const findings: EgressFinding[] = [];
+  const rawImports: RawImportBoundary[] = [];
+
+  for (const file of walkProductionTs(path.join(repoRoot, "src"))) {
+    const result = scanSource(fs.readFileSync(path.join(repoRoot, file), "utf8"), file);
+    findings.push(...result.findings);
+    rawImports.push(...result.rawImports);
+  }
+
+  return { findings, rawImports };
+}
+
+function importBoundaryKey(boundary: RawImportBoundary): string {
+  return `${boundary.file}\t${boundary.importedName}\t${boundary.sourceKind}`;
+}
+
+function isReviewedCallBoundary(finding: EgressFinding): boolean {
+  if (finding.kind === "sendJobToDevice" && finding.callee === "function sendJobToDevice") {
+    return finding.file === "src/transport/transport.ts";
+  }
+  if (finding.kind === "sendJobToDevice") {
+    return finding.importedName === "sendJobToDevice" && finding.sourceKind === "transport";
+  }
+  if (finding.kind.startsWith("directWsServer.")) {
+    return finding.importedName === "directWsServer" && finding.sourceKind === "direct-ws";
+  }
+  if (finding.kind === "transport.sendJob") return finding.file === "src/api/routes.ts";
+  if (finding.kind === "adapter.sendJob") return finding.file === "src/modules/skills/skill.cascade.ts";
+  if (finding.kind === "sendToDevice") {
+    return finding.file === "src/ws/direct-ws.server.ts"
+      || finding.file === "src/ws/ws.server.ts"
+      || finding.file === "src/api/routes.ts";
+  }
+  if (finding.kind === "ws.send") {
+    return finding.file === "src/ws/direct-ws.server.ts"
+      || finding.file === "src/ws/ws.server.ts"
+      || finding.file === "src/ws/gateway.ts"
+      || finding.file === "src/modules/workflow-events/workflow-event.service.ts";
+  }
+  return false;
 }
 
 describe("PNQ-001 production egress inventory guard", () => {
@@ -151,6 +335,21 @@ describe("PNQ-001 production egress inventory guard", () => {
     for (const entry of expected) {
       expect(entry.classification.trim()).not.toEqual("");
     }
+  });
+
+  it("keeps raw sender imports inside reviewed semantic boundaries", () => {
+    const { rawImports } = currentSemanticBoundary();
+    const actual = rawImports.map(importBoundaryKey).sort();
+    const expected = [...reviewedRawImportBoundaries].sort();
+
+    expect(actual).toEqual(expected);
+  });
+
+  it("keeps raw sender calls tied to reviewed import/call boundaries", () => {
+    const { findings } = currentSemanticBoundary();
+    const violations = findings.filter((finding) => !isReviewedCallBoundary(finding));
+
+    expect(violations).toEqual([]);
   });
 
   it("ignores comments and string literals that merely mention sender names", () => {
