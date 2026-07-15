@@ -62,6 +62,7 @@ export interface WorkflowDefinition {
 export interface WorkflowDefinitionResolutionInput {
   intent?: string;
   platform?: string;
+  goal?: string;
   key?: string;
   requestedScope?: string;
   definitions: WorkflowDefinition[];
@@ -168,33 +169,45 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
 }
 
 function terms(input: WorkflowDefinitionResolutionInput): string[] {
-  return [
+  const raw = [
     input.key,
     input.intent,
-    input.platform,
+    input.goal,
   ]
     .map((entry) => stringValue(entry)?.toLowerCase())
     .filter((entry): entry is string => !!entry);
+  return Array.from(new Set(raw.flatMap((entry) => entry
+    .replace(/[^a-z0-9_/\s]+/g, " ")
+    .split(/[\s_/]+/)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 3))));
 }
 
 function scoreDefinition(definition: WorkflowDefinition, input: WorkflowDefinitionResolutionInput, searchTerms: string[]): number {
+  if (input.key && definition.key !== input.key) return 0;
   let score = 0;
-  if (input.key && definition.key === input.key) score += 80;
+  let exactMatch = false;
+  if (input.key && definition.key === input.key) {
+    score += 100;
+    exactMatch = true;
+  }
   if (input.intent && definition.intent === input.intent) score += 50;
-  if (input.platform && definition.platform === input.platform) score += 30;
-  if (definition.status === "active") score += 10;
-  if (definition.status === "draft") score += 2;
+  if (input.intent && definition.intent === input.intent) exactMatch = true;
+  if (input.platform && definition.platform === input.platform) score += 10;
 
   const haystack = [
     definition.key,
     definition.intent,
-    definition.platform,
     definition.title,
     definition.goal,
     definition.allowedTools.join(" "),
     definition.requiredCapabilities.join(" "),
   ].join(" ").toLowerCase();
-  score += searchTerms.filter((term) => haystack.includes(term)).length * 4;
+  const termMatches = searchTerms.filter((term) => haystack.includes(term)).length;
+  if (!exactMatch && termMatches === 0) return 0;
+  score += termMatches * 12;
+  if (definition.status === "active") score += 10;
+  if (definition.status === "draft") score += 2;
   return score;
 }
 
@@ -313,6 +326,7 @@ export function buildWorkflowDefinitionResolution(input: WorkflowDefinitionResol
   return {
     intent: input.intent ?? null,
     platform: input.platform ?? null,
+    goal: input.goal ?? null,
     key: input.key ?? null,
     requestedScope: input.requestedScope ?? null,
     policy: registryPolicy(),

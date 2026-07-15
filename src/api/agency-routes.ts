@@ -2631,6 +2631,9 @@ router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Reques
   const platform = typeof req.query.platform === "string" && req.query.platform.trim().length > 0
     ? req.query.platform.trim()
     : undefined;
+  const goal = typeof req.query.goal === "string" && req.query.goal.trim().length > 0
+    ? req.query.goal.trim()
+    : undefined;
   const key = typeof req.query.key === "string" && req.query.key.trim().length > 0
     ? req.query.key.trim()
     : undefined;
@@ -2651,6 +2654,7 @@ router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Reques
   const resolution = buildWorkflowDefinitionResolution({
     intent,
     platform,
+    goal,
     key,
     requestedScope,
     definitions: definitions.rows.map(rowToWorkflowDefinition),
