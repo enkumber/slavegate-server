@@ -6,6 +6,7 @@
  */
 
 import { directWsServer } from "../ws/direct-ws.server";
+import { deviceExecutionArbiter } from "../modules/device-execution";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
 
 /**
@@ -15,9 +16,12 @@ import type { JobDispatchPayload } from "../../shared/protocol/messages";
 export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
   // DirectWs only
   if (directWsServer.isDeviceOnline(deviceId)) {
-    return directWsServer.sendJob(deviceId, payload);
+    const sent = directWsServer.sendJob(deviceId, payload);
+    observeJobDispatch(deviceId, payload, sent);
+    return sent;
   }
-  
+
+  observeJobDispatch(deviceId, payload, false);
   return false;
 }
 
@@ -40,4 +44,23 @@ export function isDeviceOnline(deviceId: string): boolean {
  */
 export function getOnlineDevices(): string[] {
   return directWsServer.getConnectedDeviceIds();
+}
+
+function observeJobDispatch(deviceId: string, payload: JobDispatchPayload, sent: boolean): void {
+  deviceExecutionArbiter.observeDispatch({
+    deviceId,
+    rootKind: "job",
+    externalId: payload.jobId,
+    requestKey: payload.jobId,
+    sent,
+    actor: "transport",
+    metadata: {
+      jobType: payload.type,
+      timeoutMs: payload.timeoutMs ?? null,
+      requiresRoot: payload.requiresRoot ?? false,
+      observeSource: "transport.sendJobToDevice",
+    },
+  }).catch((err) => {
+    console.error("[device-execution] observe job dispatch failed:", (err as Error).message);
+  });
 }

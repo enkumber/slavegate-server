@@ -10,6 +10,7 @@ import { Queue } from "bullmq";
 import { getRedisConnectionOptions } from "../../redis/client";
 import { getDb } from "../../db/client";
 import { isKillSwitchActive } from "../../api/routes";
+import { deviceExecutionArbiter } from "../device-execution";
 // NOTE: wsServer is intentionally NOT imported here — would create circular dependency.
 // Job dispatch to device WebSocket is handled by routes.ts (after calling dispatcher.dispatch()).
 // dispatcher only manages the DB + queue layer.
@@ -130,6 +131,20 @@ export class DispatcherService {
       [jobId, req.deviceId, req.type, JSON.stringify(req.params), timeoutMs]
     );
 
+    await deviceExecutionArbiter.observeAdmission({
+      deviceId: req.deviceId,
+      rootKind: "job",
+      externalId: jobId,
+      requestKey: req.workflowId ?? jobId,
+      actor: "dispatcher",
+      metadata: {
+        jobType: req.type,
+        workflowId: req.workflowId ?? null,
+        stepIndex: req.stepIndex ?? null,
+        observeSource: "dispatcher.dispatch",
+      },
+    });
+
     // 5. Audit log (dispatch record — result_status updated when JOB_RESULT arrives)
     // Skip if workflowId present — workflow executor writes its own audit log entry
     if (!req.workflowId) {
@@ -166,6 +181,15 @@ export class DispatcherService {
             "UPDATE command_log SET result_status = 'timeout' WHERE job_id = $1",
             [jobId]
           );
+          await deviceExecutionArbiter.markAmbiguous({
+            deviceId: req.deviceId,
+            rootKind: "job",
+            externalId: jobId,
+            reason: "job_timeout",
+            actor: "dispatcher_timeout",
+            state: "blocked",
+            metadata: { timeoutMs, jobType: req.type },
+          });
         }
       } catch (err) {
         console.error(`[dispatcher] Timeout handler error for job ${jobId}:`, (err as Error).message);
@@ -220,6 +244,19 @@ export class DispatcherService {
       "UPDATE command_log SET result_status = $1 WHERE job_id = $2",
       [payload.status, payload.jobId]
     );
+
+    await deviceExecutionArbiter.observeTerminal({
+      deviceId: payload.deviceId,
+      rootKind: "job",
+      externalId: payload.jobId,
+      status: payload.status,
+      actor: "dispatcher_result",
+      reason: payload.error ?? payload.status,
+      metadata: {
+        outputPresent: payload.output !== undefined,
+        durationMs: payload.durationMs,
+      },
+    });
   }
 
   async getJob(jobId: string): Promise<Job | null> {
@@ -262,10 +299,20 @@ export class DispatcherService {
     const result = await db.query(
       `UPDATE jobs SET status = 'cancelled', completed_at = NOW()
        WHERE id = $1 AND status IN ('pending')
-       RETURNING id`,
+       RETURNING id, device_id`,
       [jobId]
     );
-    return (result.rowCount ?? 0) > 0;
+    const row = result.rows[0] as { id: string; device_id: string } | undefined;
+    if (!row) return false;
+    await deviceExecutionArbiter.observeTerminal({
+      deviceId: row.device_id,
+      rootKind: "job",
+      externalId: row.id,
+      status: "cancelled",
+      actor: "dispatcher_cancel",
+      reason: "queued_job_cancelled",
+    });
+    return true;
   }
 
   async close(): Promise<void> {

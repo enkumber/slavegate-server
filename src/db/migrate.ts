@@ -4,9 +4,9 @@
  * Can be run standalone (npm run db:migrate) or called from bootstrap.
  *
  * Each migration is wrapped in its own transaction with ROLLBACK on failure.
- * Individual migration failures are LOGGED but DO NOT block server startup.
- * The server starts regardless — missing columns/tables will surface as
- * runtime errors only if the code that uses them is actually called.
+ * Most historical migration failures are LOGGED but DO NOT block server startup.
+ * PNQ-001 device execution queue migrations fail closed because the arbiter must
+ * never start with partial or missing queue authority.
  */
 
 import fs from "fs";
@@ -35,10 +35,15 @@ async function applyFile(client: any, filePath: string): Promise<{ ok: boolean; 
   }
 }
 
+function isFailClosedMigration(fileName: string): boolean {
+  return fileName.includes("device_execution_queue");
+}
+
 /**
  * Run all migrations. Called from bootstrap at server startup.
  * Searches for schema.sql and migrations/ in multiple locations.
- * NEVER throws — errors are logged and swallowed so the server always starts.
+ * Throws only for fail-closed migrations that protect the device execution
+ * arbiter; legacy migration behavior remains non-fatal.
  */
 export async function runMigrations(): Promise<void> {
   let db;
@@ -98,7 +103,12 @@ export async function runMigrations(): Promise<void> {
           let failed = 0;
           for (const file of files) {
             const result = await applyFile(client, path.join(migrationsDir, file));
-            if (!result.ok) failed++;
+            if (!result.ok) {
+              failed++;
+              if (isFailClosedMigration(file)) {
+                throw new Error(`[migrate] Fail-closed migration ${file} failed: ${result.error ?? "unknown error"}`);
+              }
+            }
           }
           if (failed > 0) {
             console.warn(`[migrate] ${failed}/${files.length} migrations had errors (server will still start)`);

@@ -31,6 +31,7 @@ import { canaryService } from "./modules/canary/canary.service";
 import { runMigrations } from "./db/migrate";
 import { startTaskRunner } from "./modules/task-runner";
 import { dashboardWorkflowWsServer } from "./modules/workflow-events/dashboard-ws.server";
+import { deviceExecutionArbiter } from "./modules/device-execution";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
@@ -57,6 +58,10 @@ async function bootstrap(): Promise<void> {
   // ─── Auto-migrate: ensure all schema + migrations are applied ─────────────
   await runMigrations();
   console.log("[server] Migrations applied.");
+
+  // PNQ-001 observe mode still requires authoritative queue schema.
+  await deviceExecutionArbiter.validateSchema();
+  console.log("[server] Device execution arbiter schema verified.");
 
   // ─── Verify Redis connection — required for BullMQ (dispatcher + workflows) ──
   {

@@ -26,6 +26,7 @@ import type { Duplex } from "stream";
 import { getDb } from "../db/client";
 import { scalabilityConfig } from "../config/scalability.config";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
+import { deviceExecutionArbiter, type DeviceExecutionRootKind } from "../modules/device-execution";
 import { devicesService } from "../modules/devices/devices.service";
 import { devicesConnected, deviceOfflineEvents, recordDeviceHealth } from "../modules/observability/metrics";
 import { alerting } from "../modules/observability/alerts";
@@ -36,6 +37,49 @@ import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/mes
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function observeRootDispatch(
+  rootKind: DeviceExecutionRootKind,
+  deviceId: string,
+  externalId: string,
+  sent: boolean,
+  metadata: Record<string, unknown>,
+): void {
+  if (!externalId || externalId === "?") return;
+  deviceExecutionArbiter.observeDispatch({
+    deviceId,
+    rootKind,
+    externalId,
+    requestKey: typeof metadata.workflowId === "string" ? metadata.workflowId : externalId,
+    sent,
+    actor: "direct_ws",
+    metadata,
+  }).catch((err) => {
+    console.error("[device-execution] observe direct-ws dispatch failed:", (err as Error).message);
+  });
+}
+
+function observeRootTerminal(
+  rootKind: DeviceExecutionRootKind,
+  deviceId: string,
+  externalId: string | undefined,
+  status: string,
+  reason: string | undefined,
+  metadata: Record<string, unknown>,
+): void {
+  if (!externalId) return;
+  deviceExecutionArbiter.observeTerminal({
+    deviceId,
+    rootKind,
+    externalId,
+    status,
+    actor: "direct_ws",
+    reason: reason ?? status,
+    metadata,
+  }).catch((err) => {
+    console.error("[device-execution] observe direct-ws terminal failed:", (err as Error).message);
+  });
 }
 
 export function mergeWorkflowStatusVariables(
@@ -229,11 +273,22 @@ export class DirectWsServer {
    */
   sendBatch(deviceId: string, batchPayload: Record<string, unknown>): boolean {
     const conn = this.connections.get(deviceId);
-    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+    const batchId = (batchPayload.batchId as string) ?? "?";
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
+      observeRootDispatch("batch", deviceId, batchId, false, {
+        workflowId: (batchPayload.workflowId as string | undefined) ?? null,
+        observeSource: "directWsServer.sendBatch",
+      });
+      return false;
+    }
 
     this._send(conn.ws, batchPayload);
-    const batchId = (batchPayload.batchId as string) ?? "?";
     console.log(`[direct-ws] sendBatch: device=${deviceId.slice(0,8)} batchId=${batchId.slice(0,8)} steps=${(batchPayload.steps as unknown[])?.length ?? 0}`);
+    observeRootDispatch("batch", deviceId, batchId, true, {
+      workflowId: (batchPayload.workflowId as string | undefined) ?? null,
+      steps: (batchPayload.steps as unknown[])?.length ?? 0,
+      observeSource: "directWsServer.sendBatch",
+    });
     return true;
   }
 
@@ -248,7 +303,15 @@ export class DirectWsServer {
     workflowId?: string,
   ): boolean {
     const conn = this.connections.get(deviceId);
-    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
+      if (workflowId) {
+        observeRootDispatch("edge_workflow", deviceId, workflowId, false, {
+          templateId: (template.id as string | undefined) ?? null,
+          observeSource: "directWsServer.sendWorkflowStart",
+        });
+      }
+      return false;
+    }
 
     this._send(conn.ws, {
       ...template,
@@ -259,6 +322,12 @@ export class DirectWsServer {
       variables: variables ?? {},
     });
     console.log(`[direct-ws] sendWorkflowStart: device=${deviceId.slice(0,8)} template=${(template.id as string)?.slice(0,20)} workflow=${workflowId?.slice(0,8) ?? 'none'}`);
+    if (workflowId) {
+      observeRootDispatch("edge_workflow", deviceId, workflowId, true, {
+        templateId: (template.id as string | undefined) ?? null,
+        observeSource: "directWsServer.sendWorkflowStart",
+      });
+    }
     return true;
   }
 
@@ -740,6 +809,13 @@ export class DirectWsServer {
       console.warn(`[direct-ws] BATCH_RESULT for unknown batchId=${batchId.slice(0,8)} — no pending awaiter`);
     }
 
+    observeRootTerminal("batch", conn.deviceId, batchId, status, msg.error as string | undefined, {
+      workflowId: (msg.workflowId as string | undefined) ?? null,
+      totalDurationMs,
+      resultCount: results.length,
+      observeSource: "directWsServer.handleBatchResult",
+    });
+
     // ACK
     this._send(conn.ws, { type: "ACK", ref: batchId });
   }
@@ -842,6 +918,14 @@ export class DirectWsServer {
           source: "edge",
         },
       });
+
+      if (status === "completed" || status === "failed" || status === "cancelled") {
+        observeRootTerminal("edge_workflow", conn.deviceId, workflowId, status, error, {
+          step: typeof step === "number" ? step : null,
+          total: typeof total === "number" ? total : null,
+          observeSource: "directWsServer.handleWorkflowStatus",
+        });
+      }
     }
 
     // Update DB (fire-and-forget)
