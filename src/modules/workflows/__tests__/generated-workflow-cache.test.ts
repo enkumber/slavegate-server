@@ -332,6 +332,84 @@ describe("generated workflow plan cache service", () => {
     expect(values).toEqual([row.cache_key, ["promoted", "candidate"]]);
   });
 
+  it("auto-promotes a successful candidate artifact and records learning metadata", async () => {
+    const row = cacheRow({
+      artifact_state: "promoted",
+      source_metadata: {
+        source: "dashboard_human",
+        workflowLearning: {
+          successCount: 1,
+          failureCount: 0,
+          lastOutcome: "success",
+        },
+      },
+    });
+    const service = new WorkflowService();
+    const query = mockDbQuery([row]);
+
+    const result = await service.recordGeneratedPlanCacheOutcome({
+      cacheKey: row.cache_key as string,
+      success: true,
+      taskId: "22222222-2222-4222-8222-222222222222",
+      workflowId: "33333333-3333-4333-8333-333333333333",
+      agencyWorkflowRunId: "44444444-4444-4444-8444-444444444444",
+      stepsCompleted: 5,
+      totalSteps: 5,
+    });
+
+    expect(result?.artifactState).toBe("promoted");
+    const [sql, values] = query.mock.calls[0];
+    expect(sql).toContain("recordGeneratedPlanCacheOutcome");
+    expect(sql).toContain("WHEN $2::int = 1");
+    expect(sql).toContain("THEN 'promoted'");
+    expect(sql).toContain("workflowLearning");
+    expect(values).toEqual([
+      row.cache_key,
+      1,
+      0,
+      null,
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+      "44444444-4444-4444-8444-444444444444",
+      5,
+      5,
+    ]);
+  });
+
+  it("quarantines a failed promoted artifact so it cannot be reused blindly", async () => {
+    const row = cacheRow({
+      artifact_state: "quarantined",
+      source_metadata: {
+        source: "dashboard_human",
+        workflowLearning: {
+          successCount: 2,
+          failureCount: 1,
+          lastOutcome: "failure",
+          decision: "quarantine_promoted_after_failure",
+        },
+      },
+    });
+    const service = new WorkflowService();
+    const query = mockDbQuery([row]);
+
+    const result = await service.recordGeneratedPlanCacheOutcome({
+      cacheKey: row.cache_key as string,
+      success: false,
+      reason: "RECOVERY_BUDGET_EXCEEDED",
+      taskId: "22222222-2222-4222-8222-222222222222",
+      stepsCompleted: 1,
+      totalSteps: 5,
+    });
+
+    expect(result?.artifactState).toBe("quarantined");
+    const [sql, values] = query.mock.calls[0];
+    expect(sql).toContain("WHEN $3::int = 1 AND artifact_state = 'promoted'");
+    expect(sql).toContain("THEN 'quarantined'");
+    expect(values[1]).toBe(0);
+    expect(values[2]).toBe(1);
+    expect(values[3]).toBe("RECOVERY_BUDGET_EXCEEDED");
+  });
+
   it("supports execute-from-cache semantics with no regenerated workflow payload", async () => {
     const row = cacheRow();
     const cachedWorkflow = row.workflow as WorkflowTemplate;

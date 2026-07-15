@@ -398,6 +398,26 @@ async function completeAgencyWorkflowRun(task: TaskRow, result: TaskRunnerResult
   );
 }
 
+async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunnerResult): Promise<void> {
+  if (task.routine !== GENERATED_WORKFLOW_ROUTINE) return;
+  const cacheKey = result.generatedWorkflow?.cacheKey;
+  if (!cacheKey) return;
+  try {
+    await workflowService.recordGeneratedPlanCacheOutcome({
+      cacheKey,
+      success: result.success,
+      reason: result.success ? null : result.failReason ?? result.generatedWorkflow?.failureCode ?? "Unknown error",
+      taskId: task.id,
+      workflowId: result.generatedWorkflow?.workflowId ?? null,
+      agencyWorkflowRunId: agencyWorkflowRunIdFromTask(task),
+      stepsCompleted: result.stepsCompleted ?? null,
+      totalSteps: result.totalSteps ?? null,
+    });
+  } catch (err) {
+    console.error("[task-runner] generated workflow learning update failed:", err);
+  }
+}
+
 async function failAgencyWorkflowRunWithError(task: TaskRow, error: Error): Promise<void> {
   const runId = agencyWorkflowRunIdFromTask(task);
   if (!runId) return;
@@ -644,6 +664,7 @@ async function executeTask(task: TaskRow): Promise<void> {
         WHERE id = $1
       `, [taskId, JSON.stringify(resultJson)]);
       await completeAgencyWorkflowRun(task, result);
+      await recordGeneratedWorkflowLearning(task, result);
       publishGeneratedWorkflowTaskEvent(task, "task_completed", {
         workflowId: result.generatedWorkflow?.workflowId,
         stepsCompleted: result.stepsCompleted,
@@ -667,6 +688,7 @@ async function executeTask(task: TaskRow): Promise<void> {
         WHERE id = $1
       `, [taskId, JSON.stringify(resultJson), result.failReason || "Unknown error", newRetryCount]);
       await completeAgencyWorkflowRun(task, result);
+      await recordGeneratedWorkflowLearning(task, result);
       publishGeneratedWorkflowTaskEvent(task, "task_failed", {
         workflowId: result.generatedWorkflow?.workflowId,
         stepsCompleted: result.stepsCompleted,
@@ -1163,6 +1185,7 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
       ]
     );
     await completeAgencyWorkflowRun(task, taskResult);
+    await recordGeneratedWorkflowLearning(task, taskResult);
     publishGeneratedWorkflowTaskEvent(task, taskResult.success ? "task_completed" : "task_failed", {
       workflowId: taskResult.generatedWorkflow?.workflowId,
       stepsCompleted: taskResult.stepsCompleted,

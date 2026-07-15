@@ -81,6 +81,17 @@ export interface GeneratedWorkflowCacheLookupOptions {
   includeCandidate?: boolean;
 }
 
+export interface GeneratedWorkflowOutcomeInput {
+  cacheKey: string;
+  success: boolean;
+  reason?: string | null;
+  taskId?: string | null;
+  workflowId?: string | null;
+  agencyWorkflowRunId?: string | null;
+  stepsCompleted?: number | null;
+  totalSteps?: number | null;
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export class WorkflowService {
@@ -426,6 +437,66 @@ export class WorkflowService {
        )
        RETURNING *`,
       [requestKey, allowedArtifactStates(options)]
+    );
+    if (result.rows.length === 0) return null;
+    return rowToGeneratedPlanCache(result.rows[0]);
+  }
+
+  async recordGeneratedPlanCacheOutcome(
+    input: GeneratedWorkflowOutcomeInput
+  ): Promise<GeneratedWorkflowPlanCacheRecord | null> {
+    const db = getDb();
+    const successIncrement = input.success ? 1 : 0;
+    const failureIncrement = input.success ? 0 : 1;
+    const result = await db.query(
+      `/* recordGeneratedPlanCacheOutcome */
+       UPDATE generated_workflow_plan_cache
+       SET artifact_state = CASE
+             WHEN $2::int = 1
+              AND artifact_state IN ('candidate', 'promoted')
+              AND COALESCE(compiled_plan #>> '{llmBudget,happyPathRequests}', '') = '0'
+               THEN 'promoted'
+             WHEN $3::int = 1 AND artifact_state = 'candidate'
+               THEN 'failed'
+             WHEN $3::int = 1 AND artifact_state = 'promoted'
+               THEN 'quarantined'
+             ELSE artifact_state
+           END,
+           source_metadata = source_metadata || jsonb_build_object(
+             'workflowLearning',
+             jsonb_build_object(
+               'successCount', COALESCE((source_metadata #>> '{workflowLearning,successCount}')::int, 0) + $2::int,
+               'failureCount', COALESCE((source_metadata #>> '{workflowLearning,failureCount}')::int, 0) + $3::int,
+               'lastOutcome', CASE WHEN $2::int = 1 THEN 'success' ELSE 'failure' END,
+               'lastReason', $4::text,
+               'lastTaskId', $5::text,
+               'lastWorkflowId', $6::text,
+               'lastAgencyWorkflowRunId', $7::text,
+               'lastStepsCompleted', $8::int,
+               'lastTotalSteps', $9::int,
+               'lastEvaluatedAt', NOW(),
+               'decision', CASE
+                 WHEN $2::int = 1 THEN 'auto_promote_or_keep'
+                 WHEN artifact_state = 'promoted' THEN 'quarantine_promoted_after_failure'
+                 WHEN artifact_state = 'candidate' THEN 'mark_candidate_failed'
+                 ELSE 'record_learning_only'
+               END
+             )
+           ),
+           updated_at = NOW()
+       WHERE cache_key = $1
+       RETURNING *`,
+      [
+        input.cacheKey,
+        successIncrement,
+        failureIncrement,
+        input.reason ?? null,
+        input.taskId ?? null,
+        input.workflowId ?? null,
+        input.agencyWorkflowRunId ?? null,
+        input.stepsCompleted ?? null,
+        input.totalSteps ?? null,
+      ]
     );
     if (result.rows.length === 0) return null;
     return rowToGeneratedPlanCache(result.rows[0]);
