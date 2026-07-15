@@ -19,6 +19,7 @@ vi.mock("../../../db/client", () => ({
 
 vi.mock("../../../transport/transport", () => ({
   sendJobToDevice: vi.fn().mockReturnValue(true),
+  sendDeviceExecutionJobToDevice: vi.fn().mockResolvedValue({ sent: true }),
   isDeviceOnline: vi.fn().mockReturnValue(true),
   waitForResult: vi.fn().mockResolvedValue({
     output: { image_base64: "fake_base64", tree: [] },
@@ -35,7 +36,12 @@ vi.mock("../../../utils/llm", () => ({
 
 import { attemptRecovery, resetRecoveryCounts } from "../recovery.service";
 import { llmJson } from "../../../utils/llm";
-import { isDeviceOnline, sendJobToDevice, waitForResult } from "../../../transport/transport";
+import {
+  isDeviceOnline,
+  sendDeviceExecutionJobToDevice,
+  sendJobToDevice,
+  waitForResult,
+} from "../../../transport/transport";
 import type { CompiledWorkflow, CompiledStep } from "../types";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -96,6 +102,7 @@ describe("attemptRecovery", () => {
     vi.mocked(llmJson).mockResolvedValue({ type: "retry_step" });
     vi.mocked(isDeviceOnline).mockReturnValue(true);
     vi.mocked(sendJobToDevice).mockReturnValue(true);
+    vi.mocked(sendDeviceExecutionJobToDevice).mockResolvedValue({ sent: true });
     vi.mocked(waitForResult).mockResolvedValue({
       output: { image_base64: "fake_base64", tree: [] },
     });
@@ -223,9 +230,10 @@ describe("attemptRecovery", () => {
       const result = await attemptRecovery(ctx, 0, "popup appeared");
       expect(result).toBe(true);
       // Should have sent tap command to dismiss popup
-      expect(sendJobToDevice).toHaveBeenCalledWith(
+      expect(sendDeviceExecutionJobToDevice).toHaveBeenCalledWith(
         "device-1",
         expect.objectContaining({ type: "tap" }),
+        expect.objectContaining({ boundary: "recovery_child" }),
       );
     });
 
@@ -239,7 +247,7 @@ describe("attemptRecovery", () => {
       const result = await attemptRecovery(ctx, 0, "wrong page");
       expect(result).toBe(true);
       // Should have sent 2 press_key "back" commands
-      const backCalls = vi.mocked(sendJobToDevice).mock.calls.filter(
+      const backCalls = vi.mocked(sendDeviceExecutionJobToDevice).mock.calls.filter(
         (c: any[]) => c[1]?.type === "press_key",
       );
       expect(backCalls).toHaveLength(2);

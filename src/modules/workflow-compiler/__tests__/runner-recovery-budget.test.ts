@@ -6,6 +6,7 @@ vi.mock("uuid", () => ({
 
 vi.mock("../../../transport/transport", () => ({
   sendJobToDevice: vi.fn().mockReturnValue(true),
+  sendDeviceExecutionJobToDevice: vi.fn().mockResolvedValue({ sent: true }),
   isDeviceOnline: vi.fn().mockReturnValue(true),
   waitForResult: vi.fn().mockResolvedValue({ status: "completed", output: {} }),
 }));
