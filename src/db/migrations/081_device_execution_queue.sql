@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS device_execution_roots (
   owner_generation      BIGINT NOT NULL DEFAULT 0,
   observe_mode          BOOLEAN NOT NULL DEFAULT TRUE,
   claimed_at            TIMESTAMPTZ,
+  dispatching_at        TIMESTAMPTZ,
   dispatched_at         TIMESTAMPTZ,
   terminal_at           TIMESTAMPTZ,
   reconciliation_reason TEXT,
@@ -35,6 +36,7 @@ ALTER TABLE device_execution_roots
   ADD COLUMN IF NOT EXISTS owner_generation BIGINT NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS observe_mode BOOLEAN NOT NULL DEFAULT TRUE,
   ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS dispatching_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS terminal_at TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS reconciliation_reason TEXT,
@@ -55,8 +57,10 @@ END $$;
 DO $$
 BEGIN
   ALTER TABLE device_execution_roots
+    DROP CONSTRAINT IF EXISTS device_execution_roots_state_check;
+  ALTER TABLE device_execution_roots
     ADD CONSTRAINT device_execution_roots_state_check
-    CHECK (state IN ('queued', 'claimed', 'dispatched', 'completed', 'failed', 'cancelled', 'reconciling', 'blocked'));
+    CHECK (state IN ('queued', 'claimed', 'dispatching', 'dispatched', 'completed', 'failed', 'cancelled', 'reconciling', 'blocked'));
 EXCEPTION
   WHEN duplicate_object THEN NULL;
 END $$;
@@ -74,9 +78,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_device_execution_roots_external
   ON device_execution_roots(root_kind, external_id)
   WHERE external_id IS NOT NULL;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_device_execution_active_slot
+DROP INDEX IF EXISTS idx_device_execution_active_slot;
+CREATE UNIQUE INDEX idx_device_execution_active_slot
   ON device_execution_roots(device_id)
-  WHERE state IN ('claimed', 'dispatched', 'reconciling', 'blocked');
+  WHERE state IN ('claimed', 'dispatching', 'dispatched', 'reconciling', 'blocked');
 
 CREATE INDEX IF NOT EXISTS idx_device_execution_roots_fifo
   ON device_execution_roots(device_id, fifo_sequence)
@@ -84,6 +89,138 @@ CREATE INDEX IF NOT EXISTS idx_device_execution_roots_fifo
 
 CREATE INDEX IF NOT EXISTS idx_device_execution_roots_device_created
   ON device_execution_roots(device_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS device_execution_operations (
+  id               BIGSERIAL PRIMARY KEY,
+  root_id          UUID NOT NULL REFERENCES device_execution_roots(id) ON DELETE CASCADE,
+  device_id        UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  root_kind        TEXT NOT NULL,
+  operation_kind   TEXT NOT NULL,
+  operation_id     TEXT NOT NULL,
+  owner_generation BIGINT NOT NULL DEFAULT 0,
+  state            TEXT NOT NULL DEFAULT 'registered',
+  egress_lane      TEXT NOT NULL DEFAULT 'device_execution',
+  wire_type        TEXT,
+  wire_handle      JSONB NOT NULL DEFAULT '{}'::jsonb,
+  metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  dispatching_at   TIMESTAMPTZ,
+  dispatched_at    TIMESTAMPTZ,
+  terminal_at      TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE device_execution_operations
+  ADD COLUMN IF NOT EXISTS id BIGSERIAL,
+  ADD COLUMN IF NOT EXISTS root_id UUID,
+  ADD COLUMN IF NOT EXISTS device_id UUID,
+  ADD COLUMN IF NOT EXISTS root_kind TEXT,
+  ADD COLUMN IF NOT EXISTS operation_kind TEXT,
+  ADD COLUMN IF NOT EXISTS operation_id TEXT,
+  ADD COLUMN IF NOT EXISTS owner_generation BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'registered',
+  ADD COLUMN IF NOT EXISTS egress_lane TEXT NOT NULL DEFAULT 'device_execution',
+  ADD COLUMN IF NOT EXISTS wire_type TEXT,
+  ADD COLUMN IF NOT EXISTS wire_handle JSONB NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN IF NOT EXISTS dispatching_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS terminal_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'device_execution_operations_root_id_fkey'
+      AND conrelid = 'device_execution_operations'::regclass
+  ) THEN
+    ALTER TABLE device_execution_operations
+      ADD CONSTRAINT device_execution_operations_root_id_fkey
+      FOREIGN KEY (root_id) REFERENCES device_execution_roots(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'device_execution_operations_device_id_fkey'
+      AND conrelid = 'device_execution_operations'::regclass
+  ) THEN
+    ALTER TABLE device_execution_operations
+      ADD CONSTRAINT device_execution_operations_device_id_fkey
+      FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  ALTER TABLE device_execution_operations
+    DROP CONSTRAINT IF EXISTS device_execution_operations_root_kind_check;
+  ALTER TABLE device_execution_operations
+    ADD CONSTRAINT device_execution_operations_root_kind_check
+    CHECK (root_kind IN ('job', 'batch', 'edge_workflow', 'server_workflow', 'control', 'unknown'));
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER TABLE device_execution_operations
+    DROP CONSTRAINT IF EXISTS device_execution_operations_operation_kind_check;
+  ALTER TABLE device_execution_operations
+    ADD CONSTRAINT device_execution_operations_operation_kind_check
+    CHECK (operation_kind IN ('job', 'batch', 'workflow', 'control', 'admin'));
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER TABLE device_execution_operations
+    DROP CONSTRAINT IF EXISTS device_execution_operations_state_check;
+  ALTER TABLE device_execution_operations
+    ADD CONSTRAINT device_execution_operations_state_check
+    CHECK (state IN ('registered', 'dispatching', 'dispatched', 'completed', 'failed', 'cancelled', 'reconciling', 'blocked', 'rejected'));
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER TABLE device_execution_operations
+    DROP CONSTRAINT IF EXISTS device_execution_operations_egress_lane_check;
+  ALTER TABLE device_execution_operations
+    ADD CONSTRAINT device_execution_operations_egress_lane_check
+    CHECK (egress_lane IN ('device_execution', 'control', 'admin'));
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  ALTER TABLE device_execution_operations
+    DROP CONSTRAINT IF EXISTS device_execution_operations_owner_generation_check;
+  ALTER TABLE device_execution_operations
+    ADD CONSTRAINT device_execution_operations_owner_generation_check
+    CHECK (owner_generation >= 0);
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_device_execution_operations_identity
+  ON device_execution_operations(operation_kind, operation_id);
+
+CREATE INDEX IF NOT EXISTS idx_device_execution_operations_root
+  ON device_execution_operations(root_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_device_execution_operations_device
+  ON device_execution_operations(device_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_device_execution_operations_state
+  ON device_execution_operations(state, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS device_execution_events (
   id             BIGSERIAL PRIMARY KEY,

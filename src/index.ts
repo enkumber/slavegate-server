@@ -62,6 +62,10 @@ async function bootstrap(): Promise<void> {
   // PNQ-001 observe mode still requires authoritative queue schema.
   await deviceExecutionArbiter.validateSchema();
   console.log("[server] Device execution arbiter schema verified.");
+  const deviceExecutionReconciliation = await deviceExecutionArbiter.reconcileInFlightAtStartup();
+  console.log(
+    `[server] Device execution startup reconciliation: reconciled=${deviceExecutionReconciliation.reconciledRoots} ambiguous=${deviceExecutionReconciliation.activeAmbiguousRoots}.`
+  );
 
   // ─── Verify Redis connection — required for BullMQ (dispatcher + workflows) ──
   {
