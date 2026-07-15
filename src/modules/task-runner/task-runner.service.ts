@@ -788,7 +788,9 @@ async function executeTask(task: TaskRow): Promise<void> {
         )
       : { rows: [] };
     const taskPlatform = typeof task.params?.platform === "string" ? task.params.platform : null;
-    const platform = accountResult.rows[0]?.platform || taskPlatform || "instagram";
+    const platform = task.routine === GENERATED_WORKFLOW_ROUTINE
+      ? taskPlatform || accountResult.rows[0]?.platform || "instagram"
+      : accountResult.rows[0]?.platform || taskPlatform || "instagram";
     const accountClientId = accountResult.rows[0]?.client_id ?? null;
     
     // Route by task type
@@ -1306,7 +1308,9 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
       )
     : { rows: [] };
   const taskPlatform = typeof task.params?.platform === "string" ? task.params.platform : null;
-  const platform = accountResult.rows[0]?.platform || taskPlatform || "instagram";
+  const platform = task.routine === GENERATED_WORKFLOW_ROUTINE
+    ? taskPlatform || accountResult.rows[0]?.platform || "instagram"
+    : accountResult.rows[0]?.platform || taskPlatform || "instagram";
   const accountClientId = accountResult.rows[0]?.client_id ?? null;
   
   deviceLocks.set(task.device_id, true);

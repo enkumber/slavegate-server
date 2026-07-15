@@ -774,6 +774,44 @@ describe("dashboard human workflow routes", () => {
     );
   });
 
+  it("treats explicit app intents as device-level when selected account is for a different platform", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [targetRow({
+        account_username: "reddit_user",
+        account_platform: "reddit",
+      })],
+    });
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.compileJobService.getByRequestKey.mockResolvedValueOnce(null);
+    mocks.compileJobService.createOrGet.mockResolvedValueOnce(compileJobRecord({
+      requestKey: requestKey(OPEN_INSTAGRAM_INTENT),
+      intent: OPEN_INSTAGRAM_INTENT,
+      platform: "instagram",
+      accountId: null,
+    }));
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: OPEN_INSTAGRAM_INTENT,
+    });
+
+    expect(response.status).toBe(202);
+    expect(response.body.data).toMatchObject({
+      status: "compiling",
+      requestKey: requestKey(OPEN_INSTAGRAM_INTENT),
+      source: "llm",
+    });
+    expect(mocks.compileJobService.createOrGet).toHaveBeenCalledWith(expect.objectContaining({
+      requestKey: requestKey(OPEN_INSTAGRAM_INTENT),
+      deviceId: DEVICE_ID,
+      accountId: ACCOUNT_ID,
+      intent: OPEN_INSTAGRAM_INTENT,
+      platform: "instagram",
+    }));
+    expect(mocks.compileJobService.runInProcess).toHaveBeenCalled();
+  });
+
   it("does not classify multi-step Reddit comment intents as simple open-app shortcuts", async () => {
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
     mocks.llmJson.mockResolvedValueOnce({
@@ -1969,6 +2007,7 @@ describe("dashboard human workflow routes", () => {
     const taskInsert = mocks.client.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO tasks"));
     expect(taskInsert).toBeDefined();
     expect(taskInsert?.[1][2]).toBe(JSON.stringify({
+      cacheKey: cacheKey(),
       requestKey: requestKey(),
       clientId: CLIENT_ID,
       platform: "reddit",
@@ -1987,6 +2026,7 @@ describe("dashboard human workflow routes", () => {
       INTENT,
       "read_only",
       requestKey(),
+      cacheKey(),
       "dashboard_human_reddit_preview_v1",
       "1.0.0",
       "a".repeat(64),
@@ -2025,6 +2065,7 @@ describe("dashboard human workflow routes", () => {
 
     const taskInsert = mocks.client.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO tasks"));
     expect(taskInsert?.[1][2]).toBe(JSON.stringify({
+      cacheKey: cacheKey(),
       requestKey: requestKey(),
       clientId: null,
       platform: "reddit",
@@ -2043,6 +2084,7 @@ describe("dashboard human workflow routes", () => {
       INTENT,
       "read_only",
       requestKey(),
+      cacheKey(),
       "dashboard_human_reddit_preview_v1",
       "1.0.0",
       "a".repeat(64),

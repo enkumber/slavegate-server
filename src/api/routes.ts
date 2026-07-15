@@ -251,7 +251,7 @@ async function queueHumanAgencyWorkflowRun(input: {
         `INSERT INTO agency_workflow_runs
            (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
             canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, status, context)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, 'queued', $11)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued', $12)
          RETURNING id`,
         [
           input.target.client_id,
@@ -261,6 +261,7 @@ async function queueHumanAgencyWorkflowRun(input: {
           input.intent,
           safetyClass,
           input.requestKey,
+          cached.cache_key,
           cached.canonical_workflow_id,
           cached.canonical_workflow_version,
           cached.compiled_plan_hash,
@@ -270,6 +271,7 @@ async function queueHumanAgencyWorkflowRun(input: {
       runId = runResult.rows[0].id;
     }
     const taskParams: Record<string, unknown> = {
+      cacheKey: cached.cache_key,
       requestKey: input.requestKey,
       clientId: input.target.client_id,
       platform: input.target.account_platform,

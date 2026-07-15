@@ -168,6 +168,11 @@ function inferHumanWorkflowPlatform(goal: string): string {
   return "android";
 }
 
+function explicitHumanWorkflowPlatform(goal: string): string | null {
+  const platform = inferHumanWorkflowPlatform(goal);
+  return platform === "android" ? null : platform;
+}
+
 function humanWorkflowAsyncCompileTimeoutMs(): number {
   const configured = Number.parseInt(process.env.HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS ?? "", 10);
   const requested = Number.isFinite(configured) && configured > 0
@@ -830,6 +835,18 @@ export class HumanWorkflowCompilerService {
     if (!row || !row.account_id) return null;
     if (row.account_device_id !== row.device_id) {
       throw Object.assign(new Error("Account is not bound to selected device"), { status: 400, code: "ACCOUNT_DEVICE_MISMATCH" });
+    }
+    const explicitPlatform = intent ? explicitHumanWorkflowPlatform(intent) : null;
+    if (explicitPlatform && explicitPlatform !== String(row.account_platform).toLowerCase()) {
+      return {
+        device_id: row.device_id as string,
+        device_model: (row.device_model as string | null) ?? null,
+        device_name: (row.device_name as string | null) ?? null,
+        account_id: null,
+        account_username: null,
+        account_platform: explicitPlatform,
+        client_id: null,
+      };
     }
     return {
       device_id: row.device_id as string,
