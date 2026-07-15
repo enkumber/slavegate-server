@@ -1841,7 +1841,7 @@ export function setWsServerRef(srv: import("../ws/ws.server").WsServer) { _wsSer
  */
 type TransportHandle = {
   isDeviceOnline: (id: string) => boolean;
-  sendJob: (id: string, payload: import("../../shared/protocol/messages").JobDispatchPayload) => boolean;
+  sendJob: (id: string, payload: import("../../shared/protocol/messages").JobDispatchPayload) => Promise<boolean>;
 };
 
 function getActiveTransport(_deviceId?: string): TransportHandle {

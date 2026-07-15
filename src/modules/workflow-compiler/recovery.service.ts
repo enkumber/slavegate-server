@@ -129,7 +129,7 @@ export function resetRecoveryCounts(workflowId: string): void {
 async function captureScreenshot(deviceId: string): Promise<string | undefined> {
   try {
     const jobId = uuidv4();
-    const sent = sendJobToDevice(deviceId, {
+    const sent = await sendJobToDevice(deviceId, {
       jobId,
       type: "screenshot",
       params: {},
@@ -147,7 +147,7 @@ async function captureScreenshot(deviceId: string): Promise<string | undefined> 
 async function captureUiTreeForRecovery(deviceId: string): Promise<UiTreeNode[]> {
   try {
     const jobId = uuidv4();
-    const sent = sendJobToDevice(deviceId, {
+    const sent = await sendJobToDevice(deviceId, {
       jobId,
       type: "ui_tree_dump",
       params: {},
@@ -256,7 +256,7 @@ async function executeRecoveryAction(
         if (!coords) continue;
 
         const jobId = uuidv4();
-        const sent = sendJobToDevice(deviceId, {
+        const sent = await sendJobToDevice(deviceId, {
           jobId,
           type: "tap",
           params: { x: coords.x, y: coords.y },
@@ -274,7 +274,7 @@ async function executeRecoveryAction(
       // Press back N times
       for (let i = 0; i < action.backSteps; i++) {
         const jobId = uuidv4();
-        const sent = sendJobToDevice(deviceId, {
+        const sent = await sendJobToDevice(deviceId, {
           jobId,
           type: "press_key",
           params: { key: "back" },

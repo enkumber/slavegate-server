@@ -28,7 +28,7 @@ async function runPreWorkflowSteps(
         params: step.params ?? step,
         timeoutMs: 15_000,
       });
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: step.type as any,
         params: step.params ?? {},
@@ -142,7 +142,7 @@ export async function dispatchWorkflow(params: DispatchParams) {
   });
 
   // 3. Send remaining workflow to device via WebSocket
-  const sent = sendJobToDevice(deviceId, {
+  const sent = await sendJobToDevice(deviceId, {
     jobId: job.jobId,
     type: "workflow_execute" as any,
     params: { workflow: workflowWithRemaining },

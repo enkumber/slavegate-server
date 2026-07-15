@@ -53,7 +53,7 @@ async function dispatchAndAwaitRefresh(
     timeoutMs,
   });
   const resultPromise = waitForResult(job.jobId, timeoutMs);
-  const sent = sendJobToDevice(deviceId, {
+  const sent = await sendJobToDevice(deviceId, {
     jobId: job.jobId,
     type: type as any,
     params,

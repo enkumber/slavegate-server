@@ -266,7 +266,7 @@ async function dispatchGeneratedWorkflowProbe(
       workflowId,
       stepIndex,
     });
-    const sent = sendJobToDevice(deviceId, { jobId, type, params: {}, timeoutMs });
+    const sent = await sendJobToDevice(deviceId, { jobId, type, params: {}, timeoutMs });
     if (!sent) return null;
     return awaitJobResult(jobId, timeoutMs + 5_000);
   } catch {
@@ -575,7 +575,14 @@ export function startWorkflowWorker(): Worker {
     scalabilityConfig.workflowQueueName,
     async (job) => {
       const { workflowId } = job.data as { workflowId: string };
-      await runWorkflow(workflowId, job);
+      const workflow = await workflowService.get(workflowId);
+      if (!workflow?.deviceId) throw new Error(`Workflow ${workflowId} has no deviceId`);
+      await deviceExecutionLeaseService.runWithLease(
+        workflow.deviceId,
+        { ownerId: workflowId, ingress: "workflow.executor", requestKey: workflowId, attempt: job.attemptsMade + 1 },
+        async () => runWorkflow(workflowId, job),
+        scalabilityConfig.workerLockDuration,
+      );
     },
     {
       connection:    getRedisConnectionOptions(),
@@ -936,7 +943,7 @@ async function executeSkillActionStep(
         workflowId,
         stepIndex,
       });
-      const sent = sendJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs });
+      const sent = await sendJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs });
       if (!sent) throw new Error("Failed to send job to device");
       return awaitJobResult(jobId, dispatchedTimeoutMs + 5_000);
     },
@@ -1694,10 +1701,10 @@ export async function executeBatchSteps(
     },
   };
 
-  const lease = deviceExecutionLeaseService.tryAcquire(deviceId, { ownerId: workflowId, ingress: "workflow.executor.batch", requestKey: batchId });
+  const lease = deviceExecutionLeaseService.activeContext() ?? await deviceExecutionLeaseService.acquire(deviceId, { ownerId: workflowId, ingress: "workflow.executor.batch", requestKey: batchId });
   const sent = directWsServer.sendBatch(deviceId, batchPayload, lease);
   if (!sent) {
-    deviceExecutionLeaseService.release(lease);
+    await deviceExecutionLeaseService.releaseTerminal(lease);
     throw new Error(`Device ${deviceId} offline — cannot send batch ${batchId}`);
   }
 

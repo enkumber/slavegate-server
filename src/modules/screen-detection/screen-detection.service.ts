@@ -356,7 +356,7 @@ export class ScreenDetectionService {
   private async fetchUiTree(deviceId: string, timeoutMs: number): Promise<UiNode[]> {
     const jobId = uuidv4();
 
-    const result = await new Promise<UiNode[] | null>((resolve) => {
+    const result = await new Promise<UiNode[] | null>(async (resolve) => {
       const timer = setTimeout(() => {
         pendingUiTree.delete(jobId);
         resolve(null);
@@ -364,7 +364,7 @@ export class ScreenDetectionService {
       pendingUiTree.set(jobId, { resolve, timer });
 
       // Send job to device via DirectWS transport
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: 'ui_tree_dump' as import('../../../shared/protocol/messages').JobType,
         params: { format: 'json' } as Record<string, unknown>,
@@ -384,7 +384,7 @@ export class ScreenDetectionService {
   private async fetchOcr(deviceId: string, timeoutMs: number): Promise<OcrResult> {
     const jobId = uuidv4();
 
-    const result = await new Promise<OcrResult | null>((resolve) => {
+    const result = await new Promise<OcrResult | null>(async (resolve) => {
       const timer = setTimeout(() => {
         pendingOcr.delete(jobId);
         resolve(null);
@@ -392,7 +392,7 @@ export class ScreenDetectionService {
       pendingOcr.set(jobId, { resolve, timer });
 
       // Send job to device via DirectWS transport
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: 'ocr_full' as import('../../../shared/protocol/messages').JobType,
         params: {} as Record<string, unknown>,
@@ -414,7 +414,7 @@ export class ScreenDetectionService {
     // The orchestrator's resolveScreenshotResult will handle this via ws.server.ts
     const jobId = uuidv4();
 
-    const result = await new Promise<string | null>((resolve) => {
+    const result = await new Promise<string | null>(async (resolve) => {
       const timer = setTimeout(() => {
         pendingScreenshots.delete(jobId);
         resolve(null);
@@ -423,7 +423,7 @@ export class ScreenDetectionService {
 
       // Send job to device via DirectWS transport
       // Send job to device via DirectWS transport
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: 'screenshot_for_vlm' as import('../../../shared/protocol/messages').JobType,
         params: { quality: 85, maxWidth: 540 } as Record<string, unknown>,

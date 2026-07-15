@@ -13,16 +13,16 @@ import { deviceExecutionLeaseService } from "../modules/device-execution/device-
  * Send a job to a device via DirectWS transport.
  * Returns true if sent successfully, false if device unreachable.
  */
-export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
+export async function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): Promise<boolean> {
   // DirectWs only
   if (directWsServer.isDeviceOnline(deviceId)) {
     try {
-      const lease = deviceExecutionLeaseService.tryAcquire(deviceId, { ingress: "transport.sendJob", requestKey: payload.jobId });
+      const inherited = deviceExecutionLeaseService.activeContext();
+      const lease = inherited ?? await deviceExecutionLeaseService.acquire(deviceId, { ingress: "transport.sendJob", requestKey: payload.jobId }, 30_000);
       const sent = directWsServer.sendJob(deviceId, payload, lease);
-      if (!sent) deviceExecutionLeaseService.release(lease);
+      if (!sent && !inherited) await deviceExecutionLeaseService.release(lease);
       return sent;
     } catch (error) {
-      if ((error as { code?: string }).code === "DEVICE_BUSY") return false;
       throw error;
     }
   }

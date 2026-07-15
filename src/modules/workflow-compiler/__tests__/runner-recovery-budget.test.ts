@@ -74,7 +74,7 @@ function makeWorkflow(overrides: Partial<CompiledWorkflow> = {}): CompiledWorkfl
 describe("runCompiledWorkflow recovery budget", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(sendJobToDevice).mockReturnValue(true);
+    vi.mocked(sendJobToDevice).mockResolvedValue(true);
     vi.mocked(waitForResult).mockResolvedValue({ status: "completed", output: {} });
   });
 

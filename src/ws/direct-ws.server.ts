@@ -224,6 +224,9 @@ export class DirectWsServer {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingJobs.delete(jobId);
+        const lease = this.executionLeases.get(jobId);
+        this.executionLeases.delete(jobId);
+        if (lease) void deviceExecutionLeaseService.releaseTerminal(lease, "cancelled").catch(err => console.error("[direct-ws] timeout lease cancel failed:", err.message));
         reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       this.pendingJobs.set(jobId, { resolve, reject, timer });
@@ -320,6 +323,9 @@ export class DirectWsServer {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingBatches.delete(batchId);
+        const lease = this.executionLeases.get(batchId);
+        this.executionLeases.delete(batchId);
+        if (lease) void deviceExecutionLeaseService.releaseTerminal(lease, "cancelled").catch(err => console.error("[direct-ws] timeout lease cancel failed:", err.message));
         reject(new Error(`Batch ${batchId} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       this.pendingBatches.set(batchId, { resolve, reject, timer });
@@ -475,7 +481,7 @@ export class DirectWsServer {
         this.rateLimiter.delete(deviceConn.deviceId);
         devicesConnected?.set(this.connections.size);
         deviceOfflineEvents?.inc();
-        deviceExecutionLeaseService.markDisconnected(deviceConn.deviceId);
+        void deviceExecutionLeaseService.markDisconnected(deviceConn.deviceId).catch(err => console.error("[direct-ws] disconnect lease transition failed:", err.message));
 
         // Reject any pending jobs for this device
         for (const [jobId, pending] of this.pendingJobs) {
@@ -604,7 +610,7 @@ export class DirectWsServer {
       const finalDeviceKey = device.device_key!;
       const finalStatus = device.status;
       if (typeof msg.resumeLeaseOwner === "string" && Number.isFinite(Number(msg.resumeLeaseToken))) {
-        try { deviceExecutionLeaseService.resume(finalDeviceId, msg.resumeLeaseOwner, Number(msg.resumeLeaseToken)); }
+        try { await deviceExecutionLeaseService.resume(finalDeviceId, msg.resumeLeaseOwner, Number(msg.resumeLeaseToken)); }
         catch (error) { console.warn(`[direct-ws] lease resume rejected for ${finalDeviceId.slice(0,8)}: ${(error as Error).message}`); }
       }
 
@@ -730,7 +736,7 @@ export class DirectWsServer {
 
     // ACK
     this._send(conn.ws, { type: "ACK", ref: jobId });
-    this.executionLeases.delete(jobId); deviceExecutionLeaseService.release(lease);
+    this.executionLeases.delete(jobId); void deviceExecutionLeaseService.releaseTerminal(lease).catch(err => console.error("[direct-ws] lease release failed:", err.message));
   }
 
   // ─── Batch result handler ────────────────────────────────────────────────
@@ -771,13 +777,13 @@ export class DirectWsServer {
 
     // ACK
     this._send(conn.ws, { type: "ACK", ref: batchId });
-    this.executionLeases.delete(batchId); deviceExecutionLeaseService.release(lease);
+    this.executionLeases.delete(batchId); void deviceExecutionLeaseService.releaseTerminal(lease).catch(err => console.error("[direct-ws] lease release failed:", err.message));
   }
 
   private async _handleHeartbeat(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {
     if (typeof msg.leaseOwner === "string" && Number.isFinite(Number(msg.leaseToken))) {
       const lease = [...this.executionLeases.values()].find((item) => item.deviceId === conn.deviceId && item.ownerId === msg.leaseOwner && item.fencingToken === Number(msg.leaseToken));
-      if (lease) { try { deviceExecutionLeaseService.heartbeat(lease); } catch { /* stale heartbeat is intentionally ignored */ } }
+      if (lease) void deviceExecutionLeaseService.heartbeat(lease).catch(() => undefined);
     }
     // Direct-WS heartbeat uses a simplified format; map to DeviceHealth
     const health: DeviceHealth = {
@@ -884,7 +890,7 @@ export class DirectWsServer {
     // Update DB (fire-and-forget)
     this._persistWorkflowStatus(conn.deviceId, workflowId, status, step, total, error, variables)
       .catch(err => console.error(`[direct-ws] Failed to persist workflow status: ${err.message}`));
-    if (status === "completed" || status === "failed" || status === "cancelled") { this.executionLeases.delete(workflowId); deviceExecutionLeaseService.release(lease); }
+    if (status === "completed" || status === "failed" || status === "cancelled") { this.executionLeases.delete(workflowId); void deviceExecutionLeaseService.releaseTerminal(lease).catch(err => console.error("[direct-ws] lease release failed:", err.message)); }
   }
 
   private async _persistWorkflowStatus(

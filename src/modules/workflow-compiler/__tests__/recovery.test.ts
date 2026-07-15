@@ -95,7 +95,7 @@ describe("attemptRecovery", () => {
     // Default: LLM returns retry_step
     vi.mocked(llmJson).mockResolvedValue({ type: "retry_step" });
     vi.mocked(isDeviceOnline).mockReturnValue(true);
-    vi.mocked(sendJobToDevice).mockReturnValue(true);
+    vi.mocked(sendJobToDevice).mockResolvedValue(true);
     vi.mocked(waitForResult).mockResolvedValue({
       output: { image_base64: "fake_base64", tree: [] },
     });

@@ -57,6 +57,14 @@ vi.mock("../../../modules/devices/devices.service", () => ({ devicesService: {} 
 vi.mock("../../../modules/dispatcher/dispatcher.service", () => ({ dispatcherService: {} }));
 vi.mock("../../../modules/auth/auth.service", () => ({ authService: {} }));
 vi.mock("../../../ws/direct-ws.server", () => ({ directWsServer: mocks.directWsServer }));
+vi.mock("../../device-execution/device-execution-lease.service", () => ({
+  deviceExecutionLeaseService: {
+    acquire: vi.fn().mockImplementation(async (deviceId: string, input: { ownerId?: string }) => ({
+      deviceId, ownerId: input.ownerId ?? "workflow", fencingToken: 1,
+    })),
+    release: vi.fn().mockResolvedValue(true),
+  },
+}));
 vi.mock("../../../transport/transport", () => ({
   sendJobToDevice: vi.fn(),
   isDeviceOnline: vi.fn(() => true),

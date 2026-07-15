@@ -189,7 +189,7 @@ async function attemptBoundedRecovery(
 
 async function captureUiTree(deviceId: string, timeoutMs = 10_000): Promise<UiTreeNode[]> {
   const jobId = uuidv4();
-  const sent = sendJobToDevice(deviceId, {
+  const sent = await sendJobToDevice(deviceId, {
     jobId,
     type: "ui_tree_dump",
     params: {},
@@ -252,7 +252,7 @@ async function executeStepAction(
           a11yParams.text = target.elementId;
           a11yParams.partialMatch = true;
         }
-        const sent = sendJobToDevice(deviceId, {
+        const sent = await sendJobToDevice(deviceId, {
           jobId,
           type: "a11y_find_tap",
           params: a11yParams,
@@ -263,7 +263,7 @@ async function executeStepAction(
       }
       // Fallback to coords
       const coords = target?.coords;
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: "tap",
         params: coords ? { x: coords.x, y: coords.y } : { x: 0.5, y: 0.5 },
@@ -287,7 +287,7 @@ async function executeStepAction(
         await waitForResult(tapJobId, 5_000).catch(() => {});
         await new Promise((r) => setTimeout(r, 300));
       }
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: "type_text",
         params: { text },
@@ -308,7 +308,7 @@ async function executeStepAction(
         right: { sx: 0.2, sy: 0.5, ex: 0.2 + distance, ey: 0.5 },
       };
       const sc = swipeCoords[direction] || swipeCoords.up;
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: "swipe",
         params: { startX: sc.sx, startY: sc.sy, endX: sc.ex, endY: sc.ey },
@@ -320,7 +320,7 @@ async function executeStepAction(
 
     case "press_key": {
       const key = (step.params?.key as string) || "back";
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: "press_key",
         params: { key },
@@ -340,7 +340,7 @@ async function executeStepAction(
 
     case "open_app": {
       const packageName = (step.params?.packageName as string) || step.target?.text || "";
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: "open_app",
         params: { packageName },
@@ -352,7 +352,7 @@ async function executeStepAction(
 
     case "intent_send": {
       const uri = (step.params?.uri as string) || "";
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: "intent_send",
         params: { uri },
@@ -363,7 +363,7 @@ async function executeStepAction(
     }
 
     case "screenshot": {
-      const sent = sendJobToDevice(deviceId, {
+      const sent = await sendJobToDevice(deviceId, {
         jobId,
         type: "screenshot",
         params: {},
@@ -518,9 +518,9 @@ async function executeCompiledBatch(
     },
   };
 
-  const lease = deviceExecutionLeaseService.tryAcquire(deviceId, { ownerId: workflowId, ingress: "workflow-compiler.batch", requestKey: batchId });
+  const lease = deviceExecutionLeaseService.activeContext() ?? await deviceExecutionLeaseService.acquire(deviceId, { ownerId: workflowId, ingress: "workflow-compiler.batch", requestKey: batchId });
   if (!directWsServer.sendBatch(deviceId, batchPayload, lease)) {
-    deviceExecutionLeaseService.release(lease);
+    await deviceExecutionLeaseService.releaseTerminal(lease);
     throw new Error(`Device ${deviceId} offline — cannot send compiled batch ${batchId}`);
   }
 
