@@ -2730,6 +2730,7 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
     deviceId,
     accountId,
   });
+  await workflowService.saveTemplate(template);
   await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
     artifactState: "promoted",
     sourceMetadata: {
