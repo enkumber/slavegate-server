@@ -102,7 +102,15 @@ describe("attemptRecovery", () => {
     vi.mocked(llmJson).mockResolvedValue({ type: "retry_step" });
     vi.mocked(isDeviceOnline).mockReturnValue(true);
     vi.mocked(sendJobToDevice).mockReturnValue(true);
-    vi.mocked(sendDeviceExecutionJobToDevice).mockResolvedValue({ sent: true });
+    vi.mocked(sendDeviceExecutionJobToDevice).mockResolvedValue({
+      decision: "dispatched",
+      root: undefined,
+      operation: undefined,
+      handle: undefined,
+      reason: undefined,
+      sent: true,
+      queued: false,
+    });
     vi.mocked(waitForResult).mockResolvedValue({
       output: { image_base64: "fake_base64", tree: [] },
     });

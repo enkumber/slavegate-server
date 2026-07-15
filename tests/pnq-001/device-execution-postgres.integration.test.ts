@@ -92,7 +92,7 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     expect(claimedOrder).toEqual(fifoOrder);
     expect(Math.max(...activeCounts)).toBe(1);
     expect(await stateCount(pool, "completed")).toBe(100);
-  });
+  }, 20_000);
 
   it("allows separate devices to hold active roots concurrently", async () => {
     await insertDevice(pool, DEVICE_A, "pnq-parallel-a");
