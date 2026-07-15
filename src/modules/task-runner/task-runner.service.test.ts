@@ -591,7 +591,7 @@ describe("task-runner generated_workflow routine", () => {
     });
   });
 
-  it("generates a repaired candidate artifact after a generated workflow failure", async () => {
+  it("retries a repaired generated workflow candidate after failure", async () => {
     const cached = cacheRecord({
       sourceMetadata: {
         source: "dashboard_human",
@@ -624,7 +624,12 @@ describe("task-runner generated_workflow routine", () => {
       intent: "Deschide Gmail si verifica inbox",
     }), "android");
     mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
-    mocks.getWorkflow.mockResolvedValue(failedWorkflow("RECOVERY_BUDGET_EXCEEDED"));
+    mocks.getWorkflow
+      .mockResolvedValueOnce(failedWorkflow("RECOVERY_BUDGET_EXCEEDED"))
+      .mockResolvedValueOnce(completedWorkflow({
+        ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+        screenState: "gmail_inbox",
+      }));
     mocks.recordGeneratedPlanCacheOutcome.mockResolvedValue({
       ...cached,
       artifactState: "failed",
@@ -653,21 +658,50 @@ describe("task-runner generated_workflow routine", () => {
       expectedFix: "Avoid retrying the old failing navigation path.",
       confidence: 0.82,
     });
+    mocks.getGeneratedPlanCache.mockImplementation(async (cacheKey: string) => ({
+      ...cached,
+      cacheKey,
+      artifactState: "candidate",
+      sourceMetadata: {
+        source: "llm_repair",
+        intent: "Deschide Gmail si verifica inbox",
+        repairOfCacheKey: CACHE_KEY,
+      },
+      workflow: repairedWorkflow,
+      compiledPlan: {
+        ...cached.compiledPlan,
+        cacheKey,
+        templateId: repairedWorkflow.id,
+        platform: repairedWorkflow.platform,
+        templateVersion: repairedWorkflow.version,
+        stepCount: 4,
+        actionCount: 3,
+        checkpointCount: 1,
+      },
+    }));
 
     const result = await executeTaskNow(TASK_ID);
 
     expect(result).toMatchObject({
-      success: false,
-      failReason: "RECOVERY_BUDGET_EXCEEDED",
+      success: true,
       generatedWorkflow: expect.objectContaining({
-        cacheKey: CACHE_KEY,
-        requestKey: REQUEST_KEY,
+        selfHealing: expect.objectContaining({
+          status: "recovered",
+          attempts: 1,
+          sourceCacheKeys: [CACHE_KEY],
+          repairedCacheKeys: [expect.any(String)],
+        }),
       }),
     });
     expect(mocks.recordGeneratedPlanCacheOutcome).toHaveBeenCalledWith(expect.objectContaining({
       cacheKey: CACHE_KEY,
       success: false,
       reason: "RECOVERY_BUDGET_EXCEEDED",
+      taskId: TASK_ID,
+      workflowId: WORKFLOW_ID,
+    }));
+    expect(mocks.recordGeneratedPlanCacheOutcome).toHaveBeenCalledWith(expect.objectContaining({
+      success: true,
       taskId: TASK_ID,
       workflowId: WORKFLOW_ID,
     }));
@@ -700,6 +734,9 @@ describe("task-runner generated_workflow routine", () => {
         }),
       }),
     );
+    const repairedCacheKey = mocks.saveGeneratedPlanCache.mock.calls[0][1].cacheKey;
+    expect(mocks.getGeneratedPlanCache).toHaveBeenCalledWith(repairedCacheKey, { includeCandidate: true });
+    expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledTimes(2);
   });
 
   it("fails dashboard human AskReddit workflows without final UI evidence", async () => {

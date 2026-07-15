@@ -76,7 +76,21 @@ interface TaskRunnerResult extends TaskResult {
     controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
     output?: Record<string, unknown>;
     failureCode?: string;
+    selfHealing?: {
+      status: "recovered" | "repair_unavailable" | "retry_failed" | "exhausted";
+      attempts: number;
+      sourceCacheKeys: string[];
+      repairedCacheKeys: string[];
+      lastReason?: string;
+    };
   };
+}
+
+interface GeneratedWorkflowRepairCandidate {
+  cacheKey: string;
+  requestKey: string;
+  workflowId: string;
+  workflowVersion: string;
 }
 
 const DEFAULT_CONFIG: TaskRunnerConfig = {
@@ -520,24 +534,24 @@ function buildWorkflowRepairPrompt(
   ].join("\n");
 }
 
-async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerResult): Promise<void> {
-  if (task.routine !== GENERATED_WORKFLOW_ROUTINE || result.success) return;
+async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerResult): Promise<GeneratedWorkflowRepairCandidate | null> {
+  if (task.routine !== GENERATED_WORKFLOW_ROUTINE || result.success) return null;
   const cacheKey = result.generatedWorkflow?.cacheKey;
-  if (!cacheKey) return;
+  if (!cacheKey) return null;
 
   let cached: GeneratedWorkflowPlanCacheRecord | null = null;
   try {
     cached = await workflowService.getGeneratedPlanCacheForRepair(cacheKey);
   } catch (err) {
     console.error("[task-runner] generated workflow repair lookup failed:", err);
-    return;
+    return null;
   }
-  if (!cached?.requestKey) return;
+  if (!cached?.requestKey) return null;
 
   const learning = cached.sourceMetadata?.workflowLearning as Record<string, unknown> | undefined;
   const repair = cached.sourceMetadata?.workflowRepair as Record<string, unknown> | undefined;
-  if (repair?.status === "candidate_generated" && repair?.sourceCacheKey === cacheKey) return;
-  if (typeof learning?.failureCount === "number" && learning.failureCount > 3) return;
+  if (repair?.status === "candidate_generated" && repair?.sourceCacheKey === cacheKey) return null;
+  if (typeof learning?.failureCount === "number" && learning.failureCount > 3) return null;
 
   try {
     const response = await llmJson<WorkflowRepairResponse>(
@@ -585,9 +599,113 @@ async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerR
       },
     });
     console.log(`[task-runner] Generated repaired workflow candidate ${compiledPlan.cacheKey} for failed cache ${cacheKey}`);
+    return {
+      cacheKey: compiledPlan.cacheKey,
+      requestKey: cached.requestKey,
+      workflowId: repaired.id,
+      workflowVersion: repaired.version,
+    };
   } catch (err) {
     console.error("[task-runner] generated workflow repair failed:", (err as Error).message);
+    return null;
   }
+}
+
+function generatedWorkflowSelfHealingLimit(task: TaskRow): number {
+  const value = task.params?.maxSelfHealingAttempts;
+  if (typeof value !== "number" || !Number.isFinite(value)) return 2;
+  return Math.max(0, Math.min(5, Math.floor(value)));
+}
+
+function withGeneratedWorkflowSelfHealingMetadata(
+  result: TaskRunnerResult,
+  selfHealing: NonNullable<NonNullable<TaskRunnerResult["generatedWorkflow"]>["selfHealing"]>,
+): TaskRunnerResult {
+  return {
+    ...result,
+    generatedWorkflow: {
+      ...(result.generatedWorkflow ?? {}),
+      selfHealing,
+    },
+  };
+}
+
+async function executeGeneratedWorkflowTaskWithSelfHealing(
+  task: TaskRow,
+  platform: string,
+  accountClientId?: string | null,
+): Promise<TaskRunnerResult> {
+  const maxSelfHealingAttempts = generatedWorkflowSelfHealingLimit(task);
+  const sourceCacheKeys: string[] = [];
+  const repairedCacheKeys: string[] = [];
+  let currentTask = task;
+  let lastResult: TaskRunnerResult | null = null;
+
+  for (let attempt = 0; attempt <= maxSelfHealingAttempts; attempt++) {
+    const result = await executeGeneratedWorkflowTask(currentTask, platform, accountClientId);
+    lastResult = result;
+
+    if (result.success) {
+      await recordGeneratedWorkflowLearning(currentTask, result);
+      if (attempt === 0) return result;
+      return withGeneratedWorkflowSelfHealingMetadata(result, {
+        status: "recovered",
+        attempts: attempt,
+        sourceCacheKeys,
+        repairedCacheKeys,
+      });
+    }
+
+    if (result.generatedWorkflow?.cacheKey) sourceCacheKeys.push(result.generatedWorkflow.cacheKey);
+    await recordGeneratedWorkflowLearning(currentTask, result);
+
+    if (attempt >= maxSelfHealingAttempts) {
+      return withGeneratedWorkflowSelfHealingMetadata(result, {
+        status: "exhausted",
+        attempts: attempt,
+        sourceCacheKeys,
+        repairedCacheKeys,
+        lastReason: result.failReason,
+      });
+    }
+
+    const repaired = await attemptGeneratedWorkflowRepair(currentTask, result);
+    if (!repaired) {
+      return withGeneratedWorkflowSelfHealingMetadata(result, {
+        status: "repair_unavailable",
+        attempts: attempt,
+        sourceCacheKeys,
+        repairedCacheKeys,
+        lastReason: result.failReason,
+      });
+    }
+
+    repairedCacheKeys.push(repaired.cacheKey);
+    currentTask = {
+      ...task,
+      params: {
+        ...task.params,
+        cacheKey: repaired.cacheKey,
+        requestKey: undefined,
+        allowCandidateArtifact: true,
+        source: task.params?.source ?? "dashboard_human",
+        selfHealingAttempt: attempt + 1,
+        selfHealingRepairOfCacheKey: result.generatedWorkflow?.cacheKey ?? null,
+      },
+    };
+  }
+
+  return withGeneratedWorkflowSelfHealingMetadata(lastResult ?? generatedWorkflowTaskFailure(
+    "SELF_HEALING_NO_RESULT",
+    "self-healing loop did not execute",
+    Date.now(),
+  ), {
+    status: "retry_failed",
+    attempts: maxSelfHealingAttempts,
+    sourceCacheKeys,
+    repairedCacheKeys,
+    lastReason: lastResult?.failReason,
+  });
 }
 
 async function failAgencyWorkflowRunWithError(task: TaskRow, error: Error): Promise<void> {
@@ -798,7 +916,7 @@ async function executeTask(task: TaskRow): Promise<void> {
     
     switch (task.routine) {
       case "generated_workflow":
-        result = await executeGeneratedWorkflowTask(task, platform, accountClientId);
+        result = await executeGeneratedWorkflowTaskWithSelfHealing(task, platform, accountClientId);
         break;
       case "engage_session":
         result = await executeEngageSession(task, platform);
@@ -838,7 +956,9 @@ async function executeTask(task: TaskRow): Promise<void> {
         WHERE id = $1
       `, [taskId, JSON.stringify(resultJson)]);
       await completeAgencyWorkflowRun(task, result);
-      await recordGeneratedWorkflowLearning(task, result);
+      if (task.routine !== GENERATED_WORKFLOW_ROUTINE) {
+        await recordGeneratedWorkflowLearning(task, result);
+      }
       publishGeneratedWorkflowTaskEvent(task, "task_completed", {
         workflowId: result.generatedWorkflow?.workflowId,
         stepsCompleted: result.stepsCompleted,
@@ -862,8 +982,10 @@ async function executeTask(task: TaskRow): Promise<void> {
         WHERE id = $1
       `, [taskId, JSON.stringify(resultJson), result.failReason || "Unknown error", newRetryCount]);
       await completeAgencyWorkflowRun(task, result);
-      await recordGeneratedWorkflowLearning(task, result);
-      await attemptGeneratedWorkflowRepair(task, result);
+      if (task.routine !== GENERATED_WORKFLOW_ROUTINE) {
+        await recordGeneratedWorkflowLearning(task, result);
+        await attemptGeneratedWorkflowRepair(task, result);
+      }
       publishGeneratedWorkflowTaskEvent(task, "task_failed", {
         workflowId: result.generatedWorkflow?.workflowId,
         stepsCompleted: result.stepsCompleted,
@@ -1044,6 +1166,7 @@ async function executeGeneratedWorkflowTask(
     workflow?: unknown;
     variables?: unknown;
     allowCandidateArtifact?: unknown;
+    selfHealingAttempt?: unknown;
   };
 
   if (Object.prototype.hasOwnProperty.call(params, "workflow")) {
@@ -1061,9 +1184,10 @@ async function executeGeneratedWorkflowTask(
   const clientId = accountClientId ?? (typeof params.clientId === "string" ? params.clientId : undefined);
   const campaignId = typeof params.campaignId === "string" ? params.campaignId : undefined;
   const source = generatedWorkflowTaskSource(cacheKey, requestKey);
+  const isSelfHealingRetry = typeof params.selfHealingAttempt === "number";
   const allowCandidateArtifact = params.allowCandidateArtifact === true
     && agencyWorkflowRunIdFromTask(task) !== null
-    && task.params?.source === "dashboard_human";
+    && (task.params?.source === "dashboard_human" || isSelfHealingRetry);
 
   if (!cacheKey && !requestKey) {
     generatedWorkflowTaskRunnerDispatches?.labels(routine, "unknown", "dispatch_failed").inc();
@@ -1323,7 +1447,7 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
     let taskResult: TaskRunnerResult;
     switch (task.routine) {
       case "generated_workflow":
-        taskResult = await executeGeneratedWorkflowTask(task, platform, accountClientId);
+        taskResult = await executeGeneratedWorkflowTaskWithSelfHealing(task, platform, accountClientId);
         break;
       case "engage_session":
         taskResult = await executeEngageSession(task, platform);
@@ -1362,8 +1486,10 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
       ]
     );
     await completeAgencyWorkflowRun(task, taskResult);
-    await recordGeneratedWorkflowLearning(task, taskResult);
-    await attemptGeneratedWorkflowRepair(task, taskResult);
+    if (task.routine !== GENERATED_WORKFLOW_ROUTINE) {
+      await recordGeneratedWorkflowLearning(task, taskResult);
+      await attemptGeneratedWorkflowRepair(task, taskResult);
+    }
     publishGeneratedWorkflowTaskEvent(task, taskResult.success ? "task_completed" : "task_failed", {
       workflowId: taskResult.generatedWorkflow?.workflowId,
       stepsCompleted: taskResult.stepsCompleted,
