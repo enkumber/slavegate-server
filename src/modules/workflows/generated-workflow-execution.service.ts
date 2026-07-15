@@ -1,5 +1,6 @@
 import { scalabilityConfig } from "../../config/scalability.config";
 import { directWsServer } from "../../ws/direct-ws.server";
+import { deviceExecutionLeaseService } from "../device-execution/device-execution-lease.service";
 import { hbeService } from "../hbe/hbe.service";
 import { startWorkflow } from "./workflow.executor";
 import { workflowService } from "./workflow.service";
@@ -188,11 +189,13 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     });
     await workflowService.markRunning(wf.id);
 
+    const lease = deviceExecutionLeaseService.tryAcquire(deviceId, { ownerId: wf.id, ingress: "generated-workflow.edge", requestKey: wf.id });
     const sent = directWsServer.sendWorkflowStart(
       deviceId,
       template as unknown as Record<string, unknown>,
       dispatchVariables,
       wf.id,
+      lease,
     );
 
     if (sent) {
@@ -221,6 +224,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     }
 
     await workflowService.markFailed(wf.id, "Edge dispatch failed");
+    deviceExecutionLeaseService.release(lease);
     console.warn(`[${logPrefix}] Edge dispatch failed for ${deviceId} — falling back to server execution`);
   } else if (requiresServerMode) {
     console.log(`[${logPrefix}] semantic resolution required — using server execution`);

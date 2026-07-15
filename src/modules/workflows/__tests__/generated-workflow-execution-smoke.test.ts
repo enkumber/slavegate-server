@@ -448,6 +448,7 @@ describe("generated workflow cache-only execution route", () => {
         generatedWorkflowId: cached.templateId,
       }),
       "wf-cache-smoke",
+      expect.objectContaining({ deviceId: "11111111-1111-4111-8111-111111111111", ownerId: "wf-cache-smoke" }),
     );
     expect(mocks.workflowService.create).toHaveBeenCalledWith(expect.objectContaining({
       accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -507,6 +508,7 @@ describe("generated workflow cache-only execution route", () => {
       cached.workflow,
       expect.any(Object),
       "wf-cache-smoke",
+      expect.objectContaining({ deviceId: "11111111-1111-4111-8111-111111111111", ownerId: "wf-cache-smoke" }),
     );
     expect(mocks.metrics.executionLabels).toHaveBeenCalledWith("reddit", "true", "request_key");
     expect(mocks.metrics.llmAvoidedLabels).toHaveBeenCalledWith("reddit", "cache_hit");

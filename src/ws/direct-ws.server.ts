@@ -33,6 +33,7 @@ import { visionService } from "../modules/vision/vision.service";
 import { workflowEvents } from "../modules/workflow-events";
 import { llmComplete } from "../utils/llm";
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
+import { deviceExecutionLeaseService, type LeaseContext } from "../modules/device-execution/device-execution-lease.service";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -141,6 +142,7 @@ export class DirectWsServer {
   private connections = new Map<string, ConnectedDevice>();   // deviceId → conn
   private pendingJobs = new Map<string, PendingJob>();        // jobId → awaiter
   private pendingBatches = new Map<string, PendingBatch>();   // batchId → awaiter
+  private executionLeases = new Map<string, LeaseContext>();
   private otaStatuses = new Map<string, OtaDeviceStatus>();   // deviceId → last OTA status
   private rateLimiter = new RateLimiter();
   private pingTimer:    ReturnType<typeof setInterval> | null = null;
@@ -193,7 +195,9 @@ export class DirectWsServer {
    * Send a job to a device. Returns true if sent, false if device not connected.
    * Does NOT wait for result — use waitForJobResult() for that.
    */
-  sendJob(deviceId: string, payload: JobDispatchPayload): boolean {
+  sendJob(deviceId: string, payload: JobDispatchPayload, lease: LeaseContext): boolean {
+    deviceExecutionLeaseService.assertCurrent(lease);
+    if (lease.deviceId !== deviceId) throw new Error("lease device mismatch");
     const conn = this.connections.get(deviceId);
     if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
 
@@ -204,7 +208,10 @@ export class DirectWsServer {
       params:  payload.params,
       timeoutMs: payload.timeoutMs,
       requiresRoot: payload.requiresRoot,
+      leaseOwner: lease.ownerId,
+      leaseToken: lease.fencingToken,
     });
+    this.executionLeases.set(payload.jobId, lease);
     console.log(`[direct-ws] sendJob: device=${deviceId.slice(0,8)} jobId=${payload.jobId?.slice(0,8)} type=${payload.type}`);
     return true;
   }
@@ -227,12 +234,15 @@ export class DirectWsServer {
    * Send a BATCH_START message to a device.
    * Returns true if sent, false if device not connected.
    */
-  sendBatch(deviceId: string, batchPayload: Record<string, unknown>): boolean {
+  sendBatch(deviceId: string, batchPayload: Record<string, unknown>, lease: LeaseContext): boolean {
+    deviceExecutionLeaseService.assertCurrent(lease);
+    if (lease.deviceId !== deviceId) throw new Error("lease device mismatch");
     const conn = this.connections.get(deviceId);
     if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
 
-    this._send(conn.ws, batchPayload);
+    this._send(conn.ws, { ...batchPayload, leaseOwner: lease.ownerId, leaseToken: lease.fencingToken });
     const batchId = (batchPayload.batchId as string) ?? "?";
+    this.executionLeases.set(batchId, lease);
     console.log(`[direct-ws] sendBatch: device=${deviceId.slice(0,8)} batchId=${batchId.slice(0,8)} steps=${(batchPayload.steps as unknown[])?.length ?? 0}`);
     return true;
   }
@@ -246,7 +256,11 @@ export class DirectWsServer {
     template: Record<string, unknown>,
     variables?: Record<string, unknown>,
     workflowId?: string,
+    lease?: LeaseContext,
   ): boolean {
+    if (!lease) throw new Error("execution lease required");
+    deviceExecutionLeaseService.assertCurrent(lease);
+    if (lease.deviceId !== deviceId) throw new Error("lease device mismatch");
     const conn = this.connections.get(deviceId);
     if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
 
@@ -257,7 +271,10 @@ export class DirectWsServer {
       type: 'WORKFLOW_START',
       ...(workflowId ? { workflowId } : {}),
       variables: variables ?? {},
+      leaseOwner: lease.ownerId,
+      leaseToken: lease.fencingToken,
     });
+    this.executionLeases.set(workflowId ?? String(template.id), lease);
     console.log(`[direct-ws] sendWorkflowStart: device=${deviceId.slice(0,8)} template=${(template.id as string)?.slice(0,20)} workflow=${workflowId?.slice(0,8) ?? 'none'}`);
     return true;
   }
@@ -458,6 +475,7 @@ export class DirectWsServer {
         this.rateLimiter.delete(deviceConn.deviceId);
         devicesConnected?.set(this.connections.size);
         deviceOfflineEvents?.inc();
+        deviceExecutionLeaseService.markDisconnected(deviceConn.deviceId);
 
         // Reject any pending jobs for this device
         for (const [jobId, pending] of this.pendingJobs) {
@@ -585,6 +603,10 @@ export class DirectWsServer {
       const finalDeviceId = device.id;
       const finalDeviceKey = device.device_key!;
       const finalStatus = device.status;
+      if (typeof msg.resumeLeaseOwner === "string" && Number.isFinite(Number(msg.resumeLeaseToken))) {
+        try { deviceExecutionLeaseService.resume(finalDeviceId, msg.resumeLeaseOwner, Number(msg.resumeLeaseToken)); }
+        catch (error) { console.warn(`[direct-ws] lease resume rejected for ${finalDeviceId.slice(0,8)}: ${(error as Error).message}`); }
+      }
 
       // Kick existing connection for same device
       const existing = this.connections.get(finalDeviceId);
@@ -666,6 +688,9 @@ export class DirectWsServer {
   private _handleJobResult(conn: ConnectedDevice, msg: Record<string, unknown>): void {
     const jobId = msg.jobId as string;
     if (!jobId) return;
+    const lease = this.executionLeases.get(jobId);
+    if (!lease || msg.leaseOwner !== lease.ownerId || Number(msg.leaseToken) !== lease.fencingToken) { console.warn(`[direct-ws] fenced late JOB_RESULT ${jobId}`); return; }
+    try { deviceExecutionLeaseService.assertCurrent(lease); } catch { console.warn(`[direct-ws] expired JOB_RESULT ${jobId}`); return; }
     console.log(`[direct-ws] JOB_RESULT received: jobId=${jobId.slice(0,8)} success=${msg.success} error=${msg.error || 'none'} device=${conn.deviceId.slice(0,8)}`);
 
     const pending = this.pendingJobs.get(jobId);
@@ -705,6 +730,7 @@ export class DirectWsServer {
 
     // ACK
     this._send(conn.ws, { type: "ACK", ref: jobId });
+    this.executionLeases.delete(jobId); deviceExecutionLeaseService.release(lease);
   }
 
   // ─── Batch result handler ────────────────────────────────────────────────
@@ -715,6 +741,9 @@ export class DirectWsServer {
       console.warn("[direct-ws] BATCH_RESULT missing batchId — ignoring");
       return;
     }
+    const lease = this.executionLeases.get(batchId);
+    if (!lease || msg.leaseOwner !== lease.ownerId || Number(msg.leaseToken) !== lease.fencingToken) { console.warn(`[direct-ws] fenced late BATCH_RESULT ${batchId}`); return; }
+    try { deviceExecutionLeaseService.assertCurrent(lease); } catch { return; }
 
     const status = msg.status as string;
     const results = (msg.results as unknown[]) ?? [];
@@ -742,9 +771,14 @@ export class DirectWsServer {
 
     // ACK
     this._send(conn.ws, { type: "ACK", ref: batchId });
+    this.executionLeases.delete(batchId); deviceExecutionLeaseService.release(lease);
   }
 
   private async _handleHeartbeat(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {
+    if (typeof msg.leaseOwner === "string" && Number.isFinite(Number(msg.leaseToken))) {
+      const lease = [...this.executionLeases.values()].find((item) => item.deviceId === conn.deviceId && item.ownerId === msg.leaseOwner && item.fencingToken === Number(msg.leaseToken));
+      if (lease) { try { deviceExecutionLeaseService.heartbeat(lease); } catch { /* stale heartbeat is intentionally ignored */ } }
+    }
     // Direct-WS heartbeat uses a simplified format; map to DeviceHealth
     const health: DeviceHealth = {
       batteryLevel:      (msg.battery as number)          ?? 0,
@@ -805,6 +839,9 @@ export class DirectWsServer {
     const total      = msg.totalSteps as number;
     const error      = msg.error as string | undefined;
     const variables  = msg.variables as Record<string, unknown> | undefined;
+    const lease = this.executionLeases.get(workflowId);
+    if (!lease || msg.leaseOwner !== lease.ownerId || Number(msg.leaseToken) !== lease.fencingToken) { console.warn(`[direct-ws] fenced late WORKFLOW_STATUS ${workflowId}`); return; }
+    try { deviceExecutionLeaseService.assertCurrent(lease); } catch { return; }
     const controlPlaneContext = variables?.controlPlaneContext &&
       typeof variables.controlPlaneContext === "object" &&
       !Array.isArray(variables.controlPlaneContext)
@@ -847,6 +884,7 @@ export class DirectWsServer {
     // Update DB (fire-and-forget)
     this._persistWorkflowStatus(conn.deviceId, workflowId, status, step, total, error, variables)
       .catch(err => console.error(`[direct-ws] Failed to persist workflow status: ${err.message}`));
+    if (status === "completed" || status === "failed" || status === "cancelled") { this.executionLeases.delete(workflowId); deviceExecutionLeaseService.release(lease); }
   }
 
   private async _persistWorkflowStatus(

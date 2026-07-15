@@ -19,6 +19,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../../db/client";
 import { sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
+import { deviceExecutionLeaseService } from "../device-execution/device-execution-lease.service";
 import { directWsServer } from "../../ws/direct-ws.server";
 import type { BATCH_RESULT, BatchStep } from "../../protocol/batch-types";
 import { computePageSignature, isSamePage } from "../app-mapping/page-fingerprint";
@@ -517,7 +518,9 @@ async function executeCompiledBatch(
     },
   };
 
-  if (!directWsServer.sendBatch(deviceId, batchPayload)) {
+  const lease = deviceExecutionLeaseService.tryAcquire(deviceId, { ownerId: workflowId, ingress: "workflow-compiler.batch", requestKey: batchId });
+  if (!directWsServer.sendBatch(deviceId, batchPayload, lease)) {
+    deviceExecutionLeaseService.release(lease);
     throw new Error(`Device ${deviceId} offline — cannot send compiled batch ${batchId}`);
   }
 

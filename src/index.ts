@@ -35,6 +35,7 @@ import { dashboardWorkflowWsServer } from "./modules/workflow-events/dashboard-w
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
 import configRoutes, { seedSystemPrompts } from "./api/config-routes";
+import { deviceExecutionLeaseService } from "./modules/device-execution/device-execution-lease.service";
 
 const PORT = parseInt(process.env.PORT ?? "21211", 10);
 
@@ -57,6 +58,8 @@ async function bootstrap(): Promise<void> {
   // ─── Auto-migrate: ensure all schema + migrations are applied ─────────────
   await runMigrations();
   console.log("[server] Migrations applied.");
+  await deviceExecutionLeaseService.reconcileStartup();
+  console.log("[server] Device execution leases reconciled before admission.");
 
   // ─── Verify Redis connection — required for BullMQ (dispatcher + workflows) ──
   {

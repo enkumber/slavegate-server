@@ -7,6 +7,7 @@
 
 import { directWsServer } from "../ws/direct-ws.server";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
+import { deviceExecutionLeaseService } from "../modules/device-execution/device-execution-lease.service";
 
 /**
  * Send a job to a device via DirectWS transport.
@@ -15,7 +16,15 @@ import type { JobDispatchPayload } from "../../shared/protocol/messages";
 export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
   // DirectWs only
   if (directWsServer.isDeviceOnline(deviceId)) {
-    return directWsServer.sendJob(deviceId, payload);
+    try {
+      const lease = deviceExecutionLeaseService.tryAcquire(deviceId, { ingress: "transport.sendJob", requestKey: payload.jobId });
+      const sent = directWsServer.sendJob(deviceId, payload, lease);
+      if (!sent) deviceExecutionLeaseService.release(lease);
+      return sent;
+    } catch (error) {
+      if ((error as { code?: string }).code === "DEVICE_BUSY") return false;
+      throw error;
+    }
   }
   
   return false;

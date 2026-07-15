@@ -24,6 +24,7 @@ import { workflowService } from "./workflow.service";
 import { hbeService } from "../hbe/hbe.service";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
 import { sendJobToDevice, isDeviceOnline } from "../../transport/transport";
+import { deviceExecutionLeaseService } from "../device-execution/device-execution-lease.service";
 import { directWsServer } from "../../ws/direct-ws.server";
 import { scalabilityConfig } from "../../config/scalability.config";
 import { getDb } from "../../db/client";
@@ -1693,8 +1694,10 @@ export async function executeBatchSteps(
     },
   };
 
-  const sent = directWsServer.sendBatch(deviceId, batchPayload);
+  const lease = deviceExecutionLeaseService.tryAcquire(deviceId, { ownerId: workflowId, ingress: "workflow.executor.batch", requestKey: batchId });
+  const sent = directWsServer.sendBatch(deviceId, batchPayload, lease);
   if (!sent) {
+    deviceExecutionLeaseService.release(lease);
     throw new Error(`Device ${deviceId} offline — cannot send batch ${batchId}`);
   }
 
