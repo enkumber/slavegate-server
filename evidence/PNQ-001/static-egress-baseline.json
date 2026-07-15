@@ -121,6 +121,12 @@
   },
   {
     "file": "src/transport/transport.ts",
+    "kind": "directWsServer.sendJob",
+    "count": 1,
+    "classification": "direct-ws-job-transport-internal"
+  },
+  {
+    "file": "src/transport/transport.ts",
     "kind": "sendJobToDevice",
     "count": 1,
     "classification": "transport-facade"
