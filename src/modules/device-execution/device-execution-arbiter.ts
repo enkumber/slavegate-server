@@ -285,6 +285,10 @@ export interface DeviceExecutionObservedEgressResult extends DeviceExecutionTran
 export interface DeviceExecutionStandaloneJobEgressInput {
   deviceId: string;
   jobId: string;
+  rootKind?: DeviceExecutionRootKind;
+  operationKind?: DeviceExecutionOperationKind;
+  boundary?: DeviceExecutionBoundaryKind;
+  wireType?: string;
   requestKey?: string;
   actor?: string;
   metadata?: Record<string, unknown>;
@@ -569,14 +573,17 @@ export class DeviceExecutionArbiter {
   async runStandaloneJobEgress(
     input: DeviceExecutionStandaloneJobEgressInput,
   ): Promise<DeviceExecutionStandaloneJobEgressResult> {
-    const rootKind: DeviceExecutionRootKind = "job";
-    const operationKind: DeviceExecutionOperationKind = "job";
+    const boundary = input.boundary ? DEVICE_EXECUTION_BOUNDARY_MATRIX[input.boundary] : undefined;
+    const rootKind: DeviceExecutionRootKind = input.rootKind ?? boundary?.rootKind ?? "job";
+    const operationKind: DeviceExecutionOperationKind = input.operationKind ?? boundary?.operationKind ?? "job";
     const actor = input.actor ?? "transport.g2";
+    const wireType = input.wireType ?? "JOB";
+    const boundaryKind = input.boundary ?? "standalone_job";
     const metadata = {
       ...(input.metadata ?? {}),
-      boundary: "standalone_job",
-      enforcement: "g2",
-      wireType: "JOB",
+      boundary: boundaryKind,
+      enforcement: boundaryKind === "standalone_job" ? "g2" : "g3",
+      wireType,
     };
 
     const prepared = await this.withTransaction(async (client) => {
@@ -629,8 +636,8 @@ export class DeviceExecutionArbiter {
         operationKind,
         operationId: input.jobId,
         state: "registered",
-        egressLane: "device_execution",
-        wireType: "JOB",
+        egressLane: boundary?.egressLane ?? "device_execution",
+        wireType,
         metadata,
       });
 

@@ -13,7 +13,7 @@
 
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../../db/client";
-import { sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
+import { sendDeviceExecutionJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import { computePageSignature } from "../app-mapping/page-fingerprint";
 import type { UiTreeNode } from "../app-mapping/schema";
 import { llmJson } from "../../utils/llm";
@@ -129,13 +129,18 @@ export function resetRecoveryCounts(workflowId: string): void {
 async function captureScreenshot(deviceId: string): Promise<string | undefined> {
   try {
     const jobId = uuidv4();
-    const sent = sendJobToDevice(deviceId, {
+    const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
       jobId,
       type: "screenshot",
       params: {},
       timeoutMs: 10_000,
+    }, {
+      boundary: "recovery_child",
+      rootKind: "job",
+      actor: "workflow_recovery",
+      metadata: { observeSource: "recovery.captureScreenshot" },
     });
-    if (!sent) return undefined;
+    if (!dispatch.sent) return undefined;
 
     const result = await waitForResult(jobId, 10_000);
     return result?.output?.image_base64 as string | undefined;
@@ -147,13 +152,18 @@ async function captureScreenshot(deviceId: string): Promise<string | undefined> 
 async function captureUiTreeForRecovery(deviceId: string): Promise<UiTreeNode[]> {
   try {
     const jobId = uuidv4();
-    const sent = sendJobToDevice(deviceId, {
+    const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
       jobId,
       type: "ui_tree_dump",
       params: {},
       timeoutMs: 10_000,
+    }, {
+      boundary: "recovery_child",
+      rootKind: "job",
+      actor: "workflow_recovery",
+      metadata: { observeSource: "recovery.captureUiTree" },
     });
-    if (!sent) return [];
+    if (!dispatch.sent) return [];
 
     const result = await waitForResult(jobId, 10_000);
     const tree = result?.output?.tree || result?.output;
@@ -256,13 +266,18 @@ async function executeRecoveryAction(
         if (!coords) continue;
 
         const jobId = uuidv4();
-        const sent = sendJobToDevice(deviceId, {
+        const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
           jobId,
           type: "tap",
           params: { x: coords.x, y: coords.y },
           timeoutMs: 5_000,
+        }, {
+          boundary: "recovery_child",
+          rootKind: "job",
+          actor: "workflow_recovery",
+          metadata: { observeSource: "recovery.dismissAction" },
         });
-        if (sent) {
+        if (dispatch.sent) {
           await waitForResult(jobId, 5_000).catch(() => {});
         }
         await new Promise((r) => setTimeout(r, 500));
@@ -274,13 +289,18 @@ async function executeRecoveryAction(
       // Press back N times
       for (let i = 0; i < action.backSteps; i++) {
         const jobId = uuidv4();
-        const sent = sendJobToDevice(deviceId, {
+        const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
           jobId,
           type: "press_key",
           params: { key: "back" },
           timeoutMs: 3_000,
+        }, {
+          boundary: "recovery_child",
+          rootKind: "job",
+          actor: "workflow_recovery",
+          metadata: { observeSource: "recovery.navigateBack" },
         });
-        if (sent) {
+        if (dispatch.sent) {
           await waitForResult(jobId, 3_000).catch(() => {});
         }
         await new Promise((r) => setTimeout(r, 800));

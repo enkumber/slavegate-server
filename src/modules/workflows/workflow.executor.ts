@@ -23,7 +23,7 @@ import { getRedisConnectionOptions } from "../../redis/client";
 import { workflowService } from "./workflow.service";
 import { hbeService } from "../hbe/hbe.service";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { sendJobToDevice, isDeviceOnline } from "../../transport/transport";
+import { sendDeviceExecutionJobToDevice, isDeviceOnline } from "../../transport/transport";
 import { directWsServer } from "../../ws/direct-ws.server";
 import { scalabilityConfig } from "../../config/scalability.config";
 import { getDb } from "../../db/client";
@@ -265,8 +265,14 @@ async function dispatchGeneratedWorkflowProbe(
       workflowId,
       stepIndex,
     });
-    const sent = sendJobToDevice(deviceId, { jobId, type, params: {}, timeoutMs });
-    if (!sent) return null;
+    const dispatch = await sendDeviceExecutionJobToDevice(deviceId, { jobId, type, params: {}, timeoutMs }, {
+      boundary: "self_healing_child",
+      rootKind: "job",
+      requestKey: workflowId,
+      actor: "generated_workflow_executor",
+      metadata: { observeSource: "generatedWorkflow.dispatchProbe", workflowId, stepIndex },
+    });
+    if (!dispatch.sent) return null;
     return awaitJobResult(jobId, timeoutMs + 5_000);
   } catch {
     return null;
@@ -935,8 +941,14 @@ async function executeSkillActionStep(
         workflowId,
         stepIndex,
       });
-      const sent = sendJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs });
-      if (!sent) throw new Error("Failed to send job to device");
+      const dispatch = await sendDeviceExecutionJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs }, {
+        boundary: "generated_child",
+        rootKind: "job",
+        requestKey: workflowId,
+        actor: "generated_workflow_executor",
+        metadata: { observeSource: "generatedWorkflow.dispatchAndWait", workflowId, stepIndex },
+      });
+      if (!dispatch.sent) throw new Error("Failed to send job to device");
       return awaitJobResult(jobId, dispatchedTimeoutMs + 5_000);
     },
 
@@ -1200,7 +1212,7 @@ async function executeActionStep(
   );
 
   // Send to device via DirectWS transport
-  sendJobToDevice(deviceId, {
+  const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
     jobId,
     type:     jobType,
     params:   finalParams as import("../../../shared/protocol/messages").JobParams,
@@ -1209,7 +1221,19 @@ async function executeActionStep(
     verificationStrategy: strategy,
     l1TimeoutMs:          hbeStep.l1TimeoutMs,
     l2SettleMs:           hbeStep.l2SettleMs,
+  }, {
+    boundary: "generated_child",
+    rootKind: "job",
+    requestKey: workflowId,
+    actor: "generated_workflow_executor",
+    metadata: {
+      observeSource: "generatedWorkflow.dispatchStep",
+      workflowId,
+      stepIndex,
+      stepAction: step.action,
+    },
   });
+  if (!dispatch.sent) throw new Error(`Failed to send job to device: ${dispatch.reason ?? dispatch.decision}`);
 
   console.log(`[workflow] ${workflowId} step ${stepIndex} dispatched ${step.action} → jobId=${jobId}`);
 

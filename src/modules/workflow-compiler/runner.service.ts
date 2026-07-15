@@ -18,7 +18,7 @@
 
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../../db/client";
-import { sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
+import { sendDeviceExecutionJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import { directWsServer } from "../../ws/direct-ws.server";
 import type { BATCH_RESULT, BatchStep } from "../../protocol/batch-types";
 import { computePageSignature, isSamePage } from "../app-mapping/page-fingerprint";
@@ -188,14 +188,19 @@ async function attemptBoundedRecovery(
 
 async function captureUiTree(deviceId: string, timeoutMs = 10_000): Promise<UiTreeNode[]> {
   const jobId = uuidv4();
-  const sent = sendJobToDevice(deviceId, {
+  const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
     jobId,
     type: "ui_tree_dump",
     params: {},
     timeoutMs,
+  }, {
+    boundary: "generated_child",
+    rootKind: "job",
+    actor: "workflow_runner",
+    metadata: { observeSource: "runner.captureUiTree" },
   });
 
-  if (!sent) {
+  if (!dispatch.sent) {
     throw new Error(`Device ${deviceId} offline or unreachable`);
   }
 
@@ -238,6 +243,25 @@ async function executeStepAction(
 
   const jobId = uuidv4();
 
+  const dispatchStepJob = async (
+    type: Parameters<typeof sendDeviceExecutionJobToDevice>[1]["type"],
+    params: Parameters<typeof sendDeviceExecutionJobToDevice>[1]["params"],
+    timeoutMs: number,
+  ): Promise<boolean> => {
+    const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
+      jobId,
+      type,
+      params,
+      timeoutMs,
+    }, {
+      boundary: "generated_child",
+      rootKind: "job",
+      actor: "workflow_runner",
+      metadata: { observeSource: "runner.executeStepAction", stepAction: step.action },
+    });
+    return dispatch.sent;
+  };
+
   switch (step.action) {
     case "tap": {
       const target = step.target;
@@ -251,23 +275,13 @@ async function executeStepAction(
           a11yParams.text = target.elementId;
           a11yParams.partialMatch = true;
         }
-        const sent = sendJobToDevice(deviceId, {
-          jobId,
-          type: "a11y_find_tap",
-          params: a11yParams,
-          timeoutMs: STEP_TIMEOUT_MS,
-        });
+        const sent = await dispatchStepJob("a11y_find_tap", a11yParams, STEP_TIMEOUT_MS);
         if (!sent) return { success: false, error: "Device unreachable" };
         break;
       }
       // Fallback to coords
       const coords = target?.coords;
-      const sent = sendJobToDevice(deviceId, {
-        jobId,
-        type: "tap",
-        params: coords ? { x: coords.x, y: coords.y } : { x: 0.5, y: 0.5 },
-        timeoutMs: STEP_TIMEOUT_MS,
-      });
+      const sent = await dispatchStepJob("tap", coords ? { x: coords.x, y: coords.y } : { x: 0.5, y: 0.5 }, STEP_TIMEOUT_MS);
       if (!sent) return { success: false, error: "Device unreachable" };
       break;
     }
@@ -277,21 +291,21 @@ async function executeStepAction(
       if (step.target?.coords) {
         // Tap first, then type
         const tapJobId = uuidv4();
-        sendJobToDevice(deviceId, {
+        await sendDeviceExecutionJobToDevice(deviceId, {
           jobId: tapJobId,
           type: "tap",
           params: { x: step.target.coords.x, y: step.target.coords.y },
           timeoutMs: 5_000,
+        }, {
+          boundary: "generated_child",
+          rootKind: "job",
+          actor: "workflow_runner",
+          metadata: { observeSource: "runner.typeFocusTap", stepAction: step.action },
         });
         await waitForResult(tapJobId, 5_000).catch(() => {});
         await new Promise((r) => setTimeout(r, 300));
       }
-      const sent = sendJobToDevice(deviceId, {
-        jobId,
-        type: "type_text",
-        params: { text },
-        timeoutMs: STEP_TIMEOUT_MS,
-      });
+      const sent = await dispatchStepJob("type_text", { text }, STEP_TIMEOUT_MS);
       if (!sent) return { success: false, error: "Device unreachable" };
       break;
     }
@@ -307,24 +321,14 @@ async function executeStepAction(
         right: { sx: 0.2, sy: 0.5, ex: 0.2 + distance, ey: 0.5 },
       };
       const sc = swipeCoords[direction] || swipeCoords.up;
-      const sent = sendJobToDevice(deviceId, {
-        jobId,
-        type: "swipe",
-        params: { startX: sc.sx, startY: sc.sy, endX: sc.ex, endY: sc.ey },
-        timeoutMs: 5_000,
-      });
+      const sent = await dispatchStepJob("swipe", { startX: sc.sx, startY: sc.sy, endX: sc.ex, endY: sc.ey }, 5_000);
       if (!sent) return { success: false, error: "Device unreachable" };
       break;
     }
 
     case "press_key": {
       const key = (step.params?.key as string) || "back";
-      const sent = sendJobToDevice(deviceId, {
-        jobId,
-        type: "press_key",
-        params: { key },
-        timeoutMs: 5_000,
-      });
+      const sent = await dispatchStepJob("press_key", { key }, 5_000);
       if (!sent) return { success: false, error: "Device unreachable" };
       break;
     }
@@ -339,35 +343,20 @@ async function executeStepAction(
 
     case "open_app": {
       const packageName = (step.params?.packageName as string) || step.target?.text || "";
-      const sent = sendJobToDevice(deviceId, {
-        jobId,
-        type: "open_app",
-        params: { packageName },
-        timeoutMs: STEP_TIMEOUT_MS,
-      });
+      const sent = await dispatchStepJob("open_app", { packageName }, STEP_TIMEOUT_MS);
       if (!sent) return { success: false, error: "Device unreachable" };
       break;
     }
 
     case "intent_send": {
       const uri = (step.params?.uri as string) || "";
-      const sent = sendJobToDevice(deviceId, {
-        jobId,
-        type: "intent_send",
-        params: { uri },
-        timeoutMs: STEP_TIMEOUT_MS,
-      });
+      const sent = await dispatchStepJob("intent_send", { uri }, STEP_TIMEOUT_MS);
       if (!sent) return { success: false, error: "Device unreachable" };
       break;
     }
 
     case "screenshot": {
-      const sent = sendJobToDevice(deviceId, {
-        jobId,
-        type: "screenshot",
-        params: {},
-        timeoutMs: 10_000,
-      });
+      const sent = await dispatchStepJob("screenshot", {}, 10_000);
       if (!sent) return { success: false, error: "Device unreachable" };
       break;
     }

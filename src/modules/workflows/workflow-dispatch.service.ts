@@ -3,7 +3,7 @@
  * Shared service for workflow dispatch, cancellation, rate limiting, and decisions.
  */
 
-import { sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
+import { sendDeviceExecutionJobToDevice, sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
 
 // ── Pre-workflow steps (sent as individual jobs before workflow) ────────────
@@ -28,14 +28,19 @@ async function runPreWorkflowSteps(
         params: step.params ?? step,
         timeoutMs: 15_000,
       });
-      const sent = sendJobToDevice(deviceId, {
+      const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
         jobId,
         type: step.type as any,
         params: step.params ?? {},
         timeoutMs: 15_000,
+      }, {
+        boundary: "prestep_child",
+        rootKind: "job",
+        actor: "workflow_dispatch",
+        metadata: { observeSource: "workflowDispatch.preWorkflowStep", workflowStepType: step.type },
       });
 
-      if (sent) {
+      if (dispatch.sent) {
         try {
           const result = await waitForResult(jobId, 15_000);
           preResults[step.id ?? step.type] = result;
@@ -142,14 +147,23 @@ export async function dispatchWorkflow(params: DispatchParams) {
   });
 
   // 3. Send remaining workflow to device via WebSocket
-  const sent = sendJobToDevice(deviceId, {
+  const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
     jobId: job.jobId,
     type: "workflow_execute" as any,
     params: { workflow: workflowWithRemaining },
     timeoutMs,
+  }, {
+    boundary: "server_workflow_root",
+    rootKind: "job",
+    actor: "workflow_dispatch",
+    metadata: {
+      observeSource: "workflowDispatch.dispatchWorkflow",
+      workflowName: workflow.name,
+      workflowStepCount: remaining.length,
+    },
   });
 
-  if (!sent) {
+  if (!dispatch.sent) {
     console.warn(`[workflow-dispatch] WebSocket send failed for ${job.jobId} — device may have gone offline`);
   }
 

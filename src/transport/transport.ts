@@ -7,7 +7,12 @@
 
 import { directWsServer } from "../ws/direct-ws.server";
 import { deviceExecutionArbiter } from "../modules/device-execution";
-import type { DeviceExecutionStandaloneJobEgressResult } from "../modules/device-execution";
+import type {
+  DeviceExecutionBoundaryKind,
+  DeviceExecutionOperationKind,
+  DeviceExecutionRootKind,
+  DeviceExecutionStandaloneJobEgressResult,
+} from "../modules/device-execution";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
 
 export type StandaloneJobSendResult = Pick<
@@ -16,6 +21,15 @@ export type StandaloneJobSendResult = Pick<
 > & {
   queued: boolean;
 };
+
+export interface DeviceExecutionJobSendOptions {
+  boundary?: DeviceExecutionBoundaryKind;
+  rootKind?: DeviceExecutionRootKind;
+  operationKind?: DeviceExecutionOperationKind;
+  requestKey?: string;
+  actor?: string;
+  metadata?: Record<string, unknown>;
+}
 
 /**
  * Send a job to a device via DirectWS transport.
@@ -44,16 +58,40 @@ export async function sendStandaloneJobToDevice(
   deviceId: string,
   payload: JobDispatchPayload,
 ): Promise<StandaloneJobSendResult> {
+  return sendDeviceExecutionJobToDevice(deviceId, payload, {
+    boundary: "standalone_job",
+    rootKind: "job",
+    requestKey: payload.jobId,
+    actor: "transport.g2",
+    metadata: { observeSource: "transport.sendStandaloneJobToDevice" },
+  });
+}
+
+/**
+ * G3 production JOB egress for roots that are admitted to the PNQ ledger.
+ *
+ * This keeps the DB as the source of truth for FIFO, ownership generation,
+ * operation identity, waiter registration, send completion, and terminal CAS.
+ */
+export async function sendDeviceExecutionJobToDevice(
+  deviceId: string,
+  payload: JobDispatchPayload,
+  options: DeviceExecutionJobSendOptions = {},
+): Promise<StandaloneJobSendResult> {
   const result = await deviceExecutionArbiter.runStandaloneJobEgress({
     deviceId,
     jobId: payload.jobId,
-    requestKey: payload.jobId,
-    actor: "transport.g2",
+    rootKind: options.rootKind,
+    operationKind: options.operationKind ?? "job",
+    boundary: options.boundary,
+    requestKey: options.requestKey ?? payload.jobId,
+    actor: options.actor ?? "transport.g3",
     metadata: {
+      ...(options.metadata ?? {}),
       jobType: payload.type,
       timeoutMs: payload.timeoutMs ?? null,
       requiresRoot: payload.requiresRoot ?? false,
-      observeSource: "transport.sendStandaloneJobToDevice",
+      observeSource: options.metadata?.observeSource ?? "transport.sendDeviceExecutionJobToDevice",
     },
     registerWaiter: (permit) => {
       directWsServer.registerJobWaiterWithPermit(permit, payload.timeoutMs ?? 300_000);
