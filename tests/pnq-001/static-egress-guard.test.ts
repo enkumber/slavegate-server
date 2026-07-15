@@ -33,6 +33,7 @@ const repoRoot = path.resolve(__dirname, "../..");
 
 const directWsServerMethods = new Set([
   "sendJob",
+  "sendJobWithPermit",
   "sendBatch",
   "sendWorkflowStart",
   "sendWorkflowCancel",
@@ -48,15 +49,11 @@ const excludedFiles = [
 ];
 
 const reviewedRawImportBoundaries = new Set([
-  "src/api/hydra-routes.ts\tsendJobToDevice\ttransport",
   "src/api/hydra-routes.ts\tdirectWsServer\tdirect-ws",
   "src/api/routes.ts\tsendJobToDevice\ttransport",
   "src/api/routes.ts\tdirectWsServer\tdirect-ws",
   "src/index.ts\tdirectWsServer\tdirect-ws",
   "src/modules/agents/orchestrator.ts\tsendJobToDevice\ttransport",
-  "src/modules/app-mapping/mapping-routes.ts\tsendJobToDevice\ttransport",
-  "src/modules/app-mapping/recorder.service.ts\tsendJobToDevice\ttransport",
-  "src/modules/screen-detection/screen-detection.service.ts\tsendJobToDevice\ttransport",
   "src/modules/skills/skill.cascade.ts\tsendJobToDevice\ttransport",
   "src/modules/workflow-compiler/recovery.service.ts\tsendJobToDevice\ttransport",
   "src/modules/workflow-compiler/runner.service.ts\tsendJobToDevice\ttransport",
@@ -148,8 +145,25 @@ function collectImportBindings(sourceFile: ts.SourceFile): Map<string, ImportBin
     if (!ts.isStringLiteral(statement.moduleSpecifier)) continue;
 
     const moduleSpecifier = statement.moduleSpecifier.text;
+    if (statement.importClause?.name) {
+      bindings.set(statement.importClause.name.text, {
+        importedName: "default",
+        moduleSpecifier,
+      });
+    }
+
     const namedBindings = statement.importClause?.namedBindings;
-    if (!namedBindings || !ts.isNamedImports(namedBindings)) continue;
+    if (!namedBindings) continue;
+
+    if (ts.isNamespaceImport(namedBindings)) {
+      bindings.set(namedBindings.name.text, {
+        importedName: "*",
+        moduleSpecifier,
+      });
+      continue;
+    }
+
+    if (!ts.isNamedImports(namedBindings)) continue;
 
     for (const element of namedBindings.elements) {
       bindings.set(element.name.text, {
@@ -171,7 +185,12 @@ function collectRawImportBoundaries(
   for (const binding of importBindings.values()) {
     const sourceKind = rawSourceKind(binding.moduleSpecifier);
     if (!sourceKind) continue;
-    if (binding.importedName !== "sendJobToDevice" && binding.importedName !== "directWsServer") continue;
+    if (
+      binding.importedName !== "sendJobToDevice" &&
+      binding.importedName !== "directWsServer" &&
+      binding.importedName !== "*" &&
+      binding.importedName !== "default"
+    ) continue;
     imports.push({ file, importedName: binding.importedName, sourceKind });
   }
 
@@ -194,6 +213,10 @@ function classifyCall(
   const callee = node.expression;
 
   if (ts.isIdentifier(callee)) {
+    const binding = importBindings.get(callee.text);
+    if (binding?.importedName === "sendJobToDevice" && rawSourceKind(binding.moduleSpecifier) === "transport") {
+      return [findingForIdentifier(file, "sendJobToDevice", callee.text, importBindings)];
+    }
     if (callee.text === "sendJobToDevice") {
       return [findingForIdentifier(file, "sendJobToDevice", callee.text, importBindings)];
     }
@@ -206,9 +229,38 @@ function classifyCall(
   const receiver = callee.expression.getText(sourceFile);
   const method = callee.name.text;
   const findings: EgressFinding[] = [];
+  const receiverBinding = importBindings.get(receiver);
 
-  if (receiver === "directWsServer" && directWsServerMethods.has(method)) {
+  if (
+    directWsServerMethods.has(method) &&
+    (receiver === "directWsServer" || receiverBinding?.importedName === "directWsServer")
+  ) {
     findings.push(findingForProperty(file, `directWsServer.${method}`, receiver, method, importBindings));
+  }
+  if (
+    method === "sendJobToDevice" &&
+    receiverBinding?.importedName === "*" &&
+    rawSourceKind(receiverBinding.moduleSpecifier) === "transport"
+  ) {
+    findings.push({
+      file,
+      kind: "sendJobToDevice",
+      callee: `${receiver}.${method}`,
+      importedName: "sendJobToDevice",
+      sourceKind: "transport",
+    });
+  }
+  if (directWsServerMethods.has(method)) {
+    const namespaced = namespacedDirectWsServerReceiver(callee.expression, importBindings);
+    if (namespaced) {
+      findings.push({
+        file,
+        kind: `directWsServer.${method}`,
+        callee: `${receiver}.${method}`,
+        importedName: "directWsServer",
+        sourceKind: "direct-ws",
+      });
+    }
   }
   if (receiver === "transport" && method === "sendJob") {
     findings.push({ file, kind: "transport.sendJob", callee: `${receiver}.${method}` });
@@ -224,6 +276,17 @@ function classifyCall(
   }
 
   return findings;
+}
+
+function namespacedDirectWsServerReceiver(
+  node: ts.Expression,
+  importBindings: Map<string, ImportBinding>,
+): boolean {
+  if (!ts.isPropertyAccessExpression(node)) return false;
+  if (node.name.text !== "directWsServer") return false;
+  if (!ts.isIdentifier(node.expression)) return false;
+  const binding = importBindings.get(node.expression.text);
+  return binding?.importedName === "*" && rawSourceKind(binding.moduleSpecifier) === "direct-ws";
 }
 
 function findingForIdentifier(
@@ -285,6 +348,40 @@ function currentSemanticBoundary(): {
   }
 
   return { findings, rawImports };
+}
+
+function routerHandlerSource(method: string, routePath: string): string | null {
+  const file = "src/api/routes.ts";
+  const sourceText = fs.readFileSync(path.join(repoRoot, file), "utf8");
+  const sourceFile = ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let handler: ts.Expression | null = null;
+
+  const visit = (node: ts.Node): void => {
+    if (handler || !ts.isCallExpression(node)) {
+      ts.forEachChild(node, visit);
+      return;
+    }
+
+    const callee = node.expression;
+    if (
+      ts.isPropertyAccessExpression(callee) &&
+      callee.expression.getText(sourceFile) === "router" &&
+      callee.name.text === method &&
+      ts.isStringLiteral(node.arguments[0]) &&
+      node.arguments[0].text === routePath
+    ) {
+      const candidate = node.arguments[node.arguments.length - 1];
+      if (ts.isArrowFunction(candidate) || ts.isFunctionExpression(candidate)) {
+        handler = candidate;
+        return;
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return handler?.getText(sourceFile) ?? null;
 }
 
 function importBoundaryKey(boundary: RawImportBoundary): string {
@@ -350,6 +447,43 @@ describe("PNQ-001 production egress inventory guard", () => {
     const violations = findings.filter((finding) => !isReviewedCallBoundary(finding));
 
     expect(violations).toEqual([]);
+  });
+
+  it("detects aliased and namespace raw transport sender bypasses", () => {
+    const source = `
+      import { sendJobToDevice as rawSend } from "../transport/transport";
+      import * as transport from "../transport/transport";
+      import { directWsServer as rawWs } from "../ws/direct-ws.server";
+      import * as direct from "../ws/direct-ws.server";
+
+      rawSend(deviceId, payload);
+      transport.sendJobToDevice(deviceId, payload);
+      rawWs.sendJob(deviceId, payload);
+      direct.directWsServer.sendBatch(deviceId, payload);
+    `;
+
+    const result = scanSource(source, "fixture.ts");
+
+    expect(result.rawImports.map(importBoundaryKey).sort()).toEqual([
+      "fixture.ts\t*\tdirect-ws",
+      "fixture.ts\t*\ttransport",
+      "fixture.ts\tdirectWsServer\tdirect-ws",
+      "fixture.ts\tsendJobToDevice\ttransport",
+    ]);
+    expect(result.findings.map((finding) => `${finding.kind}:${finding.callee}`).sort()).toEqual([
+      "directWsServer.sendBatch:direct.directWsServer.sendBatch",
+      "directWsServer.sendJob:rawWs.sendJob",
+      "sendJobToDevice:rawSend",
+      "sendJobToDevice:transport.sendJobToDevice",
+    ]);
+  });
+
+  it("keeps POST /api/jobs as a 202 queued admission response", () => {
+    const handler = routerHandlerSource("post", "/jobs");
+
+    expect(handler).not.toBeNull();
+    expect(handler).toContain("res.status(202).json");
+    expect(handler).toContain('status: "queued"');
   });
 
   it("ignores comments and string literals that merely mention sender names", () => {

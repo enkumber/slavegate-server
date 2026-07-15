@@ -1,11 +1,5 @@
 [
   {
-    "file": "src/api/hydra-routes.ts",
-    "kind": "sendJobToDevice",
-    "count": 22,
-    "classification": "device-job-ingress"
-  },
-  {
     "file": "src/api/routes.ts",
     "kind": "directWsServer.sendToDevice",
     "count": 2,
@@ -30,34 +24,10 @@
     "classification": "generic-sendto-device-match"
   },
   {
-    "file": "src/api/routes.ts",
-    "kind": "transport.sendJob",
-    "count": 1,
-    "classification": "raw-job-ingress"
-  },
-  {
     "file": "src/modules/agents/orchestrator.ts",
     "kind": "sendJobToDevice",
     "count": 16,
     "classification": "orchestrator-device-jobs"
-  },
-  {
-    "file": "src/modules/app-mapping/mapping-routes.ts",
-    "kind": "sendJobToDevice",
-    "count": 1,
-    "classification": "app-mapping-device-job"
-  },
-  {
-    "file": "src/modules/app-mapping/recorder.service.ts",
-    "kind": "sendJobToDevice",
-    "count": 1,
-    "classification": "app-mapping-device-job"
-  },
-  {
-    "file": "src/modules/screen-detection/screen-detection.service.ts",
-    "kind": "sendJobToDevice",
-    "count": 4,
-    "classification": "screen-detection-device-jobs"
   },
   {
     "file": "src/modules/skills/skill.cascade.ts",
@@ -124,6 +94,12 @@
     "kind": "directWsServer.sendJob",
     "count": 1,
     "classification": "direct-ws-job-transport-internal"
+  },
+  {
+    "file": "src/transport/transport.ts",
+    "kind": "directWsServer.sendJobWithPermit",
+    "count": 1,
+    "classification": "direct-ws-job-permit-transport-internal"
   },
   {
     "file": "src/transport/transport.ts",

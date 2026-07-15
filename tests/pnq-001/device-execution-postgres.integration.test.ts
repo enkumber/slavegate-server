@@ -3,18 +3,21 @@ import path from "node:path";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  decodeDeviceExecutionHandle,
   DeviceExecutionArbiter,
   DeviceExecutionSchemaError,
+  type DeviceExecutionJobDispatchPermit,
   type DeviceExecutionState,
 } from "../../src/modules/device-execution/device-execution-arbiter";
 
 const repoRoot = path.resolve(__dirname, "../..");
 const migrationPath = path.join(repoRoot, "src/db/migrations/081_device_execution_queue.sql");
-const postgresUrl = process.env.PNQ001_PG_URL;
+const postgresUrl = process.env.PNQ001_PG_URL ?? "postgresql://pnqtest@127.0.0.1:55432/pnq001_test";
 const describePostgres = postgresUrl ? describe : describe.skip;
 
 const DEVICE_A = "00000000-0000-4000-8000-0000000000a1";
 const DEVICE_B = "00000000-0000-4000-8000-0000000000b2";
+const DEVICE_C = "00000000-0000-4000-8000-0000000000c3";
 const ACTIVE_STATES = ["claimed", "dispatching", "dispatched", "reconciling", "blocked"] as const;
 
 let pool: Pool;
@@ -36,28 +39,34 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     await pool?.end();
   });
 
-  it("admits and drains 100 roots in stable FIFO order with at most one active root", async () => {
+  it("admits 100 concurrent roots and drains the stable PostgreSQL FIFO with maxActive=1", async () => {
     await insertDevice(pool, DEVICE_A, "pnq-fifo-a");
     const externalIds = Array.from({ length: 100 }, (_, index) => `fifo-job-${String(index + 1).padStart(3, "0")}`);
 
-    for (const externalId of externalIds) {
-      const admitted = await arbiter.observeAdmission({
-        deviceId: DEVICE_A,
-        rootKind: "job",
-        externalId,
-        requestKey: externalId,
-        actor: "pnq-test",
-      });
-      expect(admitted.decision).toBe("admitted");
-    }
+    const admissions = await Promise.all(externalIds.map((externalId) => arbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "job",
+      externalId,
+      requestKey: externalId,
+      actor: "pnq-test",
+    })));
+    expect(admissions.map((admission) => admission.decision)).toEqual(Array.from({ length: 100 }, () => "admitted"));
+    expect(await activeRootCount(pool, DEVICE_A)).toBe(0);
 
-    expect(await rootExternalIdsByFifo(pool, DEVICE_A)).toEqual(externalIds);
+    const fifoRows = await rootRowsByFifo(pool, DEVICE_A);
+    const fifoOrder = fifoRows.map((row) => row.external_id);
+    expect(fifoOrder).toHaveLength(100);
+    expect(new Set(fifoOrder)).toEqual(new Set(externalIds));
+    expect(fifoRows.map((row) => row.fifo_sequence)).toEqual([...fifoRows].map((row) => row.fifo_sequence).sort((a, b) => a - b));
 
-    for (const externalId of externalIds) {
+    const activeCounts: number[] = [];
+    const claimedOrder: string[] = [];
+    for (const externalId of fifoOrder) {
       const permit = await arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: "worker-a" });
       expect(permit).not.toBeNull();
-      expect(await activeRootCount(pool, DEVICE_A)).toBe(1);
+      activeCounts.push(await activeRootCount(pool, DEVICE_A));
       expect(await externalIdForRoot(pool, permit!.rootId)).toBe(externalId);
+      claimedOrder.push(externalId);
 
       const dispatch = await arbiter.observeDispatch({
         deviceId: DEVICE_A,
@@ -67,7 +76,7 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
         actor: "transport-test",
       });
       expect(dispatch.decision).toBe("dispatched");
-      expect(await activeRootCount(pool, DEVICE_A)).toBe(1);
+      activeCounts.push(await activeRootCount(pool, DEVICE_A));
 
       const terminal = await arbiter.observeTerminal({
         deviceId: DEVICE_A,
@@ -79,6 +88,8 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       expect(await activeRootCount(pool, DEVICE_A)).toBe(0);
     }
 
+    expect(claimedOrder).toEqual(fifoOrder);
+    expect(Math.max(...activeCounts)).toBe(1);
     expect(await stateCount(pool, "completed")).toBe(100);
   });
 
@@ -117,6 +128,63 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     expect(await eventCount(pool, "root_claimed")).toBe(1);
   });
 
+  it("uses one canonical DB/wire handle and registers the waiter before wire send", async () => {
+    await insertDevice(pool, DEVICE_A, "pnq-wire-a");
+    const order: string[] = [];
+    const seen: { waiter?: DeviceExecutionJobDispatchPermit; wire?: DeviceExecutionJobDispatchPermit } = {};
+
+    const result = await arbiter.runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "wire-job",
+      requestKey: "wire-job",
+      actor: "pnq-egress-test",
+      metadata: { jobType: "screenshot" },
+      registerWaiter: (permit) => {
+        order.push("waiter");
+        seen.waiter = permit;
+      },
+      wireDispatch: (permit) => {
+        order.push("wire");
+        seen.wire = permit;
+        expect(order).toEqual(["waiter", "wire"]);
+        return true;
+      },
+    });
+
+    expect(result).toMatchObject({ decision: "dispatched", sent: true });
+    expect(order).toEqual(["waiter", "wire"]);
+    expect(seen.waiter).toEqual(seen.wire);
+    expect(result.permit).toEqual(seen.waiter);
+    expect(result.handle).toEqual(seen.waiter!.handle);
+    expect(result.permit?.wireHandle).toEqual({
+      pnqRootId: result.handle!.rootId,
+      pnqDeviceId: DEVICE_A,
+      pnqRootKind: "job",
+      pnqOwnerGeneration: result.handle!.ownerGeneration,
+      pnqOperationKind: "job",
+      pnqOperationId: "wire-job",
+    });
+
+    const root = await rootForExternalId(pool, "wire-job");
+    const operation = await operationFor(pool, "job", "wire-job");
+    expect(root).toMatchObject({
+      id: result.handle!.rootId,
+      state: "dispatched",
+      owner_generation: result.handle!.ownerGeneration,
+    });
+    expect(operation).toMatchObject({
+      root_id: result.handle!.rootId,
+      device_id: DEVICE_A,
+      operation_id: "wire-job",
+      owner_generation: result.handle!.ownerGeneration,
+      state: "dispatched",
+      wire_type: "JOB",
+    });
+    expect(operation!.wire_handle).toEqual(result.permit!.wireHandle);
+    expect(decodeDeviceExecutionHandle(operation!.wire_handle)).toEqual(result.handle);
+    expect(await eventTypes(pool)).toEqual(["implicit_admission", "root_dispatching", "root_dispatched"]);
+  });
+
   it("keeps a queued successor blocked across a crash/restart ambiguity", async () => {
     await insertDevice(pool, DEVICE_A, "pnq-restart-a");
     await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "job", externalId: "ambiguous-root" });
@@ -148,7 +216,54 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     expect(await eventCount(pool, "root_ambiguous")).toBe(1);
   });
 
-  it("audits wrong-device and duplicate terminal CAS rejections", async () => {
+  it.each([
+    ["timeout", "job_timeout", "blocked"] as const,
+    ["disconnect", "device_disconnect", "blocked"] as const,
+    ["restart", "server_startup_reconciliation", "reconciling"] as const,
+  ])("keeps a successor queued when %s ambiguity is active", async (_label, reason, expectedState) => {
+    await insertDevice(pool, DEVICE_A, `pnq-${reason}-a`);
+    await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "job", externalId: `${reason}-root` });
+    await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "job", externalId: `${reason}-successor` });
+    const permit = await arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: `${reason}-worker` });
+    expect(permit).not.toBeNull();
+
+    if (reason === "server_startup_reconciliation") {
+      const startup = await arbiter.reconcileInFlightAtStartup({ actor: "startup-test", reason });
+      expect(startup).toEqual({ reconciledRoots: 1, activeAmbiguousRoots: 1 });
+      expect(await eventCount(pool, "startup_reconciled_root")).toBe(1);
+    } else {
+      await arbiter.observeDispatch({
+        deviceId: DEVICE_A,
+        rootKind: "job",
+        externalId: `${reason}-root`,
+        sent: true,
+        actor: `${reason}-transport`,
+      });
+      const ambiguous = await arbiter.markAmbiguous({
+        deviceId: DEVICE_A,
+        handle: {
+          rootId: permit!.rootId,
+          deviceId: DEVICE_A,
+          rootKind: "job",
+          ownerGeneration: permit!.ownerGeneration,
+          operationKind: "job",
+          operationId: `${reason}-root`,
+        },
+        reason,
+        state: expectedState,
+        actor: `${reason}-test`,
+      });
+      expect(ambiguous.decision).toBe("ambiguous");
+      expect(await eventCount(pool, "root_ambiguous")).toBe(1);
+    }
+
+    expect(await stateForExternalId(pool, `${reason}-root`)).toBe(expectedState);
+    expect(await stateForExternalId(pool, `${reason}-successor`)).toBe("queued");
+    await expect(arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: `${reason}-successor-worker` })).resolves.toBeNull();
+    expect(await activeRootCount(pool, DEVICE_A)).toBe(1);
+  });
+
+  it("audits terminal CAS rejections for wrong-device, stale, duplicate, and late results", async () => {
     await insertDevice(pool, DEVICE_A, "pnq-terminal-a");
     await insertDevice(pool, DEVICE_B, "pnq-terminal-b");
     await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "job", externalId: "terminal-job" });
@@ -161,6 +276,17 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       sent: true,
       actor: "transport-test",
     });
+
+    const stale = await arbiter.observeTerminal({
+      deviceId: DEVICE_A,
+      rootKind: "job",
+      externalId: "terminal-job",
+      ownerGeneration: permit!.ownerGeneration - 1,
+      status: "completed",
+      actor: "stale-worker",
+    });
+    expect(stale).toMatchObject({ decision: "rejected", reason: "owner_generation_mismatch" });
+    expect(await stateForExternalId(pool, "terminal-job")).toBe("dispatched");
 
     const wrongDevice = await arbiter.observeTerminal({
       deviceId: DEVICE_B,
@@ -191,8 +317,93 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     expect(["ignored", "rejected"]).toContain(duplicate.decision);
     expect(duplicate.reason).toBe("root_already_terminal");
     expect(await stateForExternalId(pool, "terminal-job")).toBe("completed");
+
+    await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "job", externalId: "late-after-cancel" });
+    const cancelled = await arbiter.observeTerminal({
+      deviceId: DEVICE_A,
+      rootKind: "job",
+      externalId: "late-after-cancel",
+      status: "cancelled",
+      actor: "dispatcher_cancel",
+    });
+    expect(cancelled.decision).toBe("terminal");
+    const late = await arbiter.observeTerminal({
+      deviceId: DEVICE_A,
+      rootKind: "job",
+      externalId: "late-after-cancel",
+      status: "completed",
+      actor: "device-late",
+    });
+    expect(late).toMatchObject({ decision: "rejected", reason: "root_already_terminal" });
+    expect(await stateForExternalId(pool, "late-after-cancel")).toBe("cancelled");
+
+    expect(await eventCount(pool, "result_rejected_stale_generation")).toBe(1);
     expect(await eventCount(pool, "result_rejected_wrong_device")).toBe(1);
-    expect(await eventCount(pool, "duplicate_or_late_result")).toBe(1);
+    expect(await eventCount(pool, "duplicate_or_late_result")).toBe(2);
+  });
+
+  it("cancels queued and running JOB roots without letting late results mutate successors", async () => {
+    await insertDevice(pool, DEVICE_A, "pnq-cancel-a");
+    await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "job", externalId: "queued-cancel" });
+    await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "job", externalId: "queued-successor" });
+
+    const queuedCancel = await arbiter.observeTerminal({
+      deviceId: DEVICE_A,
+      rootKind: "job",
+      externalId: "queued-cancel",
+      status: "cancelled",
+      actor: "dispatcher_cancel",
+      reason: "queued_job_cancelled",
+    });
+    expect(queuedCancel.decision).toBe("terminal");
+    expect(await stateForExternalId(pool, "queued-cancel")).toBe("cancelled");
+
+    const queuedSuccessor = await arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: "worker-after-queued-cancel" });
+    expect(queuedSuccessor).not.toBeNull();
+    expect(await externalIdForRoot(pool, queuedSuccessor!.rootId)).toBe("queued-successor");
+    await arbiter.observeTerminal({
+      deviceId: DEVICE_A,
+      rootId: queuedSuccessor!.rootId,
+      status: "completed",
+      actor: "device-successor",
+    });
+
+    await insertDevice(pool, DEVICE_C, "pnq-cancel-c");
+    await arbiter.observeAdmission({ deviceId: DEVICE_C, rootKind: "job", externalId: "running-cancel" });
+    await arbiter.observeAdmission({ deviceId: DEVICE_C, rootKind: "job", externalId: "running-successor" });
+    const runningPermit = await arbiter.claimNextRoot({ deviceId: DEVICE_C, actor: "worker-before-running-cancel" });
+    expect(runningPermit).not.toBeNull();
+    await arbiter.observeDispatch({
+      deviceId: DEVICE_C,
+      rootKind: "job",
+      externalId: "running-cancel",
+      sent: true,
+      actor: "transport-before-running-cancel",
+    });
+
+    const runningCancel = await arbiter.observeTerminal({
+      deviceId: DEVICE_C,
+      rootKind: "job",
+      externalId: "running-cancel",
+      status: "cancelled",
+      actor: "dispatcher_cancel",
+      reason: "running_job_cancelled",
+    });
+    expect(runningCancel.decision).toBe("terminal");
+    expect(await stateForExternalId(pool, "running-cancel")).toBe("cancelled");
+
+    const lateRunning = await arbiter.observeTerminal({
+      deviceId: DEVICE_C,
+      rootKind: "job",
+      externalId: "running-cancel",
+      status: "completed",
+      actor: "device-late-after-running-cancel",
+    });
+    expect(lateRunning).toMatchObject({ decision: "rejected", reason: "root_already_terminal" });
+
+    const runningSuccessor = await arbiter.claimNextRoot({ deviceId: DEVICE_C, actor: "worker-after-running-cancel" });
+    expect(runningSuccessor).not.toBeNull();
+    expect(await externalIdForRoot(pool, runningSuccessor!.rootId)).toBe("running-successor");
   });
 
   it("materializes the schema contract needed by PNQ queue authority", async () => {
@@ -301,12 +512,53 @@ async function rootExternalIdsByFifo(db: Pool, deviceId: string): Promise<string
   return result.rows.map((row) => row.external_id);
 }
 
+async function rootRowsByFifo(db: Pool, deviceId: string): Promise<FifoRootRow[]> {
+  const result = await db.query<{ external_id: string; fifo_sequence: string }>(
+    `SELECT external_id, fifo_sequence::text AS fifo_sequence
+     FROM device_execution_roots
+     WHERE device_id = $1
+     ORDER BY device_execution_roots.fifo_sequence ASC`,
+    [deviceId],
+  );
+  return result.rows.map((row) => ({
+    external_id: row.external_id,
+    fifo_sequence: Number(row.fifo_sequence),
+  }));
+}
+
 async function externalIdForRoot(db: Pool, rootId: string): Promise<string | null> {
   const result = await db.query<{ external_id: string | null }>(
     "SELECT external_id FROM device_execution_roots WHERE id = $1",
     [rootId],
   );
   return result.rows[0]?.external_id ?? null;
+}
+
+async function rootForExternalId(db: Pool, externalId: string): Promise<RootSummaryRow | null> {
+  const result = await db.query<RootSummaryRow>(
+    `SELECT id, device_id, external_id, state, owner_generation::int AS owner_generation
+     FROM device_execution_roots
+     WHERE external_id = $1`,
+    [externalId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function operationFor(db: Pool, operationKind: string, operationId: string): Promise<OperationSummaryRow | null> {
+  const result = await db.query<OperationSummaryRow>(
+    `SELECT
+       root_id,
+       device_id,
+       operation_id,
+       owner_generation::int AS owner_generation,
+       state,
+       wire_type,
+       wire_handle
+     FROM device_execution_operations
+     WHERE operation_kind = $1 AND operation_id = $2`,
+    [operationKind, operationId],
+  );
+  return result.rows[0] ?? null;
 }
 
 async function stateForExternalId(db: Pool, externalId: string): Promise<DeviceExecutionState | null> {
@@ -342,6 +594,13 @@ async function eventCount(db: Pool, eventType: string): Promise<number> {
     [eventType],
   );
   return result.rows[0]?.count ?? 0;
+}
+
+async function eventTypes(db: Pool): Promise<string[]> {
+  const result = await db.query<{ event_type: string }>(
+    "SELECT event_type FROM device_execution_events ORDER BY id ASC",
+  );
+  return result.rows.map((row) => row.event_type);
 }
 
 async function columnsFor(db: Pool, tableName: string): Promise<Map<string, ColumnRow>> {
@@ -400,4 +659,27 @@ interface IndexRow {
   indisunique: boolean;
   predicate: string | null;
   definition: string;
+}
+
+interface FifoRootRow {
+  external_id: string;
+  fifo_sequence: number;
+}
+
+interface RootSummaryRow {
+  id: string;
+  device_id: string;
+  external_id: string;
+  state: DeviceExecutionState;
+  owner_generation: number;
+}
+
+interface OperationSummaryRow {
+  root_id: string;
+  device_id: string;
+  operation_id: string;
+  owner_generation: number;
+  state: string;
+  wire_type: string | null;
+  wire_handle: unknown;
 }
