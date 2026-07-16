@@ -35,6 +35,7 @@ import { compileGeneratedWorkflowTemplate } from "../workflows/workflow-validato
 import { workflowEvents } from "../workflow-events";
 import { assertHumanWorkflowMeaningful } from "../human-workflow/human-workflow-compiler.service";
 import { normalizeCachedHumanWorkflowTemplate } from "../human-workflow/human-workflow-normalization";
+import { cancelPersistedWorkflowSafely } from "../workflows/workflow-cancellation.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -130,6 +131,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const GENERATED_WORKFLOW_ROUTINE = "generated_workflow";
 const GENERATED_WORKFLOW_FINAL_POLL_INTERVAL_MS = 2_000;
 const GENERATED_WORKFLOW_FINAL_TIMEOUT_MS = 180_000;
+const GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS = Number(
+  process.env.GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS ?? GENERATED_WORKFLOW_FINAL_TIMEOUT_MS,
+);
 
 function zeroTokenUsage(): TaskResult["tokenUsage"] {
   return {
@@ -351,10 +355,12 @@ function checkpointVariables(workflow: WorkflowRecord | null): Record<string, un
 }
 
 async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<WorkflowRecord> {
-  const startedAt = Date.now();
+  const queuedAt = Date.now();
+  let runningAt: number | null = null;
+  let queueCancellationLostRace = false;
   let latest: WorkflowRecord | null = null;
 
-  while (Date.now() - startedAt < GENERATED_WORKFLOW_FINAL_TIMEOUT_MS) {
+  while (true) {
     latest = await workflowService.get(workflowId);
     if (!latest) {
       throw new Error(`Generated workflow ${workflowId} not found after dispatch`);
@@ -362,12 +368,34 @@ async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<Workfl
     if (latest.status === "completed" || latest.status === "failed" || latest.status === "cancelled") {
       return latest;
     }
+
+    if (latest.status === "queued" && !queueCancellationLostRace) {
+      if (Date.now() - queuedAt >= GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS) {
+        try {
+          await cancelPersistedWorkflowSafely(workflowId);
+          const cancelled = await workflowService.get(workflowId);
+          if (cancelled?.status === "cancelled") return cancelled;
+          throw new Error(`Generated workflow ${workflowId} cancellation completed without a cancelled workflow row`);
+        } catch (err) {
+          const code = (err as Error & { code?: string }).code;
+          if (code !== "CANCELLATION_UNSUPPORTED_IN_FLIGHT") throw err;
+          // The queue pump won the exact timeout race. It has already sent the
+          // workflow, so switching to the execution deadline avoids a second
+          // dispatch while the first one is in flight.
+          queueCancellationLostRace = true;
+          runningAt = Date.now();
+        }
+      }
+    } else {
+      runningAt ??= Date.now();
+      if (Date.now() - runningAt >= GENERATED_WORKFLOW_FINAL_TIMEOUT_MS) {
+        throw new Error(
+          `Generated workflow ${workflowId} did not reach a final status within ${GENERATED_WORKFLOW_FINAL_TIMEOUT_MS}ms after dispatch; latest=${latest.status}`,
+        );
+      }
+    }
     await sleep(GENERATED_WORKFLOW_FINAL_POLL_INTERVAL_MS);
   }
-
-  throw new Error(
-    `Generated workflow ${workflowId} did not reach a final status within ${GENERATED_WORKFLOW_FINAL_TIMEOUT_MS}ms; latest=${latest?.status ?? "missing"}`,
-  );
 }
 
 function agencyWorkflowRunIdFromTask(task: TaskRow): string | null {

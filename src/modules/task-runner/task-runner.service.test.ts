@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   saveTemplate: vi.fn(),
   saveGeneratedPlanCache: vi.fn(),
   getWorkflow: vi.fn(),
+  cancelPersistedWorkflowSafely: vi.fn(),
   llmJson: vi.fn(),
 }));
 
@@ -58,6 +59,10 @@ vi.mock("../workflows/workflow.service", () => ({
     saveGeneratedPlanCache: mocks.saveGeneratedPlanCache,
     get: mocks.getWorkflow,
   },
+}));
+
+vi.mock("../workflows/workflow-cancellation.service", () => ({
+  cancelPersistedWorkflowSafely: mocks.cancelPersistedWorkflowSafely,
 }));
 
 vi.mock("../../utils/llm", () => ({
@@ -269,6 +274,10 @@ describe("task-runner generated_workflow routine", () => {
       templateId: "agent_generated_reddit_account_health_scan_v1",
     });
     mocks.getWorkflow.mockResolvedValue(completedWorkflow());
+    mocks.cancelPersistedWorkflowSafely.mockResolvedValue({
+      workflowId: WORKFLOW_ID,
+      status: "cancelled",
+    });
     mocks.recordGeneratedPlanCacheOutcome.mockResolvedValue(null);
     mocks.getGeneratedPlanCacheForRepair.mockResolvedValue(null);
     mocks.saveTemplate.mockResolvedValue(undefined);
@@ -589,6 +598,72 @@ describe("task-runner generated_workflow routine", () => {
       output: finalOutput,
       generatedWorkflow: { output: finalOutput },
     });
+  });
+
+  it("cancels a workflow that remains queued until the PNQ wait timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const cached = cacheRecord();
+      let cancelled = false;
+      mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+      mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+      mocks.getWorkflow.mockImplementation(async () => ({
+        ...completedWorkflow(),
+        status: cancelled ? "cancelled" : "queued",
+        currentStep: 0,
+        completedAt: cancelled ? new Date().toISOString() : null,
+      }));
+      mocks.cancelPersistedWorkflowSafely.mockImplementation(async () => {
+        cancelled = true;
+        return { workflowId: WORKFLOW_ID, status: "cancelled" as const };
+      });
+
+      const pending = executeTaskNow(TASK_ID);
+      await vi.advanceTimersByTimeAsync(180_001);
+      const result = await pending;
+
+      expect(mocks.cancelPersistedWorkflowSafely).toHaveBeenCalledTimes(1);
+      expect(mocks.cancelPersistedWorkflowSafely).toHaveBeenCalledWith(WORKFLOW_ID);
+      expect(result).toMatchObject({
+        success: false,
+        generatedWorkflow: { workflowId: WORKFLOW_ID },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps waiting without redispatch when the PNQ queue pump wins the timeout race", async () => {
+    vi.useFakeTimers();
+    try {
+      const cached = cacheRecord();
+      let queuePumpWon = false;
+      mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+      mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+      mocks.getWorkflow.mockImplementation(async () => ({
+        ...completedWorkflow(),
+        status: queuePumpWon ? "completed" : "queued",
+        currentStep: queuePumpWon ? 2 : 0,
+      }));
+      mocks.cancelPersistedWorkflowSafely.mockImplementation(async () => {
+        queuePumpWon = true;
+        throw Object.assign(new Error("workflow became active"), {
+          code: "CANCELLATION_UNSUPPORTED_IN_FLIGHT",
+          status: 409,
+        });
+      });
+
+      const pending = executeTaskNow(TASK_ID);
+      await vi.advanceTimersByTimeAsync(180_001);
+      await vi.advanceTimersByTimeAsync(2_001);
+      const result = await pending;
+
+      expect(mocks.cancelPersistedWorkflowSafely).toHaveBeenCalledTimes(1);
+      expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ success: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retries a repaired generated workflow candidate after failure", async () => {

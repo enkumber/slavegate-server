@@ -16,9 +16,15 @@ import { directWsServer } from "../ws/direct-ws.server";
 import * as dbClient from "../db/client";
 
 const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
+const lifecycleMocks = vi.hoisted(() => ({
+  promoteReplayedEdgeWorkflowToRunning: vi.fn(),
+}));
+
+vi.mock("../modules/workflows/edge-workflow-lifecycle.service", () => lifecycleMocks);
 
 afterEach(() => {
   vi.restoreAllMocks();
+  lifecycleMocks.promoteReplayedEdgeWorkflowToRunning.mockReset();
 });
 
 function envelope(): DeviceExecutionJobReplayEnvelopeV1 {
@@ -207,6 +213,14 @@ describe("PNQ unreplayable observed-root disposition", () => {
       sent: 1,
     });
     expect(send).toHaveBeenCalledTimes(1);
+    expect(lifecycleMocks.promoteReplayedEdgeWorkflowToRunning).toHaveBeenCalledTimes(1);
+    expect(lifecycleMocks.promoteReplayedEdgeWorkflowToRunning).toHaveBeenCalledWith({
+      workflowId: workflowHandle.operationId,
+      deviceId: DEVICE_ID,
+      templateId: "template-1",
+      variables: { generatedWorkflow: true },
+      actor: "test.edge_replay",
+    });
     const frame = JSON.parse(String(send.mock.calls[0]![0]));
     expect(frame).toMatchObject({
       type: "WORKFLOW_START",

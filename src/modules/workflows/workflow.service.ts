@@ -278,6 +278,21 @@ export class WorkflowService {
     );
   }
 
+  async markFailedIfEdgeStartUnacknowledged(id: string, error: string): Promise<boolean> {
+    const db = getDb();
+    const result = await db.query(
+      `UPDATE workflows
+       SET status = 'failed', completed_at = NOW(), error = $1
+       WHERE id = $2
+         AND status IN ('queued', 'running')
+         AND current_step = 0
+         AND (checkpoint->>'source') IS DISTINCT FROM 'edge'
+       RETURNING id`,
+      [error, id],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async markPaused(id: string): Promise<void> {
     const db = getDb();
     await db.query(

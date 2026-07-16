@@ -17,6 +17,7 @@ import type {
 } from "../modules/device-execution";
 import { DEVICE_EXECUTION_BOUNDARY_MATRIX, encodeDeviceExecutionHandle } from "../modules/device-execution";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
+import { promoteReplayedEdgeWorkflowToRunning } from "../modules/workflows/edge-workflow-lifecycle.service";
 
 export type StandaloneJobSendResult = Pick<
   DeviceExecutionStandaloneJobEgressResult,
@@ -203,6 +204,15 @@ export async function dispatchQueuedJobsForDevice(
           { actor, observeSource: "transport.dispatchQueuedJobsForDevice" },
         );
     if (!result.sent) break;
+    if (envelope.schemaVersion === "pnq.edge-workflow-dispatch/v1") {
+      await promoteReplayedEdgeWorkflowToRunning({
+        workflowId: envelope.operationId,
+        deviceId,
+        templateId: typeof envelope.template.id === "string" ? envelope.template.id : undefined,
+        variables: envelope.variables,
+        actor,
+      });
+    }
     sent += 1;
   }
   return { attempted, sent };
