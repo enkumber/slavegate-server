@@ -11,6 +11,9 @@ vi.mock("../../db/client", () => ({
 }));
 
 const query = vi.fn();
+const clientQuery = vi.fn();
+const release = vi.fn();
+const connect = vi.fn();
 
 const CREDENTIAL_FIELD_ALIASES = [
   "authorization",
@@ -78,7 +81,11 @@ function row(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   query.mockReset();
-  vi.mocked(getDb).mockReturnValue({ query } as never);
+  clientQuery.mockReset();
+  release.mockReset();
+  connect.mockReset();
+  connect.mockResolvedValue({ query: clientQuery, release });
+  vi.mocked(getDb).mockReturnValue({ query, connect } as never);
   process.env.MODEL_CONFIG_TEST_KEY = "secret-from-env";
   process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "models.example.com";
   setModelConfigEndpointResolverForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
@@ -279,6 +286,129 @@ describe("ModelConfigService credential and endpoint safety", () => {
     expect(query).toHaveBeenLastCalledWith(expect.stringContaining("api_key_encrypted = $2"), [
       "decision_llm", null, null, null,
     ]);
+  });
+
+  it("atomically combines legacy vision metadata and a supported credential ref", async () => {
+    const existing = row({
+      role: "vision_vlm",
+      model: "vision-old",
+      api_key_encrypted: "enc:v1:old",
+      credential_ref: null,
+      api_key_fingerprint: "old-fingerprint",
+    });
+    const savedRow = row({
+      ...existing,
+      role: "vision_vlm",
+      model: "vision-next",
+      credential_ref: "env:VISION_NEXT_KEY",
+      api_key_encrypted: null,
+      api_key_fingerprint: null,
+      version: 4,
+    });
+    clientQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [existing] })
+      .mockResolvedValueOnce({ rows: [savedRow] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const config = await new ModelConfigService().updateLegacyVisionConfig({
+      model: "vision-next",
+      credentialRef: "env:VISION_NEXT_KEY",
+    });
+
+    expect(config).toMatchObject({
+      role: "vision_vlm",
+      model: "vision-next",
+      hasCredential: true,
+      credentialRefType: "env",
+      version: 4,
+    });
+    expect(clientQuery.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
+      "BEGIN", "SELECT", "INSERT", "COMMIT",
+    ]);
+    expect(clientQuery.mock.calls[2][1]).toEqual([
+      "vision_vlm",
+      "openai_compatible",
+      "https://models.example.com/v1",
+      "vision-next",
+      null,
+      "env:VISION_NEXT_KEY",
+      null,
+      true,
+    ]);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(CREDENTIAL_FIELD_ALIASES.filter((field) =>
+    !["credentialRef", "apiKeyRef", "api_key_ref"].includes(field),
+  ))("rejects unsupported legacy credential alias %s even when null, before acquiring a connection", async (field) => {
+    await expect(new ModelConfigService().updateLegacyVisionConfig({
+      model: "must-not-write",
+      [field]: null,
+    })).rejects.toMatchObject({
+      code: "AI_LEGACY_VISION_CREDENTIAL_FIELD_REJECTED",
+      statusCode: 400,
+    });
+
+    expect(connect).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("rejects populated direct-secret and clear aliases before acquiring a connection", async () => {
+    for (const payload of [
+      { apiKey: "opaque-secret" },
+      { credential: "opaque-secret" },
+      { clearCredential: true },
+      { clearApiKey: true },
+    ]) {
+      await expect(new ModelConfigService().updateLegacyVisionConfig({
+        model: "must-not-write",
+        ...payload,
+      })).rejects.toMatchObject({
+        code: "AI_LEGACY_VISION_CREDENTIAL_FIELD_REJECTED",
+        statusCode: 400,
+      });
+    }
+    expect(connect).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid legacy credential ref before any metadata write", async () => {
+    await expect(new ModelConfigService().updateLegacyVisionConfig({
+      model: "must-not-write",
+      api_key_ref: "env:../../VISION_KEY",
+    })).rejects.toMatchObject({
+      code: "AI_CREDENTIAL_REF_UNSUPPORTED",
+      statusCode: 400,
+    });
+
+    expect(connect).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("rolls back the legacy transaction when the combined credential write fails", async () => {
+    const existing = row({
+      role: "vision_vlm",
+      model: "vision-old",
+      credential_ref: "env:VISION_OLD_KEY",
+    });
+    const credentialFailure = Object.assign(new Error("credential constraint rejected"), { code: "23514" });
+    clientQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [existing] })
+      .mockRejectedValueOnce(credentialFailure)
+      .mockResolvedValueOnce({ rows: [] });
+
+    await expect(new ModelConfigService().updateLegacyVisionConfig({
+      model: "must-rollback",
+      apiKeyRef: "env:VISION_REJECTED_KEY",
+    })).rejects.toBe(credentialFailure);
+
+    expect(clientQuery.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
+      "BEGIN", "SELECT", "INSERT", "ROLLBACK",
+    ]);
+    expect(clientQuery.mock.calls.filter(([sql]) => /^UPDATE\s/i.test(String(sql).trim()))).toHaveLength(0);
+    expect(release).toHaveBeenCalledTimes(1);
   });
 
   it("rejects allowlisted endpoints that resolve to private or metadata addresses unless marked local", async () => {

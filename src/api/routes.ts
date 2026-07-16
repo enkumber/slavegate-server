@@ -1707,21 +1707,9 @@ router.get("/vision/config", requireAuth, async (_req, res) => {
 
 async function updateLegacyVisionConfig(req: Request, res: Response): Promise<void> {
   try {
-    const body = req.body as Record<string, unknown>;
-    let config = await modelConfigService.update("vision_vlm", {
-      provider: body.provider as string | undefined,
-      model: body.model as string | undefined,
-      endpoint: body.endpoint as string | null | undefined,
-      enabled: body.enabled as boolean | undefined,
-    });
-    const credentialRefField = ["credentialRef", "apiKeyRef", "api_key_ref"]
-      .find((field) => Object.prototype.hasOwnProperty.call(body, field));
-    if (credentialRefField) {
-      config = await modelConfigService.updateCredential("vision_vlm", {
-        credentialRef: body[credentialRefField] as string | null,
-      });
-    }
+    const config = await modelConfigService.updateLegacyVisionConfig(req.body);
     visionService.invalidateCache();
+    notifyModelConfigUpdated();
     res.json({ ok: true, data: config });
   } catch (err) {
     handleModelConfigError(res, err);

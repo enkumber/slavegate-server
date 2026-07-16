@@ -11,6 +11,7 @@ import http from "http";
 import https from "https";
 import net from "net";
 import path from "path";
+import type { Pool } from "pg";
 import { getDb } from "../../db/client";
 
 export type ModelRole = "decision_llm" | "vision_vlm";
@@ -71,6 +72,11 @@ interface CredentialInput {
   credentialRef?: string | null;
 }
 
+interface ParsedLegacyVisionConfigInput {
+  metadata: UpdateModelConfigInput;
+  credentialRef: string | null | undefined;
+}
+
 interface ResolvedModelConfig extends ModelConfig {
   apiKey: string;
 }
@@ -109,6 +115,8 @@ const MODEL_CONFIG_CREDENTIAL_FIELD_NAMES = new Set([
   "secret",
   "clientsecret",
 ]);
+const LEGACY_VISION_METADATA_FIELDS = new Set(["provider", "endpoint", "model", "enabled"]);
+const LEGACY_VISION_CREDENTIAL_REF_FIELDS = new Set(["credentialRef", "apiKeyRef", "api_key_ref"]);
 type EndpointAddress = { address: string; family?: number };
 type EndpointAddressResolver = (hostname: string) => Promise<EndpointAddress[]>;
 
@@ -137,6 +145,8 @@ export class ModelConfigError extends Error {
 export class ModelConfigService {
   private cache = new Map<ModelRole, { config: ModelConfig; expiresAt: number }>();
 
+  constructor(private readonly dbProvider: () => Pick<Pool, "query" | "connect"> = getDb) {}
+
   async list(): Promise<RedactedModelConfig[]> {
     const rows = await this.queryRows("SELECT * FROM model_configs ORDER BY role");
     return rows.map((row) => this.redact(this.fromRow(row)));
@@ -157,7 +167,7 @@ export class ModelConfigService {
     const endpoint = validateEndpointForStorage(input.endpoint !== undefined ? nullableString(input.endpoint) : existing?.endpoint ?? defaultFor(role).endpoint, provider, role, enabled);
     const credentialRef = existing?.credentialRef ?? null;
 
-    const result = await getDb().query(
+    const result = await this.dbProvider().query(
       `INSERT INTO model_configs
          (role, provider, endpoint, model, api_key_encrypted, credential_ref, api_key_fingerprint, enabled, version)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)
@@ -199,7 +209,7 @@ export class ModelConfigService {
       throw new ModelConfigError("credential or credentialRef is required", 400, "AI_CREDENTIAL_MISSING");
     }
 
-    const result = await getDb().query(
+    const result = await this.dbProvider().query(
       `UPDATE model_configs
        SET api_key_encrypted = $2,
            credential_ref = $3,
@@ -212,6 +222,96 @@ export class ModelConfigService {
     );
     this.invalidate(role);
     return this.redact(this.fromRow(result.rows[0]));
+  }
+
+  /**
+   * Backward-compatible /vision/config mutation. The complete legacy request is
+   * validated before a connection is acquired, then metadata and the optional
+   * credential-ref replacement/clear are persisted in one transaction and one
+   * row statement. This prevents a credential failure from leaving newer
+   * metadata committed beside the old active secret.
+   */
+  async updateLegacyVisionConfig(input: unknown): Promise<RedactedModelConfig> {
+    const parsed = parseLegacyVisionConfigInput(input);
+    const client = await this.dbProvider().connect();
+    let transactionStarted = false;
+    try {
+      await client.query("BEGIN");
+      transactionStarted = true;
+
+      const locked = await client.query(
+        "SELECT * FROM model_configs WHERE role = $1 FOR UPDATE",
+        ["vision_vlm"],
+      );
+      const existing = locked.rows[0] ? this.fromRow(locked.rows[0]) : null;
+      const provider = validateProvider(
+        parsed.metadata.provider ?? existing?.provider ?? defaultFor("vision_vlm").provider,
+        "vision_vlm",
+      );
+      const model = normalizeNonEmpty(
+        parsed.metadata.model ?? existing?.model ?? defaultFor("vision_vlm").model,
+        "model",
+      );
+      const enabled = parsed.metadata.enabled !== undefined
+        ? parsed.metadata.enabled
+        : existing?.enabled ?? false;
+      const endpoint = validateEndpointForStorage(
+        parsed.metadata.endpoint !== undefined
+          ? parsed.metadata.endpoint
+          : existing?.endpoint ?? defaultFor("vision_vlm").endpoint,
+        provider,
+        "vision_vlm",
+        enabled,
+      );
+      const credentialChanged = parsed.credentialRef !== undefined;
+      const apiKeyEncrypted = credentialChanged ? null : existing?.apiKeyEncrypted ?? null;
+      const credentialRef = credentialChanged ? parsed.credentialRef : existing?.credentialRef ?? null;
+      const apiKeyFingerprint = credentialChanged ? null : existing?.apiKeyFingerprint ?? null;
+
+      const result = await client.query(
+        `INSERT INTO model_configs
+           (role, provider, endpoint, model, api_key_encrypted, credential_ref, api_key_fingerprint, enabled, version)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)
+         ON CONFLICT (role) DO UPDATE SET
+           provider = EXCLUDED.provider,
+           endpoint = EXCLUDED.endpoint,
+           model = EXCLUDED.model,
+           api_key_encrypted = EXCLUDED.api_key_encrypted,
+           credential_ref = EXCLUDED.credential_ref,
+           api_key_fingerprint = EXCLUDED.api_key_fingerprint,
+           enabled = EXCLUDED.enabled,
+           version = model_configs.version + 1,
+           updated_at = NOW()
+         RETURNING *`,
+        [
+          "vision_vlm",
+          provider,
+          endpoint,
+          model,
+          apiKeyEncrypted,
+          credentialRef,
+          apiKeyFingerprint,
+          enabled,
+        ],
+      );
+
+      await client.query("COMMIT");
+      transactionStarted = false;
+      this.invalidate("vision_vlm");
+      return this.redact(this.fromRow(result.rows[0]));
+    } catch (err: any) {
+      if (transactionStarted) await client.query("ROLLBACK").catch(() => undefined);
+      if (err?.code === "42P01") {
+        throw new ModelConfigError(
+          "model_configs table is missing. Run database migrations.",
+          503,
+          "AI_MODEL_CONFIG_MISSING",
+        );
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   async resolve(role: ModelRole): Promise<ResolvedModelConfig> {
@@ -283,7 +383,7 @@ export class ModelConfigService {
 
   private async queryRows(sql: string, params: unknown[] = []): Promise<any[]> {
     try {
-      const result = await getDb().query(sql, params);
+      const result = await this.dbProvider().query(sql, params);
       return result.rows;
     } catch (err: any) {
       if (err.code === "42P01") throw new ModelConfigError("model_configs table is missing. Run database migrations.", 503, "AI_MODEL_CONFIG_MISSING");
@@ -367,7 +467,7 @@ export class ModelConfigService {
 
   private async storeTest(role: ModelRole, status: string, message: string): Promise<RedactedModelConfig> {
     const sanitizedMessage = sanitizeProviderError(message);
-    const result = await getDb().query(
+    const result = await this.dbProvider().query(
       `UPDATE model_configs
        SET last_test_status = $2, last_test_message = $3, last_test_at = NOW(), updated_at = NOW()
        WHERE role = $1
@@ -397,6 +497,102 @@ export function assertModelConfigMetadataOnlyInput(input: unknown): asserts inpu
     "Credential fields are not accepted on model metadata routes. Use the matching /credential endpoint to update or clear credentials.",
     400,
     "AI_MODEL_CONFIG_CREDENTIAL_FIELD_REJECTED",
+  );
+}
+
+function parseLegacyVisionConfigInput(input: unknown): ParsedLegacyVisionConfigInput {
+  if (input === undefined || input === null) return { metadata: {}, credentialRef: undefined };
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new ModelConfigError(
+      "Legacy vision config payload must be a JSON object.",
+      400,
+      "AI_LEGACY_VISION_PAYLOAD_INVALID",
+    );
+  }
+
+  const body = input as Record<string, unknown>;
+  const fields = Object.keys(body);
+  const supportedCredentialFields = fields.filter((field) => LEGACY_VISION_CREDENTIAL_REF_FIELDS.has(field));
+  const unsupportedFields = fields.filter((field) =>
+    !LEGACY_VISION_METADATA_FIELDS.has(field) && !LEGACY_VISION_CREDENTIAL_REF_FIELDS.has(field),
+  );
+  const unsupportedCredentialField = unsupportedFields.find(isCredentialLikeField);
+  if (unsupportedCredentialField) {
+    throw new ModelConfigError(
+      "Unsupported credential field on the legacy vision config route. Use credentialRef, apiKeyRef, or api_key_ref for an atomic reference replacement/clear, or use /api/model-configs/vision_vlm/credential.",
+      400,
+      "AI_LEGACY_VISION_CREDENTIAL_FIELD_REJECTED",
+    );
+  }
+  if (unsupportedFields.length) {
+    throw new ModelConfigError(
+      `Unsupported legacy vision config field: ${unsupportedFields[0]}`,
+      400,
+      "AI_LEGACY_VISION_FIELD_UNSUPPORTED",
+    );
+  }
+  if (supportedCredentialFields.length > 1) {
+    throw new ModelConfigError(
+      "Specify only one of credentialRef, apiKeyRef, or api_key_ref.",
+      400,
+      "AI_LEGACY_VISION_CREDENTIAL_FIELD_AMBIGUOUS",
+    );
+  }
+
+  const metadata: UpdateModelConfigInput = {};
+  if (Object.prototype.hasOwnProperty.call(body, "provider")) {
+    if (typeof body.provider !== "string") throw legacyVisionFieldTypeError("provider", "a string");
+    metadata.provider = body.provider;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "model")) {
+    if (typeof body.model !== "string") throw legacyVisionFieldTypeError("model", "a string");
+    metadata.model = body.model;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "endpoint")) {
+    if (body.endpoint !== null && typeof body.endpoint !== "string") {
+      throw legacyVisionFieldTypeError("endpoint", "a string or null");
+    }
+    metadata.endpoint = body.endpoint as string | null;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "enabled")) {
+    if (typeof body.enabled !== "boolean") throw legacyVisionFieldTypeError("enabled", "a boolean");
+    metadata.enabled = body.enabled;
+  }
+
+  if (!supportedCredentialFields.length) return { metadata, credentialRef: undefined };
+  const credentialField = supportedCredentialFields[0];
+  const rawRef = body[credentialField];
+  if (rawRef !== null && typeof rawRef !== "string") {
+    throw legacyVisionFieldTypeError(credentialField, "a credential reference string or explicit null to clear");
+  }
+  if (typeof rawRef === "string" && !rawRef.trim()) {
+    throw new ModelConfigError(
+      `${credentialField} must be a non-empty env: or allowlisted file: reference; use explicit null to clear.`,
+      400,
+      "AI_CREDENTIAL_REF_UNSUPPORTED",
+    );
+  }
+  return {
+    metadata,
+    credentialRef: validateCredentialRef(rawRef === null ? null : rawRef.trim()),
+  };
+}
+
+function isCredentialLikeField(field: string): boolean {
+  const normalized = field.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return MODEL_CONFIG_CREDENTIAL_FIELD_NAMES.has(normalized) ||
+    normalized.includes("credential") ||
+    normalized.includes("authorization") ||
+    normalized.includes("apikey") ||
+    normalized.includes("token") ||
+    normalized.includes("secret");
+}
+
+function legacyVisionFieldTypeError(field: string, expected: string): ModelConfigError {
+  return new ModelConfigError(
+    `Legacy vision config field ${field} must be ${expected}.`,
+    400,
+    "AI_LEGACY_VISION_FIELD_INVALID",
   );
 }
 

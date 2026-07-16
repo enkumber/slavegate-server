@@ -1,6 +1,7 @@
 import express from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "./auth.middleware";
+import { ModelConfigError } from "../modules/model-config/model-config.service";
 
 const mocks = vi.hoisted(() => ({
   directWsServer: {
@@ -10,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   modelConfigService: {
     update: vi.fn(),
     updateCredential: vi.fn(),
+    updateLegacyVisionConfig: vi.fn(),
   },
   visionService: {
     invalidateCache: vi.fn(),
@@ -53,6 +55,34 @@ async function requestJson(
         const address = listener.address();
         if (!address || typeof address === "string") throw new Error("no address");
         const response = await fetch(`http://127.0.0.1:${address.port}/api/${route}/decision_llm`, {
+          method,
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+        const responseBody = await response.json();
+        listener.close(() => resolve({ status: response.status, body: responseBody }));
+      } catch (err) {
+        listener.close(() => reject(err));
+      }
+    });
+  });
+}
+
+async function requestLegacyVision(
+  method: "PATCH" | "POST",
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: any }> {
+  const server = await app();
+  const token = signJwt({ sub: "dashboard-user", role: "admin" }, 60_000);
+  return new Promise((resolve, reject) => {
+    const listener = server.listen(0, async () => {
+      try {
+        const address = listener.address();
+        if (!address || typeof address === "string") throw new Error("no address");
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/vision/config`, {
           method,
           headers: {
             authorization: `Bearer ${token}`,
@@ -118,6 +148,7 @@ describe("generic model config route credential contract", () => {
     process.env.JWT_SECRET = "test-jwt-secret";
     mocks.modelConfigService.update.mockReset();
     mocks.modelConfigService.updateCredential.mockReset();
+    mocks.modelConfigService.updateLegacyVisionConfig.mockReset();
     mocks.visionService.invalidateCache.mockReset();
     mocks.directWsServer.sendToDevice.mockReset();
     mocks.modelConfigService.update.mockResolvedValue({
@@ -125,6 +156,13 @@ describe("generic model config route credential contract", () => {
       provider: "openai_compatible",
       endpoint: "https://models.example.com/v1",
       model: "qwen-test",
+      hasCredential: true,
+    });
+    mocks.modelConfigService.updateLegacyVisionConfig.mockResolvedValue({
+      role: "vision_vlm",
+      provider: "openai_compatible",
+      endpoint: "https://models.example.com/v1",
+      model: "vision-test",
       hasCredential: true,
     });
   });
@@ -173,6 +211,45 @@ describe("generic model config route credential contract", () => {
     }
     expect(mocks.modelConfigService.update).not.toHaveBeenCalled();
     expect(mocks.modelConfigService.updateCredential).not.toHaveBeenCalled();
+    expect(mocks.directWsServer.sendToDevice).not.toHaveBeenCalled();
+  });
+
+  it.each(["PATCH", "POST"] as const)("delegates legacy vision %s metadata and credential to one atomic service call", async (method) => {
+    const payload = {
+      provider: "openai_compatible",
+      endpoint: "https://models.example.com/v1",
+      model: "vision-next",
+      enabled: true,
+      api_key_ref: "env:VISION_NEXT_KEY",
+    };
+
+    const response = await requestLegacyVision(method, payload);
+
+    expect(response.status).toBe(200);
+    expect(mocks.modelConfigService.updateLegacyVisionConfig).toHaveBeenCalledTimes(1);
+    expect(mocks.modelConfigService.updateLegacyVisionConfig).toHaveBeenCalledWith(payload);
+    expect(mocks.modelConfigService.update).not.toHaveBeenCalled();
+    expect(mocks.modelConfigService.updateCredential).not.toHaveBeenCalled();
+    expect(mocks.visionService.invalidateCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not invalidate caches or notify devices when the atomic legacy mutation is rejected", async () => {
+    mocks.modelConfigService.updateLegacyVisionConfig.mockRejectedValueOnce(new ModelConfigError(
+      "Unsupported credential field",
+      400,
+      "AI_LEGACY_VISION_CREDENTIAL_FIELD_REJECTED",
+    ));
+
+    const response = await requestLegacyVision("PATCH", {
+      model: "must-not-write",
+      clearCredential: null,
+    });
+
+    expect(response).toMatchObject({
+      status: 400,
+      body: { ok: false, code: "AI_LEGACY_VISION_CREDENTIAL_FIELD_REJECTED" },
+    });
+    expect(mocks.visionService.invalidateCache).not.toHaveBeenCalled();
     expect(mocks.directWsServer.sendToDevice).not.toHaveBeenCalled();
   });
 });

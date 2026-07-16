@@ -115,6 +115,14 @@ PATCH /api/vision/config
 
 Keep them, mapping internally to `role = vision_vlm`.
 
+Legacy writes are fail-closed and atomic. Metadata (`provider`, `endpoint`,
+`model`, `enabled`) may be combined only with one supported credential-reference
+alias (`credentialRef`, `apiKeyRef`, or `api_key_ref`). An explicit `null` clears
+the active credential in the same transaction. Direct-secret fields, clear
+aliases, ambiguous duplicate aliases, and unknown fields are rejected before
+any write; direct secret replacement uses
+`POST /api/model-configs/vision_vlm/credential`.
+
 ## Runtime integration
 
 Add:
