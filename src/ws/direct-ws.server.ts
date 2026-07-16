@@ -559,14 +559,7 @@ export class DirectWsServer {
     if (existing && !handlesEqual(existing.handle, handle)) throw new Error(`Workflow handle collision for ${handle.operationId}`);
     if (!existing) {
       const timer = setTimeout(() => {
-        this.pendingWorkflows.delete(handle.operationId);
-        void deviceExecutionArbiter.markAmbiguous({
-          deviceId: handle.deviceId,
-          handle,
-          reason: "workflow_status_timeout",
-          actor: "direct_ws_workflow_timeout",
-          state: "blocked",
-        }).catch((err) => console.error("[device-execution] workflow timeout ambiguity mark failed:", (err as Error).message));
+        void this.expirePendingWorkflow(handle);
       }, 600_000);
       timer.unref();
       this.pendingWorkflows.set(handle.operationId, { handle, timer });
@@ -579,6 +572,21 @@ export class DirectWsServer {
       pnqHandle: encodeDeviceExecutionHandle(handle),
     });
     return true;
+  }
+
+  private async expirePendingWorkflow(handle: DeviceExecutionHandle): Promise<void> {
+    const pending = this.pendingWorkflows.get(handle.operationId);
+    if (!pending || !handlesEqual(pending.handle, handle)) return;
+    await deviceExecutionArbiter.markAmbiguous({
+      deviceId: handle.deviceId,
+      handle,
+      reason: "workflow_status_timeout",
+      actor: "direct_ws_workflow_timeout",
+      state: "blocked",
+    }).catch((err) => console.error("[device-execution] workflow timeout ambiguity mark failed:", (err as Error).message));
+    if (this.pendingWorkflows.get(handle.operationId) === pending) {
+      this.pendingWorkflows.delete(handle.operationId);
+    }
   }
 
   /**
@@ -638,10 +646,9 @@ export class DirectWsServer {
       reject = rejectPromise;
     });
     promise.catch(() => {});
-      const timer = setTimeout(() => {
-        this.pendingBatches.delete(batchId);
-        reject(new Error(`Batch ${batchId} timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+    const timer = setTimeout(() => {
+      void this.expirePendingBatch(handle, timeoutMs);
+    }, timeoutMs);
     timer.unref();
     this.pendingBatches.set(batchId, { promise, resolve, reject, timer, handle });
     return promise;
@@ -653,6 +660,22 @@ export class DirectWsServer {
     clearTimeout(pending.timer);
     this.pendingBatches.delete(handle.operationId);
     pending.reject(new Error(reason));
+  }
+
+  private async expirePendingBatch(handle: DeviceExecutionHandle, timeoutMs: number): Promise<void> {
+    const pending = this.pendingBatches.get(handle.operationId);
+    if (!pending || !handlesEqual(pending.handle, handle)) return;
+    await deviceExecutionArbiter.markAmbiguous({
+      deviceId: handle.deviceId,
+      handle,
+      reason: "batch_result_timeout",
+      actor: "direct_ws_batch_timeout",
+      state: "blocked",
+      metadata: { timeoutMs },
+    }).catch((err) => console.error("[device-execution] batch timeout ambiguity mark failed:", (err as Error).message));
+    if (this.pendingBatches.get(handle.operationId) !== pending) return;
+    this.pendingBatches.delete(handle.operationId);
+    pending.reject(new Error(`Batch ${handle.operationId} timed out after ${timeoutMs}ms`));
   }
 
   isDeviceOnline(deviceId: string): boolean {
@@ -797,7 +820,7 @@ export class DirectWsServer {
       }
     });
 
-    ws.on("close", (code, reason) => {
+    ws.on("close", async (code, reason) => {
       if (deviceConn) {
         console.log(`[direct-ws] Device ${deviceConn.deviceId.slice(0,8)} disconnected: ${code} ${reason}`);
         this.connections.delete(deviceConn.deviceId);
@@ -805,32 +828,7 @@ export class DirectWsServer {
         devicesConnected?.set(this.connections.size);
         deviceOfflineEvents?.inc();
 
-        // Reject any pending jobs for this device
-        for (const [jobId, pending] of this.pendingJobs) {
-          if (pending.deviceId && pending.deviceId !== deviceConn.deviceId) continue;
-          clearTimeout(pending.timer);
-          if (pending.permit) {
-            deviceExecutionArbiter.markAmbiguous({
-              deviceId: deviceConn.deviceId,
-              handle: pending.permit.handle,
-              reason: "device_disconnected_before_job_result",
-              actor: "direct_ws_disconnect",
-              state: "blocked",
-              metadata: { handle: pending.permit.wireHandle, closeCode: code, closeReason: String(reason) },
-            }).catch((err) => {
-              console.error("[device-execution] disconnect ambiguity mark failed:", (err as Error).message);
-            });
-          }
-          pending.reject(new Error(`Device ${deviceConn!.deviceId} disconnected`));
-          this.pendingJobs.delete(jobId);
-        }
-
-        // Reject any pending batches for this device
-        for (const [batchId, pending] of this.pendingBatches) {
-          clearTimeout(pending.timer);
-          pending.reject(new Error(`Device ${deviceConn!.deviceId} disconnected during batch ${batchId}`));
-          this.pendingBatches.delete(batchId);
-        }
+        await this.blockPendingForDisconnectedDevice(deviceConn.deviceId, code, String(reason));
 
         // Update DB
         devicesService.markOffline(deviceConn.deviceId).catch(err =>
@@ -845,6 +843,71 @@ export class DirectWsServer {
     ws.on("error", (err) => {
       console.error(`[direct-ws] WebSocket error (device=${deviceConn?.deviceId?.slice(0,8) ?? "unauth"}):`, err.message);
     });
+  }
+
+  private async blockPendingForDisconnectedDevice(
+    deviceId: string,
+    closeCode: number,
+    closeReason: string,
+  ): Promise<{ jobs: number; batches: number; workflows: number }> {
+    const jobs = [...this.pendingJobs.entries()].filter(([, pending]) => pending.deviceId === deviceId);
+    const batches = [...this.pendingBatches.entries()].filter(([, pending]) => pending.handle.deviceId === deviceId);
+    const workflows = [...this.pendingWorkflows.entries()].filter(([, pending]) => pending.handle.deviceId === deviceId);
+    const transitions: Promise<unknown>[] = [];
+
+    for (const [, pending] of jobs) {
+      if (!pending.permit) continue;
+      transitions.push(deviceExecutionArbiter.markAmbiguous({
+        deviceId,
+        handle: pending.permit.handle,
+        reason: "device_disconnected_before_job_result",
+        actor: "direct_ws_disconnect",
+        state: "blocked",
+        metadata: { handle: pending.permit.wireHandle, closeCode, closeReason },
+      }));
+    }
+    for (const [, pending] of batches) {
+      transitions.push(deviceExecutionArbiter.markAmbiguous({
+        deviceId,
+        handle: pending.handle,
+        reason: "device_disconnected_before_batch_result",
+        actor: "direct_ws_disconnect",
+        state: "blocked",
+        metadata: { closeCode, closeReason },
+      }));
+    }
+    for (const [, pending] of workflows) {
+      transitions.push(deviceExecutionArbiter.markAmbiguous({
+        deviceId,
+        handle: pending.handle,
+        reason: "device_disconnected_before_workflow_terminal",
+        actor: "direct_ws_disconnect",
+        state: "blocked",
+        metadata: { closeCode, closeReason },
+      }));
+    }
+    const settled = await Promise.allSettled(transitions);
+    for (const result of settled) {
+      if (result.status === "rejected") {
+        console.error("[device-execution] disconnect ambiguity mark failed:", (result.reason as Error).message);
+      }
+    }
+
+    for (const [jobId, pending] of jobs) {
+      clearTimeout(pending.timer);
+      if (this.pendingJobs.get(jobId) === pending) this.pendingJobs.delete(jobId);
+      pending.reject(new Error(`Device ${deviceId} disconnected`));
+    }
+    for (const [batchId, pending] of batches) {
+      clearTimeout(pending.timer);
+      if (this.pendingBatches.get(batchId) === pending) this.pendingBatches.delete(batchId);
+      pending.reject(new Error(`Device ${deviceId} disconnected during batch ${batchId}`));
+    }
+    for (const [workflowId, pending] of workflows) {
+      clearTimeout(pending.timer);
+      if (this.pendingWorkflows.get(workflowId) === pending) this.pendingWorkflows.delete(workflowId);
+    }
+    return { jobs: jobs.length, batches: batches.length, workflows: workflows.length };
   }
 
   // ─── Auth handler ─────────────────────────────────────────────────────────
