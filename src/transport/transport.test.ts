@@ -2,14 +2,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  dispatchQueuedJobsForDevice,
+  isEdgeWorkflowReplayEnvelope,
   isJobReplayEnvelope,
   sendBatchToDeviceEnforced,
   sendEdgeWorkflowToDeviceEnforced,
   sendServerWorkflowBatchChildToDevice,
+  type DeviceExecutionEdgeWorkflowReplayEnvelopeV1,
   type DeviceExecutionJobReplayEnvelopeV1,
 } from "./transport";
 import { deviceExecutionArbiter, type DeviceExecutionHandle } from "../modules/device-execution";
 import { directWsServer } from "../ws/direct-ws.server";
+import * as dbClient from "../db/client";
 
 const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -30,6 +34,20 @@ function envelope(): DeviceExecutionJobReplayEnvelopeV1 {
   };
 }
 
+function edgeWorkflowEnvelope(): DeviceExecutionEdgeWorkflowReplayEnvelopeV1 {
+  return {
+    schemaVersion: "pnq.edge-workflow-dispatch/v1",
+    deviceId: DEVICE_ID,
+    rootKind: "edge_workflow",
+    rootExternalId: "workflow-1",
+    operationKind: "workflow",
+    operationId: "workflow-1",
+    boundary: "edge_workflow",
+    template: { id: "template-1", steps: [] },
+    variables: { generatedWorkflow: true },
+  };
+}
+
 describe("PNQ job replay envelope", () => {
   it("accepts only the schema-versioned envelope tied to root and operation identity", () => {
     const identity = {
@@ -44,6 +62,22 @@ describe("PNQ job replay envelope", () => {
     expect(isJobReplayEnvelope({ ...envelope(), operationId: "wrong" }, identity)).toBe(false);
     expect(isJobReplayEnvelope({ ...envelope(), schemaVersion: "pnq.job-dispatch/v2" }, identity)).toBe(false);
     expect(isJobReplayEnvelope({ ...envelope(), payload: { ...envelope().payload, jobId: "wrong" } }, identity)).toBe(false);
+  });
+
+  it("accepts only the schema-versioned edge workflow replay envelope tied to PNQ identity", () => {
+    const identity = {
+      deviceId: DEVICE_ID,
+      rootKind: "edge_workflow" as const,
+      rootExternalId: "workflow-1",
+      operationId: "workflow-1",
+    };
+    expect(isEdgeWorkflowReplayEnvelope(edgeWorkflowEnvelope(), identity)).toBe(true);
+    expect(isEdgeWorkflowReplayEnvelope({ ...edgeWorkflowEnvelope(), deviceId: "wrong" }, identity)).toBe(false);
+    expect(isEdgeWorkflowReplayEnvelope({ ...edgeWorkflowEnvelope(), rootExternalId: "wrong" }, identity)).toBe(false);
+    expect(isEdgeWorkflowReplayEnvelope({ ...edgeWorkflowEnvelope(), operationId: "wrong" }, identity)).toBe(false);
+    expect(isEdgeWorkflowReplayEnvelope({ ...edgeWorkflowEnvelope(), schemaVersion: "pnq.edge-workflow-dispatch/v2" }, identity)).toBe(false);
+    expect(isEdgeWorkflowReplayEnvelope({ ...edgeWorkflowEnvelope(), template: null }, identity)).toBe(false);
+    expect(isEdgeWorkflowReplayEnvelope(edgeWorkflowEnvelope(), { ...identity, rootKind: "job" })).toBe(false);
   });
 
   it("pins immutable duplicate metadata and corrupt-head fail-closed SQL paths", () => {
@@ -112,7 +146,7 @@ describe("PNQ unreplayable observed-root disposition", () => {
     }));
   });
 
-  it("cancels and audits a queued edge workflow before server fallback", async () => {
+  it("keeps a queued edge workflow replayable instead of cancelling before fallback", async () => {
     const workflowHandle: DeviceExecutionHandle = {
       ...handle,
       rootKind: "edge_workflow",
@@ -124,12 +158,71 @@ describe("PNQ unreplayable observed-root disposition", () => {
       DEVICE_ID,
       workflowHandle.operationId,
       { id: "template" },
-    )).resolves.toBe(false);
-    expect(observeTerminal).toHaveBeenCalledWith(expect.objectContaining({
+    )).resolves.toMatchObject({
+      decision: "would_wait",
       handle: workflowHandle,
-      status: "cancelled",
-      reason: "queued_edge_workflow_not_replayable",
-    }));
+      sent: false,
+      queued: true,
+    });
+    expect(observeTerminal).not.toHaveBeenCalled();
+  });
+
+  it("replays a queued edge workflow head exactly once through the PNQ handle path", async () => {
+    const workflowHandle: DeviceExecutionHandle = {
+      rootId: "22222222-2222-4222-8222-222222222224",
+      deviceId: DEVICE_ID,
+      rootKind: "edge_workflow",
+      ownerGeneration: 2,
+      operationKind: "workflow",
+      operationId: "workflow-1",
+    };
+    const send = vi.fn();
+    const internals = directWsServer as unknown as {
+      connections: Map<string, { ws: { readyState: number; send: typeof send }; lastSeenAt: number }>;
+      pendingWorkflows: Map<string, { handle: DeviceExecutionHandle; timer: ReturnType<typeof setTimeout> }>;
+    };
+    internals.connections.set(DEVICE_ID, { ws: { readyState: 1, send }, lastSeenAt: Date.now() });
+    const query = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{
+          root_id: workflowHandle.rootId,
+          root_kind: "edge_workflow",
+          root_external_id: workflowHandle.operationId,
+          owner_generation: "1",
+          operation_id: workflowHandle.operationId,
+          metadata: { dispatchEnvelope: edgeWorkflowEnvelope() },
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+    vi.spyOn(dbClient, "getDb").mockReturnValue({
+      query,
+    } as never);
+    vi.spyOn(deviceExecutionArbiter, "runObservedEgress").mockImplementation(async (input) => {
+      const sent = await input.wireDispatch(workflowHandle);
+      return { decision: "dispatched", root: null, handle: workflowHandle, sent };
+    });
+
+    await expect(dispatchQueuedJobsForDevice(DEVICE_ID, "test.edge_replay")).resolves.toEqual({
+      attempted: 1,
+      sent: 1,
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    const frame = JSON.parse(String(send.mock.calls[0]![0]));
+    expect(frame).toMatchObject({
+      type: "WORKFLOW_START",
+      workflowId: workflowHandle.operationId,
+      pnqHandle: {
+        pnqRootId: workflowHandle.rootId,
+        pnqRootKind: "edge_workflow",
+        pnqOwnerGeneration: 2,
+        pnqOperationKind: "workflow",
+        pnqOperationId: workflowHandle.operationId,
+      },
+    });
+    const pending = internals.pendingWorkflows.get(workflowHandle.operationId);
+    if (pending) clearTimeout(pending.timer);
+    internals.pendingWorkflows.delete(workflowHandle.operationId);
+    internals.connections.delete(DEVICE_ID);
   });
 });
 

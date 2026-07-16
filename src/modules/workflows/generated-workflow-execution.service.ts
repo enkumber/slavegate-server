@@ -187,17 +187,16 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
       hbeParams: hbeSession,
       checkpoint: createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "edge"),
     });
-    const started = await workflowService.markRunning(wf.id);
-    if (!started) throw new Error(`Workflow ${wf.id} was cancelled before edge dispatch`);
-
-    const sent = await sendEdgeWorkflowToDeviceEnforced(
+    const dispatch = await sendEdgeWorkflowToDeviceEnforced(
       deviceId,
       wf.id,
       template as unknown as Record<string, unknown>,
       dispatchVariables,
     );
 
-    if (sent) {
+    if (dispatch.sent) {
+      const started = await workflowService.markRunning(wf.id);
+      if (!started) throw new Error(`Workflow ${wf.id} was cancelled before edge dispatch`);
       scheduleEdgeWorkflowAckWatchdog(wf.id, deviceId, logPrefix);
       workflowEvents.publish({
         source: "workflow_executor",
@@ -220,6 +219,32 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
       });
       console.log(`[${logPrefix}] ${wf.id} dispatched to device (edge execution, agent=${directWsServer.getAgentVersion(deviceId)})`);
       return { workflowId: wf.id, status: "running", mode: "edge", templateId, controlPlaneContext };
+    }
+
+    if (dispatch.queued) {
+      workflowEvents.publish({
+        source: "workflow_executor",
+        event: "dispatch_queued",
+        workflowId: wf.id,
+        taskId: controlPlaneContext?.taskId,
+        agencyWorkflowRunId: controlPlaneContext?.agencyWorkflowRunId,
+        clientId: controlPlaneContext?.clientId,
+        accountId,
+        deviceId,
+        mode: "edge",
+        status: "queued",
+        totalSteps: template.steps.length,
+        details: {
+          mode: "edge",
+          templateId,
+          accountId,
+          controlPlaneContext,
+          pnqDecision: dispatch.decision,
+          pnqReason: dispatch.reason ?? null,
+        },
+      });
+      console.log(`[${logPrefix}] ${wf.id} queued behind active device root (edge execution)`);
+      return { workflowId: wf.id, status: "queued", mode: "edge", templateId, controlPlaneContext };
     }
 
     await workflowService.markFailed(wf.id, "Edge dispatch failed");

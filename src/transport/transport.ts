@@ -11,6 +11,7 @@ import { getDb } from "../db/client";
 import type {
   DeviceExecutionBoundaryKind,
   DeviceExecutionOperationKind,
+  DeviceExecutionObservedEgressResult,
   DeviceExecutionRootKind,
   DeviceExecutionStandaloneJobEgressResult,
 } from "../modules/device-execution";
@@ -44,6 +45,28 @@ export interface DeviceExecutionJobReplayEnvelopeV1 {
   operationId: string;
   boundary: DeviceExecutionBoundaryKind;
   payload: JobDispatchPayload;
+}
+
+export interface DeviceExecutionEdgeWorkflowReplayEnvelopeV1 {
+  schemaVersion: "pnq.edge-workflow-dispatch/v1";
+  deviceId: string;
+  rootKind: "edge_workflow";
+  rootExternalId: string;
+  operationKind: "workflow";
+  operationId: string;
+  boundary: "edge_workflow";
+  template: Record<string, unknown>;
+  variables?: Record<string, unknown>;
+}
+
+export interface EdgeWorkflowSendResult {
+  decision: DeviceExecutionObservedEgressResult["decision"];
+  root: DeviceExecutionObservedEgressResult["root"];
+  operation: DeviceExecutionObservedEgressResult["operation"];
+  handle: DeviceExecutionObservedEgressResult["handle"];
+  reason?: string;
+  sent: boolean;
+  queued: boolean;
 }
 
 /**
@@ -160,17 +183,25 @@ export async function dispatchQueuedJobsForDevice(
   let attempted = 0;
   let sent = 0;
   while (directWsServer.isDeviceOnline(deviceId)) {
-    const envelope = await nextQueuedJobEnvelope(deviceId);
+    const envelope = await nextQueuedDispatchEnvelope(deviceId);
     if (!envelope) break;
     attempted += 1;
-    const result = await sendDeviceExecutionJobToDevice(deviceId, envelope.payload, {
-      boundary: envelope.boundary,
-      rootKind: envelope.rootKind,
-      rootExternalId: envelope.rootExternalId,
-      requestKey: envelope.rootExternalId,
-      actor,
-      metadata: { observeSource: "transport.dispatchQueuedJobsForDevice" },
-    });
+    const result = envelope.schemaVersion === "pnq.job-dispatch/v1"
+      ? await sendDeviceExecutionJobToDevice(deviceId, envelope.payload, {
+          boundary: envelope.boundary,
+          rootKind: envelope.rootKind,
+          rootExternalId: envelope.rootExternalId,
+          requestKey: envelope.rootExternalId,
+          actor,
+          metadata: { observeSource: "transport.dispatchQueuedJobsForDevice" },
+        })
+      : await sendEdgeWorkflowToDeviceEnforced(
+          deviceId,
+          envelope.operationId,
+          envelope.template,
+          envelope.variables,
+          { actor, observeSource: "transport.dispatchQueuedJobsForDevice" },
+        );
     if (!result.sent) break;
     sent += 1;
   }
@@ -260,20 +291,41 @@ export async function sendEdgeWorkflowToDeviceEnforced(
   workflowId: string,
   template: Record<string, unknown>,
   variables?: Record<string, unknown>,
-): Promise<boolean> {
+  options: { actor?: string; observeSource?: string } = {},
+): Promise<EdgeWorkflowSendResult> {
+  const replayEnvelope: DeviceExecutionEdgeWorkflowReplayEnvelopeV1 = {
+    schemaVersion: "pnq.edge-workflow-dispatch/v1",
+    deviceId,
+    rootKind: "edge_workflow",
+    rootExternalId: workflowId,
+    operationKind: "workflow",
+    operationId: workflowId,
+    boundary: "edge_workflow",
+    template: structuredClone(template),
+    variables: variables === undefined ? undefined : structuredClone(variables),
+  };
   const dispatch = await deviceExecutionArbiter.runObservedEgress({
     deviceId,
     boundary: "edge_workflow",
     operationId: workflowId,
     wireType: "WORKFLOW_START",
-    actor: "transport.g3.edge_workflow",
-    metadata: { templateId: template.id ?? null },
+    actor: options.actor ?? "transport.g3.edge_workflow",
+    metadata: {
+      templateId: template.id ?? null,
+      dispatchEnvelope: replayEnvelope,
+      observeSource: options.observeSource ?? "transport.sendEdgeWorkflowToDeviceEnforced",
+    },
     wireDispatch: (handle) => directWsServer.sendWorkflowStartWithHandle(handle, template, variables),
   });
-  if (!dispatch.sent && dispatch.decision === "would_wait" && dispatch.handle) {
-    await cancelUnreplayableObservedAttempt(dispatch.handle, "queued_edge_workflow_not_replayable");
-  }
-  return dispatch.sent;
+  return {
+    decision: dispatch.decision,
+    root: dispatch.root,
+    operation: dispatch.operation,
+    handle: dispatch.handle,
+    reason: dispatch.reason,
+    sent: dispatch.sent,
+    queued: dispatch.decision === "would_wait" || (dispatch.root?.state === "queued" && !dispatch.sent),
+  };
 }
 
 async function cancelUnreplayableObservedAttempt(
@@ -343,7 +395,9 @@ function observeJobDispatch(deviceId: string, payload: JobDispatchPayload, sent:
   });
 }
 
-async function nextQueuedJobEnvelope(deviceId: string): Promise<DeviceExecutionJobReplayEnvelopeV1 | null> {
+type QueuedDispatchEnvelope = DeviceExecutionJobReplayEnvelopeV1 | DeviceExecutionEdgeWorkflowReplayEnvelopeV1;
+
+async function nextQueuedDispatchEnvelope(deviceId: string): Promise<QueuedDispatchEnvelope | null> {
   const result = await getDb().query<{
     root_id: string;
     root_kind: DeviceExecutionRootKind;
@@ -362,9 +416,9 @@ async function nextQueuedJobEnvelope(deviceId: string): Promise<DeviceExecutionJ
     FROM device_execution_roots roots
     JOIN device_execution_operations operations ON operations.root_id = roots.id
     WHERE roots.device_id = $1
-      AND roots.root_kind IN ('job', 'server_workflow')
+      AND roots.root_kind IN ('job', 'server_workflow', 'edge_workflow')
       AND roots.state = 'queued'
-      AND operations.operation_kind = 'job'
+      AND operations.operation_kind IN ('job', 'workflow')
     ORDER BY roots.fifo_sequence ASC
     LIMIT 1
     `,
@@ -374,6 +428,14 @@ async function nextQueuedJobEnvelope(deviceId: string): Promise<DeviceExecutionJ
   if (!row) return null;
   const envelope = row.metadata?.dispatchEnvelope;
   if (isJobReplayEnvelope(envelope, {
+    deviceId,
+    rootKind: row.root_kind,
+    rootExternalId: row.root_external_id,
+    operationId: row.operation_id,
+  })) {
+    return structuredClone(envelope);
+  }
+  if (isEdgeWorkflowReplayEnvelope(envelope, {
     deviceId,
     rootKind: row.root_kind,
     rootExternalId: row.root_external_id,
@@ -413,4 +475,27 @@ export function isJobReplayEnvelope(
     typeof envelope.payload === "object" &&
     envelope.payload.jobId === identity.operationId &&
     typeof envelope.payload.type === "string";
+}
+
+export function isEdgeWorkflowReplayEnvelope(
+  value: unknown,
+  identity: {
+    deviceId: string;
+    rootKind: DeviceExecutionRootKind;
+    rootExternalId: string | null;
+    operationId: string;
+  },
+): value is DeviceExecutionEdgeWorkflowReplayEnvelopeV1 {
+  if (!value || typeof value !== "object") return false;
+  const envelope = value as Partial<DeviceExecutionEdgeWorkflowReplayEnvelopeV1>;
+  return envelope.schemaVersion === "pnq.edge-workflow-dispatch/v1" &&
+    envelope.deviceId === identity.deviceId &&
+    identity.rootKind === "edge_workflow" &&
+    envelope.rootKind === "edge_workflow" &&
+    envelope.rootExternalId === identity.rootExternalId &&
+    envelope.operationKind === "workflow" &&
+    envelope.operationId === identity.operationId &&
+    envelope.boundary === "edge_workflow" &&
+    !!envelope.template &&
+    typeof envelope.template === "object";
 }

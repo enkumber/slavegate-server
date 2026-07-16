@@ -59,9 +59,18 @@ vi.mock("../../../modules/auth/auth.service", () => ({ authService: {} }));
 vi.mock("../../../ws/direct-ws.server", () => ({ directWsServer: mocks.directWsServer }));
 vi.mock("../../../transport/transport", () => ({
   sendJobToDevice: vi.fn(),
-  sendEdgeWorkflowToDeviceEnforced: vi.fn((deviceId, workflowId, template, variables) =>
-    Promise.resolve(mocks.directWsServer.sendWorkflowStart(deviceId, template, variables, workflowId))
-  ),
+  sendEdgeWorkflowToDeviceEnforced: vi.fn((deviceId, workflowId, template, variables) => {
+    const sent = mocks.directWsServer.sendWorkflowStart(deviceId, template, variables, workflowId);
+    return Promise.resolve({
+      decision: sent ? "dispatched" : "offline",
+      root: null,
+      operation: undefined,
+      handle: undefined,
+      sent,
+      queued: false,
+      reason: sent ? undefined : "device_offline_or_transport_rejected",
+    });
+  }),
   isDeviceOnline: vi.fn(() => true),
 }));
 vi.mock("../../../modules/app-mapping/recorder.service", () => ({ loadMap: mocks.appMapping.loadMap }));
@@ -402,6 +411,41 @@ describe("generated workflow cache-only execution route", () => {
       status: "queued",
       mode: "server",
     });
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
+  });
+
+  it("keeps PNQ would_wait edge workflows queued instead of falling back to server execution", async () => {
+    const cached = cacheRecord();
+    const transport = await import("../../../transport/transport");
+    vi.mocked(transport.sendEdgeWorkflowToDeviceEnforced).mockResolvedValueOnce({
+      decision: "would_wait",
+      root: null,
+      operation: undefined,
+      handle: undefined,
+      sent: false,
+      queued: true,
+      reason: "device_slot_already_active",
+    });
+    const executor = await import("../workflow.executor");
+    const { dispatchGeneratedWorkflowTemplate } = await import("../generated-workflow-execution.service");
+
+    const result = await dispatchGeneratedWorkflowTemplate({
+      templateId: cached.workflow.id,
+      template: cached.workflow,
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      variables: { generatedWorkflow: true },
+      logPrefix: "test",
+    });
+
+    expect(result).toMatchObject({
+      workflowId: "wf-cache-smoke",
+      status: "queued",
+      mode: "edge",
+    });
+    expect(mocks.workflowService.markRunning).not.toHaveBeenCalled();
+    expect(mocks.workflowService.markFailed).not.toHaveBeenCalled();
+    expect(executor.startWorkflow).not.toHaveBeenCalled();
     expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
   });
 
