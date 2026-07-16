@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs/promises";
+import http from "http";
 import os from "os";
 import path from "path";
-import { ModelConfigService, sanitizeProviderError, setModelConfigEndpointResolverForTests } from "./model-config.service";
+import { ModelConfigService, modelConfigFetch, sanitizeProviderError, setModelConfigEndpointResolverForTests } from "./model-config.service";
 import { getDb } from "../../db/client";
 
 vi.mock("../../db/client", () => ({
@@ -175,6 +176,29 @@ describe("ModelConfigService credential and endpoint safety", () => {
       code: "AI_ENDPOINT_PRIVATE_ADDRESS",
     });
     expect(resolution).toBe(2);
+  });
+
+  it("connects the provider socket to the policy-validated DNS address", async () => {
+    process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "local:validated.test";
+    setModelConfigEndpointResolverForTests(async () => [{ address: "127.0.0.1", family: 4 }]);
+    let receivedHost = "";
+    const server = http.createServer((req, res) => {
+      receivedHost = req.headers.host ?? "";
+      res.end("pinned");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind");
+
+    try {
+      const response = await modelConfigFetch(`http://validated.test:${address.port}/models`, {
+        signal: AbortSignal.timeout(2_000),
+      }, "decision_llm");
+      expect(await response.text()).toBe("pinned");
+      expect(receivedHost).toBe(`validated.test:${address.port}`);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   it("replacing or clearing a credential ref atomically clears an older DB secret and fingerprint", async () => {

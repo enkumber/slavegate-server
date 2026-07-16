@@ -52,5 +52,5 @@ interface VlmResponse {
 
 ```sql
 SELECT * FROM vision_config WHERE id = 'default';
--- Update via: POST /api/vision/config
+-- Update via: PATCH /api/vision/config (POST remains a compatibility alias)
 ```

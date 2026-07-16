@@ -1699,7 +1699,7 @@ router.get("/vision/config", requireAuth, async (_req, res) => {
   }
 });
 
-router.patch("/vision/config", requireAuth, async (req, res) => {
+async function updateLegacyVisionConfig(req: Request, res: Response): Promise<void> {
   try {
     const body = req.body as Record<string, unknown>;
     let config = await modelConfigService.update("vision_vlm", {
@@ -1708,12 +1708,11 @@ router.patch("/vision/config", requireAuth, async (req, res) => {
       endpoint: body.endpoint as string | null | undefined,
       enabled: body.enabled as boolean | undefined,
     });
-    const hasCredentialRef = Object.prototype.hasOwnProperty.call(body, "credentialRef") || Object.prototype.hasOwnProperty.call(body, "apiKeyRef");
-    if (hasCredentialRef) {
+    const credentialRefField = ["credentialRef", "apiKeyRef", "api_key_ref"]
+      .find((field) => Object.prototype.hasOwnProperty.call(body, field));
+    if (credentialRefField) {
       config = await modelConfigService.updateCredential("vision_vlm", {
-        credentialRef: (Object.prototype.hasOwnProperty.call(body, "credentialRef")
-          ? body.credentialRef
-          : body.apiKeyRef) as string | null,
+        credentialRef: body[credentialRefField] as string | null,
       });
     }
     visionService.invalidateCache();
@@ -1721,7 +1720,10 @@ router.patch("/vision/config", requireAuth, async (req, res) => {
   } catch (err) {
     handleModelConfigError(res, err);
   }
-});
+}
+
+router.patch("/vision/config", requireAuth, updateLegacyVisionConfig);
+router.post("/vision/config", requireAuth, updateLegacyVisionConfig);
 
 // ─── Metrics (Prometheus scrape) ─────────────────────────────────────────────
 // Auth: optional Bearer token via METRICS_AUTH_TOKEN env var.

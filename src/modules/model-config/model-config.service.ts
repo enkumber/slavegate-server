@@ -472,11 +472,14 @@ export async function modelConfigFetch(url: string, init: RequestInit = {}, role
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new ModelConfigError(`Invalid endpoint protocol for ${role}. Only http and https are supported.`, 400, "AI_ENDPOINT_PROTOCOL_UNSUPPORTED");
   }
+  if (!policy.allowlisted) {
+    throw new ModelConfigError(`Model endpoint for ${role} must be explicitly allowlisted with MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_NOT_ALLOWLISTED");
+  }
   if (parsed.protocol === "http:" && !policy.allowPrivate) {
     throw new ModelConfigError(`Model endpoint for ${role} must use HTTPS. Plain HTTP is allowed only for hosts explicitly declared local:<host> in MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_HTTPS_REQUIRED");
   }
-  if (!policy.allowlisted) {
-    throw new ModelConfigError(`Model endpoint for ${role} must be explicitly allowlisted with MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_NOT_ALLOWLISTED");
+  if (net.isIP(parsed.hostname) && isBlockedEndpointAddress(parsed.hostname) && !policy.allowPrivate) {
+    throw new ModelConfigError(`Model endpoint for ${role} resolved to a private, local, metadata, or reserved address. Use local:<host> in MODEL_CONFIG_ENDPOINT_ALLOWLIST only for an intended local provider.`, 400, "AI_ENDPOINT_PRIVATE_ADDRESS");
   }
 
   const headers = new Headers(init.headers);
@@ -488,9 +491,16 @@ export async function modelConfigFetch(url: string, init: RequestInit = {}, role
     const request = transport.request(parsed, {
       method: init.method ?? "GET",
       headers: requestHeaders,
-      lookup: (hostname, _options, callback) => {
+      lookup: (hostname: string, optionsOrCallback: { all?: boolean } | ((...args: any[]) => void), maybeCallback?: (...args: any[]) => void) => {
+        const options = typeof optionsOrCallback === "function" ? {} : optionsOrCallback;
+        const callback = typeof optionsOrCallback === "function" ? optionsOrCallback : maybeCallback;
+        if (!callback) return;
         resolveAllowedEndpointAddress(hostname, role).then(
-          (entry) => callback(null, entry.address, entry.family ?? net.isIP(entry.address)),
+          (entry) => {
+            const family = entry.family ?? net.isIP(entry.address);
+            if (options.all) callback(null, [{ address: entry.address, family }]);
+            else callback(null, entry.address, family);
+          },
           (error) => callback(error as NodeJS.ErrnoException, "", 0),
         );
       },
