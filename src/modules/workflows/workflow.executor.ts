@@ -280,15 +280,28 @@ async function dispatchGeneratedWorkflowProbe(
       workflowId,
       stepIndex,
     });
-    const dispatch = await sendDeviceExecutionJobToDevice(deviceId, { jobId, type, params: {}, timeoutMs }, {
-      boundary: "self_healing_child",
-      rootExternalId: workflowId,
-      requestKey: workflowId,
-      actor: "generated_workflow_executor",
-      metadata: { observeSource: "generatedWorkflow.dispatchProbe", workflowId, stepIndex },
-    });
-    if (!dispatch.sent && !dispatch.queued) return null;
-    return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, timeoutMs);
+    const prepared = prepareGeneratedChildJobResult(
+      jobId,
+      Math.max(timeoutMs + 5_000, scalabilityConfig.jobResultTimeout),
+    );
+    let dispatch: Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>;
+    try {
+      dispatch = await sendDeviceExecutionJobToDevice(deviceId, { jobId, type, params: {}, timeoutMs }, {
+        boundary: "self_healing_child",
+        rootExternalId: workflowId,
+        requestKey: workflowId,
+        actor: "generated_workflow_executor",
+        metadata: { observeSource: "generatedWorkflow.dispatchProbe", workflowId, stepIndex },
+      });
+    } catch (err) {
+      prepared.cancel();
+      throw err;
+    }
+    if (!dispatch.sent && !dispatch.queued) {
+      prepared.cancel();
+      return null;
+    }
+    return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, timeoutMs, prepared);
   } catch {
     return null;
   }
@@ -486,6 +499,12 @@ interface PendingResult {
   timeoutHandle: ReturnType<typeof setTimeout>;
 }
 
+export interface PreparedGeneratedChildJobResult {
+  promise: Promise<JobStepResult>;
+  armTimeout: (timeoutMs: number) => void;
+  cancel: () => void;
+}
+
 export interface JobStepResult {
   status:       string;
   output?:      unknown;
@@ -568,13 +587,60 @@ function awaitJobResult(jobId: string, timeoutMs: number): Promise<JobStepResult
   });
 }
 
+/**
+ * Register the workflow executor waiter before the JOB frame can reach the
+ * device. Fast observation actions (notably ui_tree_dump) may return their
+ * JOB_RESULT synchronously with the transport send; registering afterwards
+ * loses that result even though the DirectWS/PNQ waiter accepted it.
+ */
+export function prepareGeneratedChildJobResult(
+  jobId: string,
+  initialTimeoutMs: number,
+): PreparedGeneratedChildJobResult {
+  let pending!: PendingResult;
+  const promise = new Promise<JobStepResult>((resolve, reject) => {
+    const timeoutHandle = setTimeout(() => {
+      if (pendingJobResults.get(jobId) !== pending) return;
+      pendingJobResults.delete(jobId);
+      reject(new Error(`JOB_RESULT timeout after ${initialTimeoutMs}ms (jobId=${jobId})`));
+    }, initialTimeoutMs);
+    pending = { resolve, reject, timeoutHandle };
+    pendingJobResults.set(jobId, pending);
+  });
+  // The transport admission call is awaited before the caller awaits this
+  // promise. Attach a handler immediately so a transport stall cannot surface
+  // a transient unhandled rejection; the original promise still rejects for
+  // the workflow executor.
+  void promise.catch(() => undefined);
+
+  return {
+    promise,
+    armTimeout(timeoutMs: number) {
+      if (pendingJobResults.get(jobId) !== pending) return;
+      clearTimeout(pending.timeoutHandle);
+      pending.timeoutHandle = setTimeout(() => {
+        if (pendingJobResults.get(jobId) !== pending) return;
+        pendingJobResults.delete(jobId);
+        pending.reject(new Error(`JOB_RESULT timeout after ${timeoutMs}ms (jobId=${jobId})`));
+      }, timeoutMs);
+    },
+    cancel() {
+      if (pendingJobResults.get(jobId) !== pending) return;
+      clearTimeout(pending.timeoutHandle);
+      pendingJobResults.delete(jobId);
+    },
+  };
+}
+
 export function awaitGeneratedChildJobResult(
   workflowId: string,
   jobId: string,
   dispatch: Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>,
   executionTimeoutMs: number,
+  prepared?: PreparedGeneratedChildJobResult,
 ): Promise<JobStepResult> {
   if (!dispatch.sent && !dispatch.queued) {
+    prepared?.cancel();
     throw new Error(`Failed to send job to device: ${dispatch.reason ?? dispatch.decision}`);
   }
 
@@ -589,6 +655,10 @@ export function awaitGeneratedChildJobResult(
     console.log(
       `[workflow] ${workflowId} child job ${jobId.slice(0, 8)} queued behind the active device root; awaiting PNQ replay`,
     );
+  }
+  if (prepared) {
+    prepared.armTimeout(resultTimeoutMs);
+    return prepared.promise;
   }
   return awaitJobResult(jobId, resultTimeoutMs);
 }
@@ -1051,14 +1121,24 @@ async function executeSkillActionStep(
         workflowId,
         stepIndex,
       });
-      const dispatch = await sendDeviceExecutionJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs }, {
-        boundary: "generated_child",
-        rootExternalId: workflowId,
-        requestKey: workflowId,
-        actor: "generated_workflow_executor",
-        metadata: { observeSource: "generatedWorkflow.dispatchAndWait", workflowId, stepIndex },
-      });
-      return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, dispatchedTimeoutMs);
+      const prepared = prepareGeneratedChildJobResult(
+        jobId,
+        Math.max(dispatchedTimeoutMs + 5_000, scalabilityConfig.jobResultTimeout),
+      );
+      let dispatch: Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>;
+      try {
+        dispatch = await sendDeviceExecutionJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs }, {
+          boundary: "generated_child",
+          rootExternalId: workflowId,
+          requestKey: workflowId,
+          actor: "generated_workflow_executor",
+          metadata: { observeSource: "generatedWorkflow.dispatchAndWait", workflowId, stepIndex },
+        });
+      } catch (err) {
+        prepared.cancel();
+        throw err;
+      }
+      return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, dispatchedTimeoutMs, prepared);
     },
 
     // Cascade tap a named element (calls executeCascadeTap from skill.cascade).
@@ -1321,32 +1401,43 @@ async function executeActionStep(
   );
 
   // Send to device via DirectWS transport
-  const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
+  const prepared = prepareGeneratedChildJobResult(
     jobId,
-    type:     jobType,
-    params:   finalParams as import("../../../shared/protocol/messages").JobParams,
-    timeoutMs: dispatchedTimeoutMs,
-    requiresRoot:         isRootAction(step.action),
-    verificationStrategy: strategy,
-    l1TimeoutMs:          hbeStep.l1TimeoutMs,
-    l2SettleMs:           hbeStep.l2SettleMs,
-  }, {
-    boundary: "generated_child",
-    rootExternalId: workflowId,
-    requestKey: workflowId,
-    actor: "generated_workflow_executor",
-    metadata: {
-      observeSource: "generatedWorkflow.dispatchStep",
-      workflowId,
-      stepIndex,
-      stepAction: step.action,
-    },
-  });
+    Math.max(dispatchedTimeoutMs + 5_000, scalabilityConfig.jobResultTimeout),
+  );
+  let dispatch: Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>;
+  try {
+    dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
+      jobId,
+      type:     jobType,
+      params:   finalParams as import("../../../shared/protocol/messages").JobParams,
+      timeoutMs: dispatchedTimeoutMs,
+      requiresRoot:         isRootAction(step.action),
+      verificationStrategy: strategy,
+      l1TimeoutMs:          hbeStep.l1TimeoutMs,
+      l2SettleMs:           hbeStep.l2SettleMs,
+    }, {
+      boundary: "generated_child",
+      rootExternalId: workflowId,
+      requestKey: workflowId,
+      actor: "generated_workflow_executor",
+      metadata: {
+        observeSource: "generatedWorkflow.dispatchStep",
+        workflowId,
+        stepIndex,
+        stepAction: step.action,
+      },
+    });
+  } catch (err) {
+    prepared.cancel();
+    throw err;
+  }
   const resultPromise = awaitGeneratedChildJobResult(
     workflowId,
     jobId,
     dispatch,
     dispatchedTimeoutMs,
+    prepared,
   );
 
   console.log(

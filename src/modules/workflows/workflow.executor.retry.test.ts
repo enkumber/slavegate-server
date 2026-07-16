@@ -141,11 +141,11 @@ describe("workflow BullMQ retry semantics", () => {
           }), 0);
         }
         if (command.type === "ui_tree_dump") {
-          setTimeout(() => resolveJobResult(command.jobId, {
+          expect(resolveJobResult(command.jobId, {
             status: "completed",
             output: { tree: [{ text: "Bankroll 638.824 BTC" }] },
             durationMs: 1,
-          }), 0);
+          })).toBe(true);
         }
         return { decision: "admitted", root: null, sent: true, queued: false };
       });
