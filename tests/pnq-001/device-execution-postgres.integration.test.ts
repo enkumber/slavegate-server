@@ -193,9 +193,19 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     for (const boundary of ["edge_batch", "server_workflow_root"] as const) {
       const policy = DEVICE_EXECUTION_BOUNDARY_MATRIX[boundary];
       const operationId = `${boundary}-operation`;
+      if (boundary === "server_workflow_root") {
+        await arbiter.observeAdmission({
+          deviceId: DEVICE_A,
+          rootKind: "server_workflow",
+          externalId: operationId,
+          requestKey: operationId,
+          actor: `${boundary}-test`,
+        });
+      }
       const result = await arbiter.runObservedEgress({
         deviceId: DEVICE_A,
         boundary,
+        rootExternalId: boundary === "server_workflow_root" ? operationId : undefined,
         operationId,
         wireType: boundary === "edge_batch" ? "BATCH_START" : "WORKFLOW_START",
         actor: `${boundary}-test`,
@@ -298,10 +308,18 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
   it("fails closed after waiter registration when observed WORKFLOW wire send times out", async () => {
     await insertDevice(pool, DEVICE_A, "pnq-observed-timeout-a");
     const order: string[] = [];
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "server_workflow",
+      externalId: "timeout-workflow-root",
+      requestKey: "timeout-workflow-root",
+      actor: "workflow-timeout-test",
+    });
 
     const result = await arbiter.runObservedEgress({
       deviceId: DEVICE_A,
       boundary: "server_workflow_root",
+      rootExternalId: "timeout-workflow-root",
       operationId: "timeout-workflow-root",
       wireType: "WORKFLOW_START",
       actor: "workflow-timeout-test",
