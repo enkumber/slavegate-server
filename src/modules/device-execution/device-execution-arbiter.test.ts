@@ -1147,6 +1147,52 @@ describe("DeviceExecutionArbiter observe mode", () => {
     expect(client.roots).toHaveLength(0);
   });
 
+  it("expires only a timed-out server-workflow child and keeps the canonical root usable", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({
+      id: "workflow-timeout-root",
+      root_kind: "server_workflow",
+      external_id: "workflow-timeout",
+      request_key: "workflow-timeout",
+      fifo_sequence: 1,
+    }));
+    const arbiter = arbiterFor(client);
+
+    const first = await arbiter.runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "readiness-job",
+      boundary: "generated_child",
+      rootExternalId: "workflow-timeout",
+      registerWaiter: () => undefined,
+      wireDispatch: () => true,
+    });
+    expect(first).toMatchObject({ decision: "dispatched", sent: true });
+
+    const expired = await arbiter.expireServerWorkflowChild({
+      deviceId: DEVICE_A,
+      jobId: "readiness-job",
+      handle: first.permit!.handle,
+      actor: "test.timeout",
+    });
+    expect(expired).toMatchObject({
+      decision: "terminal",
+      reason: "child_timed_out_root_retained",
+      root: { state: "dispatched" },
+      operation: { state: "failed" },
+    });
+    expect(client.roots[0]).toMatchObject({ state: "dispatched", owner_generation: 1 });
+
+    const next = await arbiter.runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "next-readiness-job",
+      boundary: "generated_child",
+      rootExternalId: "workflow-timeout",
+      registerWaiter: () => undefined,
+      wireDispatch: () => true,
+    });
+    expect(next).toMatchObject({ decision: "dispatched", sent: true });
+  });
+
   it.each(["blocked", "reconciling"] as const)(
     "does not terminalize an ambiguous %s server-workflow root during normal finish cleanup",
     async (state) => {

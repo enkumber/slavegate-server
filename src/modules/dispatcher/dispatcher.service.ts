@@ -81,6 +81,10 @@ export function workflowChildTimeoutDisposition(
   return "timeout";
 }
 
+export function shouldBlockRootForTimedOutJob(workflowId?: string): boolean {
+  return !workflowId;
+}
+
 export class DispatcherService {
   private queues = new Map<string, Queue>();
 
@@ -199,7 +203,7 @@ export class DispatcherService {
           // the wire.  Otherwise a perfectly valid queued child is timed out
           // locally and the whole workflow root is marked ambiguous before it
           // ever reaches the phone.
-          if (req.workflowId) {
+          if (!shouldBlockRootForTimedOutJob(req.workflowId)) {
             const ownership = await db.query<{
               root_state: string;
               operation_state: string;
@@ -235,6 +239,13 @@ export class DispatcherService {
             "UPDATE command_log SET result_status = 'timeout' WHERE job_id = $1",
             [jobId]
           );
+          if (req.workflowId) {
+            // The server workflow owns the device root and decides whether a
+            // timed-out child is retried or the workflow is failed. Blocking
+            // the whole root here races the workflow executor and prevents the
+            // next idempotent readiness child (notably unlock) from dispatching.
+            return;
+          }
           await deviceExecutionArbiter.markAmbiguous({
             deviceId: req.deviceId,
             rootKind: "job",

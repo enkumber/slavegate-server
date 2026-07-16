@@ -336,6 +336,40 @@ export class DirectWsServer {
     }
   }
 
+  private async confirmServerWorkflowChildTimeoutBeforeCleanup(
+    input: Parameters<typeof deviceExecutionArbiter.expireServerWorkflowChild>[0],
+    cleanup: () => void,
+    attempt = 1,
+  ): Promise<boolean> {
+    try {
+      const transition = await deviceExecutionArbiter.expireServerWorkflowChild(input);
+      if (transition.decision !== "terminal") {
+        throw new Error(`child timeout transition not confirmed (${transition.reason ?? transition.decision})`);
+      }
+      cleanup();
+      return true;
+    } catch (err) {
+      if (attempt < AMBIGUITY_RETRY_MAX_ATTEMPTS) {
+        const retry = setTimeout(() => {
+          this.runSocketTask("server-workflow child timeout retry", async () => {
+            await this.confirmServerWorkflowChildTimeoutBeforeCleanup(input, cleanup, attempt + 1);
+          });
+        }, AMBIGUITY_RETRY_DELAY_MS);
+        retry.unref();
+        console.warn(
+          `[device-execution] child timeout transition failed; retained pending work and scheduled retry ${attempt + 1}/${AMBIGUITY_RETRY_MAX_ATTEMPTS}:`,
+          (err as Error).message,
+        );
+      } else {
+        console.error(
+          `[device-execution] child timeout transition escalation after ${attempt} attempts; pending work retained:`,
+          (err as Error).message,
+        );
+      }
+      return false;
+    }
+  }
+
   // ─── Lifecycle ──────────────────────────────────────────────────────────
 
   attach(): void {
@@ -569,6 +603,22 @@ export class DirectWsServer {
     if (!permit) {
       this.pendingJobs.delete(jobId);
       pending.reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
+      return;
+    }
+
+    if (permit.handle.rootKind === "server_workflow") {
+      await this.confirmServerWorkflowChildTimeoutBeforeCleanup({
+        deviceId: permit.handle.deviceId,
+        jobId,
+        handle: permit.handle,
+        actor: "direct_ws_waiter_timeout",
+        reason: "job_result_timeout",
+        metadata: { timeoutMs, handle: permit.wireHandle },
+      }, () => {
+        if (this.pendingJobs.get(jobId) !== pending) return;
+        this.pendingJobs.delete(jobId);
+        pending.reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
+      });
       return;
     }
     await this.confirmAmbiguityBeforeCleanup({

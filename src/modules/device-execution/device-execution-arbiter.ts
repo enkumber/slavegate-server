@@ -2437,6 +2437,110 @@ export class DeviceExecutionArbiter {
     });
   }
 
+  async expireServerWorkflowChild(input: {
+    deviceId: string;
+    jobId: string;
+    handle: DeviceExecutionHandle;
+    actor?: string;
+    reason?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<DeviceExecutionTransitionResult> {
+    return this.withTransaction(async (client) => {
+      await lockDevice(client, input.deviceId);
+      const operation = await selectOperationByIdentity(client, "job", input.jobId, true);
+      if (!operation) {
+        return { decision: "missing", root: null, reason: "child_operation_not_found" };
+      }
+      const root = await selectRoot(client, {
+        rootId: operation.root_id,
+        rootKind: "server_workflow",
+        forUpdate: true,
+      });
+      if (!root) {
+        return { decision: "missing", root: null, reason: "server_workflow_root_not_found" };
+      }
+
+      const operationHandle = operationRowToHandle(operation);
+      const boundary = typeof operation.metadata?.boundary === "string" ? operation.metadata.boundary : null;
+      const isChildBoundary = boundary !== null &&
+        (["generated_child", "self_healing_child", "prestep_child", "recovery_child"] as readonly string[]).includes(boundary);
+      const validOwner = root.device_id === input.deviceId &&
+        operation.root_id === root.id &&
+        operation.device_id === input.deviceId &&
+        deviceExecutionHandlesEqual(input.handle, operationHandle) &&
+        toNumber(operation.owner_generation) === toNumber(root.owner_generation);
+
+      if (!isChildBoundary || !validOwner) {
+        return {
+          decision: "rejected",
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          handle: operationHandle,
+          reason: !isChildBoundary ? "operation_is_not_server_workflow_child" : "child_timeout_owner_mismatch",
+        };
+      }
+      if (["completed", "failed", "cancelled"].includes(operation.state)) {
+        return {
+          decision: "terminal",
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          handle: operationHandle,
+          reason: "child_operation_already_terminal",
+        };
+      }
+      if (root.state === "blocked" || root.state === "reconciling" || isTerminalState(root.state)) {
+        return {
+          decision: root.state === "blocked" || root.state === "reconciling" ? "ambiguous" : "rejected",
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          handle: operationHandle,
+          reason: "server_workflow_root_not_active",
+        };
+      }
+
+      const terminalOperation = await updateOperationState(client, {
+        operationKind: "job",
+        operationId: input.jobId,
+        fromStates: ["dispatching", "dispatched"],
+        toState: "failed",
+        ownerGeneration: toNumber(root.owner_generation),
+        metadata: input.metadata,
+      });
+      if (!terminalOperation) {
+        return {
+          decision: "rejected",
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          handle: operationHandle,
+          reason: "child_timeout_cas_missed",
+        };
+      }
+
+      await insertEvent(client, {
+        rootId: root.id,
+        deviceId: root.device_id,
+        eventType: "child_job_timeout_recorded",
+        previousState: root.state,
+        newState: root.state,
+        actor: input.actor ?? "transport",
+        reason: input.reason ?? "job_result_timeout",
+        metadata: {
+          jobId: input.jobId,
+          workflowId: root.external_id,
+          handle: encodeDeviceExecutionHandle(operationRowToHandle(terminalOperation)),
+          ...(input.metadata ?? {}),
+        },
+      });
+      return {
+        decision: "terminal",
+        root: rowToRoot(root),
+        operation: rowToOperation(terminalOperation),
+        handle: operationRowToHandle(terminalOperation),
+        reason: "child_timed_out_root_retained",
+      };
+    });
+  }
+
   /**
    * Cancel a server workflow only while it is still queued and therefore has
    * never owned the device slot. The queued-state CAS is the authority: an

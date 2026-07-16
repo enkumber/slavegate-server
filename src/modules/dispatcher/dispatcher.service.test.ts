@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { workflowChildTimeoutDisposition } from "./dispatcher.service";
+import { shouldBlockRootForTimedOutJob, workflowChildTimeoutDisposition } from "./dispatcher.service";
 
 describe("server-workflow child timeout clock", () => {
   it("does not consume execution timeout while PNQ still owns the child as queued", () => {
@@ -26,5 +26,10 @@ describe("server-workflow child timeout clock", () => {
       root_state: "blocked",
       operation_state: "blocked",
     }, false)).toBe("timeout");
+  });
+
+  it("leaves a timed-out child under workflow ownership instead of blocking the canonical root", () => {
+    expect(shouldBlockRootForTimedOutJob("workflow-1")).toBe(false);
+    expect(shouldBlockRootForTimedOutJob()).toBe(true);
   });
 });

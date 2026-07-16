@@ -252,6 +252,31 @@ describe("DirectWS typed pending lifecycle", () => {
     expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(false);
   });
 
+  it("records a server-workflow child timeout without blocking its canonical root", async () => {
+    const server = new DirectWsServer();
+    const permit = jobPermit("child-timeout");
+    const pendingJob = server.registerJobWaiterWithPermit(permit, 60_000);
+    const internals = server as unknown as {
+      pendingJobs: Map<string, unknown>;
+      expirePendingJob: (jobId: string, timeoutMs: number, jobDispatchPermit: ReturnType<typeof jobPermit>) => Promise<void>;
+    };
+    const expireChild = vi.spyOn(deviceExecutionArbiter, "expireServerWorkflowChild")
+      .mockResolvedValue({ decision: "terminal", root: null });
+    const markAmbiguous = vi.spyOn(deviceExecutionArbiter, "markAmbiguous");
+
+    await internals.expirePendingJob(permit.handle.operationId, 1234, permit);
+
+    await expect(pendingJob).rejects.toThrow("timed out after 1234ms");
+    expect(expireChild).toHaveBeenCalledWith(expect.objectContaining({
+      deviceId: permit.handle.deviceId,
+      jobId: permit.handle.operationId,
+      handle: permit.handle,
+      reason: "job_result_timeout",
+    }));
+    expect(markAmbiguous).not.toHaveBeenCalled();
+    expect(internals.pendingJobs.has(permit.handle.operationId)).toBe(false);
+  });
+
   it("retains JOB, BATCH, and WORKFLOW pending state until a bounded ambiguity retry succeeds", async () => {
     vi.useFakeTimers();
     try {
@@ -272,6 +297,13 @@ describe("DirectWS typed pending lifecycle", () => {
       };
       internals.pendingWorkflows.set(workflow.operationId, { handle: workflow, timer: workflowTimer });
       const attempts = new Map<string, number>();
+      vi.spyOn(deviceExecutionArbiter, "expireServerWorkflowChild").mockImplementation(async (input) => {
+        const operationId = input.jobId;
+        const count = (attempts.get(operationId) ?? 0) + 1;
+        attempts.set(operationId, count);
+        if (count === 1) throw new Error("db unavailable");
+        return { decision: "terminal", root: null };
+      });
       vi.spyOn(deviceExecutionArbiter, "markAmbiguous").mockImplementation(async (input) => {
         const operationId = input.handle!.operationId;
         const count = (attempts.get(operationId) ?? 0) + 1;
