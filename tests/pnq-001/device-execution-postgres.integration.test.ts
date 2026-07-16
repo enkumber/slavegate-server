@@ -378,10 +378,14 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     const jobId = "00000000-0000-4000-8000-00000000f002";
     const startedWorkflowId = "00000000-0000-4000-8000-00000000f003";
     const startedJobId = "00000000-0000-4000-8000-00000000f004";
+    const failedWorkflowId = "00000000-0000-4000-8000-00000000f005";
+    const failedJobId = "00000000-0000-4000-8000-00000000f006";
     await insertDevice(pool, DEVICE_A, "pnq-undispatched-timeout-a");
     await insertDevice(pool, DEVICE_B, "pnq-started-timeout-b");
+    await insertDevice(pool, DEVICE_C, "pnq-terminal-orphan-c");
     await insertWorkflow(pool, workflowId, DEVICE_A, "running");
     await insertWorkflow(pool, startedWorkflowId, DEVICE_B, "running");
+    await insertWorkflow(pool, failedWorkflowId, DEVICE_C, "failed");
     await arbiter.observeAdmission({
       deviceId: DEVICE_A,
       rootKind: "server_workflow",
@@ -398,6 +402,14 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     });
     const startedPermit = await arbiter.claimNextRoot({ deviceId: DEVICE_B, actor: "workflow-worker" });
     expect(startedPermit).not.toBeNull();
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_C,
+      rootKind: "server_workflow",
+      externalId: failedWorkflowId,
+      actor: "workflow-test",
+    });
+    const failedPermit = await arbiter.claimNextRoot({ deviceId: DEVICE_C, actor: "workflow-worker" });
+    expect(failedPermit).not.toBeNull();
     await pool.query(
       `INSERT INTO jobs (id, device_id, status, started_at) VALUES ($1, $2, 'timeout', NULL)`,
       [jobId, DEVICE_A],
@@ -414,14 +426,24 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       `INSERT INTO command_log (job_id, command_raw) VALUES ($1, $2)`,
       [startedJobId, `workflow:${startedWorkflowId} step:0 screen_wake`],
     );
+    await pool.query(
+      `INSERT INTO jobs (id, device_id, status, started_at) VALUES ($1, $2, 'timeout', NULL)`,
+      [failedJobId, DEVICE_C],
+    );
+    await pool.query(
+      `INSERT INTO command_log (job_id, command_raw) VALUES ($1, $2)`,
+      [failedJobId, `workflow:${failedWorkflowId} step:0 screen_wake`],
+    );
 
     await expect(arbiter.reconcileUndispatchedTimedOutServerWorkflows()).resolves.toEqual({
-      reconciledRoots: 1,
+      reconciledRoots: 2,
     });
 
     expect(await workflowStatus(pool, workflowId)).toBe("failed");
     expect(await stateForExternalId(pool, workflowId)).toBe("failed");
-    expect(await eventCount(pool, "undispatched_timed_out_workflow_reconciled")).toBe(1);
+    expect(await workflowStatus(pool, failedWorkflowId)).toBe("failed");
+    expect(await stateForExternalId(pool, failedWorkflowId)).toBe("failed");
+    expect(await eventCount(pool, "undispatched_timed_out_workflow_reconciled")).toBe(2);
     expect(await workflowStatus(pool, startedWorkflowId)).toBe("running");
     expect(await stateForExternalId(pool, startedWorkflowId)).toBe("claimed");
   });

@@ -2828,7 +2828,10 @@ export class DeviceExecutionArbiter {
 
   /**
    * Release server-workflow roots whose only persisted child jobs timed out
-   * before they were ever started on the device.
+   * before they were ever started on the device. The workflow row may already
+   * be terminal: older executors could fail/cancel the workflow without
+   * terminalizing its PNQ root, and those orphaned roots must not retain the
+   * device slot forever.
    *
    * This is intentionally narrower than generic ambiguity resolution: every
    * linked job must be `timeout` with `started_at IS NULL`. A workflow with
@@ -2859,7 +2862,6 @@ export class DeviceExecutionArbiter {
             ON workflows.id::text = roots.external_id
           WHERE roots.root_kind = 'server_workflow'
             AND roots.state NOT IN ('completed', 'failed', 'cancelled')
-            AND workflows.status IN ('queued', 'running')
             AND EXISTS (
               SELECT 1
               FROM command_log commands
@@ -2884,6 +2886,7 @@ export class DeviceExecutionArbiter {
               error = COALESCE(workflows.error, $1)
           FROM candidates
           WHERE workflows.id::text = candidates.external_id
+            AND workflows.status IN ('queued', 'running')
           RETURNING workflows.id
         ),
         failed_roots AS (

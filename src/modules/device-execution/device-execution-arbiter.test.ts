@@ -1392,6 +1392,8 @@ describe("DeviceExecutionArbiter observe mode", () => {
       expect(normalized).toContain("jobs.status = 'timeout'");
       expect(normalized).toContain("jobs.started_at IS NULL");
       expect(normalized).toContain("jobs.status <> 'timeout' OR jobs.started_at IS NOT NULL");
+      expect(normalized).not.toContain("AND workflows.status IN ('queued', 'running') AND EXISTS");
+      expect(normalized).toContain("WHERE workflows.id::text = candidates.external_id AND workflows.status IN ('queued', 'running')");
       expect(normalized).toContain("undispatched_timed_out_workflow_reconciled");
       return { rows: [{ id: "reconciled-root" }], rowCount: 1 };
     });
