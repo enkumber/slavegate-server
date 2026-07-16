@@ -63,6 +63,14 @@ async function bootstrap(): Promise<void> {
   // PNQ-001 observe mode still requires authoritative queue schema.
   await deviceExecutionArbiter.validateSchema();
   console.log("[server] Device execution arbiter schema verified.");
+  const undispatchedWorkflowReconciliation =
+    await deviceExecutionArbiter.reconcileUndispatchedTimedOutServerWorkflows();
+  if (undispatchedWorkflowReconciliation.reconciledRoots > 0) {
+    console.warn(
+      `[device-execution] reconciled ${undispatchedWorkflowReconciliation.reconciledRoots} ` +
+      "server workflow root(s) whose child jobs timed out before device start",
+    );
+  }
   const deviceExecutionReconciliation = await deviceExecutionArbiter.reconcileInFlightAtStartup();
   console.log(
     `[server] Device execution startup reconciliation: reconciled=${deviceExecutionReconciliation.reconciledRoots} ambiguous=${deviceExecutionReconciliation.activeAmbiguousRoots}.`

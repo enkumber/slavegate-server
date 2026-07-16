@@ -2826,6 +2826,107 @@ export class DeviceExecutionArbiter {
     });
   }
 
+  /**
+   * Release server-workflow roots whose only persisted child jobs timed out
+   * before they were ever started on the device.
+   *
+   * This is intentionally narrower than generic ambiguity resolution: every
+   * linked job must be `timeout` with `started_at IS NULL`. A workflow with
+   * any wire-execution evidence remains fail-closed for manual reconciliation.
+   */
+  async reconcileUndispatchedTimedOutServerWorkflows(input: {
+    actor?: string;
+    reason?: string;
+    metadata?: Record<string, unknown>;
+  } = {}): Promise<{ reconciledRoots: number }> {
+    const actor = input.actor ?? "startup";
+    const reason = input.reason ?? "undispatched_child_jobs_timed_out";
+    const metadata = {
+      ...(input.metadata ?? {}),
+      failClosedException: "all_linked_jobs_timed_out_without_start",
+    };
+
+    return this.withTransaction(async (client) => {
+      const reconciled = await client.query<{ id: string }>(
+        `
+        WITH candidates AS (
+          SELECT roots.id,
+                 roots.device_id,
+                 roots.external_id,
+                 roots.state AS previous_state
+          FROM device_execution_roots roots
+          JOIN workflows workflows
+            ON workflows.id::text = roots.external_id
+          WHERE roots.root_kind = 'server_workflow'
+            AND roots.state NOT IN ('completed', 'failed', 'cancelled')
+            AND workflows.status IN ('queued', 'running')
+            AND EXISTS (
+              SELECT 1
+              FROM command_log commands
+              JOIN jobs jobs ON jobs.id = commands.job_id
+              WHERE commands.command_raw LIKE ('workflow:' || roots.external_id || ' step:%')
+                AND jobs.status = 'timeout'
+                AND jobs.started_at IS NULL
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM command_log commands
+              JOIN jobs jobs ON jobs.id = commands.job_id
+              WHERE commands.command_raw LIKE ('workflow:' || roots.external_id || ' step:%')
+                AND (jobs.status <> 'timeout' OR jobs.started_at IS NOT NULL)
+            )
+          FOR UPDATE OF roots, workflows
+        ),
+        failed_workflows AS (
+          UPDATE workflows workflows
+          SET status = 'failed',
+              completed_at = COALESCE(workflows.completed_at, NOW()),
+              error = COALESCE(workflows.error, $1)
+          FROM candidates
+          WHERE workflows.id::text = candidates.external_id
+          RETURNING workflows.id
+        ),
+        failed_roots AS (
+          UPDATE device_execution_roots roots
+          SET state = 'failed',
+              terminal_at = COALESCE(roots.terminal_at, NOW()),
+              terminal_reason = $1,
+              updated_at = NOW(),
+              metadata = roots.metadata || $3::jsonb
+          FROM candidates
+          WHERE roots.id = candidates.id
+          RETURNING roots.id, roots.device_id
+        ),
+        failed_operations AS (
+          UPDATE device_execution_operations operations
+          SET state = 'failed',
+              updated_at = NOW(),
+              metadata = operations.metadata || $3::jsonb
+          FROM failed_roots
+          WHERE operations.root_id = failed_roots.id
+            AND operations.state NOT IN ('completed', 'failed', 'cancelled')
+          RETURNING operations.id
+        )
+        INSERT INTO device_execution_events
+          (root_id, device_id, event_type, previous_state, new_state, actor, reason, metadata)
+        SELECT candidates.id,
+               candidates.device_id,
+               'undispatched_timed_out_workflow_reconciled',
+               candidates.previous_state,
+               'failed',
+               $2,
+               $1,
+               $3::jsonb
+        FROM candidates
+        RETURNING root_id AS id
+        `,
+        [reason, actor, JSON.stringify(metadata)],
+      );
+
+      return { reconciledRoots: reconciled.rowCount ?? reconciled.rows.length };
+    });
+  }
+
   async reconcileInFlightAtStartup(input: {
     actor?: string;
     reason?: string;

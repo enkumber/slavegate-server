@@ -1383,6 +1383,30 @@ describe("DeviceExecutionArbiter observe mode", () => {
     expect(client.events.filter((event) => event.event_type === "startup_reconciled_root")).toHaveLength(2);
   });
 
+  it("only auto-reconciles server workflows whose child jobs timed out before device start", async () => {
+    const query = vi.fn(async (sql: string) => {
+      const normalized = sql.replace(/\s+/g, " ").trim();
+      if (normalized === "BEGIN" || normalized === "COMMIT" || normalized === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+      expect(normalized).toContain("jobs.status = 'timeout'");
+      expect(normalized).toContain("jobs.started_at IS NULL");
+      expect(normalized).toContain("jobs.status <> 'timeout' OR jobs.started_at IS NOT NULL");
+      expect(normalized).toContain("undispatched_timed_out_workflow_reconciled");
+      return { rows: [{ id: "reconciled-root" }], rowCount: 1 };
+    });
+    const client = { query, release: vi.fn() };
+    const arbiter = new DeviceExecutionArbiter(() => ({
+      connect: async () => client as any,
+      query: query as any,
+    }) as any);
+
+    await expect(arbiter.reconcileUndispatchedTimedOutServerWorkflows()).resolves.toEqual({
+      reconciledRoots: 1,
+    });
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
   it("documents root boundary, control, and child policies without enabling enforcement", () => {
     expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.standalone_job).toMatchObject({
       rootKind: "job",

@@ -149,6 +149,8 @@ describe("workflow BullMQ retry semantics", () => {
       .mockResolvedValueOnce(workflow("queued"))
       .mockResolvedValueOnce(workflow("cancelled"));
     vi.spyOn(workflowService, "getTemplate").mockResolvedValue(template);
+    vi.spyOn(deviceExecutionArbiter, "observeAdmission")
+      .mockResolvedValue({ decision: "admitted", root: null });
     vi.spyOn(workflowService, "markRunning").mockResolvedValue(false);
     const finishRoot = vi.spyOn(deviceExecutionArbiter, "finishServerWorkflowRoot")
       .mockResolvedValue({ decision: "terminal", root: null });
@@ -168,6 +170,8 @@ describe("workflow BullMQ retry semantics", () => {
       .mockResolvedValueOnce(workflow("queued"))
       .mockResolvedValueOnce(workflow("queued"));
     vi.spyOn(workflowService, "getTemplate").mockResolvedValue(template);
+    vi.spyOn(deviceExecutionArbiter, "observeAdmission")
+      .mockResolvedValue({ decision: "admitted", root: null });
     vi.spyOn(workflowService, "markRunning").mockResolvedValue(false);
     const finishRoot = vi.spyOn(deviceExecutionArbiter, "finishServerWorkflowRoot");
 
@@ -175,5 +179,21 @@ describe("workflow BullMQ retry semantics", () => {
       `Workflow ${WORKFLOW_ID} could not transition to running; persisted status=queued`,
     );
     expect(finishRoot).not.toHaveBeenCalled();
+  });
+
+  it("keeps a PNQ-waiting server workflow queued until its child wins the device slot", async () => {
+    vi.spyOn(workflowService, "get").mockResolvedValue(workflow("queued"));
+    vi.spyOn(workflowService, "getTemplate").mockResolvedValue(template);
+    vi.spyOn(deviceExecutionArbiter, "observeAdmission")
+      .mockResolvedValue({ decision: "would_wait", root: null, activeRootId: "active-root" });
+    const markRunning = vi.spyOn(workflowService, "markRunning");
+    vi.spyOn(workflowService, "saveCheckpoint").mockResolvedValue(true);
+    vi.spyOn(workflowService, "markCompleted").mockResolvedValue(undefined);
+    vi.spyOn(deviceExecutionArbiter, "finishServerWorkflowRoot")
+      .mockResolvedValue({ decision: "terminal", root: null });
+
+    await expect(runWorkflow(WORKFLOW_ID, job())).resolves.toBeUndefined();
+
+    expect(markRunning).not.toHaveBeenCalled();
   });
 });

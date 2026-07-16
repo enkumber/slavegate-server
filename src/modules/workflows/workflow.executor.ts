@@ -673,11 +673,31 @@ export async function runWorkflow(workflowId: string, job: import("bullmq").Job)
 
   if (!wf.deviceId) throw new Error(`Workflow ${workflowId} has no deviceId`);
 
+  // Admit the durable server-workflow root before changing the workflow row
+  // to running. If another root owns the device, keep the row queued while
+  // the first child operation is persisted behind that owner. This preserves
+  // the task-runner's queued-only cancellation CAS until PNQ grants the turn.
+  let admissionDecision: string | null = null;
+  if (wf.status !== "running") {
+    const admission = await deviceExecutionArbiter.observeAdmission({
+      deviceId: wf.deviceId,
+      rootKind: "server_workflow",
+      externalId: workflowId,
+      requestKey: workflowId,
+      actor: "workflow_executor",
+      metadata: { observeSource: "workflowExecutor.runWorkflow" },
+    });
+    admissionDecision = admission.decision;
+    if (!["admitted", "duplicate", "would_wait"].includes(admission.decision)) {
+      throw new Error(`Workflow ${workflowId} PNQ admission failed: ${admission.reason ?? admission.decision}`);
+    }
+  }
+
   // A failed BullMQ attempt leaves the durable workflow row in `running` so
   // the next attempt can resume from its checkpoint. Only claim rows that are
   // not already running; treating a failed claim as success can strand the
   // server_workflow PNQ root forever.
-  if (wf.status !== "running") {
+  if (wf.status !== "running" && admissionDecision !== "would_wait") {
     const started = await workflowService.markRunning(workflowId);
     if (!started) {
       const latest = await workflowService.get(workflowId);
