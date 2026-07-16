@@ -209,6 +209,9 @@ export async function sendServerWorkflowBatchChildToDevice(
   timeoutMs: number,
 ): Promise<any> {
   if (!workflowRootExternalId) throw new Error("Server workflow batch child requires canonical workflow root identity");
+  if (batchPayload.workflowId !== workflowRootExternalId) {
+    throw new Error("Server workflow BATCH payload workflowId does not match canonical workflow root identity");
+  }
   return sendBatchThroughBoundary(deviceId, batchPayload, timeoutMs, {
     boundary: "server_workflow_batch_child",
     rootExternalId: workflowRootExternalId,

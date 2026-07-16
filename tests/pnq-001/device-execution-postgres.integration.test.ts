@@ -563,6 +563,91 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     expect(await externalIdForRoot(pool, runningSuccessor!.rootId)).toBe("running-successor");
   });
 
+  it("keeps workflow and PNQ ownership intact when queued cancellation loses to the worker transition", async () => {
+    const workflowId = "00000000-0000-4000-8000-00000000ca01";
+    await insertDevice(pool, DEVICE_A, "pnq-workflow-cancel-race-a");
+    await insertWorkflow(pool, workflowId, DEVICE_A, "queued");
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "server_workflow",
+      externalId: workflowId,
+      requestKey: workflowId,
+    });
+    await arbiter.runObservedEgress({
+      deviceId: DEVICE_A,
+      boundary: "server_workflow_root",
+      rootExternalId: workflowId,
+      operationId: workflowId,
+      wireType: "WORKFLOW_START",
+      wireDispatch: () => true,
+    });
+
+    const worker = await pool.connect();
+    try {
+      await worker.query("BEGIN");
+      await worker.query(
+        "UPDATE workflows SET status = 'running' WHERE id = $1 AND status = 'queued'",
+        [workflowId],
+      );
+
+      const cancellation = arbiter.cancelQueuedPersistedWorkflow({
+        deviceId: DEVICE_A,
+        workflowId,
+        actor: "postgres-cancellation-race-test",
+      });
+      await waitForWorkflowRowLockWait(pool, workflowId);
+      await worker.query("COMMIT");
+
+      await expect(cancellation).resolves.toMatchObject({
+        decision: "rejected",
+        reason: "workflow_not_queued",
+      });
+    } finally {
+      await worker.query("ROLLBACK").catch(() => undefined);
+      worker.release();
+    }
+
+    expect(await workflowStatus(pool, workflowId)).toBe("running");
+    expect(await stateForExternalId(pool, workflowId)).toBe("dispatched");
+    expect(await eventCount(pool, "persisted_workflow_cancel_rejected")).toBe(1);
+  });
+
+  it("rolls back PNQ terminalization when persisted workflow cancellation fails mid-transaction", async () => {
+    const workflowId = "00000000-0000-4000-8000-00000000ca02";
+    await insertDevice(pool, DEVICE_A, "pnq-workflow-cancel-rollback-a");
+    await insertWorkflow(pool, workflowId, DEVICE_A, "queued");
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "server_workflow",
+      externalId: workflowId,
+      requestKey: workflowId,
+    });
+    await pool.query(`
+      CREATE FUNCTION pnq_test_reject_workflow_cancel() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.status = 'cancelled' THEN
+          RAISE EXCEPTION 'pnq_test_forced_cancel_failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER pnq_test_reject_workflow_cancel
+      BEFORE UPDATE ON workflows
+      FOR EACH ROW EXECUTE FUNCTION pnq_test_reject_workflow_cancel();
+    `);
+
+    await expect(arbiter.cancelQueuedPersistedWorkflow({
+      deviceId: DEVICE_A,
+      workflowId,
+      actor: "postgres-cancellation-rollback-test",
+    })).rejects.toThrow("pnq_test_forced_cancel_failure");
+
+    expect(await workflowStatus(pool, workflowId)).toBe("queued");
+    expect(await stateForExternalId(pool, workflowId)).toBe("queued");
+    expect((await operationFor(pool, "workflow", workflowId))?.state).toBe("registered");
+    expect(await eventCount(pool, "persisted_workflow_and_root_cancelled")).toBe(0);
+  });
+
   it("materializes the schema contract needed by PNQ queue authority", async () => {
     await expect(arbiter.validateSchema()).resolves.toBeUndefined();
 
@@ -637,6 +722,8 @@ async function assertRealPostgres(db: Pool): Promise<void> {
 
 async function resetPnqSchema(db: Pool): Promise<void> {
   await db.query(`
+    DROP TABLE IF EXISTS workflows CASCADE;
+    DROP FUNCTION IF EXISTS pnq_test_reject_workflow_cancel() CASCADE;
     DROP TABLE IF EXISTS device_execution_events CASCADE;
     DROP TABLE IF EXISTS device_execution_operations CASCADE;
     DROP TABLE IF EXISTS device_execution_roots CASCADE;
@@ -647,6 +734,12 @@ async function resetPnqSchema(db: Pool): Promise<void> {
       friendly_name TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'online'
     );
+    CREATE TABLE workflows (
+      id UUID PRIMARY KEY,
+      device_id UUID REFERENCES devices(id),
+      status TEXT NOT NULL,
+      completed_at TIMESTAMPTZ
+    );
   `);
   await db.query(fs.readFileSync(migrationPath, "utf8"));
 }
@@ -656,6 +749,44 @@ async function insertDevice(db: Pool, deviceId: string, friendlyName: string): P
     "INSERT INTO devices (id, friendly_name, status) VALUES ($1, $2, 'online')",
     [deviceId, friendlyName],
   );
+}
+
+async function insertWorkflow(
+  db: Pool,
+  workflowId: string,
+  deviceId: string,
+  status: "queued" | "running",
+): Promise<void> {
+  await db.query(
+    "INSERT INTO workflows (id, device_id, status) VALUES ($1, $2, $3)",
+    [workflowId, deviceId, status],
+  );
+}
+
+async function workflowStatus(db: Pool, workflowId: string): Promise<string | null> {
+  const result = await db.query<{ status: string }>(
+    "SELECT status FROM workflows WHERE id = $1",
+    [workflowId],
+  );
+  return result.rows[0]?.status ?? null;
+}
+
+async function waitForWorkflowRowLockWait(db: Pool, workflowId: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const result = await db.query<{ waiting: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND pid <> pg_backend_pid()
+           AND wait_event_type = 'Lock'
+           AND query LIKE '%FROM workflows%FOR UPDATE%'
+       ) AS waiting`,
+    );
+    if (result.rows[0]?.waiting) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Cancellation did not reach the expected workflow row lock wait for ${workflowId}`);
 }
 
 async function rootExternalIdsByFifo(db: Pool, deviceId: string): Promise<string[]> {

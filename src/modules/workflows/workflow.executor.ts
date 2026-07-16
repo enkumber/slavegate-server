@@ -28,6 +28,7 @@ import { deviceExecutionArbiter } from "../device-execution";
 import { scalabilityConfig } from "../../config/scalability.config";
 import { getDb } from "../../db/client";
 import type {
+  WorkflowStatus,
   WorkflowStep,
   WorkflowTemplate,
   WorkflowCheckpoint,
@@ -54,6 +55,7 @@ import {
 } from "../observability/metrics";
 import { llmJson } from "../../utils/llm";
 import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
+import type { WorkflowRecord } from "./workflow.service";
 
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
@@ -617,11 +619,28 @@ export function startWorkflowWorker(): Worker {
 
 // ─── Core execution loop ──────────────────────────────────────────────────────
 
-async function runWorkflow(workflowId: string, job: import("bullmq").Job): Promise<void> {
+async function reconcileTerminalWorkflowRoot(
+  workflow: WorkflowRecord,
+  actor: string,
+): Promise<void> {
+  if (!workflow.deviceId || !["cancelled", "completed", "failed"].includes(workflow.status)) return;
+  await deviceExecutionArbiter.finishServerWorkflowRoot({
+    deviceId: workflow.deviceId,
+    workflowId: workflow.id,
+    status: workflow.status as Extract<WorkflowStatus, "cancelled" | "completed" | "failed">,
+    actor,
+    reason: `persisted_workflow_already_${workflow.status}`,
+  });
+}
+
+export async function runWorkflow(workflowId: string, job: import("bullmq").Job): Promise<void> {
   const wf = await workflowService.get(workflowId);
   if (!wf) throw new Error(`Workflow ${workflowId} not found`);
 
-  if (["cancelled", "completed", "failed"].includes(wf.status)) return;
+  if (["cancelled", "completed", "failed"].includes(wf.status)) {
+    await reconcileTerminalWorkflowRoot(wf, "workflow_executor.retry_reconcile");
+    return;
+  }
 
   if (!wf.templateId) throw new Error(`Workflow ${workflowId} has no template`);
   const template = await workflowService.getTemplate(wf.templateId);
@@ -629,10 +648,23 @@ async function runWorkflow(workflowId: string, job: import("bullmq").Job): Promi
 
   if (!wf.deviceId) throw new Error(`Workflow ${workflowId} has no deviceId`);
 
-  const started = await workflowService.markRunning(workflowId);
-  if (!started) {
-    console.log(`[workflow] ${workflowId} did not transition to running; skipping cancelled or terminal work`);
-    return;
+  // A failed BullMQ attempt leaves the durable workflow row in `running` so
+  // the next attempt can resume from its checkpoint. Only claim rows that are
+  // not already running; treating a failed claim as success can strand the
+  // server_workflow PNQ root forever.
+  if (wf.status !== "running") {
+    const started = await workflowService.markRunning(workflowId);
+    if (!started) {
+      const latest = await workflowService.get(workflowId);
+      if (!latest) throw new Error(`Workflow ${workflowId} disappeared while transitioning to running`);
+      if (["cancelled", "completed", "failed"].includes(latest.status)) {
+        await reconcileTerminalWorkflowRoot(latest, "workflow_executor.transition_reconcile");
+        return;
+      }
+      throw new Error(
+        `Workflow ${workflowId} could not transition to running; persisted status=${latest.status}`,
+      );
+    }
   }
 
   // Build (or restore) HBE session params from checkpoint

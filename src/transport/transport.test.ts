@@ -134,6 +134,21 @@ describe("PNQ unreplayable observed-root disposition", () => {
 });
 
 describe("server-workflow BATCH transport to DirectWS serializer seam", () => {
+  it("rejects a payload workflowId that is not the canonical server_workflow root", async () => {
+    const runObservedEgress = vi.spyOn(deviceExecutionArbiter, "runObservedEgress");
+
+    await expect(sendServerWorkflowBatchChildToDevice(DEVICE_ID, "canonical-workflow-root", {
+      type: "BATCH_START",
+      batchId: "server-workflow-batch-child",
+      workflowId: "different-workflow",
+      steps: [],
+    }, 60_000)).rejects.toThrow(
+      "Server workflow BATCH payload workflowId does not match canonical workflow root identity",
+    );
+
+    expect(runObservedEgress).not.toHaveBeenCalled();
+  });
+
   it("serializes a typed server_workflow batch child with its exact PNQ handle", async () => {
     const handle: DeviceExecutionHandle = {
       rootId: "22222222-2222-4222-8222-222222222223",
