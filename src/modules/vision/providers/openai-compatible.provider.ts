@@ -8,6 +8,7 @@
  */
 
 import type { VisionProvider, VisionOptions, VisionResult, VerifyResult } from "../vision-provider.interface";
+import { sanitizeProviderError } from "../../model-config/model-config.service";
 
 interface OpenAICompatibleConfig {
   apiKey:      string;
@@ -117,7 +118,7 @@ export class OpenAICompatibleProvider implements VisionProvider {
       });
       if (!res.ok) {
         const err = await res.text().catch(() => res.statusText);
-        throw new Error(`${this.name} API ${res.status}: ${err}`);
+        throw new Error(`${this.name} API ${res.status}: ${sanitizeProviderError(err)}`);
       }
       return await res.json();
     } finally {

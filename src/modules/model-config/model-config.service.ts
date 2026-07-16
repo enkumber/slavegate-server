@@ -6,6 +6,7 @@
 
 import crypto from "crypto";
 import fs from "fs/promises";
+import path from "path";
 import { getDb } from "../../db/client";
 
 export type ModelRole = "decision_llm" | "vision_vlm";
@@ -40,7 +41,8 @@ export interface DeviceModelConfigRole {
   provider: string;
   endpoint: string | null;
   model: string;
-  apiKey: string;
+  hasCredential: boolean;
+  credentialDelivery: "server_only";
   version: number;
   versionHash: string;
 }
@@ -100,10 +102,10 @@ export class ModelConfigService {
   async update(role: ModelRole, input: UpdateModelConfigInput): Promise<RedactedModelConfig> {
     assertRole(role);
     const existing = await this.getRaw(role);
-    const provider = normalizeNonEmpty(input.provider ?? existing?.provider ?? defaultFor(role).provider, "provider");
+    const provider = validateProvider(input.provider ?? existing?.provider ?? defaultFor(role).provider, role);
     const model = normalizeNonEmpty(input.model ?? existing?.model ?? defaultFor(role).model, "model");
-    const endpoint = input.endpoint !== undefined ? nullableString(input.endpoint) : existing?.endpoint ?? defaultFor(role).endpoint;
     const enabled = input.enabled !== undefined ? Boolean(input.enabled) : existing?.enabled ?? false;
+    const endpoint = validateEndpointForStorage(input.endpoint !== undefined ? nullableString(input.endpoint) : existing?.endpoint ?? defaultFor(role).endpoint, provider, role, enabled);
     const credentialRef = input.credentialRef !== undefined ? validateCredentialRef(nullableString(input.credentialRef)) : existing?.credentialRef ?? null;
 
     const result = await getDb().query(
@@ -164,9 +166,15 @@ export class ModelConfigService {
   }
 
   async resolve(role: ModelRole): Promise<ResolvedModelConfig> {
-    const config = await this.getRaw(role) ?? this.envFallback(role);
-    if (!config) throw new ModelConfigError(`Model config for ${role} is missing. Configure it in Dashboard → Tokens / Models.`, 503, "AI_MODEL_CONFIG_MISSING");
-    if (!config.enabled) throw new ModelConfigError(`Model config for ${role} is disabled. Enable it in Dashboard → Tokens / Models.`, 503, "AI_MODEL_DISABLED");
+    const rawConfig = await this.getRaw(role) ?? this.envFallback(role);
+    if (!rawConfig) throw new ModelConfigError(`Model config for ${role} is missing. Configure it in Dashboard → Tokens / Models.`, 503, "AI_MODEL_CONFIG_MISSING");
+    if (!rawConfig.enabled) throw new ModelConfigError(`Model config for ${role} is disabled. Enable it in Dashboard → Tokens / Models.`, 503, "AI_MODEL_DISABLED");
+    const provider = validateProvider(rawConfig.provider, role);
+    const config = {
+      ...rawConfig,
+      provider,
+      endpoint: validateEndpoint(rawConfig.endpoint, provider, role),
+    };
     const apiKey = await this.resolveCredential(config);
     if (!apiKey) throw new ModelConfigError(`Model config for ${role} has no server-side credential. Add a credential via Dashboard → Tokens / Models.`, 503, "AI_CREDENTIAL_MISSING");
     return { ...config, apiKey };
@@ -180,7 +188,8 @@ export class ModelConfigService {
         provider: config.provider,
         endpoint: endpointBase(config.endpoint, config.provider),
         model: config.model,
-        apiKey: config.apiKey,
+        hasCredential: true,
+        credentialDelivery: "server_only",
         version: config.version,
         versionHash: versionHash(config),
       };
@@ -269,8 +278,10 @@ export class ModelConfigService {
     if (config.apiKeyEncrypted) return decryptDbSecret(config.apiKeyEncrypted);
     const ref = config.credentialRef;
     if (!ref) return "";
-    if (ref.startsWith("env:")) return process.env[ref.slice(4)] ?? "";
-    if (ref.startsWith("file:")) return extractCredentialFromFile(await fs.readFile(ref.slice(5), "utf8"));
+    const validatedRef = validateCredentialRef(ref);
+    if (!validatedRef) return "";
+    if (validatedRef.startsWith("env:")) return process.env[validatedRef.slice(4)] ?? "";
+    if (validatedRef.startsWith("file:")) return extractCredentialFromFile(await fs.readFile(resolveCredentialFilePath(validatedRef), "utf8"));
     throw new ModelConfigError(`Unsupported credentialRef for ${config.role}. Use env:VAR_NAME${hasEncryptionKey() ? " or file:/path" : ""}.`, 400, "AI_CREDENTIAL_REF_UNSUPPORTED");
   }
 
@@ -281,14 +292,17 @@ export class ModelConfigService {
     const endpoint = process.env[`${prefix}_ENDPOINT`] ?? process.env[`${prefix}_BASE_URL`];
     const credentialRef = process.env[`${prefix}_CREDENTIAL_REF`];
     if (!provider || !model || !credentialRef) return null;
+    const normalizedProvider = validateProvider(provider, role);
+    const normalizedEndpoint = validateEndpoint(endpoint ?? null, normalizedProvider, role);
+    const normalizedCredentialRef = validateCredentialRef(credentialRef);
     const now = new Date().toISOString();
     return {
       role,
-      provider,
-      endpoint: endpoint ?? null,
+      provider: normalizedProvider,
+      endpoint: normalizedEndpoint,
       model,
       apiKeyEncrypted: null,
-      credentialRef,
+      credentialRef: normalizedCredentialRef,
       apiKeyFingerprint: null,
       enabled: true,
       version: 0,
@@ -341,12 +355,87 @@ function nullableString(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
+function validateProvider(provider: string, role: ModelRole): string {
+  const normalized = normalizeNonEmpty(provider, "provider").toLowerCase().replace("-", "_");
+  if (normalized === "openai" || normalized === "openai_compatible") return normalized;
+  throw new ModelConfigError(`Unsupported provider for ${role}: ${provider}. Supported: openai, openai_compatible.`, 400, "AI_PROVIDER_UNSUPPORTED");
+}
+
+function validateEndpoint(endpoint: string | null, provider: string, role: ModelRole): string | null {
+  if (!endpoint) {
+    if (provider === "openai") return null;
+    throw new ModelConfigError(`Endpoint is required for ${role} when provider is openai_compatible.`, 400, "AI_ENDPOINT_REQUIRED");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    throw new ModelConfigError(`Invalid endpoint URL for ${role}. Use an http(s) OpenAI-compatible base URL.`, 400, "AI_ENDPOINT_INVALID");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new ModelConfigError(`Invalid endpoint protocol for ${role}. Only http and https are supported.`, 400, "AI_ENDPOINT_PROTOCOL_UNSUPPORTED");
+  }
+  if (parsed.username || parsed.password || parsed.hash) {
+    throw new ModelConfigError(`Invalid endpoint URL for ${role}. Credentials and fragments are not allowed in endpoint URLs.`, 400, "AI_ENDPOINT_INVALID");
+  }
+  if (parsed.protocol === "http:" && !isEndpointHostAllowlisted(parsed.hostname)) {
+    throw new ModelConfigError(`HTTP model endpoint for ${role} must be explicitly allowlisted with MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_NOT_ALLOWLISTED");
+  }
+  parsed.pathname = parsed.pathname.replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
+  parsed.search = "";
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+function validateEndpointForStorage(endpoint: string | null, provider: string, role: ModelRole, enabled: boolean): string | null {
+  if (endpoint) return validateEndpoint(endpoint, provider, role);
+  if (enabled) return validateEndpoint(endpoint, provider, role);
+  return null;
+}
+
+function isEndpointHostAllowlisted(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  if (host === "api.openai.com" || host.endsWith(".openai.com")) return true;
+  const allowlist = (process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  return allowlist.some((entry) => entry === host);
+}
+
 function validateCredentialRef(ref: string | null): string | null {
   if (!ref) return null;
-  if (ref.startsWith("env:")) return ref;
-  if (ref.startsWith("file:") && hasEncryptionKey()) return ref;
+  if (ref.startsWith("env:")) {
+    const name = ref.slice(4);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      throw new ModelConfigError("credentialRef env name is invalid. Use env:VAR_NAME.", 400, "AI_CREDENTIAL_REF_UNSUPPORTED");
+    }
+    return ref;
+  }
+  if (ref.startsWith("file:") && hasEncryptionKey()) {
+    resolveCredentialFilePath(ref);
+    return ref;
+  }
   if (ref.startsWith("file:")) throw new ModelConfigError("file: credential refs require CREDENTIAL_ENCRYPTION_KEY; without it, use env:VAR_NAME refs only.", 400, "AI_CREDENTIAL_ENCRYPTION_REQUIRED");
   throw new ModelConfigError("credentialRef must be env:VAR_NAME or file:/path (file requires CREDENTIAL_ENCRYPTION_KEY)", 400, "AI_CREDENTIAL_REF_UNSUPPORTED");
+}
+
+function resolveCredentialFilePath(ref: string): string {
+  const rawPath = ref.slice(5);
+  if (!rawPath) throw new ModelConfigError("file: credentialRef path is required.", 400, "AI_CREDENTIAL_REF_UNSUPPORTED");
+  const resolved = path.resolve(rawPath);
+  const allowedDirs = (process.env.MODEL_CONFIG_CREDENTIAL_FILE_ALLOWLIST ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => path.resolve(entry));
+  if (!allowedDirs.length) {
+    throw new ModelConfigError("file: credential refs require MODEL_CONFIG_CREDENTIAL_FILE_ALLOWLIST. Use env:VAR_NAME refs unless a server credential directory is explicitly allowlisted.", 400, "AI_CREDENTIAL_REF_NOT_ALLOWLISTED");
+  }
+  const allowed = allowedDirs.some((dir) => resolved === dir || resolved.startsWith(`${dir}${path.sep}`));
+  if (!allowed) {
+    throw new ModelConfigError("file: credentialRef path is outside the server credential allowlist.", 400, "AI_CREDENTIAL_REF_NOT_ALLOWLISTED");
+  }
+  return resolved;
 }
 
 function hasEncryptionKey(): boolean {
@@ -421,16 +510,18 @@ function extractCredentialFromFile(content: string): string {
   return trimmed;
 }
 
-function sanitizeProviderError(text: string): string {
+export function sanitizeProviderError(text: string): string {
   return text
     .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
-    .replace(/(api[_-]?key|token|authorization|x-api-key)([\"'\s:=]+)([^\"'\s,}]+)/gi, "$1$2[redacted]")
+    .replace(/(api[_-]?key|token|x-api-key)([\"'\s:=]+)([^\"'\s,}]+)/gi, "$1$2[redacted]")
     .slice(0, 500);
 }
 
 function endpointBase(endpoint: string | null, provider: string): string {
-  const fallback = "https://api.openai.com/v1";
-  return (endpoint || fallback).replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
+  const normalizedProvider = provider.toLowerCase().replace("-", "_");
+  if (!endpoint && normalizedProvider === "openai") return "https://api.openai.com/v1";
+  if (!endpoint) throw new ModelConfigError("OpenAI-compatible endpoint is missing.", 503, "AI_ENDPOINT_REQUIRED");
+  return endpoint.replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
 }
 
 async function testProvider(config: ResolvedModelConfig): Promise<void> {

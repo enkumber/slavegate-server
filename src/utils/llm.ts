@@ -4,7 +4,7 @@
  * `decision_llm`. Secrets are never hardcoded or sent to devices.
  */
 
-import { modelConfigService } from "../modules/model-config/model-config.service";
+import { modelConfigService, sanitizeProviderError } from "../modules/model-config/model-config.service";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE LLM FUNCTIONS
@@ -61,7 +61,7 @@ export async function llmComplete(
   const response = await fetch(url, {
     method: "POST",
     headers,
-    signal: options?.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined,
+    signal: AbortSignal.timeout(options?.timeoutMs ?? 30_000),
     body: JSON.stringify(body),
   });
 
@@ -80,13 +80,6 @@ export async function llmComplete(
     data.content?.[0]?.text ||
     ""
   );
-}
-
-function sanitizeProviderError(text: string): string {
-  return text
-    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
-    .replace(/(api[_-]?key|token|authorization|x-api-key)([\"'\s:=]+)([^\"'\s,}]+)/gi, "$1$2[redacted]")
-    .slice(0, 500);
 }
 
 function endpointBase(endpoint: string | null, provider: string): string {

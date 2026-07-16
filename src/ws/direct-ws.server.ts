@@ -1549,7 +1549,7 @@ export class DirectWsServer {
     const prompt    = msg.prompt as string;
     const screenshot = msg.screenshot as string | undefined;
 
-    console.log(`[direct-ws] LLM_REQUEST: device=${conn.deviceId.slice(0,8)} role=${screenshot ? 'vision_vlm' : 'decision_llm'} hasImage=${!!screenshot} prompt=${prompt?.slice(0, 80)}...`);
+    console.log(`[direct-ws] LLM_REQUEST: device=${conn.deviceId.slice(0,8)} role=${screenshot ? 'vision_vlm' : 'decision_llm'} hasImage=${!!screenshot} promptLength=${typeof prompt === "string" ? prompt.length : 0}`);
 
     try {
       const text = screenshot
@@ -1558,7 +1558,7 @@ export class DirectWsServer {
             prompt,
             { maxTokens: 500, temperature: 0.3, timeoutMs: 30_000 }
           )
-        : await llmComplete(prompt, undefined, { max_tokens: 220 });
+        : await llmComplete(prompt, undefined, { max_tokens: 220, timeoutMs: 30_000 });
 
       this._send(ws, {
         type: 'LLM_RESULT',
