@@ -20,6 +20,7 @@ import { sendStandaloneJobToDevice, isDeviceOnline } from "../transport/transpor
 import { loadMap } from "../modules/app-mapping/recorder.service";
 import { validateAppMapQuality, type AppMap, type AppMapQualityReport } from "../modules/app-mapping/schema";
 import { workflowService, type GeneratedWorkflowPlanCacheRecord } from "../modules/workflows/workflow.service";
+import { cancelPersistedWorkflowSafely } from "../modules/workflows/workflow-cancellation.service";
 import {
   buildGeneratedWorkflowAppMapHints,
   buildGeneratedWorkflowPrompt,
@@ -1420,13 +1421,13 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
 });
 
 router.post("/workflows/:id/cancel", requireAuth, async (req, res) => {
-  const workflow = await workflowService.get(req.params.id);
-  const cancelled = await workflowService.cancel(req.params.id);
-  if (!cancelled) return res.status(404).json({ ok: false, error: "Not found or not cancellable" });
-  const cancelSent = workflow?.deviceId
-    ? directWsServer.sendWorkflowCancel(workflow.deviceId, req.params.id)
-    : false;
-  res.json({ ok: true, data: { cancelled: true, cancelSent } });
+  try {
+    const result = await cancelPersistedWorkflowSafely(req.params.id);
+    res.json({ ok: true, data: { ...result, cancelled: true, cancelSent: false } });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string };
+    res.status(typed.status ?? 500).json({ ok: false, error: typed.message, code: typed.code });
+  }
 });
 
 // ─── Workflow templates ───────────────────────────────────────────────────────

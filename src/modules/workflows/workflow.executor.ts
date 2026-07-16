@@ -629,7 +629,11 @@ async function runWorkflow(workflowId: string, job: import("bullmq").Job): Promi
 
   if (!wf.deviceId) throw new Error(`Workflow ${workflowId} has no deviceId`);
 
-  await workflowService.markRunning(workflowId);
+  const started = await workflowService.markRunning(workflowId);
+  if (!started) {
+    console.log(`[workflow] ${workflowId} did not transition to running; skipping cancelled or terminal work`);
+    return;
+  }
 
   // Build (or restore) HBE session params from checkpoint
   const hbeParams = wf.checkpoint.hbeParams && Object.keys(wf.checkpoint.hbeParams).length > 0

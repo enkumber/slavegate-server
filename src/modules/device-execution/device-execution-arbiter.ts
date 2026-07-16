@@ -2378,8 +2378,12 @@ export class DeviceExecutionArbiter {
         });
         return { decision: "missing", root: null, reason: "canonical_root_not_found" };
       }
-      if (root.device_id !== input.deviceId || isTerminalState(root.state)) {
-        const reason = root.device_id !== input.deviceId ? "root_owned_by_different_device" : "root_already_terminal";
+      if (root.device_id !== input.deviceId || isTerminalState(root.state) || root.state === "blocked" || root.state === "reconciling") {
+        const reason = root.device_id !== input.deviceId
+          ? "root_owned_by_different_device"
+          : isTerminalState(root.state)
+            ? "root_already_terminal"
+            : "root_ambiguous_not_finishable";
         await insertEvent(client, {
           rootId: root.id,
           deviceId: input.deviceId,

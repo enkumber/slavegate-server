@@ -187,7 +187,8 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
       hbeParams: hbeSession,
       checkpoint: createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "edge"),
     });
-    await workflowService.markRunning(wf.id);
+    const started = await workflowService.markRunning(wf.id);
+    if (!started) throw new Error(`Workflow ${wf.id} was cancelled before edge dispatch`);
 
     const sent = await sendEdgeWorkflowToDeviceEnforced(
       deviceId,

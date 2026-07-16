@@ -277,7 +277,7 @@ describe("generated workflow cache-only execution route", () => {
     mocks.workflowService.countActiveByDevice.mockResolvedValue(0);
     mocks.workflowService.countByStatus.mockResolvedValue(0);
     mocks.workflowService.create.mockResolvedValue({ id: "wf-cache-smoke" });
-    mocks.workflowService.markRunning.mockResolvedValue(undefined);
+    mocks.workflowService.markRunning.mockResolvedValue(true);
     mocks.directWsServer.supportsEdgeExecution.mockReturnValue(true);
     mocks.directWsServer.sendWorkflowStart.mockReturnValue(true);
     mocks.directWsServer.getConnectedDeviceIds.mockReturnValue([

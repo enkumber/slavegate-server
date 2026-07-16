@@ -110,6 +110,25 @@ describe("DirectWS Android result handle compatibility", () => {
   });
 });
 
+describe("DirectWS typed BATCH serializer identity", () => {
+  const valid: DeviceExecutionHandle = {
+    ...expectedHandle,
+    rootKind: "server_workflow",
+    operationKind: "batch",
+    operationId: "batch-child",
+  };
+
+  it.each([
+    { ...valid, rootKind: "edge_workflow" as const },
+    { ...valid, operationKind: "job" as const },
+    { ...valid, operationId: "wrong-batch" },
+  ])("rejects an invalid typed BATCH identity before connection or wire", (handle) => {
+    const server = new DirectWsServer();
+    expect(() => server.sendBatchWithHandle(handle, { type: "BATCH_START", batchId: "batch-child" }))
+      .toThrow("DirectWS BATCH handle does not match payload identity");
+  });
+});
+
 describe("DirectWS typed pending lifecycle", () => {
   const deviceB = "00000000-0000-4000-8000-000000000099";
   const batchHandle = (deviceId: string, operationId: string): DeviceExecutionHandle => ({
@@ -334,6 +353,38 @@ describe("DirectWS typed pending lifecycle", () => {
     await expect(internals.handleAuthenticatedClose(oldWs, oldConnection, 4000, "replaced")).resolves.toBe("superseded");
     expect(internals.connections.get(expectedHandle.deviceId)).toBe(replacement);
     expect(blockPending).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "PONG timeout", readyState: 1, lastPongAt: 0, expectedCode: 4002 },
+    { label: "non-open socket", readyState: 3, lastPongAt: Date.now(), expectedCode: 1006 },
+  ])("routes $label through ambiguity-aware close cleanup before map deletion", async ({ readyState, lastPongAt, expectedCode }) => {
+    const server = new DirectWsServer();
+    const ws = { readyState, send: vi.fn(), close: vi.fn() } as any;
+    const connection = {
+      ws,
+      deviceId: expectedHandle.deviceId,
+      connectedAt: 1,
+      lastSeenAt: 1,
+      lastPongAt,
+      msgCount: 0,
+      windowStart: 1,
+      agentVersion: "4.0.0",
+    };
+    const internals = server as unknown as {
+      connections: Map<string, typeof connection>;
+      _pingAll: () => void;
+      handleAuthenticatedClose: (socket: any, conn: typeof connection, code: number, reason: string) => Promise<string>;
+    };
+    internals.connections.set(expectedHandle.deviceId, connection);
+    const closeCleanup = vi.spyOn(internals, "handleAuthenticatedClose").mockImplementation(async () => {
+      expect(internals.connections.get(expectedHandle.deviceId)).toBe(connection);
+      return "closed";
+    });
+
+    internals._pingAll();
+    await vi.waitFor(() => expect(closeCleanup).toHaveBeenCalledTimes(1));
+    expect(closeCleanup).toHaveBeenCalledWith(ws, connection, expectedCode, expect.any(String));
   });
 
   it("contains rejected asynchronous socket tasks instead of leaking unhandled rejections", async () => {

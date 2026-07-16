@@ -7,12 +7,6 @@
   },
   {
     "file": "src/api/routes.ts",
-    "kind": "directWsServer.sendWorkflowCancel",
-    "count": 1,
-    "classification": "workflow-control-egress"
-  },
-  {
-    "file": "src/api/routes.ts",
     "kind": "sendToDevice",
     "count": 2,
     "classification": "generic-sendto-device-match"

@@ -209,7 +209,7 @@ export class WorkflowService {
     const db = getDb();
     const result = await db.query(
       `UPDATE workflows SET status = 'cancelled', completed_at = NOW()
-       WHERE id = $1 AND status IN ('queued', 'running', 'paused')
+       WHERE id = $1 AND status = 'queued'
        RETURNING id`,
       [id]
     );
@@ -252,13 +252,14 @@ export class WorkflowService {
 
   // ─── Status transitions ────────────────────────────────────────────────
 
-  async markRunning(id: string): Promise<void> {
+  async markRunning(id: string): Promise<boolean> {
     const db = getDb();
-    await db.query(
+    const result = await db.query(
       `UPDATE workflows SET status = 'running', started_at = COALESCE(started_at, NOW())
        WHERE id = $1 AND status IN ('queued', 'paused')`,
       [id]
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async markCompleted(id: string): Promise<void> {

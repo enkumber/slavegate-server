@@ -574,7 +574,11 @@ export class DirectWsServer {
   }
 
   sendBatchWithHandle(handle: DeviceExecutionHandle, batchPayload: Record<string, unknown>): boolean {
-    if (handle.rootKind !== "batch" || handle.operationKind !== "batch" || handle.operationId !== batchPayload.batchId) {
+    if (
+      (handle.rootKind !== "batch" && handle.rootKind !== "server_workflow") ||
+      handle.operationKind !== "batch" ||
+      handle.operationId !== batchPayload.batchId
+    ) {
       throw new Error("DirectWS BATCH handle does not match payload identity");
     }
     const conn = this.connections.get(handle.deviceId);
@@ -1336,7 +1340,9 @@ export class DirectWsServer {
     const now = Date.now();
     for (const [deviceId, conn] of this.connections) {
       if (conn.ws.readyState !== WebSocket.OPEN) {
-        this.connections.delete(deviceId);
+        this.runSocketTask("non-open connection cleanup", async () => {
+          await this.handleAuthenticatedClose(conn.ws, conn, 1006, "socket no longer open");
+        });
         continue;
       }
 
@@ -1344,7 +1350,9 @@ export class DirectWsServer {
       if (now - conn.lastPongAt > PONG_TIMEOUT_MS) {
         console.warn(`[direct-ws] PONG timeout for device ${deviceId.slice(0,8)} — closing`);
         conn.ws.close(4002, "PONG timeout");
-        this.connections.delete(deviceId);
+        this.runSocketTask("PONG timeout cleanup", async () => {
+          await this.handleAuthenticatedClose(conn.ws, conn, 4002, "PONG timeout");
+        });
         continue;
       }
 

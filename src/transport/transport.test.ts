@@ -5,9 +5,11 @@ import {
   isJobReplayEnvelope,
   sendBatchToDeviceEnforced,
   sendEdgeWorkflowToDeviceEnforced,
+  sendServerWorkflowBatchChildToDevice,
   type DeviceExecutionJobReplayEnvelopeV1,
 } from "./transport";
 import { deviceExecutionArbiter, type DeviceExecutionHandle } from "../modules/device-execution";
+import { directWsServer } from "../ws/direct-ws.server";
 
 const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -128,5 +130,54 @@ describe("PNQ unreplayable observed-root disposition", () => {
       status: "cancelled",
       reason: "queued_edge_workflow_not_replayable",
     }));
+  });
+});
+
+describe("server-workflow BATCH transport to DirectWS serializer seam", () => {
+  it("serializes a typed server_workflow batch child with its exact PNQ handle", async () => {
+    const handle: DeviceExecutionHandle = {
+      rootId: "22222222-2222-4222-8222-222222222223",
+      deviceId: DEVICE_ID,
+      rootKind: "server_workflow",
+      ownerGeneration: 4,
+      operationKind: "batch",
+      operationId: "server-workflow-batch-child",
+    };
+    const send = vi.fn();
+    const internals = directWsServer as unknown as {
+      connections: Map<string, { ws: { readyState: number; send: typeof send } }>;
+    };
+    internals.connections.set(DEVICE_ID, { ws: { readyState: 1, send } });
+    vi.spyOn(deviceExecutionArbiter, "runObservedEgress").mockImplementation(async (input) => {
+      await input.registerWaiter?.(handle);
+      const sent = await input.wireDispatch(handle);
+      return { decision: "dispatched", root: null, handle, sent };
+    });
+
+    const pending = sendServerWorkflowBatchChildToDevice(DEVICE_ID, "workflow-root", {
+      type: "BATCH_START",
+      batchId: handle.operationId,
+      workflowId: "workflow-root",
+      steps: [],
+    }, 60_000);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+
+    const frame = JSON.parse(String(send.mock.calls[0]![0]));
+    expect(frame).toMatchObject({
+      type: "BATCH_START",
+      batchId: handle.operationId,
+      pnqHandle: {
+        pnqRootId: handle.rootId,
+        pnqDeviceId: DEVICE_ID,
+        pnqRootKind: "server_workflow",
+        pnqOwnerGeneration: 4,
+        pnqOperationKind: "batch",
+        pnqOperationId: handle.operationId,
+      },
+    });
+
+    directWsServer.rejectBatchWaiterWithHandle(handle, "test complete");
+    await expect(pending).rejects.toThrow("test complete");
+    internals.connections.delete(DEVICE_ID);
   });
 });

@@ -1124,6 +1124,40 @@ describe("DeviceExecutionArbiter observe mode", () => {
     expect(client.roots).toHaveLength(0);
   });
 
+  it.each(["blocked", "reconciling"] as const)(
+    "does not terminalize an ambiguous %s server-workflow root during normal finish cleanup",
+    async (state) => {
+      const client = new FakeClient();
+      client.roots.push(root({
+        id: `workflow-${state}-root`,
+        root_kind: "server_workflow",
+        external_id: `workflow-${state}`,
+        request_key: `workflow-${state}`,
+        state,
+        owner_generation: 2,
+      }));
+      client.operations.push(operation({
+        root_id: `workflow-${state}-root`,
+        root_kind: "server_workflow",
+        operation_kind: "workflow",
+        operation_id: `workflow-${state}`,
+        state,
+        owner_generation: 2,
+      }));
+
+      const result = await arbiterFor(client).finishServerWorkflowRoot({
+        deviceId: DEVICE_A,
+        workflowId: `workflow-${state}`,
+        status: "failed",
+        actor: "test.cleanup",
+      });
+
+      expect(result).toMatchObject({ decision: "rejected", reason: "root_ambiguous_not_finishable" });
+      expect(client.roots[0]).toMatchObject({ state, owner_generation: 2 });
+      expect(client.operations[0]).toMatchObject({ state, owner_generation: 2 });
+    },
+  );
+
   it("cancels a queued server workflow without releasing an in-flight device slot", async () => {
     const client = new FakeClient();
     client.roots.push(
