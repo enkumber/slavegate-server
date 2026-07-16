@@ -706,12 +706,44 @@ function extractCredentialFromFile(content: string): string {
 }
 
 export function sanitizeProviderError(text: string): string {
+  const trimmed = String(text ?? "");
+  const jsonRedacted = redactProviderErrorJson(trimmed);
+  return redactProviderErrorText(jsonRedacted ?? trimmed).slice(0, 500);
+}
+
+function redactProviderErrorJson(text: string): string | null {
+  try {
+    return JSON.stringify(redactProviderErrorValue(JSON.parse(text)));
+  } catch {
+    return null;
+  }
+}
+
+function redactProviderErrorValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((entry) => redactProviderErrorValue(entry));
+  if (value && typeof value === "object") {
+    const redacted: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value)) {
+      redacted[key] = isSensitiveProviderErrorKey(key) ? "[redacted]" : redactProviderErrorValue(nested);
+    }
+    return redacted;
+  }
+  if (typeof value === "string") return redactProviderErrorText(value);
+  return value;
+}
+
+function isSensitiveProviderErrorKey(key: string): boolean {
+  return /^(authorization|proxy-authorization|api[_-]?key|x-api-key|token|credential)$/i.test(key);
+}
+
+function redactProviderErrorText(text: string): string {
   return text
+    .replace(/(Incorrect API key provided:\s*)([^\s"',}.)]+)/gi, "$1[redacted]")
+    .replace(/\bsk-[A-Za-z0-9._~+\/-]+=?/g, "[redacted]")
     .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
     .replace(/([\"']authorization[\"']\s*:\s*[\"'])([^\"']*)([\"'])/gi, "$1[redacted]$3")
     .replace(/(authorization\s*[:=]\s*)(?![\"'])([^\r\n,}]+)/gi, "$1[redacted]")
-    .replace(/(api[_-]?key|token|x-api-key)([\"'\s:=]+)([^\"'\s,}]+)/gi, "$1$2[redacted]")
-    .slice(0, 500);
+    .replace(/(api[_-]?key|token|x-api-key)([\"'\s:=]+)([^\"'\s,}]+)/gi, "$1$2[redacted]");
 }
 
 function endpointBase(endpoint: string | null, provider: string): string {
