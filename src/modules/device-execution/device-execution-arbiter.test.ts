@@ -212,6 +212,17 @@ class FakeClient {
       return { rows: [inserted], rowCount: 1 };
     }
 
+    if (normalized.startsWith("UPDATE device_execution_roots") && normalized.includes("SET state = 'cancelled'") && normalized.includes("AND state = 'queued'")) {
+      const [reason, metadata, rootId, deviceId, ownerGeneration] = params as [string, string, string, string, number];
+      const found = this.roots.find((item) => item.id === rootId && item.device_id === deviceId && item.owner_generation === ownerGeneration && item.state === "queued");
+      if (!found) return { rows: [], rowCount: 0 };
+      found.state = "cancelled";
+      found.metadata = { ...found.metadata, ...(JSON.parse(metadata) as Record<string, unknown>) };
+      found.updated_at = new Date("2026-07-15T19:31:00.000Z");
+      found.metadata.terminalReason = reason;
+      return { rows: [found], rowCount: 1 };
+    }
+
     if (normalized.startsWith("UPDATE device_execution_roots") && normalized.includes("terminal_reason = $2")) {
       const [toState, reason, metadata, rootId, deviceId, ownerGeneration] = params as [DeviceExecutionState, string, string, string, string, number];
       const found = this.roots.find((item) => item.id === rootId && item.device_id === deviceId && item.owner_generation === ownerGeneration && !["completed", "failed", "cancelled"].includes(item.state));
@@ -1099,6 +1110,76 @@ describe("DeviceExecutionArbiter observe mode", () => {
     expect(registerWaiter).not.toHaveBeenCalled();
     expect(wireDispatch).not.toHaveBeenCalled();
     expect(client.roots).toHaveLength(0);
+  });
+
+  it("cancels a queued server workflow without releasing an in-flight device slot", async () => {
+    const client = new FakeClient();
+    client.roots.push(
+      root({ id: "active-root", external_id: "active-job", state: "dispatched", owner_generation: 1 }),
+      root({
+        id: "queued-workflow-root",
+        root_kind: "server_workflow",
+        external_id: "workflow-queued",
+        request_key: "workflow-queued",
+        state: "queued",
+        fifo_sequence: 2,
+      }),
+    );
+    client.operations.push(operation({
+      root_id: "queued-workflow-root",
+      root_kind: "server_workflow",
+      operation_kind: "workflow",
+      operation_id: "workflow-queued",
+      state: "registered",
+      owner_generation: 0,
+    }));
+
+    const result = await arbiterFor(client).cancelQueuedServerWorkflowRoot({
+      deviceId: DEVICE_A,
+      workflowId: "workflow-queued",
+    });
+
+    expect(result).toMatchObject({ decision: "terminal", root: { state: "cancelled" } });
+    expect(client.roots.find((item) => item.id === "active-root")).toMatchObject({
+      state: "dispatched",
+      owner_generation: 1,
+    });
+    expect(client.operations[0]).toMatchObject({ state: "cancelled" });
+    expect(client.events.some((event) => event.event_type === "queued_server_workflow_cancelled")).toBe(true);
+  });
+
+  it("rejects queued-only cancellation after dispatch without terminalizing or releasing the slot", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({
+      id: "workflow-inflight-root",
+      root_kind: "server_workflow",
+      external_id: "workflow-inflight",
+      request_key: "workflow-inflight",
+      state: "dispatched",
+      owner_generation: 3,
+    }));
+    client.operations.push(operation({
+      root_id: "workflow-inflight-root",
+      root_kind: "server_workflow",
+      operation_kind: "workflow",
+      operation_id: "workflow-inflight",
+      state: "dispatched",
+      owner_generation: 3,
+    }));
+
+    const result = await arbiterFor(client).cancelQueuedServerWorkflowRoot({
+      deviceId: DEVICE_A,
+      workflowId: "workflow-inflight",
+    });
+
+    expect(result).toMatchObject({
+      decision: "rejected",
+      reason: "root_not_queued",
+      root: { state: "dispatched", ownerGeneration: 3 },
+    });
+    expect(client.roots[0]).toMatchObject({ state: "dispatched", owner_generation: 3 });
+    expect(client.operations[0]).toMatchObject({ state: "dispatched", owner_generation: 3 });
+    expect(client.events.some((event) => event.event_type === "queued_server_workflow_cancel_rejected")).toBe(true);
   });
 
   it("blocks and audits a corrupt queued replay head instead of silently stalling FIFO", async () => {

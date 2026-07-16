@@ -2433,6 +2433,105 @@ export class DeviceExecutionArbiter {
     });
   }
 
+  /**
+   * Cancel a server workflow only while it is still queued and therefore has
+   * never owned the device slot. The queued-state CAS is the authority: an
+   * in-memory caller may be stale because the queue pump can dispatch between
+   * the original response and a later cancellation request.
+   */
+  async cancelQueuedServerWorkflowRoot(input: {
+    deviceId: string;
+    workflowId: string;
+    actor?: string;
+    reason?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<DeviceExecutionTransitionResult> {
+    return this.withTransaction(async (client) => {
+      await lockDevice(client, input.deviceId);
+      const root = await selectRootByExternalId(client, "server_workflow", input.workflowId, true);
+      if (!root) {
+        await insertEvent(client, {
+          deviceId: input.deviceId,
+          eventType: "queued_server_workflow_cancel_rejected",
+          actor: input.actor ?? "workflow_dispatch.cancel",
+          reason: "canonical_root_not_found",
+          metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+        });
+        return { decision: "missing", root: null, reason: "canonical_root_not_found" };
+      }
+      if (root.device_id !== input.deviceId) {
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: input.deviceId,
+          eventType: "queued_server_workflow_cancel_rejected",
+          previousState: root.state,
+          newState: root.state,
+          actor: input.actor ?? "workflow_dispatch.cancel",
+          reason: "root_owned_by_different_device",
+          metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+        });
+        return { decision: "rejected", root: rowToRoot(root), reason: "root_owned_by_different_device" };
+      }
+      if (root.state !== "queued") {
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: input.deviceId,
+          eventType: "queued_server_workflow_cancel_rejected",
+          previousState: root.state,
+          newState: root.state,
+          actor: input.actor ?? "workflow_dispatch.cancel",
+          reason: "root_not_queued",
+          metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+        });
+        return { decision: "rejected", root: rowToRoot(root), reason: "root_not_queued" };
+      }
+
+      const generation = toNumber(root.owner_generation);
+      const terminal = await updateQueuedRootTerminal(client, {
+        rootId: root.id,
+        deviceId: input.deviceId,
+        ownerGeneration: generation,
+        reason: input.reason ?? "queued_workflow_cancelled_before_dispatch",
+        metadata: input.metadata,
+      });
+      if (!terminal) {
+        const current = await selectRoot(client, { rootId: root.id, rootKind: "server_workflow", forUpdate: true });
+        return {
+          decision: "rejected",
+          root: current ? rowToRoot(current) : rowToRoot(root),
+          reason: "root_not_queued",
+        };
+      }
+
+      const rootOperation = await selectOperationByIdentity(client, "workflow", input.workflowId, true);
+      const terminalOperation = rootOperation
+        ? await updateOperationState(client, {
+            operationKind: "workflow",
+            operationId: input.workflowId,
+            fromStates: ["registered"],
+            toState: "cancelled",
+            ownerGeneration: generation,
+            metadata: input.metadata,
+          }) ?? rootOperation
+        : null;
+      await insertEvent(client, {
+        rootId: terminal.id,
+        deviceId: terminal.device_id,
+        eventType: "queued_server_workflow_cancelled",
+        previousState: root.state,
+        newState: terminal.state,
+        actor: input.actor ?? "workflow_dispatch.cancel",
+        reason: input.reason ?? "queued_workflow_cancelled_before_dispatch",
+        metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+      });
+      return {
+        decision: "terminal",
+        root: rowToRoot(terminal),
+        operation: terminalOperation ? rowToOperation(terminalOperation) : undefined,
+      };
+    });
+  }
+
   async markAmbiguous(input: {
     deviceId: string;
     rootKind?: DeviceExecutionRootKind;
@@ -2966,6 +3065,39 @@ async function updateRootTerminal(
      RETURNING *`,
     [
       input.toState,
+      input.reason,
+      JSON.stringify(input.metadata ?? {}),
+      input.rootId,
+      input.deviceId,
+      input.ownerGeneration,
+    ]
+  );
+  return result.rows[0] ?? null;
+}
+
+async function updateQueuedRootTerminal(
+  client: Queryable,
+  input: {
+    rootId: string;
+    deviceId: string;
+    ownerGeneration: number;
+    reason: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<DeviceExecutionRootRow | null> {
+  const result = await client.query<DeviceExecutionRootRow>(
+    `UPDATE device_execution_roots
+     SET state = 'cancelled',
+         terminal_reason = $1,
+         terminal_at = NOW(),
+         updated_at = NOW(),
+         metadata = metadata || $2::jsonb
+     WHERE id = $3
+       AND device_id = $4
+       AND owner_generation = $5::bigint
+       AND state = 'queued'
+     RETURNING *`,
+    [
       input.reason,
       JSON.stringify(input.metadata ?? {}),
       input.rootId,

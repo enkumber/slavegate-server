@@ -72,6 +72,7 @@ router.delete("/:jobId", async (req: Request, res: Response) => {
     const status =
       code === "NOT_FOUND" ? 404 :
       code === "ALREADY_CANCELLED" ? 409 :
+      code === "CANCELLATION_UNSUPPORTED_IN_FLIGHT" ? 409 :
       500;
 
     console.error(`[workflow-cancel:${reqId}] Error (${code}): ${err.message}`);

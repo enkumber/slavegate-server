@@ -3,7 +3,7 @@
  * Shared service for workflow dispatch, cancellation, rate limiting, and decisions.
  */
 
-import { sendDeviceExecutionJobToDevice, sendWorkflowCancellationControl, isDeviceOnline, waitForResult } from "../../transport/transport";
+import { sendDeviceExecutionJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
 import { deviceExecutionArbiter } from "../device-execution";
 
@@ -85,7 +85,7 @@ function checkRateLimit(deviceId: string): boolean {
 }
 
 // Periodic cleanup of stale rate-limit entries (every 5 min)
-setInterval(() => {
+const rateCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [key, times] of deviceDispatchTimes) {
     const filtered = times.filter((t) => now - t < RATE_WINDOW_MS);
@@ -93,14 +93,16 @@ setInterval(() => {
     else deviceDispatchTimes.set(key, filtered);
   }
 }, 300_000);
+rateCleanupTimer.unref?.();
 
 // ── Active workflow tracking (for cancellation) ────────────────────────────
 interface ActiveWorkflow {
   jobId: string;
   deviceId: string;
+  workflowRootId: string;
   workflowName: string;
   dispatchedAt: number;
-  status: "dispatched" | "cancelled";
+  status: "queued" | "dispatched";
 }
 const activeWorkflows = new Map<string, ActiveWorkflow>();
 
@@ -145,6 +147,17 @@ export async function dispatchWorkflow(params: DispatchParams) {
   if (remaining.length === 0) {
     // All steps were pre-workflow, nothing left to send as workflow
     console.log(`[workflow-dispatch] All steps handled as pre-workflow jobs`);
+    const finished = await deviceExecutionArbiter.finishServerWorkflowRoot({
+      deviceId,
+      workflowId: workflowRootId,
+      status: "completed",
+      actor: "workflow_dispatch",
+      reason: "all_preworkflow_steps_finished",
+      metadata: { workflowName: workflow.name, preStepCount: workflow.steps.length },
+    });
+    if (finished.decision !== "terminal") {
+      throw new Error(`Failed to finish all-presteps workflow root: ${finished.reason ?? finished.decision}`);
+    }
     const jobId = `pre-${Date.now()}`;
     return { jobId, workflowName: workflow.name, status: "completed", preResults };
   }
@@ -176,23 +189,32 @@ export async function dispatchWorkflow(params: DispatchParams) {
     },
   });
 
-  if (!dispatch.sent) {
-    console.warn(`[workflow-dispatch] WebSocket send failed for ${job.jobId} — device may have gone offline`);
+  const status = dispatch.sent ? "dispatched" : dispatch.decision === "would_wait" ? "queued" : null;
+  if (!status) {
+    throw Object.assign(
+      new Error(`Workflow dispatch failed (${dispatch.decision}${dispatch.reason ? `: ${dispatch.reason}` : ""})`),
+      { code: "WORKFLOW_DISPATCH_FAILED" },
+    );
+  }
+  if (status === "queued") {
+    console.log(`[workflow-dispatch] Queued job ${job.jobId} behind the active device root`);
   }
 
   // Track
   activeWorkflows.set(job.jobId, {
     jobId: job.jobId,
     deviceId,
+    workflowRootId,
     workflowName: workflow.name,
     dispatchedAt: Date.now(),
-    status: "dispatched",
+    status,
   });
 
   // Auto-cleanup after timeout
-  setTimeout(() => activeWorkflows.delete(job.jobId), timeoutMs + 30_000);
+  const cleanupTimer = setTimeout(() => activeWorkflows.delete(job.jobId), timeoutMs + 30_000);
+  cleanupTimer.unref?.();
 
-  return { jobId: job.jobId, workflowName: workflow.name, status: "dispatched" };
+  return { jobId: job.jobId, workflowName: workflow.name, status };
 }
 
 // ── Cancellation ────────────────────────────────────────────────────────────
@@ -201,19 +223,43 @@ export async function cancelWorkflow(jobId: string) {
   if (!entry) {
     throw Object.assign(new Error("Workflow job not found"), { code: "NOT_FOUND" });
   }
-  if (entry.status === "cancelled") {
-    throw Object.assign(new Error("Workflow already cancelled"), { code: "ALREADY_CANCELLED" });
+  const cancelled = await deviceExecutionArbiter.cancelQueuedServerWorkflowRoot({
+    deviceId: entry.deviceId,
+    workflowId: entry.workflowRootId,
+    actor: "workflow_dispatch.cancel",
+    reason: "api_cancelled_before_dispatch",
+    metadata: { jobId, workflowName: entry.workflowName },
+  });
+
+  if (cancelled.decision === "terminal") {
+    activeWorkflows.delete(jobId);
+    console.log(`[workflow-dispatch] Cancelled queued job ${jobId} (${entry.workflowName})`);
+    return { jobId, status: "cancelled" };
   }
 
-  // Notify device to cancel (use dedicated cancel signal)
-  if (isDeviceOnline(entry.deviceId)) {
-    await sendWorkflowCancellationControl(entry.deviceId, jobId);
+  if (cancelled.reason === "root_not_queued") {
+    // The queue pump may have dispatched after the original API response. Do
+    // not send WORKFLOW_CANCEL: workflow_execute is a JOB wire operation and
+    // that signal would falsely claim cancellation while releasing ownership.
+    entry.status = "dispatched";
+    await deviceExecutionArbiter.recordRejectedEgress({
+      deviceId: entry.deviceId,
+      operationId: jobId,
+      wireType: "WORKFLOW_CANCEL",
+      actor: "workflow_dispatch.cancel",
+      reason: "workflow_execute_inflight_cancellation_unsupported",
+      metadata: { workflowRootId: entry.workflowRootId, workflowName: entry.workflowName },
+    });
+    throw Object.assign(
+      new Error("Cancellation is unsupported after workflow dispatch; execution ownership remains active"),
+      { code: "CANCELLATION_UNSUPPORTED_IN_FLIGHT", status: 409 },
+    );
   }
 
-  activeWorkflows.delete(jobId);
-
-  console.log(`[workflow-dispatch] Cancelled job ${jobId} (${entry.workflowName})`);
-  return { jobId, status: "cancelled" };
+  throw Object.assign(
+    new Error(`Workflow cancellation failed (${cancelled.reason ?? cancelled.decision})`),
+    { code: cancelled.decision === "missing" ? "NOT_FOUND" : "CANCELLATION_REJECTED" },
+  );
 }
 
 // ── Generic decide ──────────────────────────────────────────────────────────
