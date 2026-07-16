@@ -274,8 +274,8 @@ async function dispatchGeneratedWorkflowProbe(
       actor: "generated_workflow_executor",
       metadata: { observeSource: "generatedWorkflow.dispatchProbe", workflowId, stepIndex },
     });
-    if (!dispatch.sent) return null;
-    return awaitJobResult(jobId, timeoutMs + 5_000);
+    if (!dispatch.sent && !dispatch.queued) return null;
+    return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, timeoutMs);
   } catch {
     return null;
   }
@@ -553,6 +553,31 @@ function awaitJobResult(jobId: string, timeoutMs: number): Promise<JobStepResult
 
     pendingJobResults.set(jobId, { resolve, reject, timeoutHandle });
   });
+}
+
+export function awaitGeneratedChildJobResult(
+  workflowId: string,
+  jobId: string,
+  dispatch: Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>,
+  executionTimeoutMs: number,
+): Promise<JobStepResult> {
+  if (!dispatch.sent && !dispatch.queued) {
+    throw new Error(`Failed to send job to device: ${dispatch.reason ?? dispatch.decision}`);
+  }
+
+  // A server-mode workflow can be admitted behind another device root. Its
+  // first child JOB is then persisted by PNQ and replayed by the queue pump
+  // after the active root finishes. `would_wait` is therefore an accepted
+  // dispatch state, not a device/recovery failure.
+  const resultTimeoutMs = dispatch.queued
+    ? Math.max(executionTimeoutMs + 5_000, scalabilityConfig.jobResultTimeout)
+    : executionTimeoutMs + 5_000;
+  if (dispatch.queued) {
+    console.log(
+      `[workflow] ${workflowId} child job ${jobId.slice(0, 8)} queued behind the active device root; awaiting PNQ replay`,
+    );
+  }
+  return awaitJobResult(jobId, resultTimeoutMs);
 }
 
 // ─── Queue ────────────────────────────────────────────────────────────────────
@@ -1000,8 +1025,7 @@ async function executeSkillActionStep(
         actor: "generated_workflow_executor",
         metadata: { observeSource: "generatedWorkflow.dispatchAndWait", workflowId, stepIndex },
       });
-      if (!dispatch.sent) throw new Error("Failed to send job to device");
-      return awaitJobResult(jobId, dispatchedTimeoutMs + 5_000);
+      return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, dispatchedTimeoutMs);
     },
 
     // Cascade tap a named element (calls executeCascadeTap from skill.cascade).
@@ -1285,15 +1309,22 @@ async function executeActionStep(
       stepAction: step.action,
     },
   });
-  if (!dispatch.sent) throw new Error(`Failed to send job to device: ${dispatch.reason ?? dispatch.decision}`);
+  const resultPromise = awaitGeneratedChildJobResult(
+    workflowId,
+    jobId,
+    dispatch,
+    dispatchedTimeoutMs,
+  );
 
-  console.log(`[workflow] ${workflowId} step ${stepIndex} dispatched ${step.action} → jobId=${jobId}`);
+  console.log(
+    `[workflow] ${workflowId} step ${stepIndex} ${dispatch.sent ? "dispatched" : "queued"} ${step.action} → jobId=${jobId}`,
+  );
 
   // ── Await JOB_RESULT from device ──
   // resolveJobResult() will be called by WsServer when JOB_RESULT arrives.
   let result: JobStepResult;
   try {
-    result = await awaitJobResult(jobId, dispatchedTimeoutMs + 5_000 /* grace period */);
+    result = await resultPromise;
   } catch (err) {
     if (isReadinessAction(step.action) && isJobResultTimeoutError(err) && isDeviceOnline(deviceId)) {
       console.warn(

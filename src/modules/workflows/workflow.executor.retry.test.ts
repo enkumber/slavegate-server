@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Job } from "bullmq";
 import { deviceExecutionArbiter } from "../device-execution";
 import { workflowService, type WorkflowRecord } from "./workflow.service";
-import { runWorkflow } from "./workflow.executor";
+import {
+  awaitGeneratedChildJobResult,
+  resolveJobResult,
+  runWorkflow,
+} from "./workflow.executor";
 import type { WorkflowTemplate } from "./types";
 
 const WORKFLOW_ID = "11111111-1111-4111-8111-111111111111";
@@ -58,6 +62,47 @@ afterEach(() => {
 });
 
 describe("workflow BullMQ retry semantics", () => {
+  it("awaits a PNQ-queued server child until queue replay returns JOB_RESULT", async () => {
+    const jobId = "33333333-3333-4333-8333-333333333333";
+    const resultPromise = awaitGeneratedChildJobResult(
+      WORKFLOW_ID,
+      jobId,
+      {
+        decision: "would_wait",
+        root: null,
+        reason: "device_slot_already_active",
+        sent: false,
+        queued: true,
+      },
+      1_000,
+    );
+
+    expect(resolveJobResult(jobId, {
+      status: "success",
+      output: { unlocked: true },
+      durationMs: 25,
+    })).toBe(true);
+    await expect(resultPromise).resolves.toMatchObject({
+      status: "success",
+      output: { unlocked: true },
+    });
+  });
+
+  it("still rejects a server child that PNQ did not send or queue", () => {
+    expect(() => awaitGeneratedChildJobResult(
+      WORKFLOW_ID,
+      "44444444-4444-4444-8444-444444444444",
+      {
+        decision: "rejected",
+        root: null,
+        reason: "existing_root_not_found",
+        sent: false,
+        queued: false,
+      },
+      1_000,
+    )).toThrow("existing_root_not_found");
+  });
+
   it("resumes a persisted running workflow and terminally releases its PNQ root", async () => {
     vi.spyOn(workflowService, "get").mockResolvedValue(workflow("running"));
     vi.spyOn(workflowService, "getTemplate").mockResolvedValue(template);

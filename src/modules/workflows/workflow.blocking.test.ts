@@ -489,7 +489,9 @@ describe("Generated workflow contract validation", () => {
     expect(executorSource).toContain("function isReadinessAction");
     expect(executorSource).toContain("continuing because readiness actions are idempotent");
     expect(executorSource).toContain("timeoutMs: dispatchedTimeoutMs");
-    expect(executorSource).toContain("awaitJobResult(jobId, dispatchedTimeoutMs + 5_000");
+    expect(executorSource).toContain("awaitGeneratedChildJobResult");
+    expect(executorSource).toContain("executionTimeoutMs + 5_000");
+    expect(executorSource).toContain("dispatch.queued");
     expect(executorSource).toContain("generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReasonFromError(err)).inc()");
     expect(executorSource).toContain("generatedWorkflowRecoveryBudgetExhausted?.labels(platform).inc()");
 
