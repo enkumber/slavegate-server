@@ -61,6 +61,7 @@ export async function llmComplete(
   const response = await fetch(url, {
     method: "POST",
     headers,
+    redirect: "error",
     signal: AbortSignal.timeout(options?.timeoutMs ?? 30_000),
     body: JSON.stringify(body),
   });

@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { DirectWsServer, mergeWorkflowStatusVariables, resolveDirectWsResultHandle } from "./direct-ws.server";
 import { deviceExecutionArbiter, type DeviceExecutionHandle } from "../modules/device-execution";
 
@@ -126,6 +128,19 @@ describe("DirectWS typed BATCH serializer identity", () => {
     const server = new DirectWsServer();
     expect(() => server.sendBatchWithHandle(handle, { type: "BATCH_START", batchId: "batch-child" }))
       .toThrow("DirectWS BATCH handle does not match payload identity");
+  });
+});
+
+describe("DirectWS LLM_REQUEST safety", () => {
+  it("uses bounded server-side LLM handling without prompt logging or raw error egress", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src/ws/direct-ws.server.ts"), "utf8");
+    expect(source).toContain("private activeLlmRequests = new Map<string, number>()");
+    expect(source).toContain("promptLength=");
+    expect(source).not.toContain("prompt?.slice");
+    expect(source).toContain("timeoutMs: 30_000");
+    expect(source).toContain("sendLlmError");
+    expect(source).toContain("errorCode");
+    expect(source).toContain("AI_LLM_BUSY");
   });
 });
 

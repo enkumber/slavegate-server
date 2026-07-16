@@ -95,6 +95,7 @@ export class OpenAICompatibleProvider implements VisionProvider {
     try {
       const res = await fetch(`${this.endpoint}/models`, {
         headers: { Authorization: `Bearer ${this.apiKey}` },
+        redirect: "error",
         signal: AbortSignal.timeout(5_000),
       });
       return res.ok;
@@ -114,6 +115,7 @@ export class OpenAICompatibleProvider implements VisionProvider {
           "Authorization": `Bearer ${this.apiKey}`,
         },
         body:   JSON.stringify(body),
+        redirect: "error",
         signal: controller.signal,
       });
       if (!res.ok) {

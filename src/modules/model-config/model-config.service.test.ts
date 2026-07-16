@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
 import { ModelConfigService, sanitizeProviderError } from "./model-config.service";
 import { getDb } from "../../db/client";
 
@@ -32,7 +35,7 @@ beforeEach(() => {
   query.mockReset();
   vi.mocked(getDb).mockReturnValue({ query } as never);
   process.env.MODEL_CONFIG_TEST_KEY = "secret-from-env";
-  delete process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST;
+  process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "models.example.com";
   delete process.env.MODEL_CONFIG_CREDENTIAL_FILE_ALLOWLIST;
   delete process.env.CREDENTIAL_ENCRYPTION_KEY;
 });
@@ -54,6 +57,8 @@ describe("ModelConfigService credential and endpoint safety", () => {
 
     expect(JSON.stringify(bundle)).not.toContain("secret-from-env");
     expect(JSON.stringify(bundle)).not.toContain("apiKey");
+    expect(bundle.roles.decision_llm).not.toHaveProperty("credential");
+    expect(bundle.roles.decision_llm).not.toHaveProperty("credentialRef");
     expect(bundle.roles.decision_llm).toMatchObject({
       credentialDelivery: "server_only",
       hasCredential: true,
@@ -87,11 +92,34 @@ describe("ModelConfigService credential and endpoint safety", () => {
     });
   });
 
-  it("requires explicit allowlisting for HTTP OpenAI-compatible endpoints", async () => {
+  it("rejects invalid env credential names", async () => {
+    query.mockResolvedValueOnce({ rows: [row()] });
+
+    await expect(new ModelConfigService().updateCredential("decision_llm", {
+      credentialRef: "env:../../TOKEN",
+    })).rejects.toMatchObject({
+      code: "AI_CREDENTIAL_REF_UNSUPPORTED",
+      statusCode: 400,
+    });
+  });
+
+  it("requires explicit allowlisting for HTTP and HTTPS OpenAI-compatible endpoints", async () => {
+    delete process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST;
     query.mockResolvedValueOnce({ rows: [row()] });
     await expect(new ModelConfigService().update("decision_llm", {
       provider: "openai_compatible",
       endpoint: "http://gx10.local/v1",
+      model: "qwen3-vl",
+      enabled: true,
+    })).rejects.toMatchObject({
+      code: "AI_ENDPOINT_NOT_ALLOWLISTED",
+      statusCode: 400,
+    });
+
+    query.mockResolvedValueOnce({ rows: [row()] });
+    await expect(new ModelConfigService().update("decision_llm", {
+      provider: "openai_compatible",
+      endpoint: "https://192.168.10.20/v1",
       model: "qwen3-vl",
       enabled: true,
     })).rejects.toMatchObject({
@@ -111,6 +139,31 @@ describe("ModelConfigService credential and endpoint safety", () => {
     });
 
     expect(saved.endpoint).toBe("http://gx10.local/v1");
+  });
+
+  it("rejects file credential symlinks that escape the allowlisted directory at read time", async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pnmc-model-config-"));
+    const allowed = path.join(tmp, "allowed");
+    const outside = path.join(tmp, "outside");
+    await fs.mkdir(allowed);
+    await fs.mkdir(outside);
+    const outsideSecret = path.join(outside, "secret.txt");
+    const symlink = path.join(allowed, "secret-link.txt");
+    await fs.writeFile(outsideSecret, "escaped-secret", "utf8");
+    await fs.symlink(outsideSecret, symlink);
+
+    process.env.CREDENTIAL_ENCRYPTION_KEY = "test-key";
+    process.env.MODEL_CONFIG_CREDENTIAL_FILE_ALLOWLIST = allowed;
+    query.mockResolvedValueOnce({ rows: [row({ credential_ref: `file:${symlink}` })] });
+
+    try {
+      await expect(new ModelConfigService().resolve("decision_llm")).rejects.toMatchObject({
+        code: "AI_CREDENTIAL_REF_NOT_ALLOWLISTED",
+        statusCode: 400,
+      });
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
   });
 
   it("redacts provider errors before API or log surfaces see them", () => {

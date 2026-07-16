@@ -46,6 +46,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function classifyLlmError(err: unknown): string {
+  const code = isRecord(err) && typeof err.code === "string" ? err.code : "";
+  if (code.startsWith("AI_")) return code;
+  const name = isRecord(err) && typeof err.name === "string" ? err.name : "";
+  if (name === "AbortError" || name === "TimeoutError") return "AI_PROVIDER_TIMEOUT";
+  return "AI_PROVIDER_ERROR";
+}
+
+function llmErrorMessage(code: string): string {
+  switch (code) {
+    case "AI_MODEL_DISABLED":
+      return "Configured model role is disabled.";
+    case "AI_MODEL_CONFIG_MISSING":
+      return "Configured model role is missing.";
+    case "AI_CREDENTIAL_MISSING":
+      return "Configured model role is missing a server-side credential.";
+    case "AI_PROVIDER_TIMEOUT":
+      return "Model provider request timed out.";
+    case "AI_LLM_BUSY":
+      return "Another LLM request is already running for this device.";
+    default:
+      return "Model request failed.";
+  }
+}
+
 function handlesEqual(left: DeviceExecutionHandle, right: DeviceExecutionHandle): boolean {
   return left.rootId === right.rootId &&
     left.deviceId === right.deviceId &&
@@ -262,6 +287,7 @@ export class DirectWsServer {
   private pendingJobs = new Map<string, PendingJob>();        // jobId → awaiter
   private pendingBatches = new Map<string, PendingBatch>();   // batchId → awaiter
   private pendingWorkflows = new Map<string, PendingWorkflow>();
+  private activeLlmRequests = new Map<string, number>();
   private otaStatuses = new Map<string, OtaDeviceStatus>();   // deviceId → last OTA status
   private rateLimiter = new RateLimiter();
   private pingTimer:    ReturnType<typeof setInterval> | null = null;
@@ -1548,8 +1574,19 @@ export class DirectWsServer {
     const requestId = msg.requestId as string;
     const prompt    = msg.prompt as string;
     const screenshot = msg.screenshot as string | undefined;
+    const role = screenshot ? "vision_vlm" : "decision_llm";
 
-    console.log(`[direct-ws] LLM_REQUEST: device=${conn.deviceId.slice(0,8)} role=${screenshot ? 'vision_vlm' : 'decision_llm'} hasImage=${!!screenshot} promptLength=${typeof prompt === "string" ? prompt.length : 0}`);
+    console.log(`[direct-ws] LLM_REQUEST: device=${conn.deviceId.slice(0,8)} requestId=${requestId || "missing"} role=${role} hasImage=${!!screenshot} promptLength=${typeof prompt === "string" ? prompt.length : 0} imageBytes=${typeof screenshot === "string" ? screenshot.length : 0}`);
+
+    if (!requestId || typeof prompt !== "string") {
+      this.sendLlmError(ws, requestId, "AI_LLM_REQUEST_INVALID", "LLM request is missing requestId or prompt.", false);
+      return;
+    }
+
+    if (!this.acquireLlmSlot(conn.deviceId)) {
+      this.sendLlmError(ws, requestId, "AI_LLM_BUSY", "Another LLM request is already running for this device.", true);
+      return;
+    }
 
     try {
       const text = screenshot
@@ -1566,14 +1603,37 @@ export class DirectWsServer {
         result: text,
       });
     } catch (err) {
-      console.error(`[direct-ws] LLM_REQUEST failed: ${(err as Error).message}`);
-      this._send(ws, {
-        type: 'LLM_RESULT',
-        requestId,
-        result: '',
-        error: (err as Error).message,
-      });
+      const code = classifyLlmError(err);
+      console.error(`[direct-ws] LLM_REQUEST failed: device=${conn.deviceId.slice(0,8)} requestId=${requestId} code=${code}`);
+      this.sendLlmError(ws, requestId, code, llmErrorMessage(code), code !== "AI_MODEL_CONFIG_ERROR");
+    } finally {
+      this.releaseLlmSlot(conn.deviceId);
     }
+  }
+
+  private acquireLlmSlot(deviceId: string): boolean {
+    const current = this.activeLlmRequests.get(deviceId) ?? 0;
+    if (current >= 1) return false;
+    this.activeLlmRequests.set(deviceId, current + 1);
+    return true;
+  }
+
+  private releaseLlmSlot(deviceId: string): void {
+    const current = this.activeLlmRequests.get(deviceId) ?? 0;
+    if (current <= 1) this.activeLlmRequests.delete(deviceId);
+    else this.activeLlmRequests.set(deviceId, current - 1);
+  }
+
+  private sendLlmError(ws: WebSocket, requestId: string | undefined, code: string, message: string, retryable: boolean): void {
+    this._send(ws, {
+      type: "LLM_RESULT",
+      requestId,
+      result: "",
+      error: code,
+      errorCode: code,
+      errorMessage: message,
+      retryable,
+    });
   }
 
   private _handleOtaResult(conn: ConnectedDevice, msg: Record<string, unknown>): void {

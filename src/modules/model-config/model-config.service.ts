@@ -281,7 +281,7 @@ export class ModelConfigService {
     const validatedRef = validateCredentialRef(ref);
     if (!validatedRef) return "";
     if (validatedRef.startsWith("env:")) return process.env[validatedRef.slice(4)] ?? "";
-    if (validatedRef.startsWith("file:")) return extractCredentialFromFile(await fs.readFile(resolveCredentialFilePath(validatedRef), "utf8"));
+    if (validatedRef.startsWith("file:")) return extractCredentialFromFile(await fs.readFile(await resolveCredentialFilePathForRead(validatedRef), "utf8"));
     throw new ModelConfigError(`Unsupported credentialRef for ${config.role}. Use env:VAR_NAME${hasEncryptionKey() ? " or file:/path" : ""}.`, 400, "AI_CREDENTIAL_REF_UNSUPPORTED");
   }
 
@@ -378,8 +378,8 @@ function validateEndpoint(endpoint: string | null, provider: string, role: Model
   if (parsed.username || parsed.password || parsed.hash) {
     throw new ModelConfigError(`Invalid endpoint URL for ${role}. Credentials and fragments are not allowed in endpoint URLs.`, 400, "AI_ENDPOINT_INVALID");
   }
-  if (parsed.protocol === "http:" && !isEndpointHostAllowlisted(parsed.hostname)) {
-    throw new ModelConfigError(`HTTP model endpoint for ${role} must be explicitly allowlisted with MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_NOT_ALLOWLISTED");
+  if (!isEndpointHostAllowlisted(parsed.hostname)) {
+    throw new ModelConfigError(`Model endpoint for ${role} must be explicitly allowlisted with MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_NOT_ALLOWLISTED");
   }
   parsed.pathname = parsed.pathname.replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
   parsed.search = "";
@@ -436,6 +436,21 @@ function resolveCredentialFilePath(ref: string): string {
     throw new ModelConfigError("file: credentialRef path is outside the server credential allowlist.", 400, "AI_CREDENTIAL_REF_NOT_ALLOWLISTED");
   }
   return resolved;
+}
+
+async function resolveCredentialFilePathForRead(ref: string): Promise<string> {
+  const resolved = resolveCredentialFilePath(ref);
+  const realPath = await fs.realpath(resolved);
+  const allowedDirs = await Promise.all((process.env.MODEL_CONFIG_CREDENTIAL_FILE_ALLOWLIST ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => fs.realpath(path.resolve(entry))));
+  const allowed = allowedDirs.some((dir) => realPath === dir || realPath.startsWith(`${dir}${path.sep}`));
+  if (!allowed) {
+    throw new ModelConfigError("file: credentialRef path escapes the server credential allowlist.", 400, "AI_CREDENTIAL_REF_NOT_ALLOWLISTED");
+  }
+  return realPath;
 }
 
 function hasEncryptionKey(): boolean {
@@ -537,6 +552,7 @@ async function testProvider(config: ResolvedModelConfig): Promise<void> {
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    redirect: "error",
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`Provider test failed (${res.status}): ${sanitizeProviderError(await res.text())}`);
