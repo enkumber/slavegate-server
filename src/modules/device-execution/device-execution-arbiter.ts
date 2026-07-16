@@ -2827,15 +2827,14 @@ export class DeviceExecutionArbiter {
   }
 
   /**
-   * Release server-workflow roots whose only persisted child jobs timed out
-   * before they were ever started on the device. The workflow row may already
-   * be terminal: older executors could fail/cancel the workflow without
-   * terminalizing its PNQ root, and those orphaned roots must not retain the
-   * device slot forever.
+   * Release orphaned server-workflow roots when every linked child job is
+   * durably terminal. Undispatched timeouts are safe immediately. If a child
+   * has wire-execution evidence, require both a terminal workflow and a quiet
+   * period after the child's terminal timestamp before releasing the slot.
    *
    * This is intentionally narrower than generic ambiguity resolution: every
-   * linked job must be `timeout` with `started_at IS NULL`. A workflow with
-   * any wire-execution evidence remains fail-closed for manual reconciliation.
+   * This keeps live or recently ambiguous device work fail-closed while still
+   * allowing old terminal roots to recover automatically after an update.
    */
   async reconcileUndispatchedTimedOutServerWorkflows(input: {
     actor?: string;
@@ -2867,15 +2866,23 @@ export class DeviceExecutionArbiter {
               FROM command_log commands
               JOIN jobs jobs ON jobs.id = commands.job_id
               WHERE commands.command_raw LIKE ('workflow:' || roots.external_id || ' step:%')
-                AND jobs.status = 'timeout'
-                AND jobs.started_at IS NULL
             )
             AND NOT EXISTS (
               SELECT 1
               FROM command_log commands
               JOIN jobs jobs ON jobs.id = commands.job_id
               WHERE commands.command_raw LIKE ('workflow:' || roots.external_id || ' step:%')
-                AND (jobs.status <> 'timeout' OR jobs.started_at IS NOT NULL)
+                AND (
+                  jobs.status NOT IN ('completed', 'failed', 'timeout', 'cancelled')
+                  OR jobs.completed_at IS NULL
+                  OR (
+                    jobs.started_at IS NOT NULL
+                    AND (
+                      workflows.status NOT IN ('completed', 'failed', 'cancelled')
+                      OR jobs.completed_at > NOW() - INTERVAL '5 minutes'
+                    )
+                  )
+                )
             )
           FOR UPDATE OF roots, workflows
         ),

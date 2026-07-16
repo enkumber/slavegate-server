@@ -1389,9 +1389,11 @@ describe("DeviceExecutionArbiter observe mode", () => {
       if (normalized === "BEGIN" || normalized === "COMMIT" || normalized === "ROLLBACK") {
         return { rows: [], rowCount: 0 };
       }
-      expect(normalized).toContain("jobs.status = 'timeout'");
-      expect(normalized).toContain("jobs.started_at IS NULL");
-      expect(normalized).toContain("jobs.status <> 'timeout' OR jobs.started_at IS NOT NULL");
+      expect(normalized).toContain("jobs.status NOT IN ('completed', 'failed', 'timeout', 'cancelled')");
+      expect(normalized).toContain("jobs.completed_at IS NULL");
+      expect(normalized).toContain("jobs.started_at IS NOT NULL");
+      expect(normalized).toContain("workflows.status NOT IN ('completed', 'failed', 'cancelled')");
+      expect(normalized).toContain("jobs.completed_at > NOW() - INTERVAL '5 minutes'");
       expect(normalized).not.toContain("AND workflows.status IN ('queued', 'running') AND EXISTS");
       expect(normalized).toContain("WHERE workflows.id::text = candidates.external_id AND workflows.status IN ('queued', 'running')");
       expect(normalized).toContain("undispatched_timed_out_workflow_reconciled");

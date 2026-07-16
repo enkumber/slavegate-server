@@ -64,6 +64,23 @@ const ROOT_COMMANDS = new Set<JobType>(["pm_uninstall", "reboot", "ota_update"])
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 600_000;
 
+export function workflowChildTimeoutDisposition(
+  ownership: { root_state: string; operation_state: string } | undefined,
+  observedDispatch: boolean,
+): "wait_queued" | "arm_execution" | "timeout" {
+  if (ownership?.root_state === "queued" && ownership.operation_state === "registered") {
+    return "wait_queued";
+  }
+  if (
+    !observedDispatch &&
+    ownership &&
+    ["dispatching", "dispatched"].includes(ownership.operation_state)
+  ) {
+    return "arm_execution";
+  }
+  return "timeout";
+}
+
 export class DispatcherService {
   private queues = new Map<string, Queue>();
 
@@ -169,11 +186,47 @@ export class DispatcherService {
     // Server-side timeout enforcement:
     // If device executes job but never sends JOB_RESULT (crash, connection loss),
     // job would stay 'running' forever without this.
-    setTimeout(async () => {
+    let observedWorkflowChildDispatch = false;
+    const enforceTimeout = async () => {
       try {
         const job = await this.getJob(jobId);
         if (job && (job.status === "running" || job.status === "pending")) {
           const db = getDb();
+
+          // A server-workflow child can remain durably queued behind another
+          // PNQ root for longer than its execution timeout.  Its execution
+          // clock must not start until PNQ actually advances the operation to
+          // the wire.  Otherwise a perfectly valid queued child is timed out
+          // locally and the whole workflow root is marked ambiguous before it
+          // ever reaches the phone.
+          if (req.workflowId) {
+            const ownership = await db.query<{
+              root_state: string;
+              operation_state: string;
+            }>(
+              `SELECT roots.state AS root_state, operations.state AS operation_state
+               FROM device_execution_operations operations
+               JOIN device_execution_roots roots ON roots.id = operations.root_id
+               WHERE operations.operation_kind = 'job'
+                 AND operations.operation_id = $1
+               LIMIT 1`,
+              [jobId],
+            );
+            const current = ownership.rows[0];
+            const disposition = workflowChildTimeoutDisposition(current, observedWorkflowChildDispatch);
+            if (disposition === "wait_queued") {
+              const retry = setTimeout(enforceTimeout, 1_000);
+              retry.unref?.();
+              return;
+            }
+            if (disposition === "arm_execution") {
+              observedWorkflowChildDispatch = true;
+              const executionTimer = setTimeout(enforceTimeout, timeoutMs + 5_000);
+              executionTimer.unref?.();
+              return;
+            }
+          }
+
           await db.query(
             `UPDATE jobs SET status = 'timeout', completed_at = NOW() WHERE id = $1`,
             [jobId]
@@ -195,7 +248,9 @@ export class DispatcherService {
       } catch (err) {
         console.error(`[dispatcher] Timeout handler error for job ${jobId}:`, (err as Error).message);
       }
-    }, timeoutMs + 5_000); // +5s grace period for network latency
+    };
+    const timeoutHandle = setTimeout(enforceTimeout, timeoutMs + 5_000); // +5s grace period for network latency
+    timeoutHandle.unref?.();
 
     return { jobId, timeoutMs };
   }

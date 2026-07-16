@@ -19,6 +19,7 @@ const describePostgres = postgresUrl ? describe : describe.skip;
 const DEVICE_A = "00000000-0000-4000-8000-0000000000a1";
 const DEVICE_B = "00000000-0000-4000-8000-0000000000b2";
 const DEVICE_C = "00000000-0000-4000-8000-0000000000c3";
+const DEVICE_D = "00000000-0000-4000-8000-0000000000d4";
 const ACTIVE_STATES = ["claimed", "dispatching", "dispatched", "reconciling", "blocked"] as const;
 
 let pool: Pool;
@@ -373,19 +374,23 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     expect(await eventCount(pool, "root_ambiguous")).toBe(1);
   });
 
-  it("releases only a server workflow whose linked jobs timed out without device start", async () => {
+  it("releases terminal child-only server roots while retaining recent in-flight evidence", async () => {
     const workflowId = "00000000-0000-4000-8000-00000000f001";
     const jobId = "00000000-0000-4000-8000-00000000f002";
     const startedWorkflowId = "00000000-0000-4000-8000-00000000f003";
     const startedJobId = "00000000-0000-4000-8000-00000000f004";
     const failedWorkflowId = "00000000-0000-4000-8000-00000000f005";
     const failedJobId = "00000000-0000-4000-8000-00000000f006";
+    const staleTerminalWorkflowId = "00000000-0000-4000-8000-00000000f007";
+    const staleTerminalJobId = "00000000-0000-4000-8000-00000000f008";
     await insertDevice(pool, DEVICE_A, "pnq-undispatched-timeout-a");
     await insertDevice(pool, DEVICE_B, "pnq-started-timeout-b");
     await insertDevice(pool, DEVICE_C, "pnq-terminal-orphan-c");
+    await insertDevice(pool, DEVICE_D, "pnq-stale-terminal-d");
     await insertWorkflow(pool, workflowId, DEVICE_A, "running");
     await insertWorkflow(pool, startedWorkflowId, DEVICE_B, "running");
     await insertWorkflow(pool, failedWorkflowId, DEVICE_C, "failed");
+    await insertWorkflow(pool, staleTerminalWorkflowId, DEVICE_D, "failed");
     await arbiter.observeAdmission({
       deviceId: DEVICE_A,
       rootKind: "server_workflow",
@@ -410,8 +415,16 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     });
     const failedPermit = await arbiter.claimNextRoot({ deviceId: DEVICE_C, actor: "workflow-worker" });
     expect(failedPermit).not.toBeNull();
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_D,
+      rootKind: "server_workflow",
+      externalId: staleTerminalWorkflowId,
+      actor: "workflow-test",
+    });
+    const staleTerminalPermit = await arbiter.claimNextRoot({ deviceId: DEVICE_D, actor: "workflow-worker" });
+    expect(staleTerminalPermit).not.toBeNull();
     await pool.query(
-      `INSERT INTO jobs (id, device_id, status, started_at) VALUES ($1, $2, 'timeout', NULL)`,
+      `INSERT INTO jobs (id, device_id, status, started_at, completed_at) VALUES ($1, $2, 'timeout', NULL, NOW())`,
       [jobId, DEVICE_A],
     );
     await pool.query(
@@ -419,7 +432,7 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       [jobId, `workflow:${workflowId} step:0 screen_wake`],
     );
     await pool.query(
-      `INSERT INTO jobs (id, device_id, status, started_at) VALUES ($1, $2, 'timeout', NOW())`,
+      `INSERT INTO jobs (id, device_id, status, started_at, completed_at) VALUES ($1, $2, 'timeout', NOW(), NOW())`,
       [startedJobId, DEVICE_B],
     );
     await pool.query(
@@ -427,23 +440,34 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       [startedJobId, `workflow:${startedWorkflowId} step:0 screen_wake`],
     );
     await pool.query(
-      `INSERT INTO jobs (id, device_id, status, started_at) VALUES ($1, $2, 'timeout', NULL)`,
+      `INSERT INTO jobs (id, device_id, status, started_at, completed_at) VALUES ($1, $2, 'timeout', NULL, NOW())`,
       [failedJobId, DEVICE_C],
     );
     await pool.query(
       `INSERT INTO command_log (job_id, command_raw) VALUES ($1, $2)`,
       [failedJobId, `workflow:${failedWorkflowId} step:0 screen_wake`],
     );
+    await pool.query(
+      `INSERT INTO jobs (id, device_id, status, started_at, completed_at)
+       VALUES ($1, $2, 'timeout', NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '9 minutes')`,
+      [staleTerminalJobId, DEVICE_D],
+    );
+    await pool.query(
+      `INSERT INTO command_log (job_id, command_raw) VALUES ($1, $2)`,
+      [staleTerminalJobId, `workflow:${staleTerminalWorkflowId} step:0 screen_wake`],
+    );
 
     await expect(arbiter.reconcileUndispatchedTimedOutServerWorkflows()).resolves.toEqual({
-      reconciledRoots: 2,
+      reconciledRoots: 3,
     });
 
     expect(await workflowStatus(pool, workflowId)).toBe("failed");
     expect(await stateForExternalId(pool, workflowId)).toBe("failed");
     expect(await workflowStatus(pool, failedWorkflowId)).toBe("failed");
     expect(await stateForExternalId(pool, failedWorkflowId)).toBe("failed");
-    expect(await eventCount(pool, "undispatched_timed_out_workflow_reconciled")).toBe(2);
+    expect(await workflowStatus(pool, staleTerminalWorkflowId)).toBe("failed");
+    expect(await stateForExternalId(pool, staleTerminalWorkflowId)).toBe("failed");
+    expect(await eventCount(pool, "undispatched_timed_out_workflow_reconciled")).toBe(3);
     expect(await workflowStatus(pool, startedWorkflowId)).toBe("running");
     expect(await stateForExternalId(pool, startedWorkflowId)).toBe("claimed");
   });
@@ -822,7 +846,8 @@ async function resetPnqSchema(db: Pool): Promise<void> {
       id UUID PRIMARY KEY,
       device_id UUID REFERENCES devices(id),
       status TEXT NOT NULL,
-      started_at TIMESTAMPTZ
+      started_at TIMESTAMPTZ,
+      completed_at TIMESTAMPTZ
     );
     CREATE TABLE command_log (
       id BIGSERIAL PRIMARY KEY,
