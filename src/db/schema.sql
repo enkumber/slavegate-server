@@ -276,6 +276,44 @@ CREATE TABLE IF NOT EXISTS vision_config (
 -- Seed default vision config (upsert — safe to run multiple times)
 INSERT INTO vision_config (id) VALUES ('default') ON CONFLICT (id) DO NOTHING;
 
+-- ─── Model Configs (server-side LLM/VLM model and credential config) ─────────
+-- Secrets are intentionally stored server-side only and redacted by API handlers.
+CREATE TABLE IF NOT EXISTS model_configs (
+  role                TEXT PRIMARY KEY CHECK (role IN ('decision_llm', 'vision_vlm')),
+  provider            TEXT NOT NULL,
+  endpoint            TEXT,
+  model               TEXT NOT NULL,
+  api_key_encrypted   TEXT,
+  credential_ref      TEXT,
+  api_key_fingerprint TEXT,
+  enabled             BOOLEAN NOT NULL DEFAULT FALSE,
+  version             INT NOT NULL DEFAULT 1,
+  last_test_status    TEXT,
+  last_test_message   TEXT,
+  last_test_at        TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE OR REPLACE FUNCTION set_model_configs_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_model_configs_updated_at ON model_configs;
+CREATE TRIGGER trg_model_configs_updated_at
+BEFORE UPDATE ON model_configs
+FOR EACH ROW EXECUTE FUNCTION set_model_configs_updated_at();
+
+INSERT INTO model_configs (role, provider, endpoint, model, enabled)
+VALUES
+  ('decision_llm', 'openai_compatible', NULL, 'configure-me', FALSE),
+  ('vision_vlm', 'openai_compatible', NULL, 'configure-me', FALSE)
+ON CONFLICT (role) DO NOTHING;
+
 -- ─── Cleanup job placeholder ──────────────────────────────────────────────────
 -- SELECT delete_expired_registration_codes() → DELETE WHERE expires_at < NOW() AND NOT used
 -- SELECT delete_expired_revoked_tokens()    → DELETE WHERE expires_at < NOW()
