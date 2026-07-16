@@ -84,6 +84,13 @@ beforeEach(() => {
   clientQuery.mockReset();
   release.mockReset();
   connect.mockReset();
+  clientQuery.mockImplementation(async (sql: string, params?: unknown[]) => {
+    const normalized = sql.trim();
+    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(normalized) || normalized.includes("pg_advisory_xact_lock")) {
+      return { rows: [] };
+    }
+    return query(sql, params);
+  });
   connect.mockResolvedValue({ query: clientQuery, release });
   vi.mocked(getDb).mockReturnValue({ query, connect } as never);
   process.env.MODEL_CONFIG_TEST_KEY = "secret-from-env";
@@ -288,6 +295,31 @@ describe("ModelConfigService credential and endpoint safety", () => {
     ]);
   });
 
+  it("keeps credential columns out of generic metadata UPSERTs", async () => {
+    const existing = row({
+      api_key_encrypted: "enc:v1:must-not-be-copied",
+      credential_ref: "env:OLD_KEY",
+      api_key_fingerprint: "old-fingerprint",
+    });
+    query
+      .mockResolvedValueOnce({ rows: [existing] })
+      .mockResolvedValueOnce({ rows: [row({ ...existing, model: "metadata-next", version: 4 })] });
+
+    await new ModelConfigService().update("decision_llm", { model: "metadata-next" });
+
+    const insertCall = query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO model_configs"));
+    expect(insertCall).toBeDefined();
+    expect(String(insertCall?.[0])).not.toMatch(/api_key_encrypted|credential_ref|api_key_fingerprint/);
+    expect(insertCall?.[1]).toEqual([
+      "decision_llm",
+      "openai_compatible",
+      "https://models.example.com/v1",
+      "metadata-next",
+      true,
+    ]);
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes("pg_advisory_xact_lock"))).toBe(true);
+  });
+
   it("atomically combines legacy vision metadata and a supported credential ref", async () => {
     const existing = row({
       role: "vision_vlm",
@@ -305,11 +337,9 @@ describe("ModelConfigService credential and endpoint safety", () => {
       api_key_fingerprint: null,
       version: 4,
     });
-    clientQuery
-      .mockResolvedValueOnce({ rows: [] })
+    query
       .mockResolvedValueOnce({ rows: [existing] })
-      .mockResolvedValueOnce({ rows: [savedRow] })
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [savedRow] });
 
     const config = await new ModelConfigService().updateLegacyVisionConfig({
       model: "vision-next",
@@ -324,16 +354,14 @@ describe("ModelConfigService credential and endpoint safety", () => {
       version: 4,
     });
     expect(clientQuery.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
-      "BEGIN", "SELECT", "INSERT", "COMMIT",
+      "BEGIN", "SELECT", "SELECT", "INSERT", "COMMIT",
     ]);
-    expect(clientQuery.mock.calls[2][1]).toEqual([
+    expect(clientQuery.mock.calls[3][1]).toEqual([
       "vision_vlm",
       "openai_compatible",
       "https://models.example.com/v1",
       "vision-next",
-      null,
       "env:VISION_NEXT_KEY",
-      null,
       true,
     ]);
     expect(release).toHaveBeenCalledTimes(1);
@@ -393,11 +421,9 @@ describe("ModelConfigService credential and endpoint safety", () => {
       credential_ref: "env:VISION_OLD_KEY",
     });
     const credentialFailure = Object.assign(new Error("credential constraint rejected"), { code: "23514" });
-    clientQuery
-      .mockResolvedValueOnce({ rows: [] })
+    query
       .mockResolvedValueOnce({ rows: [existing] })
-      .mockRejectedValueOnce(credentialFailure)
-      .mockResolvedValueOnce({ rows: [] });
+      .mockRejectedValueOnce(credentialFailure);
 
     await expect(new ModelConfigService().updateLegacyVisionConfig({
       model: "must-rollback",
@@ -405,7 +431,7 @@ describe("ModelConfigService credential and endpoint safety", () => {
     })).rejects.toBe(credentialFailure);
 
     expect(clientQuery.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
-      "BEGIN", "SELECT", "INSERT", "ROLLBACK",
+      "BEGIN", "SELECT", "SELECT", "INSERT", "ROLLBACK",
     ]);
     expect(clientQuery.mock.calls.filter(([sql]) => /^UPDATE\s/i.test(String(sql).trim()))).toHaveLength(0);
     expect(release).toHaveBeenCalledTimes(1);
@@ -471,6 +497,10 @@ describe("ModelConfigService credential and endpoint safety", () => {
       "opaque-equals-secret-fedcba",
       "opaque-provider-token-987654",
       "opaque-authorization-secret-246810",
+      "opaque-authorization-header-135790",
+      "opaque-proxy-authorization-112233",
+      "opaque-bearer-token-445566",
+      "opaque-api-key-value-778899",
     ];
     const messages = [
       `Invalid API key: ${secrets[0]}. Request id: req_safe_123.`,
@@ -489,6 +519,22 @@ describe("ModelConfigService credential and endpoint safety", () => {
       `Proxy-Authorization=Basic ${secrets[4]}`,
       `x-api-key=${secrets[3]}`,
       `access_token: ${secrets[3]}`,
+      `authorization_header: ${secrets[5]}; request id: req_safe_header`,
+      `proxy_authorization_header = Basic ${secrets[6]}, request id: req_safe_proxy`,
+      `Proxy authorization header value: ${secrets[6]}; request id: req_safe_proxy_value`,
+      `Bearer token: ${secrets[7]}; request id: req_safe_bearer`,
+      `API key value: ${secrets[8]}; request id: req_safe_key_value`,
+      JSON.stringify({
+        error: {
+          message: `Bearer token: ${secrets[7]}; request id: req_safe_nested`,
+          authorization_header: secrets[5],
+          proxy_authorization_header: `Bearer ${secrets[6]}`,
+        },
+        authorization_status: "denied",
+        token_count: 17,
+        api_key_rotation_required: true,
+        request_id: "req_safe_json_context",
+      }),
     ];
 
     for (const sanitized of messages.map((message) => sanitizeProviderError(message))) {
@@ -500,13 +546,30 @@ describe("ModelConfigService credential and endpoint safety", () => {
     }
     expect(sanitizeProviderError(messages[0])).toContain("Request id: req_safe_123");
     expect(sanitizeProviderError(messages[4])).toContain("req_safe_456");
+    expect(sanitizeProviderError(messages[11])).toContain("req_safe_header");
+    expect(sanitizeProviderError(messages[12])).toContain("req_safe_proxy");
+    expect(sanitizeProviderError(messages[13])).toContain("req_safe_proxy_value");
+    expect(sanitizeProviderError(messages[14])).toContain("req_safe_bearer");
+    expect(sanitizeProviderError(messages[15])).toContain("req_safe_key_value");
+    const nested = sanitizeProviderError(messages[16]);
+    expect(nested).toContain('"authorization_header":"[redacted]"');
+    expect(nested).toContain('"proxy_authorization_header":"[redacted]"');
+    expect(nested).toContain('"authorization_status":"denied"');
+    expect(nested).toContain('"token_count":17');
+    expect(nested).toContain('"api_key_rotation_required":true');
+    expect(nested).toContain("req_safe_json_context");
+    expect(sanitizeProviderError("Token count: 42; authorization status: denied"))
+      .toBe("Token count: 42; authorization status: denied");
   });
 
   it("sanitizes historical last_test_message values before returning them", async () => {
     const secret = "opaque-historical-secret-123456";
     query.mockResolvedValueOnce({ rows: [row({
       last_test_status: "error",
-      last_test_message: `Invalid API key: ${secret}. Request id: req_safe_historical.`,
+      last_test_message: JSON.stringify({
+        error: { message: `API key value: ${secret}; request id: req_safe_historical` },
+        authorization_header: secret,
+      }),
     })] });
 
     const config = await new ModelConfigService().get("decision_llm");
@@ -524,8 +587,8 @@ describe("ModelConfigService credential and endpoint safety", () => {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({
         error: {
-          message: `Invalid API key: ${secret}`,
-          headers: { Authorization: secret },
+          message: `Bearer token: ${secret}`,
+          headers: { authorization_header: secret },
         },
       }));
     });

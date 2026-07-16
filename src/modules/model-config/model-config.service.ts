@@ -11,7 +11,7 @@ import http from "http";
 import https from "https";
 import net from "net";
 import path from "path";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { getDb } from "../../db/client";
 
 export type ModelRole = "decision_llm" | "vision_vlm";
@@ -83,6 +83,7 @@ interface ResolvedModelConfig extends ModelConfig {
 
 const ROLES: ModelRole[] = ["decision_llm", "vision_vlm"];
 const CACHE_TTL_MS = 30_000;
+const MODEL_CONFIG_LOCK_NAMESPACE = "phone-network:model-config";
 const MODEL_CONFIG_CREDENTIAL_FIELD_NAMES = new Set([
   "authorization",
   "authorizationheader",
@@ -160,42 +161,54 @@ export class ModelConfigService {
   async update(role: ModelRole, input: UpdateModelConfigInput): Promise<RedactedModelConfig> {
     assertRole(role);
     assertModelConfigMetadataOnlyInput(input);
-    const existing = await this.getRaw(role);
-    const provider = validateProvider(input.provider ?? existing?.provider ?? defaultFor(role).provider, role);
-    const model = normalizeNonEmpty(input.model ?? existing?.model ?? defaultFor(role).model, "model");
-    const enabled = input.enabled !== undefined ? Boolean(input.enabled) : existing?.enabled ?? false;
-    const endpoint = validateEndpointForStorage(input.endpoint !== undefined ? nullableString(input.endpoint) : existing?.endpoint ?? defaultFor(role).endpoint, provider, role, enabled);
-    const credentialRef = existing?.credentialRef ?? null;
+    const saved = await this.withRoleMutationTransaction(role, async (client) => {
+      const locked = await client.query(
+        "SELECT * FROM model_configs WHERE role = $1 FOR UPDATE",
+        [role],
+      );
+      const existing = locked.rows[0] ? this.fromRow(locked.rows[0]) : null;
+      const provider = validateProvider(input.provider ?? existing?.provider ?? defaultFor(role).provider, role);
+      const model = normalizeNonEmpty(input.model ?? existing?.model ?? defaultFor(role).model, "model");
+      const enabled = input.enabled !== undefined ? Boolean(input.enabled) : existing?.enabled ?? false;
+      const endpoint = validateEndpointForStorage(
+        input.endpoint !== undefined
+          ? nullableString(input.endpoint)
+          : existing?.endpoint ?? defaultFor(role).endpoint,
+        provider,
+        role,
+        enabled,
+      );
 
-    const result = await this.dbProvider().query(
-      `INSERT INTO model_configs
-         (role, provider, endpoint, model, api_key_encrypted, credential_ref, api_key_fingerprint, enabled, version)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)
-       ON CONFLICT (role) DO UPDATE SET
-         provider = EXCLUDED.provider,
-         endpoint = EXCLUDED.endpoint,
-         model = EXCLUDED.model,
-         credential_ref = EXCLUDED.credential_ref,
-         enabled = EXCLUDED.enabled,
-         version = model_configs.version + 1,
-         updated_at = NOW()
-       RETURNING *`,
-      [role, provider, endpoint, model, existing?.apiKeyEncrypted ?? null, credentialRef, existing?.apiKeyFingerprint ?? null, enabled]
-    );
+      // Never copy credential columns from a metadata snapshot. Even if another
+      // writer is introduced without the service lock, this UPSERT cannot roll
+      // a credential replacement back to an older value.
+      const result = await client.query(
+        `INSERT INTO model_configs
+           (role, provider, endpoint, model, enabled, version)
+         VALUES ($1, $2, $3, $4, $5, 1)
+         ON CONFLICT (role) DO UPDATE SET
+           provider = EXCLUDED.provider,
+           endpoint = EXCLUDED.endpoint,
+           model = EXCLUDED.model,
+           enabled = EXCLUDED.enabled,
+           version = model_configs.version + 1,
+           updated_at = NOW()
+         RETURNING *`,
+        [role, provider, endpoint, model, enabled],
+      );
+      return this.fromRow(result.rows[0]);
+    });
     this.invalidate(role);
-    return this.redact(this.fromRow(result.rows[0]));
+    return this.redact(saved);
   }
 
   async updateCredential(role: ModelRole, input: CredentialInput): Promise<RedactedModelConfig> {
     assertRole(role);
-    const existing = await this.getRaw(role);
-    if (!existing) throw new ModelConfigError(`Model config for ${role} is missing`, 404, "AI_MODEL_CONFIG_MISSING");
-
     const rawCredential = input.credential ?? input.apiKey;
     const credentialRef = input.credentialRef !== undefined ? validateCredentialRef(nullableString(input.credentialRef)) : undefined;
-    let apiKeyEncrypted = existing.apiKeyEncrypted;
-    let apiKeyFingerprint = existing.apiKeyFingerprint;
-    let nextCredentialRef = existing.credentialRef;
+    let apiKeyEncrypted: string | null;
+    let apiKeyFingerprint: string | null;
+    let nextCredentialRef: string | null;
 
     if (rawCredential !== undefined && rawCredential !== "") {
       apiKeyEncrypted = encryptDbSecret(rawCredential);
@@ -209,19 +222,29 @@ export class ModelConfigService {
       throw new ModelConfigError("credential or credentialRef is required", 400, "AI_CREDENTIAL_MISSING");
     }
 
-    const result = await this.dbProvider().query(
-      `UPDATE model_configs
-       SET api_key_encrypted = $2,
-           credential_ref = $3,
-           api_key_fingerprint = $4,
-           version = version + 1,
-           updated_at = NOW()
-       WHERE role = $1
-       RETURNING *`,
-      [role, apiKeyEncrypted, nextCredentialRef, apiKeyFingerprint]
-    );
+    const saved = await this.withRoleMutationTransaction(role, async (client) => {
+      const locked = await client.query(
+        "SELECT * FROM model_configs WHERE role = $1 FOR UPDATE",
+        [role],
+      );
+      if (!locked.rows[0]) {
+        throw new ModelConfigError(`Model config for ${role} is missing`, 404, "AI_MODEL_CONFIG_MISSING");
+      }
+      const result = await client.query(
+        `UPDATE model_configs
+         SET api_key_encrypted = $2,
+             credential_ref = $3,
+             api_key_fingerprint = $4,
+             version = version + 1,
+             updated_at = NOW()
+         WHERE role = $1
+         RETURNING *`,
+        [role, apiKeyEncrypted, nextCredentialRef, apiKeyFingerprint],
+      );
+      return this.fromRow(result.rows[0]);
+    });
     this.invalidate(role);
-    return this.redact(this.fromRow(result.rows[0]));
+    return this.redact(saved);
   }
 
   /**
@@ -233,12 +256,7 @@ export class ModelConfigService {
    */
   async updateLegacyVisionConfig(input: unknown): Promise<RedactedModelConfig> {
     const parsed = parseLegacyVisionConfigInput(input);
-    const client = await this.dbProvider().connect();
-    let transactionStarted = false;
-    try {
-      await client.query("BEGIN");
-      transactionStarted = true;
-
+    const saved = await this.withRoleMutationTransaction("vision_vlm", async (client) => {
       const locked = await client.query(
         "SELECT * FROM model_configs WHERE role = $1 FOR UPDATE",
         ["vision_vlm"],
@@ -264,54 +282,42 @@ export class ModelConfigService {
         enabled,
       );
       const credentialChanged = parsed.credentialRef !== undefined;
-      const apiKeyEncrypted = credentialChanged ? null : existing?.apiKeyEncrypted ?? null;
-      const credentialRef = credentialChanged ? parsed.credentialRef : existing?.credentialRef ?? null;
-      const apiKeyFingerprint = credentialChanged ? null : existing?.apiKeyFingerprint ?? null;
-
-      const result = await client.query(
-        `INSERT INTO model_configs
-           (role, provider, endpoint, model, api_key_encrypted, credential_ref, api_key_fingerprint, enabled, version)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)
-         ON CONFLICT (role) DO UPDATE SET
-           provider = EXCLUDED.provider,
-           endpoint = EXCLUDED.endpoint,
-           model = EXCLUDED.model,
-           api_key_encrypted = EXCLUDED.api_key_encrypted,
-           credential_ref = EXCLUDED.credential_ref,
-           api_key_fingerprint = EXCLUDED.api_key_fingerprint,
-           enabled = EXCLUDED.enabled,
-           version = model_configs.version + 1,
-           updated_at = NOW()
-         RETURNING *`,
-        [
-          "vision_vlm",
-          provider,
-          endpoint,
-          model,
-          apiKeyEncrypted,
-          credentialRef,
-          apiKeyFingerprint,
-          enabled,
-        ],
-      );
-
-      await client.query("COMMIT");
-      transactionStarted = false;
-      this.invalidate("vision_vlm");
-      return this.redact(this.fromRow(result.rows[0]));
-    } catch (err: any) {
-      if (transactionStarted) await client.query("ROLLBACK").catch(() => undefined);
-      if (err?.code === "42P01") {
-        throw new ModelConfigError(
-          "model_configs table is missing. Run database migrations.",
-          503,
-          "AI_MODEL_CONFIG_MISSING",
+      const result = credentialChanged
+        ? await client.query(
+          `INSERT INTO model_configs
+             (role, provider, endpoint, model, api_key_encrypted, credential_ref, api_key_fingerprint, enabled, version)
+           VALUES ($1, $2, $3, $4, NULL, $5, NULL, $6, 1)
+           ON CONFLICT (role) DO UPDATE SET
+             provider = EXCLUDED.provider,
+             endpoint = EXCLUDED.endpoint,
+             model = EXCLUDED.model,
+             api_key_encrypted = NULL,
+             credential_ref = EXCLUDED.credential_ref,
+             api_key_fingerprint = NULL,
+             enabled = EXCLUDED.enabled,
+             version = model_configs.version + 1,
+             updated_at = NOW()
+           RETURNING *`,
+          ["vision_vlm", provider, endpoint, model, parsed.credentialRef, enabled],
+        )
+        : await client.query(
+          `INSERT INTO model_configs
+             (role, provider, endpoint, model, enabled, version)
+           VALUES ($1, $2, $3, $4, $5, 1)
+           ON CONFLICT (role) DO UPDATE SET
+             provider = EXCLUDED.provider,
+             endpoint = EXCLUDED.endpoint,
+             model = EXCLUDED.model,
+             enabled = EXCLUDED.enabled,
+             version = model_configs.version + 1,
+             updated_at = NOW()
+           RETURNING *`,
+          ["vision_vlm", provider, endpoint, model, enabled],
         );
-      }
-      throw err;
-    } finally {
-      client.release();
-    }
+      return this.fromRow(result.rows[0]);
+    });
+    this.invalidate("vision_vlm");
+    return this.redact(saved);
   }
 
   async resolve(role: ModelRole): Promise<ResolvedModelConfig> {
@@ -467,17 +473,54 @@ export class ModelConfigService {
 
   private async storeTest(role: ModelRole, status: string, message: string): Promise<RedactedModelConfig> {
     const sanitizedMessage = sanitizeProviderError(message);
-    const result = await this.dbProvider().query(
-      `UPDATE model_configs
-       SET last_test_status = $2, last_test_message = $3, last_test_at = NOW(), updated_at = NOW()
-       WHERE role = $1
-       RETURNING *`,
-      [role, status, sanitizedMessage]
-    );
+    const saved = await this.withRoleMutationTransaction(role, async (client) => {
+      const result = await client.query(
+        `UPDATE model_configs
+         SET last_test_status = $2, last_test_message = $3, last_test_at = NOW(), updated_at = NOW()
+         WHERE role = $1
+         RETURNING *`,
+        [role, status, sanitizedMessage],
+      );
+      if (!result.rows[0]) {
+        throw new ModelConfigError(`Model config for ${role} is missing`, 404, "AI_MODEL_CONFIG_MISSING");
+      }
+      return this.fromRow(result.rows[0]);
+    });
     this.invalidate(role);
-    const config = result.rows[0] ? this.fromRow(result.rows[0]) : (await this.getRaw(role));
-    if (!config) throw new ModelConfigError(`Model config for ${role} is missing`, 404, "AI_MODEL_CONFIG_MISSING");
-    return this.redact(config);
+    return this.redact(saved);
+  }
+
+  /** Serialize role mutations even before the role row exists. */
+  private async withRoleMutationTransaction<T>(
+    role: ModelRole,
+    mutation: (client: PoolClient) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.dbProvider().connect();
+    let transactionStarted = false;
+    try {
+      await client.query("BEGIN");
+      transactionStarted = true;
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        [`${MODEL_CONFIG_LOCK_NAMESPACE}:${role}`],
+      );
+      const result = await mutation(client);
+      await client.query("COMMIT");
+      transactionStarted = false;
+      return result;
+    } catch (err: any) {
+      if (transactionStarted) await client.query("ROLLBACK").catch(() => undefined);
+      if (err?.code === "42P01") {
+        throw new ModelConfigError(
+          "model_configs table is missing. Run database migrations.",
+          503,
+          "AI_MODEL_CONFIG_MISSING",
+        );
+      }
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 }
 
@@ -983,27 +1026,23 @@ function redactProviderErrorValue(value: unknown): unknown {
 
 function isSensitiveProviderErrorKey(key: string): boolean {
   const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return normalized === "authorization" ||
-    normalized === "proxyauthorization" ||
-    normalized.includes("apikey") ||
-    normalized.includes("credential") ||
-    normalized.endsWith("token") ||
-    normalized === "secret" ||
-    normalized === "clientsecret" ||
+  return /(?:proxy)?authorization(?:header)?(?:value)?$/.test(normalized) ||
+    /apikey(?:header|value|provided|supplied|ref|reference|encrypted|fingerprint)?$/.test(normalized) ||
+    /credential(?:s|header|value|ref|reference)?$/.test(normalized) ||
+    /token(?:header|value|ref|reference)?$/.test(normalized) ||
+    /secret(?:header|value|ref|reference)?$/.test(normalized) ||
     normalized === "cookie" ||
     normalized === "setcookie";
 }
 
 function redactProviderErrorText(text: string): string {
   return text
-    .replace(/((?:proxy[-_\s]*)?authorization(?:\s+header)?\s*(?:=>|:|=)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n,}]+)/gi, "$1[redacted]")
+    .replace(/((?:proxy[-_\s]*)?authorization(?:[-_\s]*header)?(?:[-_\s]*value)?\s*(?:=>|:|=)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|(?:Bearer|Basic)\s+[^\s,;}\]\r\n]+|[^\s,;}\]\r\n]+)/gi, "$1[redacted]")
+    .replace(/(\b(?:(?:invalid|incorrect|expired|revoked|malformed)\s+)?(?:x[-_\s]*)?api[-_\s]*key(?:[-_\s]+(?:value|provided|supplied|received|submitted|used))?(?:[-_\s]+(?:is|was))?\s*(?:=>|:|=)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\]\r\n]+)/gi, "$1[redacted]")
+    .replace(/(\b(?:(?:invalid|incorrect|expired|revoked|malformed)\s+)?(?:(?:x[-_\s]*)?(?:auth(?:entication)?[-_\s]*)?|access[-_\s]*|provider[-_\s]*|refresh[-_\s]*|bearer[-_\s]*|basic[-_\s]*)?(?:token|credential|secret)(?:[-_\s]+(?:value|provided|supplied|received|submitted|used))?(?:[-_\s]+(?:is|was))?\s*(?:=>|:|=)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\]\r\n]+)/gi, "$1[redacted]")
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/gi, "$1 [redacted]")
-    .replace(/(\b(?:(?:invalid|incorrect|expired|revoked|malformed)\s+)?(?:x[-_\s]*)?api[-_\s]*key(?:\s+(?:provided|supplied|received|submitted|used))?(?:\s+(?:is|was))?\s*(?:=>|:|=)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\]\r\n]+)/gi, "$1[redacted]")
-    .replace(/(\b(?:(?:invalid|incorrect|expired|revoked|malformed)\s+)?(?:(?:x[-_\s]*)?(?:auth(?:entication)?[-_\s]*)?|access[-_\s]*|provider[-_\s]*|refresh[-_\s]*)?(?:token|credential|secret)(?:\s+(?:provided|supplied|received|submitted|used))?(?:\s+(?:is|was))?\s*(?:=>|:|=)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\]\r\n]+)/gi, "$1[redacted]")
     .replace(/\bsk-[A-Za-z0-9._~+\/-]+=?/g, "[redacted]")
-    .replace(/([\"']authorization[\"']\s*:\s*[\"'])([^\"']*)([\"'])/gi, "$1[redacted]$3")
-    .replace(/(authorization\s*[:=]\s*)(?![\"'])([^\r\n,}]+)/gi, "$1[redacted]")
-    .replace(/(api[_-]?key|token|x-api-key)([\"'\s:=]+)([^\"'\s,}]+)/gi, "$1$2[redacted]");
+    .replace(/([\"'](?:proxy[-_\s]*)?authorization(?:[-_\s]*header)?(?:[-_\s]*value)?[\"']\s*:\s*[\"'])([^\"']*)([\"'])/gi, "$1[redacted]$3");
 }
 
 function endpointBase(endpoint: string | null, provider: string): string {
