@@ -1,4 +1,21 @@
-# Story: Server-side Model & Token Configuration
+# PNMC-001 — Server-side Model & Token Configuration
+
+## Status
+
+- Owner: ATLAS
+- Tech lead: FORGE
+- Flow: ATLAS -> FORGE -> VOLT/SPARK/LENS/ECHO -> FORGE final
+- State: Active intake on 2026-07-16 after PNQ-001 G3 local completion.
+- Base: `c386bdf2f9a5c5b2f2cd39827721e2aafbe62993` (`docs(pnq): record final local G3 gate`)
+- Worktree: `/data/worktrees/slavegate-pnmc-001-model-config`
+- Branch: `feature/pnmc-001-server-model-config`
+- Scope: server/dashboard only. No Android/APK/OTA work in this phase.
+- Hard stops: no push, deploy, release, service restart, cron change, live-device action, or secret exfiltration.
+- PNEX-001 is a hard stop and must not be resumed, read as implementation source, or touched.
+
+## Why this is next
+
+PNQ-001 G3 is locally complete and clean, so the highest-priority unfinished Phone Network blocker returns to model/runtime configuration: live Phone Network workflows can reach `LLM_REQUEST`, but the server still needs a reviewed, DB-backed, dashboard-managed way to route decision LLM and vision VLM calls without Google defaults, GitHub secrets, or credentials exposed to phones. This directly unblocks safe workflow execution evidence while staying inside the approved local/server-only phase.
 
 ## Goal
 Replace ad-hoc `vision_config`/environment-only LLM/VLM behavior with DB-backed, dashboard-managed server-side model configuration for Phone Network.
@@ -20,6 +37,35 @@ Replace ad-hoc `vision_config`/environment-only LLM/VLM behavior with DB-backed,
 9. Fail clearly when required config/credentials are missing; no silent empty analysis loops.
 10. Preserve edge workflow path and DirectWS `LLM_REQUEST`/`LLM_RESULT` semantics.
 11. Add DB migration and API endpoints. Keep `/api/vision/config` backward compatible where practical.
+
+## Acceptance criteria
+
+1. `decision_llm` and `vision_vlm` roles are backed by durable Postgres config and disabled-safe defaults.
+2. Dashboard Tokens / Models UI can view, update, enable/disable, save credentials or credential refs, and run connection tests for both roles.
+3. API responses redact secrets and expose only safe credential metadata/fingerprint/version/test status.
+4. Phones never receive raw provider secrets unless FORGE explicitly validates an intentional local-only compatibility path and ECHO approves the security tradeoff; the preferred architecture is `phone -> server -> provider -> server -> phone`.
+5. Runtime `VisionService`, DirectWS `LLM_REQUEST`, and shared LLM utilities resolve role config server-side and fail with actionable typed errors when config, enablement, provider support, or credentials are missing.
+6. Legacy `/api/vision/config` compatibility is preserved or intentionally narrowed with tests and documentation.
+7. Google/Gemini legacy defaults are not kept as active runtime defaults; GX10/OpenAI-compatible config is supported without committing local credential material.
+8. Cache invalidates after writes and cannot serve stale credentials beyond a short bounded TTL.
+9. Tests cover config CRUD/redaction, credential update/ref behavior, missing/disabled config failures, runtime role routing, DirectWS error preservation, and legacy vision config compatibility.
+10. Verification uses explicit timeouts for focused tests, server build, full suite when feasible, migration/static secret checks, `git diff --check`, and clean-tree final status.
+
+## Safety boundaries
+
+- Do not print, copy, or commit the GX10 credential at `/data/.openclaw/credentials/gx10-vllm.json`.
+- Do not use PNEX artifacts as implementation source.
+- Do not mutate live DBs, live services, live devices, Umbrel releases, cron jobs, OTA, or APKs.
+- Keep work in the isolated worktree and branch listed above.
+- Local commits are allowed after reviewable slices are complete.
+
+## Parallel lane plan
+
+- FORGE: architecture review, threat model, ownership split, final gate.
+- VOLT: server/runtime implementation only, including migration, API service, model router, VisionService/DirectWS/shared LLM integration, and focused unit tests.
+- SPARK: dashboard/API contract and static secret-redaction guard evidence; no runtime transport edits unless FORGE explicitly reallocates.
+- LENS: explicit-timeout verification plan and execution, including focused regression, migration check, server build, full suite where feasible, and secret grep.
+- ECHO: safety/product review of credential handling, fail-closed runtime behavior, dashboard UX, backward compatibility, and operational risks.
 
 ## Implementation notes
 - Existing quick edits in `src/modules/vision/vision.service.ts` and `src/api/routes.ts` should be reviewed/reworked, not blindly accepted.
