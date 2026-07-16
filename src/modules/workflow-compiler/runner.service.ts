@@ -544,6 +544,8 @@ export async function runCompiledWorkflow(
   const startTime = Date.now();
   const { deviceId, workflow, startStepIndex = 0, compileLlmCalls = 0 } = req;
   const workflowRootExternalId = req.workflowRootExternalId ?? workflow.id;
+  let rootAdmitted = false;
+  let rootFinalized = false;
   const results: StepExecutionResult[] = [];
   const counters: WorkflowExecutionCounters = {
     compileLlmCalls,
@@ -585,6 +587,7 @@ export async function runCompiledWorkflow(
     };
   }
 
+  try {
   // Update status to running
   await deviceExecutionArbiter.observeAdmission({
     deviceId,
@@ -594,6 +597,7 @@ export async function runCompiledWorkflow(
     actor: "workflow_compiler_runner",
     metadata: { compiledWorkflowId: workflow.id, observeSource: "runner.runCompiledWorkflow" },
   });
+  rootAdmitted = true;
   await updateWorkflowStatus(workflow.id, "running");
   workflowEvents.publish({
     source: "workflow_compiler",
@@ -972,13 +976,17 @@ export async function runCompiledWorkflow(
       error: r.error,
     })),
   });
-  await deviceExecutionArbiter.finishServerWorkflowRoot({
+  const rootFinish = await deviceExecutionArbiter.finishServerWorkflowRoot({
     deviceId,
     workflowId: workflowRootExternalId,
     status: aborted ? "failed" : "completed",
     actor: "workflow_compiler_runner",
     reason: aborted ? "compiled_workflow_aborted" : "compiled_workflow_completed",
   });
+  if (rootFinish.decision !== "terminal") {
+    throw new Error(`Failed to finalize compiled workflow root: ${rootFinish.reason ?? rootFinish.decision}`);
+  }
+  rootFinalized = true;
 
   console.log(
     `[runner] Workflow "${workflow.name}" ${finalStatus}: ` +
@@ -1016,4 +1024,45 @@ export async function runCompiledWorkflow(
     error: aborted ? "Workflow aborted — see step results" : undefined,
     totalLatencyMs,
   };
+  } catch (err) {
+    if (rootAdmitted && !rootFinalized) {
+      try {
+        const failed = await deviceExecutionArbiter.finishServerWorkflowRoot({
+          deviceId,
+          workflowId: workflowRootExternalId,
+          status: "failed",
+          actor: "workflow_compiler_runner.exception",
+          reason: "compiled_workflow_unexpected_exception",
+          metadata: { error: (err as Error).message },
+        });
+        if (failed.decision !== "terminal") {
+          await deviceExecutionArbiter.markAmbiguous({
+            deviceId,
+            rootKind: "server_workflow",
+            externalId: workflowRootExternalId,
+            reason: "compiled_workflow_exception_terminalization_rejected",
+            actor: "workflow_compiler_runner.exception",
+            state: "blocked",
+            metadata: { error: (err as Error).message, finishReason: failed.reason ?? failed.decision },
+          });
+        }
+      } catch (transitionError) {
+        await deviceExecutionArbiter.markAmbiguous({
+          deviceId,
+          rootKind: "server_workflow",
+          externalId: workflowRootExternalId,
+          reason: "compiled_workflow_exception_terminalization_failed",
+          actor: "workflow_compiler_runner.exception",
+          state: "blocked",
+          metadata: {
+            error: (err as Error).message,
+            transitionError: (transitionError as Error).message,
+          },
+        }).catch((ambiguityError) => {
+          console.error("[runner] Failed to block workflow root after unexpected exception:", (ambiguityError as Error).message);
+        });
+      }
+    }
+    throw err;
+  }
 }

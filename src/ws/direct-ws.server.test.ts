@@ -128,6 +128,21 @@ describe("DirectWS typed pending lifecycle", () => {
     operationKind: "workflow",
     operationId,
   });
+  const jobPermit = (operationId: string) => {
+    const handle = { ...expectedHandle, operationId };
+    return {
+      kind: "device_execution_job_dispatch_permit" as const,
+      handle,
+      wireHandle: {
+        pnqRootId: handle.rootId,
+        pnqDeviceId: handle.deviceId,
+        pnqRootKind: handle.rootKind,
+        pnqOwnerGeneration: handle.ownerGeneration,
+        pnqOperationKind: handle.operationKind,
+        pnqOperationId: handle.operationId,
+      },
+    };
+  };
 
   it("awaits ambiguity writes and drains only the disconnected device", async () => {
     const server = new DirectWsServer();
@@ -201,5 +216,135 @@ describe("DirectWS typed pending lifecycle", () => {
     expect(markAmbiguous).toHaveBeenCalledWith(expect.objectContaining({ handle: workflow, reason: "workflow_status_timeout" }));
     expect(internals.pendingBatches.has(batch.operationId)).toBe(false);
     expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(false);
+  });
+
+  it("retains JOB, BATCH, and WORKFLOW pending state until a bounded ambiguity retry succeeds", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = new DirectWsServer();
+      const permit = jobPermit("job-retry");
+      const batch = batchHandle(expectedHandle.deviceId, "batch-retry");
+      const workflow = workflowHandle(expectedHandle.deviceId, "workflow-retry");
+      const pendingJob = server.registerJobWaiterWithPermit(permit, 60_000);
+      const pendingBatch = server.registerBatchWaiterWithHandle(batch, 60_000);
+      const workflowTimer = setTimeout(() => {}, 60_000);
+      const internals = server as unknown as {
+        pendingJobs: Map<string, unknown>;
+        pendingBatches: Map<string, unknown>;
+        pendingWorkflows: Map<string, { handle: DeviceExecutionHandle; timer: ReturnType<typeof setTimeout> }>;
+        expirePendingJob: (jobId: string, timeoutMs: number, permit: typeof permit) => Promise<void>;
+        expirePendingBatch: (handle: DeviceExecutionHandle, timeoutMs: number) => Promise<void>;
+        expirePendingWorkflow: (handle: DeviceExecutionHandle) => Promise<void>;
+      };
+      internals.pendingWorkflows.set(workflow.operationId, { handle: workflow, timer: workflowTimer });
+      const attempts = new Map<string, number>();
+      vi.spyOn(deviceExecutionArbiter, "markAmbiguous").mockImplementation(async (input) => {
+        const operationId = input.handle!.operationId;
+        const count = (attempts.get(operationId) ?? 0) + 1;
+        attempts.set(operationId, count);
+        if (count === 1) throw new Error("db unavailable");
+        return { decision: "ambiguous", root: null };
+      });
+
+      await Promise.all([
+        internals.expirePendingJob(permit.handle.operationId, 1234, permit),
+        internals.expirePendingBatch(batch, 1234),
+        internals.expirePendingWorkflow(workflow),
+      ]);
+      expect(internals.pendingJobs.has(permit.handle.operationId)).toBe(true);
+      expect(internals.pendingBatches.has(batch.operationId)).toBe(true);
+      expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(250);
+      await expect(pendingJob).rejects.toThrow("timed out after 1234ms");
+      await expect(pendingBatch).rejects.toThrow("timed out after 1234ms");
+      expect(internals.pendingJobs.has(permit.handle.operationId)).toBe(false);
+      expect(internals.pendingBatches.has(batch.operationId)).toBe(false);
+      expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains disconnected pending work when ambiguity persistence fails, then drains it after retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = new DirectWsServer();
+      const permit = jobPermit("job-disconnect-retry");
+      const batch = batchHandle(expectedHandle.deviceId, "batch-disconnect-retry");
+      const workflow = workflowHandle(expectedHandle.deviceId, "workflow-disconnect-retry");
+      const pendingJob = server.registerJobWaiterWithPermit(permit, 60_000);
+      const pendingBatch = server.registerBatchWaiterWithHandle(batch, 60_000);
+      const workflowTimer = setTimeout(() => {}, 60_000);
+      const internals = server as unknown as {
+        pendingJobs: Map<string, unknown>;
+        pendingBatches: Map<string, unknown>;
+        pendingWorkflows: Map<string, { handle: DeviceExecutionHandle; timer: ReturnType<typeof setTimeout> }>;
+        blockPendingForDisconnectedDevice: (deviceId: string, code: number, reason: string) => Promise<unknown>;
+      };
+      internals.pendingWorkflows.set(workflow.operationId, { handle: workflow, timer: workflowTimer });
+      const attempts = new Map<string, number>();
+      vi.spyOn(deviceExecutionArbiter, "markAmbiguous").mockImplementation(async (input) => {
+        const operationId = input.handle!.operationId;
+        const count = (attempts.get(operationId) ?? 0) + 1;
+        attempts.set(operationId, count);
+        if (count === 1) throw new Error("db unavailable");
+        return { decision: "ambiguous", root: null };
+      });
+
+      await internals.blockPendingForDisconnectedDevice(expectedHandle.deviceId, 1006, "lost");
+      expect(internals.pendingJobs.has(permit.handle.operationId)).toBe(true);
+      expect(internals.pendingBatches.has(batch.operationId)).toBe(true);
+      expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(250);
+      await expect(pendingJob).rejects.toThrow("disconnected");
+      await expect(pendingBatch).rejects.toThrow("disconnected");
+      expect(internals.pendingJobs.has(permit.handle.operationId)).toBe(false);
+      expect(internals.pendingBatches.has(batch.operationId)).toBe(false);
+      expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores a superseded socket close without deleting or blocking the replacement connection", async () => {
+    const server = new DirectWsServer();
+    const oldWs = {} as any;
+    const replacementWs = {} as any;
+    const oldConnection = {
+      ws: oldWs,
+      deviceId: expectedHandle.deviceId,
+      connectedAt: 1,
+      lastSeenAt: 1,
+      lastPongAt: 1,
+      msgCount: 0,
+      windowStart: 1,
+      agentVersion: "4.0.0",
+    };
+    const replacement = { ...oldConnection, ws: replacementWs, connectedAt: 2 };
+    const internals = server as unknown as {
+      connections: Map<string, typeof replacement>;
+      blockPendingForDisconnectedDevice: (deviceId: string, code: number, reason: string) => Promise<unknown>;
+      handleAuthenticatedClose: (ws: any, connection: typeof oldConnection, code: number, reason: string) => Promise<string>;
+    };
+    internals.connections.set(expectedHandle.deviceId, replacement);
+    const blockPending = vi.spyOn(internals, "blockPendingForDisconnectedDevice");
+
+    await expect(internals.handleAuthenticatedClose(oldWs, oldConnection, 4000, "replaced")).resolves.toBe("superseded");
+    expect(internals.connections.get(expectedHandle.deviceId)).toBe(replacement);
+    expect(blockPending).not.toHaveBeenCalled();
+  });
+
+  it("contains rejected asynchronous socket tasks instead of leaking unhandled rejections", async () => {
+    const server = new DirectWsServer();
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const internals = server as unknown as { runSocketTask: (label: string, task: () => Promise<void>) => void };
+
+    internals.runSocketTask("test", async () => { throw new Error("handler exploded"); });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(error).toHaveBeenCalledWith("[direct-ws] test handler failed:", "handler exploded");
   });
 });

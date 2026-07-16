@@ -16,6 +16,7 @@ vi.mock("../../device-execution", () => ({
   deviceExecutionArbiter: {
     observeAdmission: vi.fn().mockResolvedValue({ decision: "admitted", root: null }),
     finishServerWorkflowRoot: vi.fn().mockResolvedValue({ decision: "terminal", root: null }),
+    markAmbiguous: vi.fn().mockResolvedValue({ decision: "ambiguous", root: null }),
   },
 }));
 
@@ -51,6 +52,8 @@ import {
   generatedWorkflowRecoveryAttempts,
   generatedWorkflowRecoveryBudgetExhausted,
 } from "../../observability/metrics";
+import { deviceExecutionArbiter } from "../../device-execution";
+import { updateWorkflowStatus } from "../planner.service";
 
 function makeWorkflow(overrides: Partial<CompiledWorkflow> = {}): CompiledWorkflow {
   return {
@@ -85,6 +88,10 @@ describe("runCompiledWorkflow recovery budget", () => {
     vi.clearAllMocks();
     vi.mocked(sendJobToDevice).mockReturnValue(true);
     vi.mocked(waitForResult).mockResolvedValue({ status: "completed", output: {} });
+    vi.mocked(updateWorkflowStatus).mockResolvedValue(undefined);
+    vi.mocked(deviceExecutionArbiter.observeAdmission).mockResolvedValue({ decision: "admitted", root: null });
+    vi.mocked(deviceExecutionArbiter.finishServerWorkflowRoot).mockResolvedValue({ decision: "terminal", root: null });
+    vi.mocked(deviceExecutionArbiter.markAmbiguous).mockResolvedValue({ decision: "ambiguous", root: null });
   });
 
   it("keeps happy-path token and recovery usage at zero", async () => {
@@ -137,5 +144,22 @@ describe("runCompiledWorkflow recovery budget", () => {
     expect(result.results[0]?.error).toBe(RECOVERY_BUDGET_EXCEEDED);
     expect(generatedWorkflowRecoveryAttempts?.labels).toHaveBeenCalledWith("reddit", "fingerprint_mismatch");
     expect(generatedWorkflowRecoveryBudgetExhausted?.labels).toHaveBeenCalledWith("reddit");
+  });
+
+  it("terminalizes the canonical root when an unexpected error occurs after admission", async () => {
+    vi.mocked(updateWorkflowStatus).mockRejectedValueOnce(new Error("workflow status database unavailable"));
+
+    await expect(runCompiledWorkflow(
+      { deviceId: "device-1", workflow: makeWorkflow() },
+      vi.fn().mockResolvedValue(false),
+    )).rejects.toThrow("workflow status database unavailable");
+
+    expect(deviceExecutionArbiter.observeAdmission).toHaveBeenCalledTimes(1);
+    expect(deviceExecutionArbiter.finishServerWorkflowRoot).toHaveBeenCalledWith(expect.objectContaining({
+      workflowId: "wf-runner-budget",
+      status: "failed",
+      reason: "compiled_workflow_unexpected_exception",
+    }));
+    expect(deviceExecutionArbiter.markAmbiguous).not.toHaveBeenCalled();
   });
 });

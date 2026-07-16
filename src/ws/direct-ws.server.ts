@@ -173,6 +173,8 @@ const MAX_MSG_BYTES         = scalabilityConfig.wsMaxMessageSize;
 const RATE_LIMIT            = scalabilityConfig.wsRateLimitPerSecond;
 const RATE_WINDOW_MS        = 1_000;
 const MAX_WS_CONNECTIONS    = scalabilityConfig.maxWsConnections;
+const AMBIGUITY_RETRY_MAX_ATTEMPTS = 3;
+const AMBIGUITY_RETRY_DELAY_MS = 250;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -264,6 +266,48 @@ export class DirectWsServer {
   private rateLimiter = new RateLimiter();
   private pingTimer:    ReturnType<typeof setInterval> | null = null;
 
+  private runSocketTask(label: string, task: () => Promise<void>): void {
+    void task().catch((err) => {
+      console.error(`[direct-ws] ${label} handler failed:`, (err as Error).message);
+    });
+  }
+
+  private async confirmAmbiguityBeforeCleanup(
+    input: Parameters<typeof deviceExecutionArbiter.markAmbiguous>[0],
+    cleanup: () => void,
+    attempt = 1,
+  ): Promise<boolean> {
+    try {
+      const transition = await deviceExecutionArbiter.markAmbiguous(input);
+      const confirmed = transition.decision === "ambiguous" ||
+        (transition.decision === "ignored" && transition.reason === "root_already_terminal");
+      if (!confirmed) {
+        throw new Error(`ambiguity transition not confirmed (${transition.reason ?? transition.decision})`);
+      }
+      cleanup();
+      return true;
+    } catch (err) {
+      if (attempt < AMBIGUITY_RETRY_MAX_ATTEMPTS) {
+        const retry = setTimeout(() => {
+          this.runSocketTask("ambiguity retry", async () => {
+            await this.confirmAmbiguityBeforeCleanup(input, cleanup, attempt + 1);
+          });
+        }, AMBIGUITY_RETRY_DELAY_MS);
+        retry.unref();
+        console.warn(
+          `[device-execution] ambiguity transition failed; retained pending work and scheduled retry ${attempt + 1}/${AMBIGUITY_RETRY_MAX_ATTEMPTS}:`,
+          (err as Error).message,
+        );
+      } else {
+        console.error(
+          `[device-execution] ambiguity transition escalation after ${attempt} attempts; pending work retained:`,
+          (err as Error).message,
+        );
+      }
+      return false;
+    }
+  }
+
   // ─── Lifecycle ──────────────────────────────────────────────────────────
 
   attach(): void {
@@ -293,53 +337,56 @@ export class DirectWsServer {
   async close(): Promise<void> {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.wss?.close();
-    const ambiguityWrites: Promise<unknown>[] = [];
-    // Reject all pending jobs
+    const confirmations: Promise<boolean>[] = [];
     for (const [jobId, pending] of this.pendingJobs) {
-      clearTimeout(pending.timer);
       if (pending.permit) {
-        ambiguityWrites.push(deviceExecutionArbiter.markAmbiguous({
+        confirmations.push(this.confirmAmbiguityBeforeCleanup({
           deviceId: pending.permit.handle.deviceId,
           handle: pending.permit.handle,
           reason: "direct_ws_server_shutdown_before_result",
           actor: "direct_ws_close",
           state: "blocked",
           metadata: { handle: pending.permit.wireHandle },
+        }, () => {
+          if (this.pendingJobs.get(jobId) !== pending) return;
+          clearTimeout(pending.timer);
+          this.pendingJobs.delete(jobId);
+          pending.reject(new Error("Server shutting down"));
         }));
+      } else {
+        clearTimeout(pending.timer);
+        this.pendingJobs.delete(jobId);
+        pending.reject(new Error("Server shutting down"));
       }
-      pending.reject(new Error("Server shutting down"));
-      this.pendingJobs.delete(jobId);
     }
-    // Reject all pending batches
     for (const [batchId, pending] of this.pendingBatches) {
-      clearTimeout(pending.timer);
-      ambiguityWrites.push(deviceExecutionArbiter.markAmbiguous({
+      confirmations.push(this.confirmAmbiguityBeforeCleanup({
         deviceId: pending.handle.deviceId,
         handle: pending.handle,
         reason: "direct_ws_server_shutdown_before_batch_result",
         actor: "direct_ws_close",
         state: "blocked",
+      }, () => {
+        if (this.pendingBatches.get(batchId) !== pending) return;
+        clearTimeout(pending.timer);
+        this.pendingBatches.delete(batchId);
+        pending.reject(new Error("Server shutting down"));
       }));
-      pending.reject(new Error("Server shutting down"));
-      this.pendingBatches.delete(batchId);
     }
     for (const [workflowId, pending] of this.pendingWorkflows) {
-      clearTimeout(pending.timer);
-      ambiguityWrites.push(deviceExecutionArbiter.markAmbiguous({
+      confirmations.push(this.confirmAmbiguityBeforeCleanup({
         deviceId: pending.handle.deviceId,
         handle: pending.handle,
         reason: "direct_ws_server_shutdown_before_workflow_terminal",
         actor: "direct_ws_close",
         state: "blocked",
+      }, () => {
+        if (this.pendingWorkflows.get(workflowId) !== pending) return;
+        clearTimeout(pending.timer);
+        this.pendingWorkflows.delete(workflowId);
       }));
-      this.pendingWorkflows.delete(workflowId);
     }
-    const ambiguityResults = await Promise.allSettled(ambiguityWrites);
-    for (const result of ambiguityResults) {
-      if (result.status === "rejected") {
-        console.error("[device-execution] shutdown ambiguity mark failed:", (result.reason as Error).message);
-      }
-    }
+    await Promise.all(confirmations);
   }
 
   // ─── Public API (transport interface) ────────────────────────────────────
@@ -476,26 +523,38 @@ export class DirectWsServer {
     permit?: DeviceExecutionJobDispatchPermit,
   ): ReturnType<typeof setTimeout> {
     const timer = setTimeout(() => {
-      this.pendingJobs.delete(jobId);
-      if (permit) {
-        deviceExecutionArbiter.markAmbiguous({
-          deviceId: permit.handle.deviceId,
-          handle: permit.handle,
-          reason: "job_result_timeout",
-          actor: "direct_ws_waiter_timeout",
-          state: "blocked",
-          metadata: {
-            timeoutMs,
-            handle: permit.wireHandle,
-          },
-        }).catch((err) => {
-          console.error("[device-execution] timeout ambiguity mark failed:", (err as Error).message);
-        });
-      }
-      reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
+      this.runSocketTask("job timeout", async () => {
+        await this.expirePendingJob(jobId, timeoutMs, permit);
+      });
     }, timeoutMs);
     timer.unref();
     return timer;
+  }
+
+  private async expirePendingJob(
+    jobId: string,
+    timeoutMs: number,
+    permit?: DeviceExecutionJobDispatchPermit,
+  ): Promise<void> {
+    const pending = this.pendingJobs.get(jobId);
+    if (!pending || pending.permit !== permit) return;
+    if (!permit) {
+      this.pendingJobs.delete(jobId);
+      pending.reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
+      return;
+    }
+    await this.confirmAmbiguityBeforeCleanup({
+      deviceId: permit.handle.deviceId,
+      handle: permit.handle,
+      reason: "job_result_timeout",
+      actor: "direct_ws_waiter_timeout",
+      state: "blocked",
+      metadata: { timeoutMs, handle: permit.wireHandle },
+    }, () => {
+      if (this.pendingJobs.get(jobId) !== pending) return;
+      this.pendingJobs.delete(jobId);
+      pending.reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
+    });
   }
 
   /**
@@ -577,16 +636,16 @@ export class DirectWsServer {
   private async expirePendingWorkflow(handle: DeviceExecutionHandle): Promise<void> {
     const pending = this.pendingWorkflows.get(handle.operationId);
     if (!pending || !handlesEqual(pending.handle, handle)) return;
-    await deviceExecutionArbiter.markAmbiguous({
+    await this.confirmAmbiguityBeforeCleanup({
       deviceId: handle.deviceId,
       handle,
       reason: "workflow_status_timeout",
       actor: "direct_ws_workflow_timeout",
       state: "blocked",
-    }).catch((err) => console.error("[device-execution] workflow timeout ambiguity mark failed:", (err as Error).message));
-    if (this.pendingWorkflows.get(handle.operationId) === pending) {
+    }, () => {
+      if (this.pendingWorkflows.get(handle.operationId) !== pending) return;
       this.pendingWorkflows.delete(handle.operationId);
-    }
+    });
   }
 
   /**
@@ -665,17 +724,18 @@ export class DirectWsServer {
   private async expirePendingBatch(handle: DeviceExecutionHandle, timeoutMs: number): Promise<void> {
     const pending = this.pendingBatches.get(handle.operationId);
     if (!pending || !handlesEqual(pending.handle, handle)) return;
-    await deviceExecutionArbiter.markAmbiguous({
+    await this.confirmAmbiguityBeforeCleanup({
       deviceId: handle.deviceId,
       handle,
       reason: "batch_result_timeout",
       actor: "direct_ws_batch_timeout",
       state: "blocked",
       metadata: { timeoutMs },
-    }).catch((err) => console.error("[device-execution] batch timeout ambiguity mark failed:", (err as Error).message));
-    if (this.pendingBatches.get(handle.operationId) !== pending) return;
-    this.pendingBatches.delete(handle.operationId);
-    pending.reject(new Error(`Batch ${handle.operationId} timed out after ${timeoutMs}ms`));
+    }, () => {
+      if (this.pendingBatches.get(handle.operationId) !== pending) return;
+      this.pendingBatches.delete(handle.operationId);
+      pending.reject(new Error(`Batch ${handle.operationId} timed out after ${timeoutMs}ms`));
+    });
   }
 
   isDeviceOnline(deviceId: string): boolean {
@@ -765,7 +825,8 @@ export class DirectWsServer {
       }
     }, AUTH_TIMEOUT_MS);
 
-    ws.on("message", async (raw) => {
+    ws.on("message", (raw) => {
+      this.runSocketTask("message", async () => {
       // Size guard
       if (Buffer.byteLength(raw as Buffer) > MAX_MSG_BYTES) {
         console.warn("[direct-ws] Oversized message — closing connection");
@@ -818,31 +879,46 @@ export class DirectWsServer {
         case "OTA_RESULT":     this._handleOtaResult(deviceConn, msg); break;
         default:                console.warn(`[direct-ws] Unknown message type: ${type}`); break;
       }
+      });
     });
 
-    ws.on("close", async (code, reason) => {
-      if (deviceConn) {
-        console.log(`[direct-ws] Device ${deviceConn.deviceId.slice(0,8)} disconnected: ${code} ${reason}`);
-        this.connections.delete(deviceConn.deviceId);
-        this.rateLimiter.delete(deviceConn.deviceId);
-        devicesConnected?.set(this.connections.size);
-        deviceOfflineEvents?.inc();
-
-        await this.blockPendingForDisconnectedDevice(deviceConn.deviceId, code, String(reason));
-
-        // Update DB
-        devicesService.markOffline(deviceConn.deviceId).catch(err =>
-          console.error("[direct-ws] markOffline error:", err)
-        );
-
-        alerting.deviceOffline(deviceConn.deviceId, "direct-ws").catch(() => {});
-      }
+    ws.on("close", (code, reason) => {
       if (authTimeout) clearTimeout(authTimeout);
+      if (!deviceConn) return;
+      const closedConnection = deviceConn;
+      this.runSocketTask("close", async () => {
+        await this.handleAuthenticatedClose(ws, closedConnection, code, String(reason));
+      });
     });
 
     ws.on("error", (err) => {
       console.error(`[direct-ws] WebSocket error (device=${deviceConn?.deviceId?.slice(0,8) ?? "unauth"}):`, err.message);
     });
+  }
+
+  private async handleAuthenticatedClose(
+    ws: WebSocket,
+    connection: ConnectedDevice,
+    code: number,
+    reason: string,
+  ): Promise<"closed" | "superseded"> {
+    if (this.connections.get(connection.deviceId)?.ws !== ws) {
+      console.log(`[direct-ws] Ignoring stale close for superseded device connection ${connection.deviceId.slice(0, 8)}`);
+      return "superseded";
+    }
+
+    console.log(`[direct-ws] Device ${connection.deviceId.slice(0,8)} disconnected: ${code} ${reason}`);
+    this.connections.delete(connection.deviceId);
+    this.rateLimiter.delete(connection.deviceId);
+    devicesConnected?.set(this.connections.size);
+    deviceOfflineEvents?.inc();
+
+    await this.blockPendingForDisconnectedDevice(connection.deviceId, code, reason);
+    await devicesService.markOffline(connection.deviceId).catch(err =>
+      console.error("[direct-ws] markOffline error:", err)
+    );
+    await alerting.deviceOffline(connection.deviceId, "direct-ws").catch(() => {});
+    return "closed";
   }
 
   private async blockPendingForDisconnectedDevice(
@@ -853,60 +929,59 @@ export class DirectWsServer {
     const jobs = [...this.pendingJobs.entries()].filter(([, pending]) => pending.deviceId === deviceId);
     const batches = [...this.pendingBatches.entries()].filter(([, pending]) => pending.handle.deviceId === deviceId);
     const workflows = [...this.pendingWorkflows.entries()].filter(([, pending]) => pending.handle.deviceId === deviceId);
-    const transitions: Promise<unknown>[] = [];
+    const confirmations: Promise<boolean>[] = [];
 
-    for (const [, pending] of jobs) {
-      if (!pending.permit) continue;
-      transitions.push(deviceExecutionArbiter.markAmbiguous({
+    for (const [jobId, pending] of jobs) {
+      if (!pending.permit) {
+        clearTimeout(pending.timer);
+        if (this.pendingJobs.get(jobId) === pending) this.pendingJobs.delete(jobId);
+        pending.reject(new Error(`Device ${deviceId} disconnected`));
+        continue;
+      }
+      confirmations.push(this.confirmAmbiguityBeforeCleanup({
         deviceId,
         handle: pending.permit.handle,
         reason: "device_disconnected_before_job_result",
         actor: "direct_ws_disconnect",
         state: "blocked",
         metadata: { handle: pending.permit.wireHandle, closeCode, closeReason },
+      }, () => {
+        if (this.pendingJobs.get(jobId) !== pending) return;
+        clearTimeout(pending.timer);
+        this.pendingJobs.delete(jobId);
+        pending.reject(new Error(`Device ${deviceId} disconnected`));
       }));
     }
-    for (const [, pending] of batches) {
-      transitions.push(deviceExecutionArbiter.markAmbiguous({
+    for (const [batchId, pending] of batches) {
+      confirmations.push(this.confirmAmbiguityBeforeCleanup({
         deviceId,
         handle: pending.handle,
         reason: "device_disconnected_before_batch_result",
         actor: "direct_ws_disconnect",
         state: "blocked",
         metadata: { closeCode, closeReason },
+      }, () => {
+        if (this.pendingBatches.get(batchId) !== pending) return;
+        clearTimeout(pending.timer);
+        this.pendingBatches.delete(batchId);
+        pending.reject(new Error(`Device ${deviceId} disconnected during batch ${batchId}`));
       }));
     }
-    for (const [, pending] of workflows) {
-      transitions.push(deviceExecutionArbiter.markAmbiguous({
+    for (const [workflowId, pending] of workflows) {
+      confirmations.push(this.confirmAmbiguityBeforeCleanup({
         deviceId,
         handle: pending.handle,
         reason: "device_disconnected_before_workflow_terminal",
         actor: "direct_ws_disconnect",
         state: "blocked",
         metadata: { closeCode, closeReason },
+      }, () => {
+        if (this.pendingWorkflows.get(workflowId) !== pending) return;
+        clearTimeout(pending.timer);
+        this.pendingWorkflows.delete(workflowId);
       }));
     }
-    const settled = await Promise.allSettled(transitions);
-    for (const result of settled) {
-      if (result.status === "rejected") {
-        console.error("[device-execution] disconnect ambiguity mark failed:", (result.reason as Error).message);
-      }
-    }
-
-    for (const [jobId, pending] of jobs) {
-      clearTimeout(pending.timer);
-      if (this.pendingJobs.get(jobId) === pending) this.pendingJobs.delete(jobId);
-      pending.reject(new Error(`Device ${deviceId} disconnected`));
-    }
-    for (const [batchId, pending] of batches) {
-      clearTimeout(pending.timer);
-      if (this.pendingBatches.get(batchId) === pending) this.pendingBatches.delete(batchId);
-      pending.reject(new Error(`Device ${deviceId} disconnected during batch ${batchId}`));
-    }
-    for (const [workflowId, pending] of workflows) {
-      clearTimeout(pending.timer);
-      if (this.pendingWorkflows.get(workflowId) === pending) this.pendingWorkflows.delete(workflowId);
-    }
+    await Promise.all(confirmations);
     return { jobs: jobs.length, batches: batches.length, workflows: workflows.length };
   }
 

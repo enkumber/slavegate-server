@@ -245,6 +245,18 @@ class FakeClient {
       return { rows: [found], rowCount: 1 };
     }
 
+    if (normalized.startsWith("UPDATE device_execution_operations") && normalized.includes("WHERE root_id = $1") && normalized.includes("state = 'registered'")) {
+      const [rootId, ownerGeneration, metadata] = params as [string, number, string];
+      const found = this.operations.filter((item) => item.root_id === rootId && item.state === "registered");
+      for (const item of found) {
+        item.state = "cancelled";
+        item.owner_generation = ownerGeneration;
+        item.metadata = { ...item.metadata, ...(JSON.parse(metadata) as Record<string, unknown>) };
+        item.updated_at = new Date("2026-07-15T19:31:00.000Z");
+      }
+      return { rows: found, rowCount: found.length };
+    }
+
     if (normalized.startsWith("UPDATE device_execution_operations")) {
       const [toState, ownerGeneration, metadata, wireHandle, operationKind, operationId, fromStates] = params as [
         DeviceExecutionOperationState,
@@ -1125,14 +1137,26 @@ describe("DeviceExecutionArbiter observe mode", () => {
         fifo_sequence: 2,
       }),
     );
-    client.operations.push(operation({
-      root_id: "queued-workflow-root",
-      root_kind: "server_workflow",
-      operation_kind: "workflow",
-      operation_id: "workflow-queued",
-      state: "registered",
-      owner_generation: 0,
-    }));
+    client.operations.push(
+      operation({
+        id: 1,
+        root_id: "queued-workflow-root",
+        root_kind: "server_workflow",
+        operation_kind: "workflow",
+        operation_id: "workflow-queued",
+        state: "registered",
+        owner_generation: 0,
+      }),
+      operation({
+        id: 2,
+        root_id: "queued-workflow-root",
+        root_kind: "server_workflow",
+        operation_kind: "job",
+        operation_id: "workflow-execute-job",
+        state: "registered",
+        owner_generation: 0,
+      }),
+    );
 
     const result = await arbiterFor(client).cancelQueuedServerWorkflowRoot({
       deviceId: DEVICE_A,
@@ -1144,7 +1168,8 @@ describe("DeviceExecutionArbiter observe mode", () => {
       state: "dispatched",
       owner_generation: 1,
     });
-    expect(client.operations[0]).toMatchObject({ state: "cancelled" });
+    expect(client.operations).toHaveLength(2);
+    expect(client.operations.every((item) => item.state === "cancelled")).toBe(true);
     expect(client.events.some((event) => event.event_type === "queued_server_workflow_cancelled")).toBe(true);
   });
 

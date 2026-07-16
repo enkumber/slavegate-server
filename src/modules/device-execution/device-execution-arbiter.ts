@@ -2503,17 +2503,14 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      const rootOperation = await selectOperationByIdentity(client, "workflow", input.workflowId, true);
-      const terminalOperation = rootOperation
-        ? await updateOperationState(client, {
-            operationKind: "workflow",
-            operationId: input.workflowId,
-            fromStates: ["registered"],
-            toState: "cancelled",
-            ownerGeneration: generation,
-            metadata: input.metadata,
-          }) ?? rootOperation
-        : null;
+      const cancelledOperations = await cancelRegisteredOperationsForRoot(client, {
+        rootId: root.id,
+        ownerGeneration: generation,
+        metadata: input.metadata,
+      });
+      const terminalOperation = cancelledOperations.find((operation) =>
+        operation.operation_kind === "workflow" && operation.operation_id === input.workflowId
+      ) ?? null;
       await insertEvent(client, {
         rootId: terminal.id,
         deviceId: terminal.device_id,
@@ -2522,7 +2519,11 @@ export class DeviceExecutionArbiter {
         newState: terminal.state,
         actor: input.actor ?? "workflow_dispatch.cancel",
         reason: input.reason ?? "queued_workflow_cancelled_before_dispatch",
-        metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+        metadata: {
+          workflowId: input.workflowId,
+          cancelledOperationCount: cancelledOperations.length,
+          ...(input.metadata ?? {}),
+        },
       });
       return {
         decision: "terminal",
@@ -3038,6 +3039,29 @@ async function updateOperationState(
     ]
   );
   return result.rows[0] ?? null;
+}
+
+async function cancelRegisteredOperationsForRoot(
+  client: Queryable,
+  input: {
+    rootId: string;
+    ownerGeneration: number;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<DeviceExecutionOperationRow[]> {
+  const result = await client.query<DeviceExecutionOperationRow>(
+    `UPDATE device_execution_operations
+     SET state = 'cancelled',
+         owner_generation = $2::bigint,
+         terminal_at = NOW(),
+         updated_at = NOW(),
+         metadata = metadata || $3::jsonb
+     WHERE root_id = $1
+       AND state = 'registered'
+     RETURNING *`,
+    [input.rootId, input.ownerGeneration, JSON.stringify(input.metadata ?? {})],
+  );
+  return result.rows;
 }
 
 async function updateRootTerminal(
