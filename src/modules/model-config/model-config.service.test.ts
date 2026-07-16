@@ -278,4 +278,71 @@ describe("ModelConfigService credential and endpoint safety", () => {
     expect(sanitizeProviderError("Authorization: Basic dXNlcjpwYXNz\nauthorization=opaque-secret"))
       .toBe("Authorization: [redacted]\nauthorization=[redacted]");
   });
+
+  it("removes API-key values and fragments from provider error variants", () => {
+    const secrets = [
+      "sk-live-provider-secret-123456",
+      "sk-json-provider-secret-abcdef",
+      "sk-header-provider-secret-fedcba",
+      "opaque-provider-token-987654",
+    ];
+    const messages = [
+      `Incorrect API key provided: ${secrets[0]}. You can find your API key at https://platform.openai.com/account/api-keys.`,
+      JSON.stringify({
+        error: {
+          message: `Incorrect API key provided: ${secrets[1]}`,
+          headers: { Authorization: secrets[2] },
+        },
+      }),
+      `Authorization: ${secrets[2]}`,
+      `x-api-key=${secrets[3]}`,
+    ];
+
+    for (const sanitized of messages.map((message) => sanitizeProviderError(message))) {
+      for (const secret of secrets) {
+        expect(sanitized).not.toContain(secret);
+        expect(sanitized).not.toContain(secret.slice(0, 12));
+        expect(sanitized).not.toContain(secret.slice(-12));
+      }
+    }
+  });
+
+  it("stores only sanitized provider failure text in last_test_message", async () => {
+    const secret = "sk-last-test-message-secret-123456";
+    process.env.MODEL_CONFIG_TEST_KEY = secret;
+    process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "local:provider.test";
+    setModelConfigEndpointResolverForTests(async () => [{ address: "127.0.0.1", family: 4 }]);
+    const server = http.createServer((_req, res) => {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        error: `Incorrect API key provided: ${secret}`,
+        Authorization: secret,
+      }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server did not bind");
+
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("SELECT * FROM model_configs WHERE role = $1")) {
+        return { rows: [row({ role: params?.[0], endpoint: `http://provider.test:${address.port}/v1` })] };
+      }
+      if (sql.includes("UPDATE model_configs")) {
+        const message = String(params?.[2] ?? "");
+        expect(message).not.toContain(secret);
+        expect(message).not.toContain(secret.slice(0, 12));
+        expect(message).not.toContain(secret.slice(-12));
+        return { rows: [row({ last_test_status: params?.[1], last_test_message: message })] };
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    });
+
+    try {
+      await expect(new ModelConfigService().test("decision_llm")).rejects.toMatchObject({
+        code: "AI_PROVIDER_TEST_FAILED",
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
 });
