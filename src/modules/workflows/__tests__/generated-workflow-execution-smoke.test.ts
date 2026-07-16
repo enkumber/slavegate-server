@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => {
       create: vi.fn(),
       markRunning: vi.fn(),
       markFailed: vi.fn(),
+      markFailedIfEdgeStartUnacknowledged: vi.fn(),
       get: vi.fn(),
       cancel: vi.fn(),
       getTemplate: vi.fn(),
@@ -287,6 +288,7 @@ describe("generated workflow cache-only execution route", () => {
     mocks.workflowService.countByStatus.mockResolvedValue(0);
     mocks.workflowService.create.mockResolvedValue({ id: "wf-cache-smoke" });
     mocks.workflowService.markRunning.mockResolvedValue(true);
+    mocks.workflowService.markFailedIfEdgeStartUnacknowledged.mockResolvedValue(true);
     mocks.directWsServer.supportsEdgeExecution.mockReturnValue(true);
     mocks.directWsServer.sendWorkflowStart.mockReturnValue(true);
     mocks.directWsServer.getConnectedDeviceIds.mockReturnValue([
@@ -340,7 +342,7 @@ describe("generated workflow cache-only execution route", () => {
 
     await vi.advanceTimersByTimeAsync(6);
 
-    expect(mocks.workflowService.markFailed).toHaveBeenCalledWith(
+    expect(mocks.workflowService.markFailedIfEdgeStartUnacknowledged).toHaveBeenCalledWith(
       "wf-cache-smoke",
       expect.stringContaining("Edge workflow did not acknowledge WORKFLOW_START"),
     );
@@ -376,7 +378,7 @@ describe("generated workflow cache-only execution route", () => {
 
     await vi.advanceTimersByTimeAsync(6);
 
-    expect(mocks.workflowService.markFailed).not.toHaveBeenCalled();
+    expect(mocks.workflowService.markFailedIfEdgeStartUnacknowledged).not.toHaveBeenCalled();
   });
 
   it("runs semantic workflows server-side so semantic targets resolve from live UI tree", async () => {
