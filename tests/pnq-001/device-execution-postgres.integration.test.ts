@@ -316,8 +316,8 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
 
     expect(order).toEqual(["waiter", "wire"]);
     expect(result).toMatchObject({ decision: "offline", sent: false, reason: "workflow_send_timeout" });
-    expect(result.root).toMatchObject({ state: "dispatching" });
-    expect(result.operation).toMatchObject({ state: "rejected" });
+    expect(result.root).toMatchObject({ state: "blocked" });
+    expect(result.operation).toMatchObject({ state: "blocked" });
     await arbiter.observeAdmission({ deviceId: DEVICE_A, rootKind: "job", externalId: "timeout-successor" });
     await expect(arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: "after-timeout-worker" })).resolves.toBeNull();
     expect(await stateForExternalId(pool, "timeout-successor")).toBe("queued");
