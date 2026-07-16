@@ -130,9 +130,9 @@ function publishGeneratedWorkflowTaskEvent(
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATED_WORKFLOW_ROUTINE = "generated_workflow";
 const GENERATED_WORKFLOW_FINAL_POLL_INTERVAL_MS = 2_000;
-const GENERATED_WORKFLOW_FINAL_TIMEOUT_MS = 180_000;
+const GENERATED_WORKFLOW_ACTIVE_WARN_MS = 180_000;
 const GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS = Number(
-  process.env.GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS ?? GENERATED_WORKFLOW_FINAL_TIMEOUT_MS,
+  process.env.GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS ?? GENERATED_WORKFLOW_ACTIVE_WARN_MS,
 );
 
 function zeroTokenUsage(): TaskResult["tokenUsage"] {
@@ -388,10 +388,17 @@ async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<Workfl
       }
     } else {
       runningAt ??= Date.now();
-      if (Date.now() - runningAt >= GENERATED_WORKFLOW_FINAL_TIMEOUT_MS) {
-        throw new Error(
-          `Generated workflow ${workflowId} did not reach a final status within ${GENERATED_WORKFLOW_FINAL_TIMEOUT_MS}ms after dispatch; latest=${latest.status}`,
+      if (Date.now() - runningAt >= GENERATED_WORKFLOW_ACTIVE_WARN_MS) {
+        // The workflow worker owns the durable execution lifecycle.  Do not
+        // fail the task on a shorter observer deadline: that makes the task
+        // runner retry and dispatch a second workflow while the original root
+        // is still active.  Keep the task attached to the original workflow
+        // until the worker persists a terminal state.
+        console.warn(
+          `[task-runner] Generated workflow ${workflowId} is still ${latest.status} after ` +
+          `${GENERATED_WORKFLOW_ACTIVE_WARN_MS}ms; continuing to await the original execution`,
         );
+        runningAt = Date.now();
       }
     }
     await sleep(GENERATED_WORKFLOW_FINAL_POLL_INTERVAL_MS);

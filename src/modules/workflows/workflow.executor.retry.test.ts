@@ -1,13 +1,30 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Job } from "bullmq";
 import { deviceExecutionArbiter } from "../device-execution";
+import { dispatcherService } from "../dispatcher/dispatcher.service";
+import { hbeService } from "../hbe/hbe.service";
+import * as transport from "../../transport/transport";
 import { workflowService, type WorkflowRecord } from "./workflow.service";
 import {
   awaitGeneratedChildJobResult,
   resolveJobResult,
   runWorkflow,
+  shouldContinueAfterMissingJobResult,
 } from "./workflow.executor";
 import type { WorkflowTemplate } from "./types";
+
+vi.mock("../../transport/transport", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../transport/transport")>();
+  return {
+    ...actual,
+    isDeviceOnline: vi.fn(actual.isDeviceOnline),
+    sendDeviceExecutionJobToDevice: vi.fn(actual.sendDeviceExecutionJobToDevice),
+  };
+});
+
+vi.mock("../../db/client", () => ({
+  getDb: vi.fn(() => ({ query: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }) })),
+}));
 
 const WORKFLOW_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_ID = "22222222-2222-4222-8222-222222222222";
@@ -62,6 +79,92 @@ afterEach(() => {
 });
 
 describe("workflow BullMQ retry semantics", () => {
+  it("continues only timeout-tolerant dispatched effects when JOB_RESULT is missing", () => {
+    const timeout = new Error("JOB_RESULT timeout after 30000ms (jobId=test)");
+
+    expect(shouldContinueAfterMissingJobResult("screen_wake", timeout, true)).toBe(true);
+    expect(shouldContinueAfterMissingJobResult("unlock", timeout, true)).toBe(true);
+    expect(shouldContinueAfterMissingJobResult("intent_send", timeout, true)).toBe(true);
+    expect(shouldContinueAfterMissingJobResult("ui_tree_dump", timeout, true)).toBe(false);
+    expect(shouldContinueAfterMissingJobResult("intent_send", new Error("dispatch rejected"), true)).toBe(false);
+    expect(shouldContinueAfterMissingJobResult("intent_send", timeout, false)).toBe(false);
+  });
+
+  it("completes wake -> unlock -> intent_send -> ui_tree_dump when effect jobs omit JOB_RESULT", async () => {
+    vi.useFakeTimers();
+    try {
+      const exactTemplate: WorkflowTemplate = {
+        id: TEMPLATE_ID,
+        name: "BustaBuster server-mode regression",
+        platform: "android",
+        description: "Exact live path with fire-and-forget effects and final UI evidence",
+        version: "1.0.0",
+        safetyClass: "read_only",
+        recoveryPolicy: { autonomy: "bounded", maxAttemptsPerStep: 1, maxAttemptsPerWorkflow: 1 },
+        steps: [
+          { type: "action", id: "wake", action: "screen_wake", timeoutMs: 1, params: {} },
+          { type: "action", id: "unlock", action: "unlock", timeoutMs: 1, params: {} },
+          { type: "action", id: "open", action: "intent_send", timeoutMs: 1, params: { uri: "https://bustabit.com/bankroll" } },
+          { type: "action", id: "tree", action: "ui_tree_dump", timeoutMs: 1, params: { outputVariable: "_finalUiTree" } },
+        ],
+        defaultVerificationStrategy: "local_only",
+        dataRetentionDays: 1,
+      };
+      const running = { ...workflow("running"), totalSteps: 4 };
+      const dispatched: string[] = [];
+      let jobCounter = 0;
+
+      vi.spyOn(workflowService, "get").mockResolvedValue(running);
+      vi.spyOn(workflowService, "getTemplate").mockResolvedValue(exactTemplate);
+      vi.spyOn(workflowService, "saveCheckpoint").mockResolvedValue(true);
+      const completed = vi.spyOn(workflowService, "markCompleted").mockResolvedValue(undefined);
+      vi.spyOn(deviceExecutionArbiter, "finishServerWorkflowRoot")
+        .mockResolvedValue({ decision: "terminal", root: null });
+      vi.mocked(transport.isDeviceOnline).mockReturnValue(true);
+      vi.spyOn(hbeService, "getActionParams").mockReturnValue({
+        action: { preActionDelayMs: 0, postActionDelayMs: 0, simulateError: false },
+        verificationStrategy: "local_only",
+        l1TimeoutMs: 1,
+        l2SettleMs: 0,
+      } as ReturnType<typeof hbeService.getActionParams>);
+      vi.spyOn(dispatcherService, "dispatch").mockImplementation(async (input) => ({
+        jobId: `job-${++jobCounter}-${input.type}`,
+        timeoutMs: input.timeoutMs ?? 1,
+      }));
+      vi.mocked(transport.sendDeviceExecutionJobToDevice).mockImplementation(async (_deviceId, command) => {
+        dispatched.push(command.type);
+        if (command.type === "unlock") {
+          setTimeout(() => resolveJobResult(command.jobId, {
+            status: "completed",
+            output: { unlocked: true },
+            durationMs: 1,
+          }), 0);
+        }
+        if (command.type === "ui_tree_dump") {
+          setTimeout(() => resolveJobResult(command.jobId, {
+            status: "completed",
+            output: { tree: [{ text: "Bankroll 638.824 BTC" }] },
+            durationMs: 1,
+          }), 0);
+        }
+        return { decision: "admitted", root: null, sent: true, queued: false };
+      });
+
+      const pending = runWorkflow(WORKFLOW_ID, job());
+      const completedAssertion = expect(pending).resolves.toBeUndefined();
+      await vi.runAllTimersAsync();
+      await completedAssertion;
+
+      expect(dispatched).toEqual(["screen_wake", "unlock", "intent_send", "ui_tree_dump"]);
+      expect(completed).toHaveBeenCalledWith(WORKFLOW_ID);
+      expect(running.checkpoint.variables._finalUiTree).toEqual({
+        tree: [{ text: "Bankroll 638.824 BTC" }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("awaits a PNQ-queued server child until queue replay returns JOB_RESULT", async () => {
     const jobId = "33333333-3333-4333-8333-333333333333";
     const resultPromise = awaitGeneratedChildJobResult(

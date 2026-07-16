@@ -486,8 +486,9 @@ describe("Generated workflow contract validation", () => {
     expect(executorSource).toContain("stats.runtimeLlmCalls++");
     expect(executorSource).toContain("normalizeA11yFindTapParams(finalParams)");
     expect(executorSource).toContain('params["resourceId"] = "add_comment_button"');
-    expect(executorSource).toContain("function isReadinessAction");
-    expect(executorSource).toContain("continuing because readiness actions are idempotent");
+    expect(executorSource).toContain("function isTimeoutTolerantEffectAction");
+    expect(executorSource).toContain('action === "intent_send"');
+    expect(executorSource).toContain("continuing because the dispatched effect is timeout-tolerant");
     expect(executorSource).toContain("timeoutMs: dispatchedTimeoutMs");
     expect(executorSource).toContain("awaitGeneratedChildJobResult");
     expect(executorSource).toContain("executionTimeoutMs + 5_000");

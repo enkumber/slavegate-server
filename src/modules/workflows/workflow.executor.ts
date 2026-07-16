@@ -127,13 +127,26 @@ function recoveryReasonFromError(err: unknown): string {
   return "deterministic_failure";
 }
 
-function isReadinessAction(action: string): boolean {
-  return action === "screen_wake" || action === "unlock";
+function isTimeoutTolerantEffectAction(action: string): boolean {
+  // These commands may complete on Android even when the process/activity
+  // transition prevents the device from returning JOB_RESULT.  They are safe
+  // to treat as dispatched effects after a timeout while the device remains
+  // online.  State-bearing observation actions (ui_tree_dump, screenshot,
+  // classifiers, etc.) must still return their result.
+  return action === "screen_wake" || action === "unlock" || action === "intent_send";
 }
 
 function isJobResultTimeoutError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return message.includes("JOB_RESULT timeout");
+}
+
+export function shouldContinueAfterMissingJobResult(
+  action: string,
+  err: unknown,
+  deviceOnline: boolean,
+): boolean {
+  return deviceOnline && isTimeoutTolerantEffectAction(action) && isJobResultTimeoutError(err);
 }
 
 function generatedWorkflowRecoveryAttemptsByStep(checkpoint: WorkflowCheckpoint): Record<string, number> {
@@ -1346,10 +1359,10 @@ async function executeActionStep(
   try {
     result = await resultPromise;
   } catch (err) {
-    if (isReadinessAction(step.action) && isJobResultTimeoutError(err) && isDeviceOnline(deviceId)) {
+    if (shouldContinueAfterMissingJobResult(step.action, err, isDeviceOnline(deviceId))) {
       console.warn(
         `[workflow] ${workflowId} step ${stepIndex} ${step.action} timed out waiting for JOB_RESULT, ` +
-        "but device is online; continuing because readiness actions are idempotent"
+        "but device is online; continuing because the dispatched effect is timeout-tolerant"
       );
       return;
     }

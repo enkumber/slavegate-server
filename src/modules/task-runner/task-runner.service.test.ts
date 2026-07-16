@@ -666,6 +666,33 @@ describe("task-runner generated_workflow routine", () => {
     }
   });
 
+  it("does not retry or redispatch while the original workflow remains active past the observer warning", async () => {
+    vi.useFakeTimers();
+    try {
+      const cached = cacheRecord();
+      let completed = false;
+      mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+      mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+      mocks.getWorkflow.mockImplementation(async () => ({
+        ...completedWorkflow(),
+        status: completed ? "completed" : "running",
+        currentStep: completed ? 2 : 1,
+        completedAt: completed ? new Date().toISOString() : null,
+      }));
+
+      const pending = executeTaskNow(TASK_ID);
+      await vi.advanceTimersByTimeAsync(180_001);
+      completed = true;
+      await vi.advanceTimersByTimeAsync(2_001);
+      const result = await pending;
+
+      expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ success: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("retries a repaired generated workflow candidate after failure", async () => {
     const cached = cacheRecord({
       sourceMetadata: {
