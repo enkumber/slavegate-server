@@ -14,7 +14,7 @@ import type {
   DeviceExecutionRootKind,
   DeviceExecutionStandaloneJobEgressResult,
 } from "../modules/device-execution";
-import { DEVICE_EXECUTION_BOUNDARY_MATRIX } from "../modules/device-execution";
+import { DEVICE_EXECUTION_BOUNDARY_MATRIX, encodeDeviceExecutionHandle } from "../modules/device-execution";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
 
 export type StandaloneJobSendResult = Pick<
@@ -196,15 +196,46 @@ export async function sendBatchToDeviceEnforced(
   batchPayload: Record<string, unknown>,
   timeoutMs: number,
 ): Promise<any> {
+  return sendBatchThroughBoundary(deviceId, batchPayload, timeoutMs, {
+    boundary: "edge_batch",
+    actor: "transport.g3.batch",
+  });
+}
+
+export async function sendServerWorkflowBatchChildToDevice(
+  deviceId: string,
+  workflowRootExternalId: string,
+  batchPayload: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<any> {
+  if (!workflowRootExternalId) throw new Error("Server workflow batch child requires canonical workflow root identity");
+  return sendBatchThroughBoundary(deviceId, batchPayload, timeoutMs, {
+    boundary: "server_workflow_batch_child",
+    rootExternalId: workflowRootExternalId,
+    actor: "transport.g3.server_workflow_batch_child",
+  });
+}
+
+async function sendBatchThroughBoundary(
+  deviceId: string,
+  batchPayload: Record<string, unknown>,
+  timeoutMs: number,
+  options: {
+    boundary: "edge_batch" | "server_workflow_batch_child";
+    rootExternalId?: string;
+    actor: string;
+  },
+): Promise<any> {
   const batchId = batchPayload.batchId;
   if (typeof batchId !== "string" || !batchId) throw new Error("BATCH_START requires batchId");
   let resultPromise: Promise<any> | undefined;
   const dispatch = await deviceExecutionArbiter.runObservedEgress({
     deviceId,
-    boundary: "edge_batch",
+    boundary: options.boundary,
+    rootExternalId: options.rootExternalId,
     operationId: batchId,
     wireType: "BATCH_START",
-    actor: "transport.g3.batch",
+    actor: options.actor,
     metadata: { workflowId: batchPayload.workflowId ?? null },
     registerWaiter: (handle) => {
       resultPromise = directWsServer.registerBatchWaiterWithHandle(handle, timeoutMs);
@@ -213,6 +244,9 @@ export async function sendBatchToDeviceEnforced(
   });
   if (!dispatch.sent || !dispatch.handle || !resultPromise) {
     if (dispatch.handle) directWsServer.rejectBatchWaiterWithHandle(dispatch.handle, dispatch.reason ?? "batch_not_sent");
+    if (options.boundary === "edge_batch" && dispatch.decision === "would_wait" && dispatch.handle) {
+      await cancelUnreplayableObservedAttempt(dispatch.handle, "queued_edge_batch_not_replayable");
+    }
     throw new Error(`Batch ${batchId} was not sent: ${dispatch.reason ?? dispatch.decision}`);
   }
   return resultPromise;
@@ -233,7 +267,27 @@ export async function sendEdgeWorkflowToDeviceEnforced(
     metadata: { templateId: template.id ?? null },
     wireDispatch: (handle) => directWsServer.sendWorkflowStartWithHandle(handle, template, variables),
   });
+  if (!dispatch.sent && dispatch.decision === "would_wait" && dispatch.handle) {
+    await cancelUnreplayableObservedAttempt(dispatch.handle, "queued_edge_workflow_not_replayable");
+  }
   return dispatch.sent;
+}
+
+async function cancelUnreplayableObservedAttempt(
+  handle: import("../modules/device-execution").DeviceExecutionHandle,
+  reason: string,
+): Promise<void> {
+  const cancelled = await deviceExecutionArbiter.observeTerminal({
+    deviceId: handle.deviceId,
+    handle,
+    status: "cancelled",
+    actor: "transport.unreplayable_observed_attempt",
+    reason,
+    metadata: { queueDisposition: "cancelled_before_fallback", handle: encodeDeviceExecutionHandle(handle) },
+  });
+  if (cancelled.decision !== "terminal") {
+    throw new Error(`Failed to cancel unreplayable PNQ attempt ${handle.operationId}: ${cancelled.reason ?? cancelled.decision}`);
+  }
 }
 
 export async function sendWorkflowCancellationControl(deviceId: string, workflowId: string): Promise<boolean> {

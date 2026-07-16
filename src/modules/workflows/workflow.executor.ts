@@ -23,7 +23,7 @@ import { getRedisConnectionOptions } from "../../redis/client";
 import { workflowService } from "./workflow.service";
 import { hbeService } from "../hbe/hbe.service";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { sendBatchToDeviceEnforced, sendDeviceExecutionJobToDevice, isDeviceOnline } from "../../transport/transport";
+import { sendServerWorkflowBatchChildToDevice, sendDeviceExecutionJobToDevice, isDeviceOnline } from "../../transport/transport";
 import { deviceExecutionArbiter } from "../device-execution";
 import { scalabilityConfig } from "../../config/scalability.config";
 import { getDb } from "../../db/client";
@@ -1735,8 +1735,9 @@ export async function executeBatchSteps(
 
   console.log(`[workflow] Batch ${batchId.slice(0,8)} sent to ${deviceId.slice(0,8)}: ${steps.length} steps`);
 
-  const result = await sendBatchToDeviceEnforced(
+  const result = await sendServerWorkflowBatchChildToDevice(
     deviceId,
+    workflowId,
     batchPayload,
     (batchPayload.options as Record<string, unknown>).batchTimeoutMs as number + 30_000,
   );

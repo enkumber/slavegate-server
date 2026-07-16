@@ -1,9 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
-import { isJobReplayEnvelope, type DeviceExecutionJobReplayEnvelopeV1 } from "./transport";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  isJobReplayEnvelope,
+  sendBatchToDeviceEnforced,
+  sendEdgeWorkflowToDeviceEnforced,
+  type DeviceExecutionJobReplayEnvelopeV1,
+} from "./transport";
+import { deviceExecutionArbiter, type DeviceExecutionHandle } from "../modules/device-execution";
 
 const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function envelope(): DeviceExecutionJobReplayEnvelopeV1 {
   return {
@@ -55,5 +65,66 @@ describe("PNQ job replay envelope", () => {
     expect(indexSource).toContain("queueSweepTimer.unref()");
     expect(indexSource).toContain("clearInterval(queueSweepTimer)");
     expect(directWsSource).toContain("await Promise.allSettled(ambiguityWrites)");
+  });
+});
+
+describe("PNQ unreplayable observed-root disposition", () => {
+  const handle: DeviceExecutionHandle = {
+    rootId: "22222222-2222-4222-8222-222222222222",
+    deviceId: DEVICE_ID,
+    rootKind: "batch",
+    ownerGeneration: 0,
+    operationKind: "batch",
+    operationId: "batch-waiting",
+  };
+
+  function mockWouldWait(waitingHandle: DeviceExecutionHandle) {
+    vi.spyOn(deviceExecutionArbiter, "runObservedEgress").mockResolvedValue({
+      decision: "would_wait",
+      root: null,
+      handle: waitingHandle,
+      sent: false,
+      reason: "device_slot_already_active",
+    });
+    return vi.spyOn(deviceExecutionArbiter, "observeTerminal").mockResolvedValue({
+      decision: "terminal",
+      root: null,
+      handle: waitingHandle,
+    });
+  }
+
+  it("cancels and audits a queued standalone batch before caller fallback", async () => {
+    const observeTerminal = mockWouldWait(handle);
+    await expect(sendBatchToDeviceEnforced(DEVICE_ID, {
+      type: "BATCH_START",
+      batchId: handle.operationId,
+      workflowId: "wf",
+      steps: [],
+    }, 1_000)).rejects.toThrow("device_slot_already_active");
+    expect(observeTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      handle,
+      status: "cancelled",
+      reason: "queued_edge_batch_not_replayable",
+    }));
+  });
+
+  it("cancels and audits a queued edge workflow before server fallback", async () => {
+    const workflowHandle: DeviceExecutionHandle = {
+      ...handle,
+      rootKind: "edge_workflow",
+      operationKind: "workflow",
+      operationId: "workflow-waiting",
+    };
+    const observeTerminal = mockWouldWait(workflowHandle);
+    await expect(sendEdgeWorkflowToDeviceEnforced(
+      DEVICE_ID,
+      workflowHandle.operationId,
+      { id: "template" },
+    )).resolves.toBe(false);
+    expect(observeTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      handle: workflowHandle,
+      status: "cancelled",
+      reason: "queued_edge_workflow_not_replayable",
+    }));
   });
 });

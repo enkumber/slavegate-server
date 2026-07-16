@@ -14,12 +14,20 @@
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../../db/client";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { sendStandaloneJobToDevice, isDeviceOnline } from "../../transport/transport";
+import { sendDeviceExecutionJobToDevice, sendStandaloneJobToDevice, isDeviceOnline } from "../../transport/transport";
 
 function getTransportAdapter() {
   return {
-    sendJob: (deviceId: string, payload: any) => {
-      return sendStandaloneJobToDevice(deviceId, payload).then((result) => result.sent);
+    sendJob: (deviceId: string, payload: any, workflowRootExternalId?: string) => {
+      const result = workflowRootExternalId
+        ? sendDeviceExecutionJobToDevice(deviceId, payload, {
+            boundary: "generated_child",
+            rootExternalId: workflowRootExternalId,
+            actor: "skill_cascade",
+            metadata: { observeSource: "skillCascade.transportAdapter" },
+          })
+        : sendStandaloneJobToDevice(deviceId, payload);
+      return result.then((dispatch) => dispatch.sent);
     },
     isDeviceOnline: (deviceId: string) => {
       return isDeviceOnline(deviceId);
@@ -233,7 +241,7 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
         type: "press_key" as import("../../../shared/protocol/messages").JobType,
         params: { key: "back" } as Record<string, unknown>,
         timeoutMs: 2_000,
-      });
+      }, req.workflowId);
       await awaitCascadeResult(backJobId, 2_500).catch(() => {});
       await new Promise<void>((resolve) => setTimeout(resolve, 400));
 
@@ -246,7 +254,7 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
         type: "tap" as import("../../../shared/protocol/messages").JobType,
         params: { x: 0.10, y: 0.912 } as Record<string, unknown>,
         timeoutMs: 3_000,
-      });
+      }, req.workflowId);
       await awaitCascadeResult(homeJobId, 3_500).catch(() => {});
       await new Promise<void>((resolve) => setTimeout(resolve, 800));
       console.log(`[cascade] US-016: BACK + nav.home complete, proceeding with ${req.elementName}`);
@@ -485,7 +493,7 @@ async function executeSkillTapJob(
     type: "skill_tap",
     params: params as unknown as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
-  });
+  }, req.workflowId);
 
   return awaitCascadeResult(jobId, timeoutMs + 5000);
 }
@@ -595,7 +603,7 @@ async function executeA11yFindTapJob(
     type: "a11y_find_tap",
     params: params as unknown as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
-  });
+  }, req.workflowId);
 
   return awaitCascadeResult(jobId, timeoutMs + 5000);
 }
@@ -633,7 +641,7 @@ async function executeOcrFindTapJob(
     type: "ocr_find_tap",
     params: params as unknown as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
-  });
+  }, req.workflowId);
 
   return awaitCascadeResult(jobId, timeoutMs + 5000);
 }

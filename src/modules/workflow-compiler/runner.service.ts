@@ -18,7 +18,7 @@
 
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../../db/client";
-import { sendBatchToDeviceEnforced, sendDeviceExecutionJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
+import { sendServerWorkflowBatchChildToDevice, sendDeviceExecutionJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import type { BATCH_RESULT, BatchStep } from "../../protocol/batch-types";
 import { computePageSignature, isSamePage } from "../app-mapping/page-fingerprint";
 import type { UiTreeNode } from "../app-mapping/schema";
@@ -27,6 +27,7 @@ import {
   generatedWorkflowRecoveryBudgetExhausted,
 } from "../observability/metrics";
 import { workflowEvents } from "../workflow-events";
+import { deviceExecutionArbiter } from "../device-execution";
 
 // Import types from canonical types.ts (re-exported via planner for backward compat)
 import type { CompiledWorkflow, CompiledStep } from "./types";
@@ -43,6 +44,8 @@ export interface RunCompiledRequest {
   startStepIndex?: number;
   /** LLM calls already spent compiling this workflow for the current request. */
   compileLlmCalls?: number;
+  /** Canonical PNQ server-workflow identity. Defaults to workflow.id. */
+  workflowRootExternalId?: string;
 }
 
 export interface StepExecutionResult {
@@ -84,6 +87,7 @@ export interface WorkflowExecutionCounters {
 
 export interface RunnerContext {
   deviceId: string;
+  workflowRootExternalId: string;
   workflow: CompiledWorkflow;
   stepsCompleted: number;
   recoveryCount: number;
@@ -185,7 +189,7 @@ async function attemptBoundedRecovery(
 // UI TREE CAPTURE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function captureUiTree(deviceId: string, timeoutMs = 10_000): Promise<UiTreeNode[]> {
+async function captureUiTree(deviceId: string, workflowRootExternalId: string, timeoutMs = 10_000): Promise<UiTreeNode[]> {
   const jobId = uuidv4();
   const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
     jobId,
@@ -194,7 +198,7 @@ async function captureUiTree(deviceId: string, timeoutMs = 10_000): Promise<UiTr
     timeoutMs,
   }, {
     boundary: "generated_child",
-    rootKind: "job",
+    rootExternalId: workflowRootExternalId,
     actor: "workflow_runner",
     metadata: { observeSource: "runner.captureUiTree" },
   });
@@ -219,9 +223,10 @@ async function captureUiTree(deviceId: string, timeoutMs = 10_000): Promise<UiTr
 
 async function verifyFingerprint(
   deviceId: string,
-  expectedHash: string
+  expectedHash: string,
+  workflowRootExternalId: string,
 ): Promise<{ match: boolean; actualHash: string; uiTree: UiTreeNode[] }> {
-  const uiTree = await captureUiTree(deviceId);
+  const uiTree = await captureUiTree(deviceId, workflowRootExternalId);
   const actualHash = computePageSignature(uiTree);
   const match = isSamePage(actualHash, expectedHash);
 
@@ -234,7 +239,8 @@ async function verifyFingerprint(
 
 async function executeStepAction(
   deviceId: string,
-  step: CompiledStep
+  step: CompiledStep,
+  workflowRootExternalId: string,
 ): Promise<{ success: boolean; jobId?: string; error?: string }> {
   if (!isDeviceOnline(deviceId)) {
     return { success: false, error: `Device ${deviceId} offline` };
@@ -254,7 +260,7 @@ async function executeStepAction(
       timeoutMs,
     }, {
       boundary: "generated_child",
-      rootKind: "job",
+      rootExternalId: workflowRootExternalId,
       actor: "workflow_runner",
       metadata: { observeSource: "runner.executeStepAction", stepAction: step.action },
     });
@@ -297,7 +303,7 @@ async function executeStepAction(
           timeoutMs: 5_000,
         }, {
           boundary: "generated_child",
-          rootKind: "job",
+          rootExternalId: workflowRootExternalId,
           actor: "workflow_runner",
           metadata: { observeSource: "runner.typeFocusTap", stepAction: step.action },
         });
@@ -389,7 +395,7 @@ async function verifyPostAction(
   await new Promise((r) => setTimeout(r, DEFAULT_WAIT_AFTER_ACTION_MS));
 
   try {
-    const { match, actualHash } = await verifyFingerprint(deviceId, step.expectedPageHash);
+    const { match, actualHash } = await verifyFingerprint(deviceId, step.expectedPageHash, workflowId);
     return { verified: match, actualHash };
   } catch (err) {
     console.warn(`[runner] Post-action fingerprint check failed: ${(err as Error).message}`);
@@ -505,7 +511,12 @@ async function executeCompiledBatch(
     },
   };
 
-  const result = await sendBatchToDeviceEnforced(deviceId, batchPayload, batchTimeoutMs + 30_000);
+  const result = await sendServerWorkflowBatchChildToDevice(
+    deviceId,
+    workflowId,
+    batchPayload,
+    batchTimeoutMs + 30_000,
+  );
   return {
     type: "BATCH_RESULT",
     batchId: result.batchId,
@@ -532,6 +543,7 @@ export async function runCompiledWorkflow(
 ): Promise<RunCompiledResult> {
   const startTime = Date.now();
   const { deviceId, workflow, startStepIndex = 0, compileLlmCalls = 0 } = req;
+  const workflowRootExternalId = req.workflowRootExternalId ?? workflow.id;
   const results: StepExecutionResult[] = [];
   const counters: WorkflowExecutionCounters = {
     compileLlmCalls,
@@ -574,6 +586,14 @@ export async function runCompiledWorkflow(
   }
 
   // Update status to running
+  await deviceExecutionArbiter.observeAdmission({
+    deviceId,
+    rootKind: "server_workflow",
+    externalId: workflowRootExternalId,
+    requestKey: workflowRootExternalId,
+    actor: "workflow_compiler_runner",
+    metadata: { compiledWorkflowId: workflow.id, observeSource: "runner.runCompiledWorkflow" },
+  });
   await updateWorkflowStatus(workflow.id, "running");
   workflowEvents.publish({
     source: "workflow_compiler",
@@ -593,6 +613,7 @@ export async function runCompiledWorkflow(
 
   const ctx: RunnerContext = {
     deviceId,
+    workflowRootExternalId,
     workflow,
     stepsCompleted: 0,
     recoveryCount: 0,
@@ -624,7 +645,7 @@ export async function runCompiledWorkflow(
         },
       });
       try {
-        const batchResult = await executeCompiledBatch(deviceId, workflow.id, i, batch.batchSteps);
+        const batchResult = await executeCompiledBatch(deviceId, workflowRootExternalId, i, batch.batchSteps);
         const firstFailed = batchResult.results.findIndex(
           (r) => r.status === "failed" || r.status === "timeout"
         );
@@ -636,7 +657,7 @@ export async function runCompiledWorkflow(
           const lastStepIndex = i + successfulCount - 1;
           const lastStep = batch.steps[successfulCount - 1];
           if (lastStep.expectedPageHash && lastStep.action !== "wait") {
-            const postCheck = await verifyPostAction(deviceId, workflow.id, lastStep, lastStepIndex);
+            const postCheck = await verifyPostAction(deviceId, workflowRootExternalId, lastStep, lastStepIndex);
             if (!postCheck.verified) {
               batchCompleted = false;
               verifiedSuccessfulCount = Math.max(0, successfulCount - 1);
@@ -749,7 +770,7 @@ export async function runCompiledWorkflow(
     let fingerprintMatch = true;
     if (step.expectedPageHash && step.action !== "open_app" && step.action !== "wait") {
       try {
-        const fp = await verifyFingerprint(deviceId, step.expectedPageHash);
+        const fp = await verifyFingerprint(deviceId, step.expectedPageHash, workflowRootExternalId);
         fingerprintMatch = fp.match;
         if (!fingerprintMatch) {
           console.warn(
@@ -799,7 +820,7 @@ export async function runCompiledWorkflow(
     }
 
     // ─── Execute action ─────────────────────────────────────────────────────
-    const actionResult = await executeStepAction(deviceId, step);
+    const actionResult = await executeStepAction(deviceId, step, workflowRootExternalId);
 
     if (!actionResult.success) {
       console.warn(`[runner] Step ${i} action failed: ${actionResult.error}`);
@@ -810,7 +831,7 @@ export async function runCompiledWorkflow(
         counters.retriedSteps++;
         console.log(`[runner] Retry ${retry + 1}/${step.retries} for step ${i}`);
         await new Promise((r) => setTimeout(r, step.retryDelay));
-        const retryResult = await executeStepAction(deviceId, step);
+        const retryResult = await executeStepAction(deviceId, step, workflowRootExternalId);
         if (retryResult.success) {
           retried = true;
           break;
@@ -853,7 +874,7 @@ export async function runCompiledWorkflow(
     // ─── Post-action verification ───────────────────────────────────────────
     let postActionVerified = true;
     if (step.expectedPageHash && step.action !== "wait") {
-      const postCheck = await verifyPostAction(deviceId, workflow.id, step, i);
+      const postCheck = await verifyPostAction(deviceId, workflowRootExternalId, step, i);
       postActionVerified = postCheck.verified;
 
       if (!postActionVerified) {
@@ -950,6 +971,13 @@ export async function runCompiledWorkflow(
       verified: r.postActionVerified,
       error: r.error,
     })),
+  });
+  await deviceExecutionArbiter.finishServerWorkflowRoot({
+    deviceId,
+    workflowId: workflowRootExternalId,
+    status: aborted ? "failed" : "completed",
+    actor: "workflow_compiler_runner",
+    reason: aborted ? "compiled_workflow_aborted" : "compiled_workflow_completed",
   });
 
   console.log(

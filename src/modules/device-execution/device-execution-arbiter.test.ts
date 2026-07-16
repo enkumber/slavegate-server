@@ -1008,6 +1008,99 @@ describe("DeviceExecutionArbiter observe mode", () => {
     });
   });
 
+  it("retains one canonical server-workflow root across JOB then BATCH then JOB children", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({
+      id: "workflow-mixed-root",
+      root_kind: "server_workflow",
+      external_id: "workflow-mixed",
+      request_key: "workflow-mixed",
+      fifo_sequence: 1,
+    }));
+    const arbiter = arbiterFor(client);
+
+    const sendJobChild = async (jobId: string) => arbiter.runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId,
+      boundary: "generated_child",
+      rootExternalId: "workflow-mixed",
+      registerWaiter: () => undefined,
+      wireDispatch: async (permit) => {
+        const terminal = await arbiter.acceptJobResult({
+          deviceId: DEVICE_A,
+          jobId,
+          handle: permit.handle,
+          reportedHandle: permit.handle,
+          status: "completed",
+        });
+        expect(terminal.accepted).toBe(true);
+        return true;
+      },
+    });
+
+    await expect(sendJobChild("mixed-job-1")).resolves.toMatchObject({ decision: "terminal", sent: true });
+    expect(client.roots[0]).toMatchObject({ id: "workflow-mixed-root", state: "dispatched", owner_generation: 1 });
+
+    const batch = await arbiter.runObservedEgress({
+      deviceId: DEVICE_A,
+      boundary: "server_workflow_batch_child",
+      rootExternalId: "workflow-mixed",
+      operationId: "mixed-batch-1",
+      wireType: "BATCH_START",
+      registerWaiter: () => undefined,
+      wireDispatch: async (handle) => {
+        const terminal = await arbiter.observeTerminal({
+          deviceId: DEVICE_A,
+          handle,
+          status: "completed",
+          actor: "test.batch_result",
+        });
+        expect(terminal).toMatchObject({ decision: "terminal" });
+        return true;
+      },
+    });
+    expect(batch).toMatchObject({ decision: "terminal", sent: true });
+    expect(client.roots[0]).toMatchObject({ id: "workflow-mixed-root", state: "dispatched", owner_generation: 1 });
+    expect(client.operations.find((item) => item.operation_id === "mixed-batch-1")).toMatchObject({
+      operation_kind: "batch",
+      state: "completed",
+      root_id: "workflow-mixed-root",
+    });
+
+    await expect(sendJobChild("mixed-job-2")).resolves.toMatchObject({ decision: "terminal", sent: true });
+    expect(client.roots[0]).toMatchObject({ id: "workflow-mixed-root", state: "dispatched", owner_generation: 1 });
+
+    await expect(arbiter.finishServerWorkflowRoot({
+      deviceId: DEVICE_A,
+      workflowId: "workflow-mixed",
+      status: "completed",
+    })).resolves.toMatchObject({ decision: "terminal", root: { state: "completed" } });
+  });
+
+  it("rejects a server-workflow BATCH child without canonical root identity before waiter or wire", async () => {
+    const client = new FakeClient();
+    const registerWaiter = vi.fn();
+    const wireDispatch = vi.fn(() => true);
+
+    const result = await arbiterFor(client).runObservedEgress({
+      deviceId: DEVICE_A,
+      boundary: "server_workflow_batch_child",
+      operationId: "orphan-batch",
+      wireType: "BATCH_START",
+      registerWaiter,
+      wireDispatch,
+    });
+
+    expect(result).toMatchObject({
+      decision: "rejected",
+      sent: false,
+      reason: "existing_root_identity_required",
+    });
+    expect(registerWaiter).not.toHaveBeenCalled();
+    expect(wireDispatch).not.toHaveBeenCalled();
+    expect(client.roots).toHaveLength(0);
+  });
+
   it("blocks and audits a corrupt queued replay head instead of silently stalling FIFO", async () => {
     const client = new FakeClient();
     client.roots.push(root({ id: "corrupt-root", external_id: "job-corrupt", state: "queued" }));

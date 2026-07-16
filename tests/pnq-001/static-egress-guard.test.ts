@@ -345,6 +345,43 @@ function currentSemanticBoundary(): {
   return { findings, rawImports };
 }
 
+function requiresExistingRootIdentityViolations(): string[] {
+  const violations: string[] = [];
+  for (const file of walkProductionTs(path.join(repoRoot, "src"))) {
+    const sourceText = fs.readFileSync(path.join(repoRoot, file), "utf8");
+    const sourceFile = ts.createSourceFile(file, sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression.getText(sourceFile);
+        const optionsIndex = callee.endsWith("sendDeviceExecutionJobToDevice") ? 2
+          : callee.endsWith("runObservedEgress") ? 0
+            : -1;
+        const options = optionsIndex >= 0 ? node.arguments[optionsIndex] : undefined;
+        if (options && ts.isObjectLiteralExpression(options)) {
+          const properties = new Map(options.properties
+            .filter(ts.isPropertyAssignment)
+            .map((property) => [property.name.getText(sourceFile).replace(/["']/g, ""), property.initializer]));
+          const boundaryNode = properties.get("boundary");
+          const boundary = boundaryNode && ts.isStringLiteral(boundaryNode) ? boundaryNode.text : null;
+          if (
+            boundary &&
+            boundary in DEVICE_EXECUTION_BOUNDARY_MATRIX &&
+            DEVICE_EXECUTION_BOUNDARY_MATRIX[boundary as keyof typeof DEVICE_EXECUTION_BOUNDARY_MATRIX].requiresExistingRootHandle &&
+            !properties.has("rootId") &&
+            !properties.has("rootExternalId")
+          ) {
+            const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+            violations.push(`${file}:${line}:${boundary}`);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  return violations.sort();
+}
+
 function routerHandlerSource(method: string, routePath: string): string | null {
   const file = "src/api/routes.ts";
   const sourceText = fs.readFileSync(path.join(repoRoot, file), "utf8");
@@ -526,6 +563,14 @@ describe("PNQ-001 production egress inventory guard", () => {
       egressLane: "device_execution",
       mayBypassDeviceQueue: false,
     });
+    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.server_workflow_batch_child).toMatchObject({
+      rootKind: "server_workflow",
+      operationKind: "batch",
+      retainsRootUntilTerminal: false,
+      requiresExistingRootHandle: true,
+      egressLane: "device_execution",
+      mayBypassDeviceQueue: false,
+    });
 
     for (const childBoundary of ["generated_child", "self_healing_child", "prestep_child", "recovery_child"] as const) {
       expect(DEVICE_EXECUTION_BOUNDARY_MATRIX[childBoundary]).toMatchObject({
@@ -544,6 +589,10 @@ describe("PNQ-001 production egress inventory guard", () => {
       terminalCas: "device_root_generation",
       websocketOwnership: "single_active_connection_observed",
     });
+  });
+
+  it("requires canonical root identity at every existing-root egress call", () => {
+    expect(requiresExistingRootIdentityViolations()).toEqual([]);
   });
 
   it("ignores comments and string literals that merely mention sender names", () => {

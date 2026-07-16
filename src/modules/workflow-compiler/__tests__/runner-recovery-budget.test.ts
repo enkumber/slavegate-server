@@ -7,8 +7,16 @@ vi.mock("uuid", () => ({
 vi.mock("../../../transport/transport", () => ({
   sendJobToDevice: vi.fn().mockReturnValue(true),
   sendDeviceExecutionJobToDevice: vi.fn().mockResolvedValue({ sent: true }),
+  sendServerWorkflowBatchChildToDevice: vi.fn(),
   isDeviceOnline: vi.fn().mockReturnValue(true),
   waitForResult: vi.fn().mockResolvedValue({ status: "completed", output: {} }),
+}));
+
+vi.mock("../../device-execution", () => ({
+  deviceExecutionArbiter: {
+    observeAdmission: vi.fn().mockResolvedValue({ decision: "admitted", root: null }),
+    finishServerWorkflowRoot: vi.fn().mockResolvedValue({ decision: "terminal", root: null }),
+  },
 }));
 
 vi.mock("../../../ws/direct-ws.server", () => ({

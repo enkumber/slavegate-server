@@ -126,7 +126,7 @@ export function resetRecoveryCounts(workflowId: string): void {
 // SCREENSHOT + UI TREE CAPTURE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function captureScreenshot(deviceId: string): Promise<string | undefined> {
+async function captureScreenshot(deviceId: string, workflowRootExternalId: string): Promise<string | undefined> {
   try {
     const jobId = uuidv4();
     const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
@@ -136,7 +136,7 @@ async function captureScreenshot(deviceId: string): Promise<string | undefined> 
       timeoutMs: 10_000,
     }, {
       boundary: "recovery_child",
-      rootKind: "job",
+      rootExternalId: workflowRootExternalId,
       actor: "workflow_recovery",
       metadata: { observeSource: "recovery.captureScreenshot" },
     });
@@ -149,7 +149,7 @@ async function captureScreenshot(deviceId: string): Promise<string | undefined> 
   }
 }
 
-async function captureUiTreeForRecovery(deviceId: string): Promise<UiTreeNode[]> {
+async function captureUiTreeForRecovery(deviceId: string, workflowRootExternalId: string): Promise<UiTreeNode[]> {
   try {
     const jobId = uuidv4();
     const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
@@ -159,7 +159,7 @@ async function captureUiTreeForRecovery(deviceId: string): Promise<UiTreeNode[]>
       timeoutMs: 10_000,
     }, {
       boundary: "recovery_child",
-      rootKind: "job",
+      rootExternalId: workflowRootExternalId,
       actor: "workflow_recovery",
       metadata: { observeSource: "recovery.captureUiTree" },
     });
@@ -242,7 +242,8 @@ function summarizeUiTree(uiTree: UiTreeNode[], maxNodes = 30): string {
 
 async function executeRecoveryAction(
   deviceId: string,
-  action: RecoveryAction
+  action: RecoveryAction,
+  workflowRootExternalId: string,
 ): Promise<{ success: boolean; error?: string }> {
   if (!isDeviceOnline(deviceId)) {
     return { success: false, error: "Device offline" };
@@ -273,7 +274,7 @@ async function executeRecoveryAction(
           timeoutMs: 5_000,
         }, {
           boundary: "recovery_child",
-          rootKind: "job",
+          rootExternalId: workflowRootExternalId,
           actor: "workflow_recovery",
           metadata: { observeSource: "recovery.dismissAction" },
         });
@@ -296,7 +297,7 @@ async function executeRecoveryAction(
           timeoutMs: 3_000,
         }, {
           boundary: "recovery_child",
-          rootKind: "job",
+          rootExternalId: workflowRootExternalId,
           actor: "workflow_recovery",
           metadata: { observeSource: "recovery.navigateBack" },
         });
@@ -391,8 +392,8 @@ export async function attemptRecovery(
 
   // 1. Capture current state
   const [screenshotBase64, uiTree] = await Promise.all([
-    captureScreenshot(deviceId),
-    captureUiTreeForRecovery(deviceId),
+    captureScreenshot(deviceId, ctx.workflowRootExternalId),
+    captureUiTreeForRecovery(deviceId, ctx.workflowRootExternalId),
   ]);
 
   const currentFingerprint = uiTree.length > 0 ? computePageSignature(uiTree) : undefined;
@@ -445,7 +446,7 @@ export async function attemptRecovery(
   }
 
   // 4. Execute recovery action
-  const execResult = await executeRecoveryAction(deviceId, recoveryAction);
+  const execResult = await executeRecoveryAction(deviceId, recoveryAction, ctx.workflowRootExternalId);
 
   // If retry_with_adaptation, validate & replace the step in the workflow
   if (recoveryAction.type === "retry_with_adaptation" && recoveryAction.adaptedStep) {

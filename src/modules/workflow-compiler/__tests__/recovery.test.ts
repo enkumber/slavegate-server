@@ -82,6 +82,7 @@ function makeWorkflow(overrides: Partial<CompiledWorkflow> = {}): CompiledWorkfl
 function makeRunnerContext(overrides: Record<string, any> = {}) {
   return {
     deviceId: "device-1",
+    workflowRootExternalId: "wf-recovery-test",
     workflow: makeWorkflow(),
     stepsCompleted: 0,
     recoveryCount: 0,

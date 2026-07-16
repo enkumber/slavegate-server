@@ -78,6 +78,7 @@ export type DeviceExecutionBoundaryKind =
   | "edge_batch"
   | "edge_workflow"
   | "server_workflow_root"
+  | "server_workflow_batch_child"
   | "generated_child"
   | "self_healing_child"
   | "prestep_child"
@@ -122,6 +123,14 @@ export const DEVICE_EXECUTION_BOUNDARY_MATRIX: Record<DeviceExecutionBoundaryKin
     rootKind: "server_workflow",
     operationKind: "workflow",
     retainsRootUntilTerminal: true,
+    requiresExistingRootHandle: true,
+    egressLane: "device_execution",
+    mayBypassDeviceQueue: false,
+  },
+  server_workflow_batch_child: {
+    rootKind: "server_workflow",
+    operationKind: "batch",
+    retainsRootUntilTerminal: false,
     requiresExistingRootHandle: true,
     egressLane: "device_execution",
     mayBypassDeviceQueue: false,
@@ -266,6 +275,9 @@ export interface DeviceExecutionTransitionResult {
 
 export interface DeviceExecutionObservedEgressInput {
   deviceId: string;
+  /** Required by child boundaries: canonical root id or external workflow id. */
+  rootId?: string;
+  rootExternalId?: string;
   rootKind?: DeviceExecutionRootKind;
   operationKind?: DeviceExecutionOperationKind;
   operationId: string;
@@ -1242,6 +1254,7 @@ export class DeviceExecutionArbiter {
     const boundary = input.boundary ? DEVICE_EXECUTION_BOUNDARY_MATRIX[input.boundary] : undefined;
     const rootKind = input.rootKind ?? boundary?.rootKind ?? "job";
     const operationKind = input.operationKind ?? boundary?.operationKind ?? rootKindToOperationKind(rootKind);
+    const requiresExistingRoot = boundary?.requiresExistingRootHandle === true;
     const actor = input.actor ?? "transport";
     const metadata = {
       ...(input.metadata ?? {}),
@@ -1252,8 +1265,35 @@ export class DeviceExecutionArbiter {
 
     const prepared = await this.withTransaction(async (client) => {
       await lockDevice(client, input.deviceId);
-      let root = await selectRootByExternalId(client, rootKind, input.operationId, true);
+      let root = input.rootId
+        ? await selectRoot(client, { rootId: input.rootId, rootKind, forUpdate: true })
+        : await selectRootByExternalId(
+            client,
+            rootKind,
+            requiresExistingRoot ? (input.rootExternalId ?? "") : input.operationId,
+            true,
+          );
       if (!root) {
+        if (requiresExistingRoot) {
+          await insertEvent(client, {
+            deviceId: input.deviceId,
+            eventType: "child_egress_rejected_missing_root",
+            actor,
+            reason: input.rootId || input.rootExternalId ? "existing_root_not_found" : "existing_root_identity_required",
+            metadata: {
+              ...metadata,
+              operationId: input.operationId,
+              rootId: input.rootId ?? null,
+              rootExternalId: input.rootExternalId ?? null,
+            },
+          });
+          return {
+            decision: "rejected" as const,
+            root: null,
+            sent: false,
+            reason: input.rootId || input.rootExternalId ? "existing_root_not_found" : "existing_root_identity_required",
+          };
+        }
         root = await insertRoot(client, {
           deviceId: input.deviceId,
           rootKind,
@@ -1291,6 +1331,23 @@ export class DeviceExecutionArbiter {
           root: rowToRoot(root),
           reason: "root_owned_by_different_device",
           sent: false,
+        };
+      }
+
+      if (isTerminalState(root.state)) {
+        return {
+          decision: "terminal" as const,
+          root: rowToRoot(root),
+          sent: false,
+          reason: "root_already_terminal",
+        };
+      }
+      if (root.state === "reconciling" || root.state === "blocked") {
+        return {
+          decision: "ambiguous" as const,
+          root: rowToRoot(root),
+          sent: false,
+          reason: root.state,
         };
       }
 
@@ -1437,7 +1494,10 @@ export class DeviceExecutionArbiter {
         operation.operation_id === prepared.handle!.operationId &&
         toNumber(root.owner_generation) === expectedGeneration &&
         toNumber(operation.owner_generation) === expectedGeneration;
-      if (sameOwner && isTerminalState(root.state) && isTerminalOperationState(operation.state)) {
+      const childAlreadyTerminal = requiresExistingRoot &&
+        root.state === "dispatched" &&
+        isTerminalOperationState(operation.state);
+      if (sameOwner && ((isTerminalState(root.state) && isTerminalOperationState(operation.state)) || childAlreadyTerminal)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: root.device_id,
@@ -2006,14 +2066,34 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      const terminal = await updateRootTerminal(client, {
-        rootId: root.id,
-        deviceId: input.deviceId,
-        ownerGeneration: expectedGeneration,
-        toState: terminalState,
-        reason: input.reason ?? input.status,
-        metadata: input.metadata,
-      });
+      const operationBoundary = typeof operation?.metadata?.boundary === "string"
+        ? operation.metadata.boundary as DeviceExecutionBoundaryKind
+        : null;
+      const operationPolicy = operationBoundary && operationBoundary in DEVICE_EXECUTION_BOUNDARY_MATRIX
+        ? DEVICE_EXECUTION_BOUNDARY_MATRIX[operationBoundary]
+        : null;
+      const isServerWorkflowChild = root.root_kind === "server_workflow" &&
+        operation !== null &&
+        operationPolicy?.requiresExistingRootHandle === true &&
+        operationPolicy.retainsRootUntilTerminal === false;
+      const terminal = isServerWorkflowChild
+        ? root.state === "dispatching"
+          ? await updateRootState(client, {
+              rootId: root.id,
+              fromStates: ["dispatching"],
+              toState: "dispatched",
+              ownerGenerationIncrement: false,
+              metadata: input.metadata,
+            })
+          : root
+        : await updateRootTerminal(client, {
+            rootId: root.id,
+            deviceId: input.deviceId,
+            ownerGeneration: expectedGeneration,
+            toState: terminalState,
+            reason: input.reason ?? input.status,
+            metadata: input.metadata,
+          });
       if (!terminal) {
         await insertEvent(client, {
           rootId: root.id,
@@ -2056,7 +2136,7 @@ export class DeviceExecutionArbiter {
       await insertEvent(client, {
         rootId: terminal.id,
         deviceId: terminal.device_id,
-        eventType: "root_terminal",
+        eventType: isServerWorkflowChild ? "child_result_accepted" : "root_terminal",
         previousState: root.state,
         newState: terminal.state,
         actor: input.actor ?? "transport",
