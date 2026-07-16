@@ -272,6 +272,10 @@ describe("ModelConfigService credential and endpoint safety", () => {
     expect(sanitizeProviderError('{"error":"bad","apiKey":"sk-live-secret","authorization":"Bearer abc123"}'))
       .not.toContain("sk-live-secret");
     expect(sanitizeProviderError("Authorization: Bearer sk-test-secret"))
-      .toContain("Bearer [redacted]");
+      .toBe("Authorization: [redacted]");
+    expect(sanitizeProviderError('{"authorization":"Basic dXNlcjpwYXNz","error":"bad"}'))
+      .toBe('{"authorization":"[redacted]","error":"bad"}');
+    expect(sanitizeProviderError("Authorization: Basic dXNlcjpwYXNz\nauthorization=opaque-secret"))
+      .toBe("Authorization: [redacted]\nauthorization=[redacted]");
   });
 });

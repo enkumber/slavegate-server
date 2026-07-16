@@ -708,6 +708,8 @@ function extractCredentialFromFile(content: string): string {
 export function sanitizeProviderError(text: string): string {
   return text
     .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
+    .replace(/([\"']authorization[\"']\s*:\s*[\"'])([^\"']*)([\"'])/gi, "$1[redacted]$3")
+    .replace(/(authorization\s*[:=]\s*)(?![\"'])([^\r\n,}]+)/gi, "$1[redacted]")
     .replace(/(api[_-]?key|token|x-api-key)([\"'\s:=]+)([^\"'\s,}]+)/gi, "$1$2[redacted]")
     .slice(0, 500);
 }
