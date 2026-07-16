@@ -287,6 +287,8 @@ export class DirectWsServer {
   private pendingJobs = new Map<string, PendingJob>();        // jobId → awaiter
   private pendingBatches = new Map<string, PendingBatch>();   // batchId → awaiter
   private pendingWorkflows = new Map<string, PendingWorkflow>();
+  // LLM_REQUEST is single-flight per device: concurrent requests are rejected
+  // with a stable retryable LLM_RESULT so requestId ownership stays unambiguous.
   private activeLlmRequests = new Map<string, number>();
   private otaStatuses = new Map<string, OtaDeviceStatus>();   // deviceId → last OTA status
   private rateLimiter = new RateLimiter();

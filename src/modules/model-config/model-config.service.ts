@@ -5,7 +5,9 @@
  */
 
 import crypto from "crypto";
+import dns from "dns/promises";
 import fs from "fs/promises";
+import net from "net";
 import path from "path";
 import { getDb } from "../../db/client";
 
@@ -74,6 +76,19 @@ interface ResolvedModelConfig extends ModelConfig {
 
 const ROLES: ModelRole[] = ["decision_llm", "vision_vlm"];
 const CACHE_TTL_MS = 30_000;
+type EndpointAddress = { address: string; family?: number };
+type EndpointAddressResolver = (hostname: string) => Promise<EndpointAddress[]>;
+
+const defaultEndpointAddressResolver: EndpointAddressResolver = async (hostname) => {
+  if (net.isIP(hostname)) return [{ address: hostname }];
+  return dns.lookup(hostname, { all: true, verbatim: true });
+};
+
+let endpointAddressResolver: EndpointAddressResolver = defaultEndpointAddressResolver;
+
+export function setModelConfigEndpointResolverForTests(resolver?: EndpointAddressResolver): void {
+  endpointAddressResolver = resolver ?? defaultEndpointAddressResolver;
+}
 
 export class ModelConfigError extends Error {
   statusCode: number;
@@ -175,6 +190,7 @@ export class ModelConfigService {
       provider,
       endpoint: validateEndpoint(rawConfig.endpoint, provider, role),
     };
+    await validateEndpointNetwork(config.endpoint, provider, role);
     const apiKey = await this.resolveCredential(config);
     if (!apiKey) throw new ModelConfigError(`Model config for ${role} has no server-side credential. Add a credential via Dashboard → Tokens / Models.`, 503, "AI_CREDENTIAL_MISSING");
     return { ...config, apiKey };
@@ -378,7 +394,7 @@ function validateEndpoint(endpoint: string | null, provider: string, role: Model
   if (parsed.username || parsed.password || parsed.hash) {
     throw new ModelConfigError(`Invalid endpoint URL for ${role}. Credentials and fragments are not allowed in endpoint URLs.`, 400, "AI_ENDPOINT_INVALID");
   }
-  if (!isEndpointHostAllowlisted(parsed.hostname)) {
+  if (!endpointPolicyForHost(parsed.hostname).allowlisted) {
     throw new ModelConfigError(`Model endpoint for ${role} must be explicitly allowlisted with MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_NOT_ALLOWLISTED");
   }
   parsed.pathname = parsed.pathname.replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
@@ -392,14 +408,82 @@ function validateEndpointForStorage(endpoint: string | null, provider: string, r
   return null;
 }
 
-function isEndpointHostAllowlisted(hostname: string): boolean {
+async function validateEndpointNetwork(endpoint: string | null, provider: string, role: ModelRole): Promise<void> {
+  const base = endpointBase(endpoint, provider);
+  const parsed = new URL(base);
+  const policy = endpointPolicyForHost(parsed.hostname);
+  if (!policy.allowlisted) {
+    throw new ModelConfigError(`Model endpoint for ${role} must be explicitly allowlisted with MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_NOT_ALLOWLISTED");
+  }
+
+  let addresses: EndpointAddress[];
+  try {
+    addresses = await endpointAddressResolver(parsed.hostname);
+  } catch {
+    throw new ModelConfigError(`Model endpoint DNS lookup failed for ${role}.`, 503, "AI_ENDPOINT_DNS_FAILED");
+  }
+
+  if (!addresses.length) {
+    throw new ModelConfigError(`Model endpoint DNS lookup returned no addresses for ${role}.`, 503, "AI_ENDPOINT_DNS_FAILED");
+  }
+
+  for (const entry of addresses) {
+    if (isBlockedEndpointAddress(entry.address) && !policy.allowPrivate) {
+      throw new ModelConfigError(`Model endpoint for ${role} resolved to a private, local, metadata, or reserved address. Use local:<host> in MODEL_CONFIG_ENDPOINT_ALLOWLIST only for an intended local provider.`, 400, "AI_ENDPOINT_PRIVATE_ADDRESS");
+    }
+  }
+}
+
+function endpointPolicyForHost(hostname: string): { allowlisted: boolean; allowPrivate: boolean } {
   const host = hostname.toLowerCase();
-  if (host === "api.openai.com" || host.endsWith(".openai.com")) return true;
+  if (host === "api.openai.com" || host.endsWith(".openai.com")) {
+    return { allowlisted: true, allowPrivate: false };
+  }
   const allowlist = (process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST ?? "")
     .split(",")
     .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean);
-  return allowlist.some((entry) => entry === host);
+  const allowPrivate = allowlist.some((entry) => entry === `local:${host}`);
+  const allowlisted = allowPrivate || allowlist.some((entry) => entry === host);
+  return { allowlisted, allowPrivate };
+}
+
+function isBlockedEndpointAddress(address: string): boolean {
+  if (address.startsWith("::ffff:")) {
+    return isBlockedEndpointAddress(address.slice(7));
+  }
+
+  if (net.isIPv4(address)) {
+    const octets = address.split(".").map((part) => Number(part));
+    const [a, b] = octets;
+    return a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 192 && b === 0) ||
+      (a === 192 && b === 2) ||
+      (a === 198 && (b === 18 || b === 19)) ||
+      (a === 198 && b === 51) ||
+      (a === 203 && b === 0) ||
+      a >= 224;
+  }
+
+  if (net.isIPv6(address)) {
+    const lower = address.toLowerCase();
+    return lower === "::" ||
+      lower === "::1" ||
+      lower.startsWith("fc") ||
+      lower.startsWith("fd") ||
+      lower.startsWith("fe8") ||
+      lower.startsWith("fe9") ||
+      lower.startsWith("fea") ||
+      lower.startsWith("feb");
+  }
+
+  return true;
 }
 
 function validateCredentialRef(ref: string | null): string | null {

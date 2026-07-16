@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-import { ModelConfigService, sanitizeProviderError } from "./model-config.service";
+import { ModelConfigService, sanitizeProviderError, setModelConfigEndpointResolverForTests } from "./model-config.service";
 import { getDb } from "../../db/client";
 
 vi.mock("../../db/client", () => ({
@@ -36,11 +36,13 @@ beforeEach(() => {
   vi.mocked(getDb).mockReturnValue({ query } as never);
   process.env.MODEL_CONFIG_TEST_KEY = "secret-from-env";
   process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "models.example.com";
+  setModelConfigEndpointResolverForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
   delete process.env.MODEL_CONFIG_CREDENTIAL_FILE_ALLOWLIST;
   delete process.env.CREDENTIAL_ENCRYPTION_KEY;
 });
 
 afterEach(() => {
+  setModelConfigEndpointResolverForTests();
   vi.restoreAllMocks();
 });
 
@@ -127,7 +129,7 @@ describe("ModelConfigService credential and endpoint safety", () => {
       statusCode: 400,
     });
 
-    process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "gx10.local";
+    process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "local:gx10.local";
     query.mockResolvedValueOnce({ rows: [row()] });
     query.mockResolvedValueOnce({ rows: [row({ endpoint: "http://gx10.local/v1", model: "qwen3-vl" })] });
 
@@ -139,6 +141,23 @@ describe("ModelConfigService credential and endpoint safety", () => {
     });
 
     expect(saved.endpoint).toBe("http://gx10.local/v1");
+  });
+
+  it("rejects allowlisted endpoints that resolve to private or metadata addresses unless marked local", async () => {
+    process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "models.example.com";
+    setModelConfigEndpointResolverForTests(async () => [{ address: "169.254.169.254", family: 4 }]);
+    query.mockResolvedValueOnce({ rows: [row({ endpoint: "https://models.example.com/v1" })] });
+
+    await expect(new ModelConfigService().resolve("decision_llm")).rejects.toMatchObject({
+      code: "AI_ENDPOINT_PRIVATE_ADDRESS",
+      statusCode: 400,
+    });
+
+    process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "local:models.example.com";
+    query.mockResolvedValueOnce({ rows: [row({ endpoint: "https://models.example.com/v1" })] });
+    await expect(new ModelConfigService().resolve("decision_llm")).resolves.toMatchObject({
+      endpoint: "https://models.example.com/v1",
+    });
   });
 
   it("rejects file credential symlinks that escape the allowlisted directory at read time", async () => {
