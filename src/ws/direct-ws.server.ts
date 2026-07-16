@@ -55,6 +55,54 @@ function handlesEqual(left: DeviceExecutionHandle, right: DeviceExecutionHandle)
     left.operationId === right.operationId;
 }
 
+export interface DirectWsResultHandleResolution {
+  accepted: boolean;
+  reportedHandle: DeviceExecutionHandle | null;
+  compatibility: "echoed_handle" | "authenticated_pending_handle" | "rejected";
+  reason?: "reported_handle_invalid" | "reported_handle_mismatch";
+}
+
+/**
+ * Android agents deployed before PNQ handles do not echo the extra `pnqHandle`
+ * property. The authenticated socket plus the exact server-side pending handle
+ * is therefore the compatibility identity. If a device does report a handle,
+ * it must decode and match every field; callers still perform the DB CAS.
+ */
+export function resolveDirectWsResultHandle(
+  expectedHandle: DeviceExecutionHandle,
+  message: Record<string, unknown>,
+): DirectWsResultHandleResolution {
+  if (!("pnqHandle" in message) || message.pnqHandle == null) {
+    return {
+      accepted: true,
+      reportedHandle: null,
+      compatibility: "authenticated_pending_handle",
+    };
+  }
+  const reportedHandle = decodeDeviceExecutionHandle(message.pnqHandle);
+  if (!reportedHandle) {
+    return {
+      accepted: false,
+      reportedHandle: null,
+      compatibility: "rejected",
+      reason: "reported_handle_invalid",
+    };
+  }
+  if (!handlesEqual(expectedHandle, reportedHandle)) {
+    return {
+      accepted: false,
+      reportedHandle,
+      compatibility: "rejected",
+      reason: "reported_handle_mismatch",
+    };
+  }
+  return {
+    accepted: true,
+    reportedHandle,
+    compatibility: "echoed_handle",
+  };
+}
+
 function observeRootDispatch(
   rootKind: DeviceExecutionRootKind,
   deviceId: string,
@@ -986,7 +1034,10 @@ export class DirectWsServer {
     const status = Boolean(msg.success) ? "completed" : "failed";
     const durationMs = (msg.durationMs as number | undefined) ?? 0;
     const wireHandle = isRecord(msg.pnqHandle) ? msg.pnqHandle : null;
-    const reportedHandle = decodeDeviceExecutionHandle(wireHandle);
+    const handleResolution = pending?.permit
+      ? resolveDirectWsResultHandle(pending.permit.handle, msg)
+      : null;
+    const reportedHandle = handleResolution?.reportedHandle ?? decodeDeviceExecutionHandle(wireHandle);
 
     try {
       const accepted = await deviceExecutionArbiter.acceptJobResult({
@@ -994,7 +1045,7 @@ export class DirectWsServer {
         jobId,
         handle: pending?.permit?.handle,
         reportedHandle,
-        allowLegacyMissingHandle: !pending?.permit,
+        allowLegacyMissingHandle: handleResolution?.compatibility === "authenticated_pending_handle",
         status,
         actor: "direct_ws",
         reason: (msg.error as string | undefined) ?? status,
@@ -1003,7 +1054,8 @@ export class DirectWsServer {
           observeSource: "directWsServer.handleJobResult",
           expectedHandle: pending?.permit?.wireHandle ?? null,
           reportedHandle: wireHandle,
-          legacyMissingHandleAllowed: !pending?.permit,
+          legacyMissingHandleAllowed: handleResolution?.compatibility === "authenticated_pending_handle",
+          handleCompatibility: handleResolution?.compatibility ?? "no_pending_handle",
         },
       });
       if (!accepted.accepted) {
@@ -1075,15 +1127,16 @@ export class DirectWsServer {
     console.log(`[direct-ws] BATCH_RESULT received: batchId=${batchId.slice(0,8)} status=${status} steps=${results.length} totalMs=${totalDurationMs} device=${conn.deviceId.slice(0,8)}`);
 
     const pending = this.pendingBatches.get(batchId);
-    const reportedHandle = decodeDeviceExecutionHandle(msg.pnqHandle);
-    if (!pending || !reportedHandle || !handlesEqual(pending.handle, reportedHandle) || reportedHandle.deviceId !== conn.deviceId) {
+    const handleResolution = pending ? resolveDirectWsResultHandle(pending.handle, msg) : null;
+    const reportedHandle = handleResolution?.reportedHandle ?? pending?.handle ?? null;
+    if (!pending || !handleResolution?.accepted || !reportedHandle || reportedHandle.deviceId !== conn.deviceId) {
       await deviceExecutionArbiter.recordRejectedEgress({
         deviceId: conn.deviceId,
         operationId: batchId,
         wireType: "BATCH_RESULT",
         actor: "direct_ws",
-        reason: !pending ? "batch_result_without_waiter" : !reportedHandle ? "batch_result_handle_required" : "batch_result_handle_mismatch",
-        metadata: { reportedHandle: msg.pnqHandle ?? null },
+        reason: !pending ? "batch_result_without_waiter" : handleResolution?.reason ?? "batch_result_handle_mismatch",
+        metadata: { reportedHandle: msg.pnqHandle ?? null, handleCompatibility: handleResolution?.compatibility ?? null },
       });
       return;
     }
@@ -1093,7 +1146,7 @@ export class DirectWsServer {
       status,
       actor: "direct_ws",
       reason: msg.error as string | undefined,
-      metadata: { totalDurationMs, resultCount: results.length },
+      metadata: { totalDurationMs, resultCount: results.length, handleCompatibility: handleResolution.compatibility },
     });
     if (terminal.decision !== "terminal") return;
 
@@ -1176,15 +1229,16 @@ export class DirectWsServer {
     const variables  = msg.variables as Record<string, unknown> | undefined;
     const pendingWorkflow = this.pendingWorkflows.get(workflowId);
     const expectedHandle = pendingWorkflow?.handle;
-    const reportedHandle = decodeDeviceExecutionHandle(msg.pnqHandle);
-    if (!expectedHandle || !reportedHandle || !handlesEqual(expectedHandle, reportedHandle) || reportedHandle.deviceId !== conn.deviceId) {
+    const handleResolution = expectedHandle ? resolveDirectWsResultHandle(expectedHandle, msg) : null;
+    const reportedHandle = handleResolution?.reportedHandle ?? expectedHandle ?? null;
+    if (!expectedHandle || !handleResolution?.accepted || !reportedHandle || reportedHandle.deviceId !== conn.deviceId) {
       await deviceExecutionArbiter.recordRejectedEgress({
         deviceId: conn.deviceId,
         operationId: workflowId || "missing",
         wireType: "WORKFLOW_STATUS",
         actor: "direct_ws",
-        reason: !expectedHandle ? "workflow_status_without_pending_handle" : !reportedHandle ? "workflow_status_handle_required" : "workflow_status_handle_mismatch",
-        metadata: { reportedHandle: msg.pnqHandle ?? null, status },
+        reason: !expectedHandle ? "workflow_status_without_pending_handle" : handleResolution?.reason ?? "workflow_status_handle_mismatch",
+        metadata: { reportedHandle: msg.pnqHandle ?? null, status, handleCompatibility: handleResolution?.compatibility ?? null },
       });
       return;
     }
@@ -1234,8 +1288,9 @@ export class DirectWsServer {
           actor: "direct_ws",
           reason: error,
           metadata: {
-          step: typeof step === "number" ? step : null,
-          total: typeof total === "number" ? total : null,
+            step: typeof step === "number" ? step : null,
+            total: typeof total === "number" ? total : null,
+            handleCompatibility: handleResolution.compatibility,
           },
         });
         if (terminal.decision !== "terminal") return;
