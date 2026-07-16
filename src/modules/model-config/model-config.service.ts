@@ -63,7 +63,6 @@ interface UpdateModelConfigInput {
   endpoint?: string | null;
   model?: string;
   enabled?: boolean;
-  credentialRef?: string | null;
 }
 
 interface CredentialInput {
@@ -78,6 +77,38 @@ interface ResolvedModelConfig extends ModelConfig {
 
 const ROLES: ModelRole[] = ["decision_llm", "vision_vlm"];
 const CACHE_TTL_MS = 30_000;
+const MODEL_CONFIG_CREDENTIAL_FIELD_NAMES = new Set([
+  "authorization",
+  "authorizationheader",
+  "credential",
+  "credentials",
+  "credentialconfigured",
+  "credentialref",
+  "credentialreference",
+  "credentialvalue",
+  "clearcredential",
+  "deletecredential",
+  "removecredential",
+  "apikey",
+  "apikeyconfigured",
+  "apikeyencrypted",
+  "apikeyfingerprint",
+  "apikeyref",
+  "apikeyreference",
+  "clearapikey",
+  "deleteapikey",
+  "removeapikey",
+  "xapikey",
+  "token",
+  "accesstoken",
+  "authtoken",
+  "providertoken",
+  "cleartoken",
+  "deletetoken",
+  "removetoken",
+  "secret",
+  "clientsecret",
+]);
 type EndpointAddress = { address: string; family?: number };
 type EndpointAddressResolver = (hostname: string) => Promise<EndpointAddress[]>;
 
@@ -118,12 +149,13 @@ export class ModelConfigService {
 
   async update(role: ModelRole, input: UpdateModelConfigInput): Promise<RedactedModelConfig> {
     assertRole(role);
+    assertModelConfigMetadataOnlyInput(input);
     const existing = await this.getRaw(role);
     const provider = validateProvider(input.provider ?? existing?.provider ?? defaultFor(role).provider, role);
     const model = normalizeNonEmpty(input.model ?? existing?.model ?? defaultFor(role).model, "model");
     const enabled = input.enabled !== undefined ? Boolean(input.enabled) : existing?.enabled ?? false;
     const endpoint = validateEndpointForStorage(input.endpoint !== undefined ? nullableString(input.endpoint) : existing?.endpoint ?? defaultFor(role).endpoint, provider, role, enabled);
-    const credentialRef = input.credentialRef !== undefined ? validateCredentialRef(nullableString(input.credentialRef)) : existing?.credentialRef ?? null;
+    const credentialRef = existing?.credentialRef ?? null;
 
     const result = await getDb().query(
       `INSERT INTO model_configs
@@ -227,7 +259,7 @@ export class ModelConfigService {
       await testProvider(config);
       return await this.storeTest(role, "ok", `Connection OK (${Date.now() - started}ms)`);
     } catch (err) {
-      const message = (err as Error).message;
+      const message = sanitizeProviderError((err as Error).message);
       await this.storeTest(role, "error", message).catch(() => undefined);
       throw new ModelConfigError(message, err instanceof ModelConfigError ? err.statusCode : 502, err instanceof ModelConfigError ? err.code : "AI_PROVIDER_TEST_FAILED");
     }
@@ -283,6 +315,7 @@ export class ModelConfigService {
     const refType = credentialRefType(config);
     return {
       ...safe,
+      lastTestMessage: config.lastTestMessage === null ? null : sanitizeProviderError(config.lastTestMessage),
       hasCredential: Boolean(config.apiKeyEncrypted || config.credentialRef),
       credential: config.apiKeyEncrypted || config.credentialRef ? "redacted" : null,
       credentialConfigured: Boolean(config.apiKeyEncrypted || config.credentialRef),
@@ -333,18 +366,38 @@ export class ModelConfigService {
   }
 
   private async storeTest(role: ModelRole, status: string, message: string): Promise<RedactedModelConfig> {
+    const sanitizedMessage = sanitizeProviderError(message);
     const result = await getDb().query(
       `UPDATE model_configs
        SET last_test_status = $2, last_test_message = $3, last_test_at = NOW(), updated_at = NOW()
        WHERE role = $1
        RETURNING *`,
-      [role, status, message.slice(0, 1000)]
+      [role, status, sanitizedMessage]
     );
     this.invalidate(role);
     const config = result.rows[0] ? this.fromRow(result.rows[0]) : (await this.getRaw(role));
     if (!config) throw new ModelConfigError(`Model config for ${role} is missing`, 404, "AI_MODEL_CONFIG_MISSING");
     return this.redact(config);
   }
+}
+
+export function assertModelConfigMetadataOnlyInput(input: unknown): asserts input is UpdateModelConfigInput {
+  if (!input || typeof input !== "object") return;
+  const credentialField = Object.keys(input).find((field) => {
+    const normalized = field.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return MODEL_CONFIG_CREDENTIAL_FIELD_NAMES.has(normalized) ||
+      normalized.includes("credential") ||
+      normalized.includes("authorization") ||
+      normalized.includes("apikey") ||
+      normalized.includes("token") ||
+      normalized.includes("secret");
+  });
+  if (!credentialField) return;
+  throw new ModelConfigError(
+    "Credential fields are not accepted on model metadata routes. Use the matching /credential endpoint to update or clear credentials.",
+    400,
+    "AI_MODEL_CONFIG_CREDENTIAL_FIELD_REJECTED",
+  );
 }
 
 function assertRole(role: string): asserts role is ModelRole {
@@ -733,14 +786,25 @@ function redactProviderErrorValue(value: unknown): unknown {
 }
 
 function isSensitiveProviderErrorKey(key: string): boolean {
-  return /^(authorization|proxy-authorization|api[_-]?key|x-api-key|token|credential)$/i.test(key);
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return normalized === "authorization" ||
+    normalized === "proxyauthorization" ||
+    normalized.includes("apikey") ||
+    normalized.includes("credential") ||
+    normalized.endsWith("token") ||
+    normalized === "secret" ||
+    normalized === "clientsecret" ||
+    normalized === "cookie" ||
+    normalized === "setcookie";
 }
 
 function redactProviderErrorText(text: string): string {
   return text
-    .replace(/(Incorrect API key provided:\s*)([^\s"',}.)]+)/gi, "$1[redacted]")
+    .replace(/((?:proxy[-_\s]*)?authorization(?:\s+header)?\s*(?:=>|:|=)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\r\n,}]+)/gi, "$1[redacted]")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/-]+=*/gi, "$1 [redacted]")
+    .replace(/(\b(?:(?:invalid|incorrect|expired|revoked|malformed)\s+)?(?:x[-_\s]*)?api[-_\s]*key(?:\s+(?:provided|supplied|received|submitted|used))?(?:\s+(?:is|was))?\s*(?:=>|:|=)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\]\r\n]+)/gi, "$1[redacted]")
+    .replace(/(\b(?:(?:invalid|incorrect|expired|revoked|malformed)\s+)?(?:(?:x[-_\s]*)?(?:auth(?:entication)?[-_\s]*)?|access[-_\s]*|provider[-_\s]*|refresh[-_\s]*)?(?:token|credential|secret)(?:\s+(?:provided|supplied|received|submitted|used))?(?:\s+(?:is|was))?\s*(?:=>|:|=)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}\]\r\n]+)/gi, "$1[redacted]")
     .replace(/\bsk-[A-Za-z0-9._~+\/-]+=?/g, "[redacted]")
-    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
     .replace(/([\"']authorization[\"']\s*:\s*[\"'])([^\"']*)([\"'])/gi, "$1[redacted]$3")
     .replace(/(authorization\s*[:=]\s*)(?![\"'])([^\r\n,}]+)/gi, "$1[redacted]")
     .replace(/(api[_-]?key|token|x-api-key)([\"'\s:=]+)([^\"'\s,}]+)/gi, "$1$2[redacted]");

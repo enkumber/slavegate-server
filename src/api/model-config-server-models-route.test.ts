@@ -24,19 +24,10 @@ vi.mock("../modules/vision/vision.service", () => ({
   visionService: mocks.visionService,
 }));
 
-vi.mock("../modules/model-config/model-config.service", () => {
-  class ModelConfigError extends Error {
-    statusCode: number;
-    code: string;
-    constructor(message: string, statusCode = 400, code = "AI_MODEL_CONFIG_ERROR") {
-      super(message);
-      this.name = "ModelConfigError";
-      this.statusCode = statusCode;
-      this.code = code;
-    }
-  }
+vi.mock("../modules/model-config/model-config.service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../modules/model-config/model-config.service")>();
   return {
-    ModelConfigError,
+    ...actual,
     modelConfigService: mocks.modelConfigService,
   };
 });
@@ -49,7 +40,11 @@ async function app() {
   return app;
 }
 
-async function requestJson(method: "PATCH" | "PUT", body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+async function requestJson(
+  route: "model-configs" | "server/models",
+  method: "PATCH" | "PUT",
+  body: Record<string, unknown>,
+): Promise<{ status: number; body: any }> {
   const server = await app();
   const token = signJwt({ sub: "dashboard-user", role: "admin" }, 60_000);
   return new Promise((resolve, reject) => {
@@ -57,7 +52,7 @@ async function requestJson(method: "PATCH" | "PUT", body: Record<string, unknown
       try {
         const address = listener.address();
         if (!address || typeof address === "string") throw new Error("no address");
-        const response = await fetch(`http://127.0.0.1:${address.port}/api/server/models/decision_llm`, {
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/${route}/decision_llm`, {
           method,
           headers: {
             authorization: `Bearer ${token}`,
@@ -74,7 +69,51 @@ async function requestJson(method: "PATCH" | "PUT", body: Record<string, unknown
   });
 }
 
-describe("/server/models/:role credential contract", () => {
+const CREDENTIAL_FIELD_ALIASES = [
+  "authorization",
+  "authorization_header",
+  "credential",
+  "credentials",
+  "credentialConfigured",
+  "credentialRef",
+  "credential_ref",
+  "credentialReference",
+  "credentialValue",
+  "clearCredential",
+  "delete_credential",
+  "removeCredential",
+  "clear_credentials",
+  "credential_clear",
+  "apiKey",
+  "api_key",
+  "apiKeyConfigured",
+  "apiKeyEncrypted",
+  "api_key_encrypted",
+  "apiKeyFingerprint",
+  "api_key_fingerprint",
+  "apiKeyRef",
+  "api_key_ref",
+  "apiKeyReference",
+  "clearApiKey",
+  "delete_api_key",
+  "removeApiKey",
+  "xApiKey",
+  "x_api_key",
+  "api_token",
+  "token",
+  "token_ref",
+  "access_token",
+  "authToken",
+  "provider_token",
+  "clearToken",
+  "delete_token",
+  "removeToken",
+  "secret",
+  "client_secret",
+  "secret_ref",
+] as const;
+
+describe("generic model config route credential contract", () => {
   beforeEach(() => {
     process.env.JWT_SECRET = "test-jwt-secret";
     mocks.modelConfigService.update.mockReset();
@@ -90,8 +129,13 @@ describe("/server/models/:role credential contract", () => {
     });
   });
 
-  it.each(["PATCH", "PUT"] as const)("rejects credential fields on %s /api/server/models/:role", async (method) => {
-    const response = await requestJson(method, {
+  it.each([
+    ["model-configs", "PATCH"],
+    ["model-configs", "PUT"],
+    ["server/models", "PATCH"],
+    ["server/models", "PUT"],
+  ] as const)("rejects credential fields on %s %s", async (route, method) => {
+    const response = await requestJson(route, method, {
       provider: "openai_compatible",
       endpoint: "https://models.example.com/v1",
       model: "qwen-test",
@@ -112,20 +156,23 @@ describe("/server/models/:role credential contract", () => {
     expect(mocks.directWsServer.sendToDevice).not.toHaveBeenCalled();
   });
 
-  it("rejects credentialRef null on the legacy config route so stale DB secrets cannot win", async () => {
-    const response = await requestJson("PATCH", {
-      provider: "openai_compatible",
-      endpoint: "https://models.example.com/v1",
-      model: "qwen-test",
-      credentialRef: null,
-    });
+  it.each(CREDENTIAL_FIELD_ALIASES)("rejects own field %s even when its value is null on both aliases", async (field) => {
+    for (const route of ["model-configs", "server/models"] as const) {
+      const response = await requestJson(route, "PATCH", {
+        provider: "openai_compatible",
+        endpoint: "https://models.example.com/v1",
+        model: "qwen-test",
+        [field]: null,
+      });
 
-    expect(response.status).toBe(400);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "AI_MODEL_CONFIG_CREDENTIAL_FIELD_REJECTED",
-    });
+      expect(response.status).toBe(400);
+      expect(response.body).toMatchObject({
+        ok: false,
+        code: "AI_MODEL_CONFIG_CREDENTIAL_FIELD_REJECTED",
+      });
+    }
     expect(mocks.modelConfigService.update).not.toHaveBeenCalled();
     expect(mocks.modelConfigService.updateCredential).not.toHaveBeenCalled();
+    expect(mocks.directWsServer.sendToDevice).not.toHaveBeenCalled();
   });
 });

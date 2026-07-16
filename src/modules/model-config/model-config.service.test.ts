@@ -12,6 +12,50 @@ vi.mock("../../db/client", () => ({
 
 const query = vi.fn();
 
+const CREDENTIAL_FIELD_ALIASES = [
+  "authorization",
+  "authorization_header",
+  "credential",
+  "credentials",
+  "credentialConfigured",
+  "credentialRef",
+  "credential_ref",
+  "credentialReference",
+  "credentialValue",
+  "clearCredential",
+  "delete_credential",
+  "removeCredential",
+  "clear_credentials",
+  "credential_clear",
+  "apiKey",
+  "api_key",
+  "apiKeyConfigured",
+  "apiKeyEncrypted",
+  "api_key_encrypted",
+  "apiKeyFingerprint",
+  "api_key_fingerprint",
+  "apiKeyRef",
+  "api_key_ref",
+  "apiKeyReference",
+  "clearApiKey",
+  "delete_api_key",
+  "removeApiKey",
+  "xApiKey",
+  "x_api_key",
+  "api_token",
+  "token",
+  "token_ref",
+  "access_token",
+  "authToken",
+  "provider_token",
+  "clearToken",
+  "delete_token",
+  "removeToken",
+  "secret",
+  "client_secret",
+  "secret_ref",
+] as const;
+
 function row(overrides: Record<string, unknown> = {}) {
   return {
     role: "decision_llm",
@@ -48,6 +92,17 @@ afterEach(() => {
 });
 
 describe("ModelConfigService credential and endpoint safety", () => {
+  it("rejects every credential alias, including null clears, before generic metadata persistence", async () => {
+    const service = new ModelConfigService();
+    for (const field of CREDENTIAL_FIELD_ALIASES) {
+      await expect(service.update("decision_llm", { [field]: null } as never)).rejects.toMatchObject({
+        code: "AI_MODEL_CONFIG_CREDENTIAL_FIELD_REJECTED",
+        statusCode: 400,
+      });
+    }
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it("never includes raw apiKey material in the device bundle", async () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (sql.includes("SELECT * FROM model_configs WHERE role = $1")) {
@@ -281,21 +336,29 @@ describe("ModelConfigService credential and endpoint safety", () => {
 
   it("removes API-key values and fragments from provider error variants", () => {
     const secrets = [
-      "sk-live-provider-secret-123456",
-      "sk-json-provider-secret-abcdef",
-      "sk-header-provider-secret-fedcba",
+      "opaque-invalid-secret-123456",
+      "opaque-provided-secret-abcdef",
+      "opaque-equals-secret-fedcba",
       "opaque-provider-token-987654",
+      "opaque-authorization-secret-246810",
     ];
     const messages = [
-      `Incorrect API key provided: ${secrets[0]}. You can find your API key at https://platform.openai.com/account/api-keys.`,
+      `Invalid API key: ${secrets[0]}. Request id: req_safe_123.`,
+      `API key provided: ${secrets[1]}`,
+      `api key = ${secrets[2]}`,
+      `ApI-kEy SuPpLiEd => '${secrets[2]}'`,
       JSON.stringify({
         error: {
-          message: `Incorrect API key provided: ${secrets[1]}`,
-          headers: { Authorization: secrets[2] },
+          message: `Invalid API key: ${secrets[1]}`,
+          headers: { Authorization: secrets[4], "X-Auth-Token": secrets[3], "request-id": "req_safe_456" },
         },
       }),
-      `Authorization: ${secrets[2]}`,
+      JSON.stringify({ error: { message: `API key provided: ${secrets[2]}` } }),
+      JSON.stringify({ error: { message: `api key = ${secrets[0]}` } }),
+      `Authorization header: Bearer ${secrets[4]}`,
+      `Proxy-Authorization=Basic ${secrets[4]}`,
       `x-api-key=${secrets[3]}`,
+      `access_token: ${secrets[3]}`,
     ];
 
     for (const sanitized of messages.map((message) => sanitizeProviderError(message))) {
@@ -305,18 +368,35 @@ describe("ModelConfigService credential and endpoint safety", () => {
         expect(sanitized).not.toContain(secret.slice(-12));
       }
     }
+    expect(sanitizeProviderError(messages[0])).toContain("Request id: req_safe_123");
+    expect(sanitizeProviderError(messages[4])).toContain("req_safe_456");
+  });
+
+  it("sanitizes historical last_test_message values before returning them", async () => {
+    const secret = "opaque-historical-secret-123456";
+    query.mockResolvedValueOnce({ rows: [row({
+      last_test_status: "error",
+      last_test_message: `Invalid API key: ${secret}. Request id: req_safe_historical.`,
+    })] });
+
+    const config = await new ModelConfigService().get("decision_llm");
+
+    expect(config?.lastTestMessage).not.toContain(secret);
+    expect(config?.lastTestMessage).toContain("req_safe_historical");
   });
 
   it("stores only sanitized provider failure text in last_test_message", async () => {
-    const secret = "sk-last-test-message-secret-123456";
+    const secret = "opaque-last-test-message-secret-123456";
     process.env.MODEL_CONFIG_TEST_KEY = secret;
     process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "local:provider.test";
     setModelConfigEndpointResolverForTests(async () => [{ address: "127.0.0.1", family: 4 }]);
     const server = http.createServer((_req, res) => {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        error: `Incorrect API key provided: ${secret}`,
-        Authorization: secret,
+        error: {
+          message: `Invalid API key: ${secret}`,
+          headers: { Authorization: secret },
+        },
       }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -338,9 +418,14 @@ describe("ModelConfigService credential and endpoint safety", () => {
     });
 
     try {
-      await expect(new ModelConfigService().test("decision_llm")).rejects.toMatchObject({
-        code: "AI_PROVIDER_TEST_FAILED",
-      });
+      let failure: unknown;
+      try {
+        await new ModelConfigService().test("decision_llm");
+      } catch (err) {
+        failure = err;
+      }
+      expect(failure).toMatchObject({ code: "AI_PROVIDER_TEST_FAILED" });
+      expect((failure as Error).message).not.toContain(secret);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

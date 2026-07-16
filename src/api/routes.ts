@@ -47,7 +47,12 @@ import {
 import { accountsService } from "../modules/accounts/accounts.service";
 import { dataPipelineService } from "../modules/data-pipeline/data-pipeline.service";
 import { visionService } from "../modules/vision/vision.service";
-import { modelConfigService, ModelConfigError, type ModelRole } from "../modules/model-config/model-config.service";
+import {
+  assertModelConfigMetadataOnlyInput,
+  modelConfigService,
+  ModelConfigError,
+  type ModelRole,
+} from "../modules/model-config/model-config.service";
 import {
   generatedWorkflowCacheLookups,
   generatedWorkflowExecutions,
@@ -1626,41 +1631,7 @@ router.get("/server/models/:role", requireAuth, getModelConfigRoute);
 
 async function updateModelConfigRoute(req: Request, res: Response): Promise<void> {
   try {
-    const role = parseModelRole(req.params.role);
-    const config = await modelConfigService.update(role, req.body ?? {});
-    if (role === "vision_vlm") visionService.invalidateCache();
-    notifyModelConfigUpdated();
-    res.json({ ok: true, data: config });
-  } catch (err) {
-    handleModelConfigError(res, err);
-  }
-}
-
-function bodyHasLegacyModelCredentialField(body: unknown): boolean {
-  if (!body || typeof body !== "object") return false;
-  return [
-    "credential",
-    "credentialRef",
-    "apiKey",
-    "api_key",
-    "apiKeyRef",
-    "api_key_ref",
-    "apiKeyEncrypted",
-    "api_key_encrypted",
-    "apiKeyFingerprint",
-    "api_key_fingerprint",
-  ].some((field) => Object.prototype.hasOwnProperty.call(body, field));
-}
-
-async function updateLegacyServerModelConfigRoute(req: Request, res: Response): Promise<void> {
-  try {
-    if (bodyHasLegacyModelCredentialField(req.body)) {
-      throw new ModelConfigError(
-        "Credential fields are not accepted on this route. Use /api/server/models/:role/credential to update or clear credentials.",
-        400,
-        "AI_MODEL_CONFIG_CREDENTIAL_FIELD_REJECTED",
-      );
-    }
+    assertModelConfigMetadataOnlyInput(req.body);
     const role = parseModelRole(req.params.role);
     const config = await modelConfigService.update(role, req.body ?? {});
     if (role === "vision_vlm") visionService.invalidateCache();
@@ -1673,8 +1644,8 @@ async function updateLegacyServerModelConfigRoute(req: Request, res: Response): 
 
 router.patch("/model-configs/:role", requireAuth, updateModelConfigRoute);
 router.put("/model-configs/:role", requireAuth, updateModelConfigRoute);
-router.patch("/server/models/:role", requireAuth, updateLegacyServerModelConfigRoute);
-router.put("/server/models/:role", requireAuth, updateLegacyServerModelConfigRoute);
+router.patch("/server/models/:role", requireAuth, updateModelConfigRoute);
+router.put("/server/models/:role", requireAuth, updateModelConfigRoute);
 
 async function updateModelCredentialRoute(req: Request, res: Response): Promise<void> {
   try {
