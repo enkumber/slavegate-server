@@ -2,21 +2,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
-  cancel: vi.fn(),
-  cancelQueuedServerWorkflowRoot: vi.fn(),
+  cancelQueuedPersistedWorkflow: vi.fn(),
   recordRejectedEgress: vi.fn(),
 }));
 
 vi.mock("./workflow.service", () => ({
   workflowService: {
     get: mocks.get,
-    cancel: mocks.cancel,
   },
 }));
 
 vi.mock("../device-execution", () => ({
   deviceExecutionArbiter: {
-    cancelQueuedServerWorkflowRoot: mocks.cancelQueuedServerWorkflowRoot,
+    cancelQueuedPersistedWorkflow: mocks.cancelQueuedPersistedWorkflow,
     recordRejectedEgress: mocks.recordRejectedEgress,
   },
 }));
@@ -33,37 +31,32 @@ describe("persisted workflow cancellation safety", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.get.mockResolvedValue(workflow);
-    mocks.cancel.mockResolvedValue(true);
-    mocks.cancelQueuedServerWorkflowRoot.mockResolvedValue({ decision: "terminal", root: null });
+    mocks.cancelQueuedPersistedWorkflow.mockResolvedValue({ decision: "terminal", root: null });
     mocks.recordRejectedEgress.mockResolvedValue(undefined);
   });
 
-  it("wins the workflow queued CAS before terminalizing the queued PNQ root", async () => {
-    const order: string[] = [];
-    mocks.cancel.mockImplementation(async () => {
-      order.push("workflow-cas");
-      return true;
-    });
-    mocks.cancelQueuedServerWorkflowRoot.mockImplementation(async () => {
-      order.push("pnq-cas");
-      return { decision: "terminal", root: null };
-    });
-
+  it("delegates the workflow and PNQ CAS to one atomic arbiter transaction", async () => {
     await expect(cancelPersistedWorkflowSafely(workflow.id)).resolves.toEqual({
       workflowId: workflow.id,
       status: "cancelled",
     });
-    expect(order).toEqual(["workflow-cas", "pnq-cas"]);
+    expect(mocks.cancelQueuedPersistedWorkflow).toHaveBeenCalledWith(expect.objectContaining({
+      deviceId: workflow.deviceId,
+      workflowId: workflow.id,
+    }));
   });
 
   it("never releases PNQ ownership when the worker wins queued-to-running", async () => {
-    mocks.cancel.mockResolvedValue(false);
+    mocks.cancelQueuedPersistedWorkflow.mockResolvedValue({
+      decision: "rejected",
+      root: { state: "dispatched" },
+      reason: "root_not_queued",
+    });
 
     await expect(cancelPersistedWorkflowSafely(workflow.id)).rejects.toMatchObject({
       code: "CANCELLATION_UNSUPPORTED_IN_FLIGHT",
       status: 409,
     });
-    expect(mocks.cancelQueuedServerWorkflowRoot).not.toHaveBeenCalled();
     expect(mocks.recordRejectedEgress).toHaveBeenCalledWith(expect.objectContaining({
       deviceId: workflow.deviceId,
       operationId: workflow.id,
@@ -72,11 +65,7 @@ describe("persisted workflow cancellation safety", () => {
   });
 
   it("accepts cancellation before a PNQ root has been admitted", async () => {
-    mocks.cancelQueuedServerWorkflowRoot.mockResolvedValue({
-      decision: "missing",
-      root: null,
-      reason: "canonical_root_not_found",
-    });
+    mocks.cancelQueuedPersistedWorkflow.mockResolvedValue({ decision: "terminal", root: null });
 
     await expect(cancelPersistedWorkflowSafely(workflow.id)).resolves.toMatchObject({ status: "cancelled" });
   });
@@ -88,7 +77,6 @@ describe("persisted workflow cancellation safety", () => {
       code: "CANCELLATION_UNSUPPORTED_IN_FLIGHT",
       status: 409,
     });
-    expect(mocks.cancel).not.toHaveBeenCalled();
-    expect(mocks.cancelQueuedServerWorkflowRoot).not.toHaveBeenCalled();
+    expect(mocks.cancelQueuedPersistedWorkflow).not.toHaveBeenCalled();
   });
 });

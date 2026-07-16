@@ -2537,6 +2537,152 @@ export class DeviceExecutionArbiter {
     });
   }
 
+  /**
+   * Atomically cancel a persisted queued workflow and its queued PNQ root.
+   *
+   * The workflow row is locked in the same transaction as the device/root.
+   * This makes cancellation race directly with the worker's queued->running
+   * CAS without creating a split-brain state where one table is cancelled and
+   * the other has already advanced to active ownership.
+   */
+  async cancelQueuedPersistedWorkflow(input: {
+    deviceId: string;
+    workflowId: string;
+    actor?: string;
+    reason?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<DeviceExecutionTransitionResult> {
+    return this.withTransaction(async (client) => {
+      await lockDevice(client, input.deviceId);
+
+      const workflowResult = await client.query<{
+        id: string;
+        device_id: string | null;
+        status: string;
+      }>(
+        `SELECT id, device_id, status
+         FROM workflows
+         WHERE id = $1
+         FOR UPDATE`,
+        [input.workflowId],
+      );
+      const workflow = workflowResult.rows[0] ?? null;
+      if (!workflow) {
+        await insertEvent(client, {
+          deviceId: input.deviceId,
+          eventType: "persisted_workflow_cancel_rejected",
+          actor: input.actor ?? "workflow_api.cancel",
+          reason: "workflow_record_not_found",
+          metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+        });
+        return { decision: "missing", root: null, reason: "workflow_record_not_found" };
+      }
+      if (workflow.device_id !== input.deviceId) {
+        await insertEvent(client, {
+          deviceId: input.deviceId,
+          eventType: "persisted_workflow_cancel_rejected",
+          actor: input.actor ?? "workflow_api.cancel",
+          reason: "workflow_owned_by_different_device",
+          metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+        });
+        return { decision: "rejected", root: null, reason: "workflow_owned_by_different_device" };
+      }
+      if (workflow.status !== "queued") {
+        await insertEvent(client, {
+          deviceId: input.deviceId,
+          eventType: "persisted_workflow_cancel_rejected",
+          actor: input.actor ?? "workflow_api.cancel",
+          reason: "workflow_not_queued",
+          metadata: {
+            workflowId: input.workflowId,
+            workflowStatus: workflow.status,
+            ...(input.metadata ?? {}),
+          },
+        });
+        return { decision: "rejected", root: null, reason: "workflow_not_queued" };
+      }
+
+      const root = await selectRootByExternalId(client, "server_workflow", input.workflowId, true);
+      if (root && root.device_id !== input.deviceId) {
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: input.deviceId,
+          eventType: "persisted_workflow_cancel_rejected",
+          previousState: root.state,
+          newState: root.state,
+          actor: input.actor ?? "workflow_api.cancel",
+          reason: "root_owned_by_different_device",
+          metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+        });
+        return { decision: "rejected", root: rowToRoot(root), reason: "root_owned_by_different_device" };
+      }
+      if (root && root.state !== "queued") {
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: input.deviceId,
+          eventType: "persisted_workflow_cancel_rejected",
+          previousState: root.state,
+          newState: root.state,
+          actor: input.actor ?? "workflow_api.cancel",
+          reason: "root_not_queued",
+          metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+        });
+        return { decision: "rejected", root: rowToRoot(root), reason: "root_not_queued" };
+      }
+
+      let terminalRoot: DeviceExecutionRootRow | null = null;
+      let terminalOperation: DeviceExecutionOperationRow | null = null;
+      if (root) {
+        const generation = toNumber(root.owner_generation);
+        terminalRoot = await updateQueuedRootTerminal(client, {
+          rootId: root.id,
+          deviceId: input.deviceId,
+          ownerGeneration: generation,
+          reason: input.reason ?? "queued_workflow_cancelled_before_dispatch",
+          metadata: input.metadata,
+        });
+        if (!terminalRoot) {
+          throw new Error(`Queued PNQ root ${root.id} changed while locked`);
+        }
+        const cancelledOperations = await cancelRegisteredOperationsForRoot(client, {
+          rootId: root.id,
+          ownerGeneration: generation,
+          metadata: input.metadata,
+        });
+        terminalOperation = cancelledOperations.find((operation) =>
+          operation.operation_kind === "workflow" && operation.operation_id === input.workflowId
+        ) ?? null;
+      }
+
+      const cancelledWorkflow = await client.query<{ id: string }>(
+        `UPDATE workflows
+         SET status = 'cancelled', completed_at = NOW()
+         WHERE id = $1 AND device_id = $2 AND status = 'queued'
+         RETURNING id`,
+        [input.workflowId, input.deviceId],
+      );
+      if ((cancelledWorkflow.rowCount ?? 0) !== 1) {
+        throw new Error(`Queued workflow ${input.workflowId} changed while locked`);
+      }
+
+      await insertEvent(client, {
+        rootId: terminalRoot?.id,
+        deviceId: input.deviceId,
+        eventType: root ? "persisted_workflow_and_root_cancelled" : "persisted_workflow_cancelled_before_root_admission",
+        previousState: "queued",
+        newState: "cancelled",
+        actor: input.actor ?? "workflow_api.cancel",
+        reason: input.reason ?? "queued_workflow_cancelled_before_dispatch",
+        metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+      });
+      return {
+        decision: "terminal",
+        root: terminalRoot ? rowToRoot(terminalRoot) : null,
+        operation: terminalOperation ? rowToOperation(terminalOperation) : undefined,
+      };
+    });
+  }
+
   async markAmbiguous(input: {
     deviceId: string;
     rootKind?: DeviceExecutionRootKind;

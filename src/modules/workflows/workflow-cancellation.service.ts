@@ -26,10 +26,9 @@ async function auditUnsupportedInFlight(
  *
  * Only a workflow that is still queued may be cancelled. No wire cancellation
  * is sent: a running workflow retains PNQ ownership until its real terminal
- * result or ambiguity reconciliation. The workflow-table CAS happens first so
- * it competes directly with the worker's queued->running CAS. Once cancellation
- * wins that race, no worker can begin dispatch while the queued PNQ root is
- * terminalized.
+ * result or ambiguity reconciliation. The workflow row and PNQ root are locked
+ * and terminalized in one database transaction so neither side can win only
+ * half of the cancellation race.
  */
 export async function cancelPersistedWorkflowSafely(workflowId: string): Promise<{ workflowId: string; status: "cancelled" }> {
   const workflow = await workflowService.get(workflowId);
@@ -45,24 +44,14 @@ export async function cancelPersistedWorkflowSafely(workflowId: string): Promise
     );
   }
 
-  const cancelled = await workflowService.cancel(workflowId);
-  if (!cancelled) {
-    await auditUnsupportedInFlight(workflowId, workflow.deviceId, "state_changed_before_cancel");
-    throw cancellationError(
-      "CANCELLATION_UNSUPPORTED_IN_FLIGHT",
-      "Workflow became active before cancellation; execution ownership remains active",
-      409,
-    );
-  }
-
-  const pnq = await deviceExecutionArbiter.cancelQueuedServerWorkflowRoot({
+  const pnq = await deviceExecutionArbiter.cancelQueuedPersistedWorkflow({
     deviceId: workflow.deviceId,
     workflowId,
     actor: "workflow_api.cancel",
     reason: "api_cancelled_before_dispatch",
     metadata: { workflowStatus: workflow.status },
   });
-  if (pnq.decision !== "terminal" && pnq.decision !== "missing") {
+  if (pnq.decision !== "terminal") {
     await auditUnsupportedInFlight(workflowId, workflow.deviceId, pnq.root?.state ?? workflow.status);
     throw cancellationError(
       "CANCELLATION_UNSUPPORTED_IN_FLIGHT",

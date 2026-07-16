@@ -59,6 +59,12 @@ interface OperationRow {
   updated_at: Date;
 }
 
+interface WorkflowRow {
+  id: string;
+  device_id: string | null;
+  status: "queued" | "running" | "cancelled";
+}
+
 function root(overrides: Partial<RootRow> = {}): RootRow {
   return {
     id: overrides.id ?? `root-${Math.random().toString(16).slice(2)}`,
@@ -99,6 +105,7 @@ class FakeClient {
   roots: RootRow[] = [];
   operations: OperationRow[] = [];
   events: EventRow[] = [];
+  workflows: WorkflowRow[] = [];
   committed = false;
   rolledBack = false;
   private nextRoot = 1;
@@ -116,6 +123,22 @@ class FakeClient {
       return { rows: [], rowCount: 0 };
     }
     if (normalized.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 0 };
+
+    if (normalized.startsWith("SELECT id, device_id, status FROM workflows WHERE id = $1 FOR UPDATE")) {
+      const [workflowId] = params as [string];
+      const found = this.workflows.find((item) => item.id === workflowId);
+      return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
+    }
+
+    if (normalized.startsWith("UPDATE workflows SET status = 'cancelled'")) {
+      const [workflowId, deviceId] = params as [string, string];
+      const found = this.workflows.find((item) =>
+        item.id === workflowId && item.device_id === deviceId && item.status === "queued"
+      );
+      if (!found) return { rows: [], rowCount: 0 };
+      found.status = "cancelled";
+      return { rows: [{ id: found.id }], rowCount: 1 };
+    }
 
     if (normalized.startsWith("SELECT * FROM device_execution_roots WHERE root_kind = $1 AND external_id = $2")) {
       const [rootKind, externalId] = params as [DeviceExecutionRootKind, string];
@@ -1239,6 +1262,72 @@ describe("DeviceExecutionArbiter observe mode", () => {
     expect(client.roots[0]).toMatchObject({ state: "dispatched", owner_generation: 3 });
     expect(client.operations[0]).toMatchObject({ state: "dispatched", owner_generation: 3 });
     expect(client.events.some((event) => event.event_type === "queued_server_workflow_cancel_rejected")).toBe(true);
+  });
+
+  it("atomically cancels a persisted workflow row and its queued PNQ root", async () => {
+    const client = new FakeClient();
+    client.workflows.push({ id: "workflow-persisted", device_id: DEVICE_A, status: "queued" });
+    client.roots.push(root({
+      id: "workflow-persisted-root",
+      root_kind: "server_workflow",
+      external_id: "workflow-persisted",
+      request_key: "workflow-persisted",
+      state: "queued",
+    }));
+    client.operations.push(operation({
+      root_id: "workflow-persisted-root",
+      root_kind: "server_workflow",
+      operation_kind: "workflow",
+      operation_id: "workflow-persisted",
+      state: "registered",
+    }));
+
+    const result = await arbiterFor(client).cancelQueuedPersistedWorkflow({
+      deviceId: DEVICE_A,
+      workflowId: "workflow-persisted",
+    });
+
+    expect(result).toMatchObject({ decision: "terminal", root: { state: "cancelled" } });
+    expect(client.workflows[0]?.status).toBe("cancelled");
+    expect(client.operations[0]?.state).toBe("cancelled");
+    expect(client.events.some((event) => event.event_type === "persisted_workflow_and_root_cancelled")).toBe(true);
+    expect(client.committed).toBe(true);
+  });
+
+  it("leaves a queued PNQ root untouched when the worker already won queued-to-running", async () => {
+    const client = new FakeClient();
+    client.workflows.push({ id: "workflow-running", device_id: DEVICE_A, status: "running" });
+    client.roots.push(root({
+      id: "workflow-running-root",
+      root_kind: "server_workflow",
+      external_id: "workflow-running",
+      request_key: "workflow-running",
+      state: "queued",
+    }));
+
+    const result = await arbiterFor(client).cancelQueuedPersistedWorkflow({
+      deviceId: DEVICE_A,
+      workflowId: "workflow-running",
+    });
+
+    expect(result).toMatchObject({ decision: "rejected", reason: "workflow_not_queued" });
+    expect(client.workflows[0]?.status).toBe("running");
+    expect(client.roots[0]?.state).toBe("queued");
+    expect(client.events.some((event) => event.reason === "workflow_not_queued")).toBe(true);
+  });
+
+  it("cancels a persisted workflow safely before its PNQ root is admitted", async () => {
+    const client = new FakeClient();
+    client.workflows.push({ id: "workflow-no-root", device_id: DEVICE_A, status: "queued" });
+
+    const result = await arbiterFor(client).cancelQueuedPersistedWorkflow({
+      deviceId: DEVICE_A,
+      workflowId: "workflow-no-root",
+    });
+
+    expect(result).toEqual(expect.objectContaining({ decision: "terminal", root: null }));
+    expect(client.workflows[0]?.status).toBe("cancelled");
+    expect(client.events.some((event) => event.event_type === "persisted_workflow_cancelled_before_root_admission")).toBe(true);
   });
 
   it("blocks and audits a corrupt queued replay head instead of silently stalling FIFO", async () => {
