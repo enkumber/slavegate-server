@@ -1702,13 +1702,20 @@ router.get("/vision/config", requireAuth, async (_req, res) => {
 router.patch("/vision/config", requireAuth, async (req, res) => {
   try {
     const body = req.body as Record<string, unknown>;
-    const config = await modelConfigService.update("vision_vlm", {
+    let config = await modelConfigService.update("vision_vlm", {
       provider: body.provider as string | undefined,
       model: body.model as string | undefined,
       endpoint: body.endpoint as string | null | undefined,
-      credentialRef: (body.credentialRef ?? body.apiKeyRef) as string | null | undefined,
       enabled: body.enabled as boolean | undefined,
     });
+    const hasCredentialRef = Object.prototype.hasOwnProperty.call(body, "credentialRef") || Object.prototype.hasOwnProperty.call(body, "apiKeyRef");
+    if (hasCredentialRef) {
+      config = await modelConfigService.updateCredential("vision_vlm", {
+        credentialRef: (Object.prototype.hasOwnProperty.call(body, "credentialRef")
+          ? body.credentialRef
+          : body.apiKeyRef) as string | null,
+      });
+    }
     visionService.invalidateCache();
     res.json({ ok: true, data: config });
   } catch (err) {

@@ -14,5 +14,14 @@ describe("legacy vision config route mapping", () => {
     expect(source).toContain("last_test_at: config.lastTestAt");
     expect(source).toContain("updated_at: config.updatedAt");
   });
-});
 
+  it("routes legacy credential ref replacement and clear through credential mutation semantics", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src/api/routes.ts"), "utf8");
+    const patchRoute = source.slice(source.indexOf('router.patch("/vision/config"'), source.indexOf("// ─── Metrics"));
+    expect(patchRoute).not.toContain("credentialRef: (body.credentialRef ?? body.apiKeyRef) as string | null | undefined,");
+    expect(patchRoute).toContain('modelConfigService.updateCredential("vision_vlm"');
+    expect(patchRoute).toContain('Object.prototype.hasOwnProperty.call(body, "credentialRef")');
+    expect(patchRoute).toContain("? body.credentialRef");
+    expect(patchRoute).toContain(": body.apiKeyRef) as string | null");
+  });
+});

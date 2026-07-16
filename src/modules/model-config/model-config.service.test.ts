@@ -114,7 +114,7 @@ describe("ModelConfigService credential and endpoint safety", () => {
       model: "qwen3-vl",
       enabled: true,
     })).rejects.toMatchObject({
-      code: "AI_ENDPOINT_NOT_ALLOWLISTED",
+      code: "AI_ENDPOINT_HTTPS_REQUIRED",
       statusCode: 400,
     });
 
@@ -141,6 +141,65 @@ describe("ModelConfigService credential and endpoint safety", () => {
     });
 
     expect(saved.endpoint).toBe("http://gx10.local/v1");
+  });
+
+  it("requires HTTPS for credential-bearing public and OpenAI endpoints", async () => {
+    process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST = "models.example.com";
+    query.mockResolvedValue({ rows: [row()] });
+    await expect(new ModelConfigService().update("decision_llm", {
+      endpoint: "http://models.example.com/v1",
+      enabled: true,
+    })).rejects.toMatchObject({ code: "AI_ENDPOINT_HTTPS_REQUIRED" });
+
+    delete process.env.MODEL_CONFIG_ENDPOINT_ALLOWLIST;
+    await expect(new ModelConfigService().update("decision_llm", {
+      provider: "openai",
+      endpoint: "http://api.openai.com/v1",
+      enabled: true,
+    })).rejects.toMatchObject({ code: "AI_ENDPOINT_HTTPS_REQUIRED" });
+  });
+
+  it("rejects public-then-private DNS rebinding at the provider connection", async () => {
+    let resolution = 0;
+    setModelConfigEndpointResolverForTests(async () => [{
+      address: resolution++ === 0 ? "93.184.216.34" : "169.254.169.254",
+      family: 4,
+    }]);
+    query.mockImplementation(async (sql: string) => {
+      if (sql.includes("SELECT * FROM model_configs")) return { rows: [row()] };
+      if (sql.includes("UPDATE model_configs")) return { rows: [row()] };
+      throw new Error(`unexpected query: ${sql}`);
+    });
+
+    await expect(new ModelConfigService().test("decision_llm")).rejects.toMatchObject({
+      code: "AI_ENDPOINT_PRIVATE_ADDRESS",
+    });
+    expect(resolution).toBe(2);
+  });
+
+  it("replacing or clearing a credential ref atomically clears an older DB secret and fingerprint", async () => {
+    query.mockResolvedValueOnce({ rows: [row({
+      api_key_encrypted: "enc:v1:old",
+      credential_ref: null,
+      api_key_fingerprint: "old-fingerprint",
+    })] });
+    query.mockResolvedValueOnce({ rows: [row({ credential_ref: "env:NEW_KEY" })] });
+
+    await new ModelConfigService().updateCredential("decision_llm", { credentialRef: "env:NEW_KEY" });
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining("api_key_encrypted = $2"), [
+      "decision_llm", null, "env:NEW_KEY", null,
+    ]);
+
+    query.mockReset();
+    query.mockResolvedValueOnce({ rows: [row({
+      api_key_encrypted: "enc:v1:old",
+      api_key_fingerprint: "old-fingerprint",
+    })] });
+    query.mockResolvedValueOnce({ rows: [row({ credential_ref: null })] });
+    await new ModelConfigService().updateCredential("decision_llm", { credentialRef: null });
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining("api_key_encrypted = $2"), [
+      "decision_llm", null, null, null,
+    ]);
   });
 
   it("rejects allowlisted endpoints that resolve to private or metadata addresses unless marked local", async () => {

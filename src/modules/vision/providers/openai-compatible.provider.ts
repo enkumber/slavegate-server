@@ -8,7 +8,7 @@
  */
 
 import type { VisionProvider, VisionOptions, VisionResult, VerifyResult } from "../vision-provider.interface";
-import { sanitizeProviderError } from "../../model-config/model-config.service";
+import { modelConfigFetch, sanitizeProviderError } from "../../model-config/model-config.service";
 
 interface OpenAICompatibleConfig {
   apiKey:      string;
@@ -93,11 +93,11 @@ export class OpenAICompatibleProvider implements VisionProvider {
 
   async healthCheck(): Promise<boolean> {
     try {
-      const res = await fetch(`${this.endpoint}/models`, {
+      const res = await modelConfigFetch(`${this.endpoint}/models`, {
         headers: { Authorization: `Bearer ${this.apiKey}` },
         redirect: "error",
         signal: AbortSignal.timeout(5_000),
-      });
+      }, "vision_vlm");
       return res.ok;
     } catch {
       return false;
@@ -108,7 +108,7 @@ export class OpenAICompatibleProvider implements VisionProvider {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs ?? this.timeoutMs);
     try {
-      const res = await fetch(`${this.endpoint}${path}`, {
+      const res = await modelConfigFetch(`${this.endpoint}${path}`, {
         method:  "POST",
         headers: {
           "content-type":  "application/json",
@@ -117,7 +117,7 @@ export class OpenAICompatibleProvider implements VisionProvider {
         body:   JSON.stringify(body),
         redirect: "error",
         signal: controller.signal,
-      });
+      }, "vision_vlm");
       if (!res.ok) {
         const err = await res.text().catch(() => res.statusText);
         throw new Error(`${this.name} API ${res.status}: ${sanitizeProviderError(err)}`);

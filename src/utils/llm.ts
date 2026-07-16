@@ -4,7 +4,7 @@
  * `decision_llm`. Secrets are never hardcoded or sent to devices.
  */
 
-import { modelConfigService, sanitizeProviderError } from "../modules/model-config/model-config.service";
+import { modelConfigFetch, modelConfigService, sanitizeProviderError } from "../modules/model-config/model-config.service";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE LLM FUNCTIONS
@@ -58,13 +58,13 @@ export async function llmComplete(
     body.chat_template_kwargs = { enable_thinking: false };
   }
 
-  const response = await fetch(url, {
+  const response = await modelConfigFetch(url, {
     method: "POST",
     headers,
     redirect: "error",
     signal: AbortSignal.timeout(options?.timeoutMs ?? 30_000),
     body: JSON.stringify(body),
-  });
+  }, "decision_llm");
 
   if (!response.ok) {
     const errText = await response.text();

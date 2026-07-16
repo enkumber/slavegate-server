@@ -7,6 +7,8 @@
 import crypto from "crypto";
 import dns from "dns/promises";
 import fs from "fs/promises";
+import http from "http";
+import https from "https";
 import net from "net";
 import path from "path";
 import { getDb } from "../../db/client";
@@ -391,10 +393,14 @@ function validateEndpoint(endpoint: string | null, provider: string, role: Model
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     throw new ModelConfigError(`Invalid endpoint protocol for ${role}. Only http and https are supported.`, 400, "AI_ENDPOINT_PROTOCOL_UNSUPPORTED");
   }
+  const endpointPolicy = endpointPolicyForHost(parsed.hostname);
   if (parsed.username || parsed.password || parsed.hash) {
     throw new ModelConfigError(`Invalid endpoint URL for ${role}. Credentials and fragments are not allowed in endpoint URLs.`, 400, "AI_ENDPOINT_INVALID");
   }
-  if (!endpointPolicyForHost(parsed.hostname).allowlisted) {
+  if (parsed.protocol === "http:" && !endpointPolicy.allowPrivate) {
+    throw new ModelConfigError(`Model endpoint for ${role} must use HTTPS. Plain HTTP is allowed only for hosts explicitly declared local:<host> in MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_HTTPS_REQUIRED");
+  }
+  if (!endpointPolicy.allowlisted) {
     throw new ModelConfigError(`Model endpoint for ${role} must be explicitly allowlisted with MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_NOT_ALLOWLISTED");
   }
   parsed.pathname = parsed.pathname.replace(/\/+$/, "").replace(/\/chat\/completions$/, "");
@@ -432,6 +438,86 @@ async function validateEndpointNetwork(endpoint: string | null, provider: string
       throw new ModelConfigError(`Model endpoint for ${role} resolved to a private, local, metadata, or reserved address. Use local:<host> in MODEL_CONFIG_ENDPOINT_ALLOWLIST only for an intended local provider.`, 400, "AI_ENDPOINT_PRIVATE_ADDRESS");
     }
   }
+}
+
+async function resolveAllowedEndpointAddress(hostname: string, role: ModelRole): Promise<EndpointAddress> {
+  const policy = endpointPolicyForHost(hostname);
+  if (!policy.allowlisted) {
+    throw new ModelConfigError(`Model endpoint for ${role} must be explicitly allowlisted with MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_NOT_ALLOWLISTED");
+  }
+  let addresses: EndpointAddress[];
+  try {
+    addresses = await endpointAddressResolver(hostname);
+  } catch {
+    throw new ModelConfigError(`Model endpoint DNS lookup failed for ${role}.`, 503, "AI_ENDPOINT_DNS_FAILED");
+  }
+  if (!addresses.length) {
+    throw new ModelConfigError(`Model endpoint DNS lookup returned no addresses for ${role}.`, 503, "AI_ENDPOINT_DNS_FAILED");
+  }
+  for (const entry of addresses) {
+    if (isBlockedEndpointAddress(entry.address) && !policy.allowPrivate) {
+      throw new ModelConfigError(`Model endpoint for ${role} resolved to a private, local, metadata, or reserved address. Use local:<host> in MODEL_CONFIG_ENDPOINT_ALLOWLIST only for an intended local provider.`, 400, "AI_ENDPOINT_PRIVATE_ADDRESS");
+    }
+  }
+  return addresses[0];
+}
+
+/** Credential-safe provider transport. DNS policy is enforced by the lookup used
+ * by the actual socket, preventing a validated hostname from being resolved a
+ * second time by an unrelated transport. HTTPS still receives the original
+ * hostname for SNI and certificate verification. */
+export async function modelConfigFetch(url: string, init: RequestInit = {}, role: ModelRole): Promise<Response> {
+  const parsed = new URL(url);
+  const policy = endpointPolicyForHost(parsed.hostname);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new ModelConfigError(`Invalid endpoint protocol for ${role}. Only http and https are supported.`, 400, "AI_ENDPOINT_PROTOCOL_UNSUPPORTED");
+  }
+  if (parsed.protocol === "http:" && !policy.allowPrivate) {
+    throw new ModelConfigError(`Model endpoint for ${role} must use HTTPS. Plain HTTP is allowed only for hosts explicitly declared local:<host> in MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_HTTPS_REQUIRED");
+  }
+  if (!policy.allowlisted) {
+    throw new ModelConfigError(`Model endpoint for ${role} must be explicitly allowlisted with MODEL_CONFIG_ENDPOINT_ALLOWLIST.`, 400, "AI_ENDPOINT_NOT_ALLOWLISTED");
+  }
+
+  const headers = new Headers(init.headers);
+  const requestHeaders: Record<string, string> = {};
+  headers.forEach((value, name) => { requestHeaders[name] = value; });
+  const body = init.body == null ? undefined : String(init.body);
+  return new Promise<Response>((resolve, reject) => {
+    const transport = parsed.protocol === "https:" ? https : http;
+    const request = transport.request(parsed, {
+      method: init.method ?? "GET",
+      headers: requestHeaders,
+      lookup: (hostname, _options, callback) => {
+        resolveAllowedEndpointAddress(hostname, role).then(
+          (entry) => callback(null, entry.address, entry.family ?? net.isIP(entry.address)),
+          (error) => callback(error as NodeJS.ErrnoException, "", 0),
+        );
+      },
+      ...(parsed.protocol === "https:" ? { servername: parsed.hostname } : {}),
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => {
+        const responseHeaders = new Headers();
+        for (let i = 0; i < response.rawHeaders.length; i += 2) {
+          responseHeaders.append(response.rawHeaders[i], response.rawHeaders[i + 1]);
+        }
+        resolve(new Response(Buffer.concat(chunks), {
+          status: response.statusCode ?? 502,
+          statusText: response.statusMessage,
+          headers: responseHeaders,
+        }));
+      });
+    });
+    request.on("error", reject);
+    const onAbort = () => request.destroy(new DOMException("The operation was aborted", "AbortError"));
+    if (init.signal?.aborted) onAbort();
+    else init.signal?.addEventListener("abort", onAbort, { once: true });
+    request.on("close", () => init.signal?.removeEventListener("abort", onAbort));
+    if (body !== undefined) request.write(body);
+    request.end();
+  });
 }
 
 function endpointPolicyForHost(hostname: string): { allowlisted: boolean; allowPrivate: boolean } {
@@ -632,13 +718,13 @@ async function testProvider(config: ResolvedModelConfig): Promise<void> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   headers.Authorization = `Bearer ${config.apiKey}`;
   const body = { model: config.model, max_tokens: 8, messages: [{ role: "user", content: "ping" }] };
-  const res = await fetch(`${endpointBase(config.endpoint, provider)}${path}`, {
+  const res = await modelConfigFetch(`${endpointBase(config.endpoint, provider)}${path}`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
     redirect: "error",
     signal: AbortSignal.timeout(10_000),
-  });
+  }, config.role);
   if (!res.ok) throw new Error(`Provider test failed (${res.status}): ${sanitizeProviderError(await res.text())}`);
 }
 
