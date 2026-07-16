@@ -532,6 +532,84 @@ describe("DeviceExecutionArbiter observe mode", () => {
     ]);
   });
 
+  it("keeps observed BATCH/WORKFLOW roots FIFO-ordered before waiter and wire", async () => {
+    const client = new FakeClient();
+    client.roots.push(
+      root({ id: "batch-older-root", root_kind: "batch", external_id: "batch-older", fifo_sequence: 1 }),
+      root({ id: "batch-later-root", root_kind: "batch", external_id: "batch-later", fifo_sequence: 2 }),
+    );
+    const registerWaiter = vi.fn();
+    const wireDispatch = vi.fn(() => true);
+
+    const result = await arbiterFor(client).runObservedEgress({
+      deviceId: DEVICE_A,
+      boundary: "edge_batch",
+      operationId: "batch-later",
+      wireType: "BATCH_START",
+      registerWaiter,
+      wireDispatch,
+    });
+
+    expect(result).toMatchObject({
+      decision: "would_wait",
+      sent: false,
+      activeRootId: "batch-older-root",
+      reason: "older_queued_root_exists",
+    });
+    expect(registerWaiter).not.toHaveBeenCalled();
+    expect(wireDispatch).not.toHaveBeenCalled();
+  });
+
+  it("fails observed egress closed when waiter registration collides", async () => {
+    const client = new FakeClient();
+    const wireDispatch = vi.fn(() => true);
+    const result = await arbiterFor(client).runObservedEgress({
+      deviceId: DEVICE_A,
+      boundary: "edge_batch",
+      operationId: "batch-waiter-collision",
+      wireType: "BATCH_START",
+      registerWaiter: () => { throw new Error("collision"); },
+      wireDispatch,
+    });
+
+    expect(result).toMatchObject({
+      decision: "offline",
+      sent: false,
+      reason: "waiter_registration_failed: collision",
+    });
+    expect(wireDispatch).not.toHaveBeenCalled();
+    expect(client.roots[0].state).toBe("blocked");
+    expect(client.operations[0].state).toBe("blocked");
+    expect(client.events.at(-1)?.event_type).toBe("egress_not_sent_fail_closed");
+  });
+
+  it("does not regress a fast BATCH terminal result after wireDispatch returns", async () => {
+    const client = new FakeClient();
+    const arbiter = arbiterFor(client);
+    const result = await arbiter.runObservedEgress({
+      deviceId: DEVICE_A,
+      boundary: "edge_batch",
+      operationId: "batch-fast",
+      wireType: "BATCH_START",
+      registerWaiter: () => undefined,
+      wireDispatch: async (handle) => {
+        const terminal = await arbiter.observeTerminal({
+          deviceId: DEVICE_A,
+          handle,
+          status: "completed",
+          actor: "test.fast_batch",
+        });
+        expect(terminal.decision).toBe("terminal");
+        return true;
+      },
+    });
+
+    expect(result).toMatchObject({ decision: "terminal", sent: true, reason: "result_already_terminal" });
+    expect(client.roots[0].state).toBe("completed");
+    expect(client.operations[0].state).toBe("completed");
+    expect(client.events.at(-1)?.event_type).toBe("dispatch_completion_after_terminal");
+  });
+
   it("authorizes standalone job egress only for the FIFO head and sends with a typed permit", async () => {
     const client = new FakeClient();
     client.roots.push(
@@ -807,6 +885,155 @@ describe("DeviceExecutionArbiter observe mode", () => {
     expect(client.events.at(-1)).toMatchObject({
       event_type: "egress_not_sent_fail_closed",
       reason: "waiter_registration_failed: collision",
+    });
+  });
+
+  it("dispatches a JOB child under the canonical server-workflow root and keeps the root active on result", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({
+      id: "workflow-root",
+      root_kind: "server_workflow",
+      external_id: "workflow-1",
+      request_key: "workflow-1",
+      fifo_sequence: 1,
+    }));
+    const arbiter = arbiterFor(client);
+
+    const result = await arbiter.runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "workflow-child-1",
+      boundary: "generated_child",
+      rootExternalId: "workflow-1",
+      registerWaiter: () => undefined,
+      wireDispatch: async (permit) => {
+        expect(permit.handle).toMatchObject({
+          rootId: "workflow-root",
+          rootKind: "server_workflow",
+          operationKind: "job",
+          operationId: "workflow-child-1",
+          ownerGeneration: 1,
+        });
+        const accepted = await arbiter.acceptJobResult({
+          deviceId: DEVICE_A,
+          jobId: "workflow-child-1",
+          handle: permit.handle,
+          reportedHandle: permit.handle,
+          status: "completed",
+        });
+        expect(accepted.accepted).toBe(true);
+        return true;
+      },
+    });
+
+    expect(result).toMatchObject({ decision: "terminal", sent: true });
+    expect(client.roots[0]).toMatchObject({ id: "workflow-root", state: "dispatched", owner_generation: 1 });
+    expect(client.operations[0]).toMatchObject({
+      root_id: "workflow-root",
+      operation_id: "workflow-child-1",
+      state: "completed",
+      owner_generation: 1,
+    });
+    expect(client.events.map((event) => event.event_type)).toEqual([
+      "root_dispatching",
+      "child_job_result_accepted",
+      "dispatch_completion_after_terminal",
+    ]);
+  });
+
+  it("releases a server-workflow root when its root JOB result is accepted", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({
+      id: "workflow-root-job",
+      root_kind: "server_workflow",
+      external_id: "workflow-root-job",
+      fifo_sequence: 1,
+    }));
+    const arbiter = arbiterFor(client);
+
+    const result = await arbiter.runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "workflow-root-wire-job",
+      boundary: "server_workflow_root",
+      operationKind: "job",
+      rootExternalId: "workflow-root-job",
+      registerWaiter: () => undefined,
+      wireDispatch: async (permit) => {
+        const accepted = await arbiter.acceptJobResult({
+          deviceId: DEVICE_A,
+          jobId: "workflow-root-wire-job",
+          handle: permit.handle,
+          reportedHandle: permit.handle,
+          status: "completed",
+        });
+        expect(accepted.accepted).toBe(true);
+        return true;
+      },
+    });
+
+    expect(result).toMatchObject({ decision: "terminal", sent: true });
+    expect(client.roots[0].state).toBe("completed");
+    expect(client.operations[0].state).toBe("completed");
+    expect(client.events.map((event) => event.event_type)).toEqual([
+      "root_dispatching",
+      "job_result_accepted",
+      "dispatch_completion_after_terminal",
+    ]);
+  });
+
+  it("rejects child egress without an existing canonical root before waiter or wire", async () => {
+    const client = new FakeClient();
+    const registerWaiter = vi.fn();
+    const wireDispatch = vi.fn(() => true);
+
+    const result = await arbiterFor(client).runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "orphan-child",
+      boundary: "recovery_child",
+      rootExternalId: "missing-workflow",
+      registerWaiter,
+      wireDispatch,
+    });
+
+    expect(result).toMatchObject({
+      decision: "rejected",
+      sent: false,
+      reason: "existing_root_not_found",
+    });
+    expect(registerWaiter).not.toHaveBeenCalled();
+    expect(wireDispatch).not.toHaveBeenCalled();
+    expect(client.roots).toHaveLength(0);
+    expect(client.events[0]).toMatchObject({
+      event_type: "child_egress_rejected_missing_root",
+      reason: "existing_root_not_found",
+    });
+  });
+
+  it("blocks and audits a corrupt queued replay head instead of silently stalling FIFO", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({ id: "corrupt-root", external_id: "job-corrupt", state: "queued" }));
+    client.operations.push(operation({
+      root_id: "corrupt-root",
+      operation_id: "job-corrupt",
+      state: "registered",
+    }));
+
+    await arbiterFor(client).markCorruptQueueHead({
+      deviceId: DEVICE_A,
+      rootId: "corrupt-root",
+      rootKind: "job",
+      ownerGeneration: 0,
+      operationId: "job-corrupt",
+      actor: "test.queue_replay",
+      reason: "invalid_or_mismatched_dispatch_envelope",
+    });
+
+    expect(client.roots[0].state).toBe("blocked");
+    expect(client.operations[0].state).toBe("blocked");
+    expect(client.events[0]).toMatchObject({
+      event_type: "queue_replay_corrupt_head_blocked",
+      previous_state: "queued",
+      new_state: "blocked",
+      reason: "invalid_or_mismatched_dispatch_envelope",
     });
   });
 

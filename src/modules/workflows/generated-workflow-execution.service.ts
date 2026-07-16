@@ -1,5 +1,6 @@
 import { scalabilityConfig } from "../../config/scalability.config";
 import { directWsServer } from "../../ws/direct-ws.server";
+import { sendEdgeWorkflowToDeviceEnforced } from "../../transport/transport";
 import { hbeService } from "../hbe/hbe.service";
 import { startWorkflow } from "./workflow.executor";
 import { workflowService } from "./workflow.service";
@@ -188,11 +189,11 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     });
     await workflowService.markRunning(wf.id);
 
-    const sent = directWsServer.sendWorkflowStart(
+    const sent = await sendEdgeWorkflowToDeviceEnforced(
       deviceId,
+      wf.id,
       template as unknown as Record<string, unknown>,
       dispatchVariables,
-      wf.id,
     );
 
     if (sent) {

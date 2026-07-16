@@ -59,6 +59,9 @@ vi.mock("../../../modules/auth/auth.service", () => ({ authService: {} }));
 vi.mock("../../../ws/direct-ws.server", () => ({ directWsServer: mocks.directWsServer }));
 vi.mock("../../../transport/transport", () => ({
   sendJobToDevice: vi.fn(),
+  sendEdgeWorkflowToDeviceEnforced: vi.fn((deviceId, workflowId, template, variables) =>
+    Promise.resolve(mocks.directWsServer.sendWorkflowStart(deviceId, template, variables, workflowId))
+  ),
   isDeviceOnline: vi.fn(() => true),
 }));
 vi.mock("../../../modules/app-mapping/recorder.service", () => ({ loadMap: mocks.appMapping.loadMap }));

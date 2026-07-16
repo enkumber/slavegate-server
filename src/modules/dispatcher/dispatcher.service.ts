@@ -133,13 +133,14 @@ export class DispatcherService {
 
     await deviceExecutionArbiter.observeAdmission({
       deviceId: req.deviceId,
-      rootKind: "job",
-      externalId: jobId,
+      rootKind: req.workflowId ? "server_workflow" : "job",
+      externalId: req.workflowId ?? jobId,
       requestKey: req.workflowId ?? jobId,
       actor: "dispatcher",
       metadata: {
         jobType: req.type,
         workflowId: req.workflowId ?? null,
+        canonicalRoot: Boolean(req.workflowId),
         stepIndex: req.stepIndex ?? null,
         observeSource: "dispatcher.dispatch",
       },

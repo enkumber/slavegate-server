@@ -28,8 +28,10 @@ import { scalabilityConfig } from "../config/scalability.config";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import {
   decodeDeviceExecutionHandle,
+  encodeDeviceExecutionHandle,
   deviceExecutionArbiter,
   type DeviceExecutionJobDispatchPermit,
+  type DeviceExecutionHandle,
   type DeviceExecutionRootKind,
 } from "../modules/device-execution";
 import { devicesService } from "../modules/devices/devices.service";
@@ -42,6 +44,15 @@ import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/mes
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function handlesEqual(left: DeviceExecutionHandle, right: DeviceExecutionHandle): boolean {
+  return left.rootId === right.rootId &&
+    left.deviceId === right.deviceId &&
+    left.rootKind === right.rootKind &&
+    left.ownerGeneration === right.ownerGeneration &&
+    left.operationKind === right.operationKind &&
+    left.operationId === right.operationId;
 }
 
 function observeRootDispatch(
@@ -138,9 +149,16 @@ interface PendingJob {
 }
 
 interface PendingBatch {
+  promise: Promise<BatchResult>;
   resolve: (result: BatchResult) => void;
   reject:  (err: Error) => void;
   timer:   ReturnType<typeof setTimeout>;
+  handle: DeviceExecutionHandle;
+}
+
+interface PendingWorkflow {
+  handle: DeviceExecutionHandle;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface OtaDeviceStatus {
@@ -193,6 +211,7 @@ export class DirectWsServer {
   private connections = new Map<string, ConnectedDevice>();   // deviceId → conn
   private pendingJobs = new Map<string, PendingJob>();        // jobId → awaiter
   private pendingBatches = new Map<string, PendingBatch>();   // batchId → awaiter
+  private pendingWorkflows = new Map<string, PendingWorkflow>();
   private otaStatuses = new Map<string, OtaDeviceStatus>();   // deviceId → last OTA status
   private rateLimiter = new RateLimiter();
   private pingTimer:    ReturnType<typeof setInterval> | null = null;
@@ -208,6 +227,7 @@ export class DirectWsServer {
 
     // Periodic PING + stale connection cleanup
     this.pingTimer = setInterval(() => this._pingAll(), PING_INTERVAL_MS);
+    this.pingTimer.unref();
     console.log("[direct-ws] Ready for HTTP upgrade routing on /ws-direct");
   }
 
@@ -225,20 +245,19 @@ export class DirectWsServer {
   async close(): Promise<void> {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.wss?.close();
+    const ambiguityWrites: Promise<unknown>[] = [];
     // Reject all pending jobs
     for (const [jobId, pending] of this.pendingJobs) {
       clearTimeout(pending.timer);
       if (pending.permit) {
-        deviceExecutionArbiter.markAmbiguous({
+        ambiguityWrites.push(deviceExecutionArbiter.markAmbiguous({
           deviceId: pending.permit.handle.deviceId,
           handle: pending.permit.handle,
           reason: "direct_ws_server_shutdown_before_result",
           actor: "direct_ws_close",
           state: "blocked",
           metadata: { handle: pending.permit.wireHandle },
-        }).catch((err) => {
-          console.error("[device-execution] shutdown ambiguity mark failed:", (err as Error).message);
-        });
+        }));
       }
       pending.reject(new Error("Server shutting down"));
       this.pendingJobs.delete(jobId);
@@ -246,8 +265,32 @@ export class DirectWsServer {
     // Reject all pending batches
     for (const [batchId, pending] of this.pendingBatches) {
       clearTimeout(pending.timer);
+      ambiguityWrites.push(deviceExecutionArbiter.markAmbiguous({
+        deviceId: pending.handle.deviceId,
+        handle: pending.handle,
+        reason: "direct_ws_server_shutdown_before_batch_result",
+        actor: "direct_ws_close",
+        state: "blocked",
+      }));
       pending.reject(new Error("Server shutting down"));
       this.pendingBatches.delete(batchId);
+    }
+    for (const [workflowId, pending] of this.pendingWorkflows) {
+      clearTimeout(pending.timer);
+      ambiguityWrites.push(deviceExecutionArbiter.markAmbiguous({
+        deviceId: pending.handle.deviceId,
+        handle: pending.handle,
+        reason: "direct_ws_server_shutdown_before_workflow_terminal",
+        actor: "direct_ws_close",
+        state: "blocked",
+      }));
+      this.pendingWorkflows.delete(workflowId);
+    }
+    const ambiguityResults = await Promise.allSettled(ambiguityWrites);
+    for (const result of ambiguityResults) {
+      if (result.status === "rejected") {
+        console.error("[device-execution] shutdown ambiguity mark failed:", (result.reason as Error).message);
+      }
     }
   }
 
@@ -277,8 +320,11 @@ export class DirectWsServer {
     if (permit.kind !== "device_execution_job_dispatch_permit") {
       throw new Error("DirectWS JOB send requires a PNQ device-execution permit");
     }
-    if (permit.handle.rootKind !== "job" || permit.handle.operationKind !== "job") {
-      throw new Error("DirectWS JOB permit must target a standalone job operation");
+    if (
+      permit.handle.operationKind !== "job" ||
+      (permit.handle.rootKind !== "job" && permit.handle.rootKind !== "server_workflow")
+    ) {
+      throw new Error("DirectWS JOB permit must target a standalone job or server-workflow child operation");
     }
     if (permit.handle.operationId !== payload.jobId) {
       throw new Error("DirectWS JOB permit operation id does not match payload jobId");
@@ -381,7 +427,7 @@ export class DirectWsServer {
     reject: (err: Error) => void,
     permit?: DeviceExecutionJobDispatchPermit,
   ): ReturnType<typeof setTimeout> {
-    return setTimeout(() => {
+    const timer = setTimeout(() => {
       this.pendingJobs.delete(jobId);
       if (permit) {
         deviceExecutionArbiter.markAmbiguous({
@@ -400,6 +446,8 @@ export class DirectWsServer {
       }
       reject(new Error(`Job ${jobId} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
+    timer.unref();
+    return timer;
   }
 
   /**
@@ -407,23 +455,24 @@ export class DirectWsServer {
    * Returns true if sent, false if device not connected.
    */
   sendBatch(deviceId: string, batchPayload: Record<string, unknown>): boolean {
-    const conn = this.connections.get(deviceId);
-    const batchId = (batchPayload.batchId as string) ?? "?";
-    if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
-      observeRootDispatch("batch", deviceId, batchId, false, {
-        workflowId: (batchPayload.workflowId as string | undefined) ?? null,
-        observeSource: "directWsServer.sendBatch",
-      });
-      return false;
-    }
+    console.error(`[device-execution] blocked raw BATCH egress: device=${deviceId.slice(0, 8)} batch=${String(batchPayload.batchId ?? "?").slice(0, 8)}`);
+    void deviceExecutionArbiter.recordRejectedEgress({
+      deviceId,
+      operationId: String(batchPayload.batchId ?? "missing"),
+      wireType: "BATCH_START",
+      actor: "direct_ws.raw_sender_guard",
+      reason: "raw_batch_sender_disabled_use_permit_path",
+    }).catch((err) => console.error("[device-execution] raw BATCH rejection audit failed:", (err as Error).message));
+    return false;
+  }
 
-    this._send(conn.ws, batchPayload);
-    console.log(`[direct-ws] sendBatch: device=${deviceId.slice(0,8)} batchId=${batchId.slice(0,8)} steps=${(batchPayload.steps as unknown[])?.length ?? 0}`);
-    observeRootDispatch("batch", deviceId, batchId, true, {
-      workflowId: (batchPayload.workflowId as string | undefined) ?? null,
-      steps: (batchPayload.steps as unknown[])?.length ?? 0,
-      observeSource: "directWsServer.sendBatch",
-    });
+  sendBatchWithHandle(handle: DeviceExecutionHandle, batchPayload: Record<string, unknown>): boolean {
+    if (handle.rootKind !== "batch" || handle.operationKind !== "batch" || handle.operationId !== batchPayload.batchId) {
+      throw new Error("DirectWS BATCH handle does not match payload identity");
+    }
+    const conn = this.connections.get(handle.deviceId);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+    this._send(conn.ws, { ...batchPayload, pnqHandle: encodeDeviceExecutionHandle(handle) });
     return true;
   }
 
@@ -437,32 +486,50 @@ export class DirectWsServer {
     variables?: Record<string, unknown>,
     workflowId?: string,
   ): boolean {
-    const conn = this.connections.get(deviceId);
-    if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
-      if (workflowId) {
-        observeRootDispatch("edge_workflow", deviceId, workflowId, false, {
-          templateId: (template.id as string | undefined) ?? null,
-          observeSource: "directWsServer.sendWorkflowStart",
-        });
-      }
-      return false;
-    }
+    console.error(`[device-execution] blocked raw WORKFLOW_START egress: device=${deviceId.slice(0, 8)} workflow=${workflowId?.slice(0, 8) ?? "missing"}`);
+    void deviceExecutionArbiter.recordRejectedEgress({
+      deviceId,
+      operationId: workflowId ?? "missing",
+      wireType: "WORKFLOW_START",
+      actor: "direct_ws.raw_sender_guard",
+      reason: "raw_workflow_sender_disabled_use_permit_path",
+    }).catch((err) => console.error("[device-execution] raw WORKFLOW rejection audit failed:", (err as Error).message));
+    return false;
+  }
 
+  sendWorkflowStartWithHandle(
+    handle: DeviceExecutionHandle,
+    template: Record<string, unknown>,
+    variables?: Record<string, unknown>,
+  ): boolean {
+    if (handle.rootKind !== "edge_workflow" || handle.operationKind !== "workflow") {
+      throw new Error("DirectWS WORKFLOW handle must target an edge workflow root");
+    }
+    const conn = this.connections.get(handle.deviceId);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+    const existing = this.pendingWorkflows.get(handle.operationId);
+    if (existing && !handlesEqual(existing.handle, handle)) throw new Error(`Workflow handle collision for ${handle.operationId}`);
+    if (!existing) {
+      const timer = setTimeout(() => {
+        this.pendingWorkflows.delete(handle.operationId);
+        void deviceExecutionArbiter.markAmbiguous({
+          deviceId: handle.deviceId,
+          handle,
+          reason: "workflow_status_timeout",
+          actor: "direct_ws_workflow_timeout",
+          state: "blocked",
+        }).catch((err) => console.error("[device-execution] workflow timeout ambiguity mark failed:", (err as Error).message));
+      }, 600_000);
+      timer.unref();
+      this.pendingWorkflows.set(handle.operationId, { handle, timer });
+    }
     this._send(conn.ws, {
       ...template,
-      // Keep protocol type LAST so a template field named `type` can never
-      // overwrite WORKFLOW_START and make the Android client ignore the run.
-      type: 'WORKFLOW_START',
-      ...(workflowId ? { workflowId } : {}),
+      type: "WORKFLOW_START",
+      workflowId: handle.operationId,
       variables: variables ?? {},
+      pnqHandle: encodeDeviceExecutionHandle(handle),
     });
-    console.log(`[direct-ws] sendWorkflowStart: device=${deviceId.slice(0,8)} template=${(template.id as string)?.slice(0,20)} workflow=${workflowId?.slice(0,8) ?? 'none'}`);
-    if (workflowId) {
-      observeRootDispatch("edge_workflow", deviceId, workflowId, true, {
-        templateId: (template.id as string | undefined) ?? null,
-        observeSource: "directWsServer.sendWorkflowStart",
-      });
-    }
     return true;
   }
 
@@ -504,13 +571,40 @@ export class DirectWsServer {
    * Rejects after timeoutMs (default: 10 min — batches can be long).
    */
   waitForBatchResult(batchId: string, timeoutMs = 600_000): Promise<BatchResult> {
-    return new Promise((resolve, reject) => {
+    const existing = this.pendingBatches.get(batchId);
+    if (existing) return existing.promise;
+    throw new Error(`Batch ${batchId} has no typed PNQ waiter`);
+  }
+
+  registerBatchWaiterWithHandle(handle: DeviceExecutionHandle, timeoutMs = 600_000): Promise<BatchResult> {
+    const batchId = handle.operationId;
+    const existing = this.pendingBatches.get(batchId);
+    if (existing) {
+      if (!handlesEqual(existing.handle, handle)) throw new Error(`Batch waiter collision for ${batchId}`);
+      return existing.promise;
+    }
+    let resolve!: (result: BatchResult) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<BatchResult>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    promise.catch(() => {});
       const timer = setTimeout(() => {
         this.pendingBatches.delete(batchId);
         reject(new Error(`Batch ${batchId} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
-      this.pendingBatches.set(batchId, { resolve, reject, timer });
-    });
+    timer.unref();
+    this.pendingBatches.set(batchId, { promise, resolve, reject, timer, handle });
+    return promise;
+  }
+
+  rejectBatchWaiterWithHandle(handle: DeviceExecutionHandle, reason: string): void {
+    const pending = this.pendingBatches.get(handle.operationId);
+    if (!pending || !handlesEqual(pending.handle, handle)) return;
+    clearTimeout(pending.timer);
+    this.pendingBatches.delete(handle.operationId);
+    pending.reject(new Error(reason));
   }
 
   isDeviceOnline(deviceId: string): boolean {
@@ -643,12 +737,12 @@ export class DirectWsServer {
       // ── Route by type ─────────────────────────────────────────────────
       switch (type) {
         case "JOB_RESULT":      await this._handleJobResult(deviceConn, msg);   break;
-        case "BATCH_RESULT":    this._handleBatchResult(deviceConn, msg); break;
+        case "BATCH_RESULT":    await this._handleBatchResult(deviceConn, msg); break;
         case "HEARTBEAT":       await this._handleHeartbeat(deviceConn, msg); break;
         case "PING":            this._send(ws, { type: "PONG" });          break;
         case "PONG":            deviceConn.lastPongAt = Date.now();         break;
         // ── Edge Workflow Execution (ADR-001) ──
-        case "WORKFLOW_STATUS": this._handleWorkflowStatus(deviceConn, msg); break;
+        case "WORKFLOW_STATUS": await this._handleWorkflowStatus(deviceConn, msg); break;
         case "LLM_REQUEST":    this._handleLlmRequest(deviceConn, ws, msg); break;
         case "OTA_RESULT":     this._handleOtaResult(deviceConn, msg); break;
         default:                console.warn(`[direct-ws] Unknown message type: ${type}`); break;
@@ -967,7 +1061,7 @@ export class DirectWsServer {
 
   // ─── Batch result handler ────────────────────────────────────────────────
 
-  private _handleBatchResult(conn: ConnectedDevice, msg: Record<string, unknown>): void {
+  private async _handleBatchResult(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {
     const batchId = msg.batchId as string;
     if (!batchId) {
       console.warn("[direct-ws] BATCH_RESULT missing batchId — ignoring");
@@ -980,29 +1074,39 @@ export class DirectWsServer {
 
     console.log(`[direct-ws] BATCH_RESULT received: batchId=${batchId.slice(0,8)} status=${status} steps=${results.length} totalMs=${totalDurationMs} device=${conn.deviceId.slice(0,8)}`);
 
-    // Resolve waiting promise
     const pending = this.pendingBatches.get(batchId);
-    if (pending) {
-      clearTimeout(pending.timer);
-      this.pendingBatches.delete(batchId);
-      pending.resolve({
-        batchId,
-        workflowId:      msg.workflowId as string ?? "",
-        status,
-        results,
-        executedAt:       msg.executedAt as string ?? new Date().toISOString(),
-        totalDurationMs,
-        error:           msg.error as string | undefined,
+    const reportedHandle = decodeDeviceExecutionHandle(msg.pnqHandle);
+    if (!pending || !reportedHandle || !handlesEqual(pending.handle, reportedHandle) || reportedHandle.deviceId !== conn.deviceId) {
+      await deviceExecutionArbiter.recordRejectedEgress({
+        deviceId: conn.deviceId,
+        operationId: batchId,
+        wireType: "BATCH_RESULT",
+        actor: "direct_ws",
+        reason: !pending ? "batch_result_without_waiter" : !reportedHandle ? "batch_result_handle_required" : "batch_result_handle_mismatch",
+        metadata: { reportedHandle: msg.pnqHandle ?? null },
       });
-    } else {
-      console.warn(`[direct-ws] BATCH_RESULT for unknown batchId=${batchId.slice(0,8)} — no pending awaiter`);
+      return;
     }
+    const terminal = await deviceExecutionArbiter.observeTerminal({
+      deviceId: conn.deviceId,
+      handle: reportedHandle,
+      status,
+      actor: "direct_ws",
+      reason: msg.error as string | undefined,
+      metadata: { totalDurationMs, resultCount: results.length },
+    });
+    if (terminal.decision !== "terminal") return;
 
-    observeRootTerminal("batch", conn.deviceId, batchId, status, msg.error as string | undefined, {
-      workflowId: (msg.workflowId as string | undefined) ?? null,
+    clearTimeout(pending.timer);
+    this.pendingBatches.delete(batchId);
+    pending.resolve({
+      batchId,
+      workflowId: msg.workflowId as string ?? "",
+      status,
+      results,
+      executedAt: msg.executedAt as string ?? new Date().toISOString(),
       totalDurationMs,
-      resultCount: results.length,
-      observeSource: "directWsServer.handleBatchResult",
+      error: msg.error as string | undefined,
     });
 
     // ACK
@@ -1063,13 +1167,27 @@ export class DirectWsServer {
    * Handle WORKFLOW_STATUS from device.
    * Fire-and-forget: log + update DB. No response needed.
    */
-  private _handleWorkflowStatus(conn: ConnectedDevice, msg: Record<string, unknown>): void {
+  private async _handleWorkflowStatus(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {
     const workflowId = msg.workflowId as string;
     const status     = msg.status as string;
     const step       = msg.currentStep as number;
     const total      = msg.totalSteps as number;
     const error      = msg.error as string | undefined;
     const variables  = msg.variables as Record<string, unknown> | undefined;
+    const pendingWorkflow = this.pendingWorkflows.get(workflowId);
+    const expectedHandle = pendingWorkflow?.handle;
+    const reportedHandle = decodeDeviceExecutionHandle(msg.pnqHandle);
+    if (!expectedHandle || !reportedHandle || !handlesEqual(expectedHandle, reportedHandle) || reportedHandle.deviceId !== conn.deviceId) {
+      await deviceExecutionArbiter.recordRejectedEgress({
+        deviceId: conn.deviceId,
+        operationId: workflowId || "missing",
+        wireType: "WORKFLOW_STATUS",
+        actor: "direct_ws",
+        reason: !expectedHandle ? "workflow_status_without_pending_handle" : !reportedHandle ? "workflow_status_handle_required" : "workflow_status_handle_mismatch",
+        metadata: { reportedHandle: msg.pnqHandle ?? null, status },
+      });
+      return;
+    }
     const controlPlaneContext = variables?.controlPlaneContext &&
       typeof variables.controlPlaneContext === "object" &&
       !Array.isArray(variables.controlPlaneContext)
@@ -1109,16 +1227,25 @@ export class DirectWsServer {
       });
 
       if (status === "completed" || status === "failed" || status === "cancelled") {
-        observeRootTerminal("edge_workflow", conn.deviceId, workflowId, status, error, {
+        const terminal = await deviceExecutionArbiter.observeTerminal({
+          deviceId: conn.deviceId,
+          handle: reportedHandle,
+          status,
+          actor: "direct_ws",
+          reason: error,
+          metadata: {
           step: typeof step === "number" ? step : null,
           total: typeof total === "number" ? total : null,
-          observeSource: "directWsServer.handleWorkflowStatus",
+          },
         });
+        if (terminal.decision !== "terminal") return;
+        if (pendingWorkflow) clearTimeout(pendingWorkflow.timer);
+        this.pendingWorkflows.delete(workflowId);
       }
     }
 
     // Update DB (fire-and-forget)
-    this._persistWorkflowStatus(conn.deviceId, workflowId, status, step, total, error, variables)
+    await this._persistWorkflowStatus(conn.deviceId, workflowId, status, step, total, error, variables)
       .catch(err => console.error(`[direct-ws] Failed to persist workflow status: ${err.message}`));
   }
 

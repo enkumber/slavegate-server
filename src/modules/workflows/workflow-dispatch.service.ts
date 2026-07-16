@@ -3,8 +3,9 @@
  * Shared service for workflow dispatch, cancellation, rate limiting, and decisions.
  */
 
-import { sendDeviceExecutionJobToDevice, sendJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
+import { sendDeviceExecutionJobToDevice, sendWorkflowCancellationControl, isDeviceOnline, waitForResult } from "../../transport/transport";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
+import { deviceExecutionArbiter } from "../device-execution";
 
 // ── Pre-workflow steps (sent as individual jobs before workflow) ────────────
 // Device-side workflow executor may not handle these correctly,
@@ -14,6 +15,7 @@ const PRE_WORKFLOW_TYPES = new Set(["screen_wake", "unlock"]);
 async function runPreWorkflowSteps(
   deviceId: string,
   steps: any[],
+  workflowRootId: string,
 ): Promise<{ remaining: any[]; preResults: Record<string, any> }> {
   const preResults: Record<string, any> = {};
   const remaining: any[] = [];
@@ -27,6 +29,7 @@ async function runPreWorkflowSteps(
         type: step.type as any,
         params: step.params ?? step,
         timeoutMs: 15_000,
+        workflowId: workflowRootId,
       });
       const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
         jobId,
@@ -35,7 +38,7 @@ async function runPreWorkflowSteps(
         timeoutMs: 15_000,
       }, {
         boundary: "prestep_child",
-        rootKind: "job",
+        rootExternalId: workflowRootId,
         actor: "workflow_dispatch",
         metadata: { observeSource: "workflowDispatch.preWorkflowStep", workflowStepType: step.type },
       });
@@ -128,7 +131,16 @@ export async function dispatchWorkflow(params: DispatchParams) {
   );
 
   // 1. Extract screen_wake + unlock and send as individual jobs
-  const { remaining, preResults } = await runPreWorkflowSteps(deviceId, workflow.steps);
+  const workflowRootId = `workflow-dispatch:${deviceId}:${Date.now()}`;
+  await deviceExecutionArbiter.observeAdmission({
+    deviceId,
+    rootKind: "server_workflow",
+    externalId: workflowRootId,
+    requestKey: workflowRootId,
+    actor: "workflow_dispatch",
+    metadata: { workflowName: workflow.name, observeSource: "workflowDispatch.dispatchWorkflow" },
+  });
+  const { remaining, preResults } = await runPreWorkflowSteps(deviceId, workflow.steps, workflowRootId);
 
   if (remaining.length === 0) {
     // All steps were pre-workflow, nothing left to send as workflow
@@ -144,6 +156,7 @@ export async function dispatchWorkflow(params: DispatchParams) {
     type: "workflow_execute" as any,
     params: { workflow: workflowWithRemaining },
     timeoutMs,
+    workflowId: workflowRootId,
   });
 
   // 3. Send remaining workflow to device via WebSocket
@@ -154,7 +167,7 @@ export async function dispatchWorkflow(params: DispatchParams) {
     timeoutMs,
   }, {
     boundary: "server_workflow_root",
-    rootKind: "job",
+    rootExternalId: workflowRootId,
     actor: "workflow_dispatch",
     metadata: {
       observeSource: "workflowDispatch.dispatchWorkflow",
@@ -194,12 +207,7 @@ export async function cancelWorkflow(jobId: string) {
 
   // Notify device to cancel (use dedicated cancel signal)
   if (isDeviceOnline(entry.deviceId)) {
-    sendJobToDevice(entry.deviceId, {
-      jobId,
-      type: "cancel_workflow" as any,
-      params: { reason: "cancelled_by_user" },
-      timeoutMs: 5000,
-    });
+    await sendWorkflowCancellationControl(entry.deviceId, jobId);
   }
 
   activeWorkflows.delete(jobId);

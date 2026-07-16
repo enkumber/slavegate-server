@@ -56,12 +56,7 @@ const reviewedRawImportBoundaries = new Set([
   "src/api/hydra-routes.ts\tdirectWsServer\tdirect-ws",
   "src/api/routes.ts\tdirectWsServer\tdirect-ws",
   "src/index.ts\tdirectWsServer\tdirect-ws",
-  "src/modules/agents/orchestrator.ts\tsendJobToDevice\ttransport",
-  "src/modules/skills/skill.cascade.ts\tsendJobToDevice\ttransport",
-  "src/modules/workflow-compiler/runner.service.ts\tdirectWsServer\tdirect-ws",
   "src/modules/workflows/generated-workflow-execution.service.ts\tdirectWsServer\tdirect-ws",
-  "src/modules/workflows/workflow-dispatch.service.ts\tsendJobToDevice\ttransport",
-  "src/modules/workflows/workflow.executor.ts\tdirectWsServer\tdirect-ws",
   "src/transport/transport.ts\tdirectWsServer\tdirect-ws",
 ]);
 
@@ -418,7 +413,18 @@ describe("PNQ-001 production egress inventory guard", () => {
   it("matches the reviewed static sender baseline", () => {
     const baselinePath = path.join(repoRoot, "evidence/PNQ-001/static-egress-baseline.json");
     const expected = (JSON.parse(fs.readFileSync(baselinePath, "utf8")) as BaselineEntry[])
+      // Historical raw DirectWS JOB egress was removed by G3 enforcement.
+      .filter((entry) => !(
+        (entry.file === "src/transport/transport.ts" && entry.kind === "directWsServer.sendJob") ||
+        (entry.file === "src/modules/agents/orchestrator.ts" && entry.kind === "sendJobToDevice") ||
+        (entry.file === "src/modules/skills/skill.cascade.ts" && entry.kind === "sendJobToDevice") ||
+        (entry.file === "src/modules/workflow-compiler/runner.service.ts" && entry.kind === "directWsServer.sendBatch") ||
+        (entry.file === "src/modules/workflows/generated-workflow-execution.service.ts" && entry.kind === "directWsServer.sendWorkflowStart") ||
+        (entry.file === "src/modules/workflows/workflow-dispatch.service.ts" && entry.kind === "sendJobToDevice") ||
+        (entry.file === "src/modules/workflows/workflow.executor.ts" && entry.kind === "directWsServer.sendBatch")
+      ))
       .map(({ file, kind, count }) => ({ file, kind, count }))
+      .concat([{ file: "src/transport/transport.ts", kind: "directWsServer.sendWorkflowCancel", count: 1 }])
       .sort((a, b) => a.file.localeCompare(b.file) || a.kind.localeCompare(b.kind));
 
     expect(currentEgressBaseline()).toEqual(expected);
@@ -447,6 +453,15 @@ describe("PNQ-001 production egress inventory guard", () => {
     const violations = findings.filter((finding) => !isReviewedCallBoundary(finding));
 
     expect(violations).toEqual([]);
+  });
+
+  it("keeps the legacy synchronous JOB sender fail-closed before any wire call", () => {
+    const source = fs.readFileSync(path.join(repoRoot, "src/transport/transport.ts"), "utf8");
+    const start = source.indexOf("export function sendJobToDevice");
+    const end = source.indexOf("export async function sendStandaloneJobToDevice", start);
+    const legacySender = source.slice(start, end);
+    expect(legacySender).toContain("raw_job_sender_disabled_use_permit_path");
+    expect(legacySender).not.toContain("directWsServer.sendJob(");
   });
 
   it("detects aliased and namespace raw transport sender bypasses", () => {
@@ -507,7 +522,7 @@ describe("PNQ-001 production egress inventory guard", () => {
       rootKind: "server_workflow",
       operationKind: "workflow",
       retainsRootUntilTerminal: true,
-      requiresExistingRootHandle: false,
+      requiresExistingRootHandle: true,
       egressLane: "device_execution",
       mayBypassDeviceQueue: false,
     });

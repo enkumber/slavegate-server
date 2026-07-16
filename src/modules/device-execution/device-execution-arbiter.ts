@@ -122,7 +122,7 @@ export const DEVICE_EXECUTION_BOUNDARY_MATRIX: Record<DeviceExecutionBoundaryKin
     rootKind: "server_workflow",
     operationKind: "workflow",
     retainsRootUntilTerminal: true,
-    requiresExistingRootHandle: false,
+    requiresExistingRootHandle: true,
     egressLane: "device_execution",
     mayBypassDeviceQueue: false,
   },
@@ -285,6 +285,9 @@ export interface DeviceExecutionObservedEgressResult extends DeviceExecutionTran
 export interface DeviceExecutionStandaloneJobEgressInput {
   deviceId: string;
   jobId: string;
+  /** Required by child boundaries: canonical root id or external workflow id. */
+  rootId?: string;
+  rootExternalId?: string;
   rootKind?: DeviceExecutionRootKind;
   operationKind?: DeviceExecutionOperationKind;
   boundary?: DeviceExecutionBoundaryKind;
@@ -579,6 +582,108 @@ export class DeviceExecutionArbiter {
     }
   }
 
+  async recordRejectedEgress(input: {
+    deviceId: string;
+    operationId: string;
+    wireType: string;
+    actor: string;
+    reason: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.withTransaction(async (client) => {
+      await lockDevice(client, input.deviceId);
+      await insertEvent(client, {
+        deviceId: input.deviceId,
+        eventType: "egress_rejected_before_wire",
+        actor: input.actor,
+        reason: input.reason,
+        metadata: {
+          operationId: input.operationId,
+          wireType: input.wireType,
+          ...(input.metadata ?? {}),
+        },
+      });
+    });
+  }
+
+  async recordControlEgress(input: {
+    deviceId: string;
+    operationId: string;
+    controlKind: DeviceExecutionControlPolicy["allowedKinds"][number];
+    actor: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.withTransaction(async (client) => {
+      await lockDevice(client, input.deviceId);
+      await insertEvent(client, {
+        deviceId: input.deviceId,
+        eventType: "control_egress_authorized",
+        actor: input.actor,
+        reason: input.controlKind,
+        metadata: {
+          operationId: input.operationId,
+          controlKind: input.controlKind,
+          queueBypass: true,
+          mayCarryUiWork: false,
+          ...(input.metadata ?? {}),
+        },
+      });
+    });
+  }
+
+  async markCorruptQueueHead(input: {
+    deviceId: string;
+    rootId: string;
+    rootKind: DeviceExecutionRootKind;
+    ownerGeneration: number;
+    operationId: string;
+    actor: string;
+    reason: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.withTransaction(async (client) => {
+      await lockDevice(client, input.deviceId);
+      const root = await selectRoot(client, { rootId: input.rootId, rootKind: input.rootKind, forUpdate: true });
+      if (!root || root.device_id !== input.deviceId || toNumber(root.owner_generation) !== input.ownerGeneration) {
+        await insertEvent(client, {
+          deviceId: input.deviceId,
+          eventType: "queue_replay_corruption_mark_rejected",
+          actor: input.actor,
+          reason: "queue_head_identity_changed",
+          metadata: { rootId: input.rootId, operationId: input.operationId, ...(input.metadata ?? {}) },
+        });
+        return;
+      }
+      const previousState = root.state;
+      const blocked = await updateRootAmbiguous(client, {
+        rootId: root.id,
+        deviceId: input.deviceId,
+        ownerGeneration: input.ownerGeneration,
+        toState: "blocked",
+        reason: input.reason,
+        metadata: input.metadata,
+      });
+      await updateOperationState(client, {
+        operationKind: "job",
+        operationId: input.operationId,
+        fromStates: ["registered", "dispatching", "dispatched", "rejected"],
+        toState: "blocked",
+        ownerGeneration: input.ownerGeneration,
+        metadata: input.metadata,
+      });
+      await insertEvent(client, {
+        rootId: root.id,
+        deviceId: input.deviceId,
+        eventType: "queue_replay_corrupt_head_blocked",
+        previousState,
+        newState: blocked?.state ?? root.state,
+        actor: input.actor,
+        reason: input.reason,
+        metadata: { operationId: input.operationId, ...(input.metadata ?? {}) },
+      });
+    });
+  }
+
   async runStandaloneJobEgress(
     input: DeviceExecutionStandaloneJobEgressInput,
   ): Promise<DeviceExecutionStandaloneJobEgressResult> {
@@ -588,6 +693,7 @@ export class DeviceExecutionArbiter {
     const actor = input.actor ?? "transport.g2";
     const wireType = input.wireType ?? "JOB";
     const boundaryKind = input.boundary ?? "standalone_job";
+    const requiresExistingRoot = boundary?.requiresExistingRootHandle === true;
     const metadata = {
       ...(input.metadata ?? {}),
       boundary: boundaryKind,
@@ -598,8 +704,35 @@ export class DeviceExecutionArbiter {
     const prepared = await this.withTransaction(async (client) => {
       await lockDevice(client, input.deviceId);
 
-      let root = await selectRootByExternalId(client, rootKind, input.jobId, true);
+      let root = input.rootId
+        ? await selectRoot(client, { rootId: input.rootId, rootKind, forUpdate: true })
+        : await selectRootByExternalId(
+            client,
+            rootKind,
+            requiresExistingRoot ? (input.rootExternalId ?? "") : input.jobId,
+            true,
+          );
       if (!root) {
+        if (requiresExistingRoot) {
+          await insertEvent(client, {
+            deviceId: input.deviceId,
+            eventType: "child_egress_rejected_missing_root",
+            actor,
+            reason: input.rootId || input.rootExternalId ? "existing_root_not_found" : "existing_root_identity_required",
+            metadata: {
+              ...metadata,
+              jobId: input.jobId,
+              rootId: input.rootId ?? null,
+              rootExternalId: input.rootExternalId ?? null,
+            },
+          });
+          return {
+            decision: "rejected" as const,
+            root: null,
+            sent: false,
+            reason: input.rootId || input.rootExternalId ? "existing_root_not_found" : "existing_root_identity_required",
+          };
+        }
         root = await insertRoot(client, {
           deviceId: input.deviceId,
           rootKind,
@@ -723,7 +856,7 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      if (root.state === "dispatched") {
+      if (root.state === "dispatched" && !requiresExistingRoot) {
         const handle = operationRowToHandle(operation);
         await insertEvent(client, {
           rootId: root.id,
@@ -812,7 +945,7 @@ export class DeviceExecutionArbiter {
           metadata,
         });
         if (dispatching) current = dispatching;
-      } else if (root.state !== "dispatching") {
+      } else if (root.state !== "dispatching" && !(requiresExistingRoot && root.state === "dispatched")) {
         return {
           decision: "ignored" as const,
           root: rowToRoot(root),
@@ -927,7 +1060,10 @@ export class DeviceExecutionArbiter {
         toNumber(root.owner_generation) === expectedGeneration &&
         toNumber(operation.owner_generation) === expectedGeneration;
 
-      if (sameOwner && isTerminalState(root.state) && isTerminalOperationState(operation.state)) {
+      const childAlreadyTerminal = requiresExistingRoot &&
+        root.state === "dispatched" &&
+        isTerminalOperationState(operation.state);
+      if (sameOwner && ((isTerminalState(root.state) && isTerminalOperationState(operation.state)) || childAlreadyTerminal)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: root.device_id,
@@ -956,7 +1092,7 @@ export class DeviceExecutionArbiter {
 
       if (
         !sameOwner ||
-        root.state !== "dispatching"
+        (root.state !== "dispatching" && !(requiresExistingRoot && root.state === "dispatched"))
       ) {
         await insertEvent(client, {
           rootId: root.id,
@@ -1034,16 +1170,18 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      const dispatched = await updateRootState(client, {
-        rootId: root.id,
-        fromStates: ["dispatching"],
-        toState: "dispatched",
-        ownerGenerationIncrement: false,
-        metadata: {
-          ...metadata,
-          handle: prepared.permit.wireHandle,
-        },
-      });
+      const dispatched = root.state === "dispatched"
+        ? root
+        : await updateRootState(client, {
+            rootId: root.id,
+            fromStates: ["dispatching"],
+            toState: "dispatched",
+            ownerGenerationIncrement: false,
+            metadata: {
+              ...metadata,
+              handle: prepared.permit.wireHandle,
+            },
+          });
       if (!dispatched) {
         await insertEvent(client, {
           rootId: root.id,
@@ -1082,7 +1220,7 @@ export class DeviceExecutionArbiter {
       await insertEvent(client, {
         rootId: dispatched.id,
         deviceId: dispatched.device_id,
-        eventType: "root_dispatched",
+        eventType: requiresExistingRoot ? "child_dispatched_under_root" : "root_dispatched",
         previousState: root.state,
         newState: dispatched.state,
         actor,
@@ -1189,6 +1327,31 @@ export class DeviceExecutionArbiter {
         };
       }
 
+      if (root.state === "queued") {
+        const oldest = await selectOldestQueuedRoot(client, input.deviceId);
+        if (!oldest || oldest.id !== root.id) {
+          await insertEvent(client, {
+            rootId: root.id,
+            deviceId: root.device_id,
+            eventType: "egress_waiting_fifo_predecessor",
+            previousState: root.state,
+            newState: root.state,
+            actor,
+            reason: "older_queued_root_exists",
+            metadata: { ...metadata, predecessorRootId: oldest?.id ?? null },
+          });
+          return {
+            decision: "would_wait" as const,
+            root: rowToRoot(root),
+            operation: rowToOperation(operation),
+            handle,
+            activeRootId: oldest?.id,
+            sent: false,
+            reason: "older_queued_root_exists",
+          };
+        }
+      }
+
       let current = root;
       if (root.state === "queued" || root.state === "claimed") {
         const dispatching = await updateRootState(client, {
@@ -1230,20 +1393,24 @@ export class DeviceExecutionArbiter {
       };
     });
 
-    if (!prepared.handle) return prepared;
-
-    await input.registerWaiter?.(prepared.handle);
+    if (!prepared.handle || prepared.decision !== "claimed") return prepared;
 
     let sent = false;
     let wireError: string | undefined;
     try {
-      sent = await input.wireDispatch(prepared.handle);
+      await input.registerWaiter?.(prepared.handle);
+    } catch (err) {
+      wireError = `waiter_registration_failed: ${(err as Error).message}`;
+    }
+    try {
+      if (!wireError) sent = await input.wireDispatch(prepared.handle);
     } catch (err) {
       wireError = (err as Error).message;
       sent = false;
     }
 
     const completed = await this.withTransaction(async (client) => {
+      await lockDevice(client, input.deviceId);
       const root = await selectRoot(client, {
         rootId: prepared.handle?.rootId,
         rootKind,
@@ -1261,27 +1428,66 @@ export class DeviceExecutionArbiter {
         return { ...prepared, sent, reason: "missing_root_or_operation" };
       }
 
+
+      const expectedGeneration = prepared.handle!.ownerGeneration;
+      const sameOwner = root.device_id === input.deviceId &&
+        operation.root_id === root.id &&
+        operation.device_id === input.deviceId &&
+        operation.operation_kind === prepared.handle!.operationKind &&
+        operation.operation_id === prepared.handle!.operationId &&
+        toNumber(root.owner_generation) === expectedGeneration &&
+        toNumber(operation.owner_generation) === expectedGeneration;
+      if (sameOwner && isTerminalState(root.state) && isTerminalOperationState(operation.state)) {
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: root.device_id,
+          eventType: "dispatch_completion_after_terminal",
+          previousState: root.state,
+          newState: root.state,
+          actor,
+          reason: "result_arrived_before_wire_dispatch_returned",
+          metadata: { ...metadata, handle: encodeDeviceExecutionHandle(prepared.handle!), sent, wireError: wireError ?? null },
+        });
+        return {
+          decision: "terminal" as const,
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          handle: prepared.handle!,
+          sent,
+          reason: "result_already_terminal",
+        };
+      }
+
       if (!sent) {
+        const blocked = await updateRootAmbiguous(client, {
+          rootId: root.id,
+          deviceId: input.deviceId,
+          ownerGeneration: expectedGeneration,
+          toState: "blocked",
+          reason: wireError ?? "device_offline_or_transport_rejected_after_dispatching",
+          metadata,
+        }) ?? root;
         const rejected = await updateOperationState(client, {
           operationKind,
           operationId: input.operationId,
           fromStates: ["registered", "dispatching"],
-          toState: "rejected",
+          toState: "blocked",
+          ownerGeneration: expectedGeneration,
           metadata: { ...metadata, wireError: wireError ?? null },
         });
         await insertEvent(client, {
           rootId: root.id,
           deviceId: root.device_id,
-          eventType: "egress_not_sent",
+          eventType: "egress_not_sent_fail_closed",
           previousState: root.state,
-          newState: root.state,
+          newState: blocked.state,
           actor,
           reason: wireError ?? "device_offline_or_transport_rejected",
           metadata: { ...metadata, handle: encodeDeviceExecutionHandle(operationRowToHandle(operation)) },
         });
         return {
           decision: "offline" as const,
-          root: rowToRoot(root),
+          root: rowToRoot(blocked),
           operation: rowToOperation(rejected ?? operation),
           handle: operationRowToHandle(rejected ?? operation),
           sent,
@@ -1323,7 +1529,7 @@ export class DeviceExecutionArbiter {
       });
 
       return {
-        decision: prepared.decision === "would_wait" ? "would_wait" as const : "dispatched" as const,
+        decision: "dispatched" as const,
         root: rowToRoot(dispatched ?? root),
         operation: rowToOperation(dispatchedOperation),
         handle: operationRowToHandle(dispatchedOperation),
@@ -1959,7 +2165,7 @@ export class DeviceExecutionArbiter {
         root.device_id === input.deviceId &&
         operation.device_id === input.deviceId &&
         toNumber(root.owner_generation) === expectedGeneration &&
-        ((operation.state === "dispatching" && root.state === "dispatching") ||
+        ((operation.state === "dispatching" && (root.state === "dispatching" || root.state === "dispatched")) ||
           (operation.state === "dispatched" && root.state === "dispatched"));
       if (
         !isCurrentDispatchOwner ||
@@ -1995,14 +2201,29 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      const terminal = await updateRootTerminal(client, {
-        rootId: root.id,
-        deviceId: input.deviceId,
-        ownerGeneration: expectedGeneration,
-        toState: terminalState,
-        reason: input.reason ?? input.status,
-        metadata: input.metadata,
-      });
+      const operationBoundary = typeof operation.metadata?.boundary === "string" ? operation.metadata.boundary : null;
+      const isServerWorkflowChild = root.root_kind === "server_workflow" &&
+        operation.operation_kind === "job" &&
+        operationBoundary !== null &&
+        (["generated_child", "self_healing_child", "prestep_child", "recovery_child"] as readonly string[]).includes(operationBoundary);
+      const terminal = isServerWorkflowChild
+        ? root.state === "dispatching"
+          ? await updateRootState(client, {
+              rootId: root.id,
+              fromStates: ["dispatching"],
+              toState: "dispatched",
+              ownerGenerationIncrement: false,
+              metadata: input.metadata,
+            })
+          : root
+        : await updateRootTerminal(client, {
+            rootId: root.id,
+            deviceId: input.deviceId,
+            ownerGeneration: expectedGeneration,
+            toState: terminalState,
+            reason: input.reason ?? input.status,
+            metadata: input.metadata,
+          });
       if (!terminal) {
         await insertEvent(client, {
           rootId: root.id,
@@ -2035,7 +2256,7 @@ export class DeviceExecutionArbiter {
       await insertEvent(client, {
         rootId: terminal.id,
         deviceId: terminal.device_id,
-        eventType: "job_result_accepted",
+        eventType: isServerWorkflowChild ? "child_job_result_accepted" : "job_result_accepted",
         previousState: root.state,
         newState: terminal.state,
         actor: input.actor ?? "transport",
@@ -2048,10 +2269,86 @@ export class DeviceExecutionArbiter {
       });
       return {
         accepted: true,
-        decision: "terminal",
+          decision: "terminal",
         root: rowToRoot(terminal),
         operation: rowToOperation(terminalOperation),
         handle: operationRowToHandle(terminalOperation),
+      };
+    });
+  }
+
+  async finishServerWorkflowRoot(input: {
+    deviceId: string;
+    workflowId: string;
+    status: "completed" | "failed" | "cancelled";
+    actor?: string;
+    reason?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<DeviceExecutionTransitionResult> {
+    return this.withTransaction(async (client) => {
+      await lockDevice(client, input.deviceId);
+      const root = await selectRootByExternalId(client, "server_workflow", input.workflowId, true);
+      if (!root) {
+        await insertEvent(client, {
+          deviceId: input.deviceId,
+          eventType: "server_workflow_finish_rejected",
+          actor: input.actor ?? "workflow_executor",
+          reason: "canonical_root_not_found",
+          metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+        });
+        return { decision: "missing", root: null, reason: "canonical_root_not_found" };
+      }
+      if (root.device_id !== input.deviceId || isTerminalState(root.state)) {
+        const reason = root.device_id !== input.deviceId ? "root_owned_by_different_device" : "root_already_terminal";
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: input.deviceId,
+          eventType: "server_workflow_finish_rejected",
+          previousState: root.state,
+          newState: root.state,
+          actor: input.actor ?? "workflow_executor",
+          reason,
+          metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+        });
+        return { decision: "rejected", root: rowToRoot(root), reason };
+      }
+
+      const generation = toNumber(root.owner_generation);
+      const terminal = await updateRootTerminal(client, {
+        rootId: root.id,
+        deviceId: input.deviceId,
+        ownerGeneration: generation,
+        toState: input.status,
+        reason: input.reason ?? input.status,
+        metadata: input.metadata,
+      });
+      if (!terminal) return { decision: "rejected", root: rowToRoot(root), reason: "terminal_cas_missed" };
+
+      const rootOperation = await selectOperationByIdentity(client, "workflow", input.workflowId, true);
+      const terminalOperation = rootOperation
+        ? await updateOperationState(client, {
+            operationKind: "workflow",
+            operationId: input.workflowId,
+            fromStates: ["registered", "dispatching", "dispatched", "reconciling", "blocked", "rejected"],
+            toState: input.status,
+            ownerGeneration: generation,
+            metadata: input.metadata,
+          }) ?? rootOperation
+        : null;
+      await insertEvent(client, {
+        rootId: terminal.id,
+        deviceId: terminal.device_id,
+        eventType: "server_workflow_root_terminal",
+        previousState: root.state,
+        newState: terminal.state,
+        actor: input.actor ?? "workflow_executor",
+        reason: input.reason ?? input.status,
+        metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
+      });
+      return {
+        decision: "terminal",
+        root: rowToRoot(terminal),
+        operation: terminalOperation ? rowToOperation(terminalOperation) : undefined,
       };
     });
   }
@@ -2452,7 +2749,11 @@ async function upsertOperation(
              WHEN device_execution_operations.state = 'registered' THEN EXCLUDED.wire_handle
              ELSE device_execution_operations.wire_handle
            END,
-           metadata = device_execution_operations.metadata || EXCLUDED.metadata,
+           metadata = CASE
+             WHEN device_execution_operations.metadata ? 'dispatchEnvelope'
+               THEN device_execution_operations.metadata || (EXCLUDED.metadata - 'dispatchEnvelope')
+             ELSE device_execution_operations.metadata || EXCLUDED.metadata
+           END,
            updated_at = NOW()
        WHERE device_execution_operations.root_id = EXCLUDED.root_id
      RETURNING *`,

@@ -14,6 +14,7 @@ import type {
   DeviceExecutionRootKind,
   DeviceExecutionStandaloneJobEgressResult,
 } from "../modules/device-execution";
+import { DEVICE_EXECUTION_BOUNDARY_MATRIX } from "../modules/device-execution";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
 
 export type StandaloneJobSendResult = Pick<
@@ -27,9 +28,22 @@ export interface DeviceExecutionJobSendOptions {
   boundary?: DeviceExecutionBoundaryKind;
   rootKind?: DeviceExecutionRootKind;
   operationKind?: DeviceExecutionOperationKind;
+  rootId?: string;
+  rootExternalId?: string;
   requestKey?: string;
   actor?: string;
   metadata?: Record<string, unknown>;
+}
+
+export interface DeviceExecutionJobReplayEnvelopeV1 {
+  schemaVersion: "pnq.job-dispatch/v1";
+  deviceId: string;
+  rootKind: DeviceExecutionRootKind;
+  rootExternalId: string;
+  operationKind: "job";
+  operationId: string;
+  boundary: DeviceExecutionBoundaryKind;
+  payload: JobDispatchPayload;
 }
 
 /**
@@ -37,14 +51,17 @@ export interface DeviceExecutionJobSendOptions {
  * Returns true if sent successfully, false if device unreachable.
  */
 export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
-  // DirectWs only
-  if (directWsServer.isDeviceOnline(deviceId)) {
-    const sent = directWsServer.sendJob(deviceId, payload);
-    observeJobDispatch(deviceId, payload, sent);
-    return sent;
-  }
-
-  observeJobDispatch(deviceId, payload, false);
+  console.error(
+    `[device-execution] blocked unauthorized raw JOB egress: device=${deviceId.slice(0, 8)} job=${payload.jobId.slice(0, 8)}`
+  );
+  deviceExecutionArbiter.recordRejectedEgress({
+    deviceId,
+    operationId: payload.jobId,
+    wireType: "JOB",
+    actor: "transport.raw_sender_guard",
+    reason: "raw_job_sender_disabled_use_permit_path",
+    metadata: { jobType: payload.type },
+  }).catch((err) => console.error("[device-execution] raw sender rejection audit failed:", (err as Error).message));
   return false;
 }
 
@@ -79,10 +96,25 @@ export async function sendDeviceExecutionJobToDevice(
   payload: JobDispatchPayload,
   options: DeviceExecutionJobSendOptions = {},
 ): Promise<StandaloneJobSendResult> {
+  const boundaryPolicy = options.boundary ? DEVICE_EXECUTION_BOUNDARY_MATRIX[options.boundary] : undefined;
+  const effectiveRootKind = boundaryPolicy?.requiresExistingRootHandle ? boundaryPolicy.rootKind : (options.rootKind ?? boundaryPolicy?.rootKind ?? "job");
+  const rootExternalId = options.rootExternalId ?? payload.jobId;
+  const replayEnvelope: DeviceExecutionJobReplayEnvelopeV1 = {
+    schemaVersion: "pnq.job-dispatch/v1",
+    deviceId,
+    rootKind: effectiveRootKind,
+    rootExternalId,
+    operationKind: "job",
+    operationId: payload.jobId,
+    boundary: options.boundary ?? "standalone_job",
+    payload: structuredClone(payload),
+  };
   const result = await deviceExecutionArbiter.runStandaloneJobEgress({
     deviceId,
     jobId: payload.jobId,
-    rootKind: options.rootKind,
+    rootId: options.rootId,
+    rootExternalId: options.rootExternalId,
+    rootKind: effectiveRootKind,
     operationKind: options.operationKind ?? "job",
     boundary: options.boundary,
     requestKey: options.requestKey ?? payload.jobId,
@@ -92,7 +124,7 @@ export async function sendDeviceExecutionJobToDevice(
       jobType: payload.type,
       timeoutMs: payload.timeoutMs ?? null,
       requiresRoot: payload.requiresRoot ?? false,
-      dispatchEnvelope: payload,
+      dispatchEnvelope: replayEnvelope,
       observeSource: options.metadata?.observeSource ?? "transport.sendDeviceExecutionJobToDevice",
     },
     registerWaiter: (permit) => {
@@ -131,10 +163,11 @@ export async function dispatchQueuedJobsForDevice(
     const envelope = await nextQueuedJobEnvelope(deviceId);
     if (!envelope) break;
     attempted += 1;
-    const result = await sendDeviceExecutionJobToDevice(deviceId, envelope, {
-      boundary: "standalone_job",
-      rootKind: "job",
-      requestKey: envelope.jobId,
+    const result = await sendDeviceExecutionJobToDevice(deviceId, envelope.payload, {
+      boundary: envelope.boundary,
+      rootKind: envelope.rootKind,
+      rootExternalId: envelope.rootExternalId,
+      requestKey: envelope.rootExternalId,
       actor,
       metadata: { observeSource: "transport.dispatchQueuedJobsForDevice" },
     });
@@ -156,6 +189,61 @@ export async function sweepQueuedJobsForOnlineDevices(
     sent += result.sent;
   }
   return { devices: deviceIds.length, attempted, sent };
+}
+
+export async function sendBatchToDeviceEnforced(
+  deviceId: string,
+  batchPayload: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<any> {
+  const batchId = batchPayload.batchId;
+  if (typeof batchId !== "string" || !batchId) throw new Error("BATCH_START requires batchId");
+  let resultPromise: Promise<any> | undefined;
+  const dispatch = await deviceExecutionArbiter.runObservedEgress({
+    deviceId,
+    boundary: "edge_batch",
+    operationId: batchId,
+    wireType: "BATCH_START",
+    actor: "transport.g3.batch",
+    metadata: { workflowId: batchPayload.workflowId ?? null },
+    registerWaiter: (handle) => {
+      resultPromise = directWsServer.registerBatchWaiterWithHandle(handle, timeoutMs);
+    },
+    wireDispatch: (handle) => directWsServer.sendBatchWithHandle(handle, batchPayload),
+  });
+  if (!dispatch.sent || !dispatch.handle || !resultPromise) {
+    if (dispatch.handle) directWsServer.rejectBatchWaiterWithHandle(dispatch.handle, dispatch.reason ?? "batch_not_sent");
+    throw new Error(`Batch ${batchId} was not sent: ${dispatch.reason ?? dispatch.decision}`);
+  }
+  return resultPromise;
+}
+
+export async function sendEdgeWorkflowToDeviceEnforced(
+  deviceId: string,
+  workflowId: string,
+  template: Record<string, unknown>,
+  variables?: Record<string, unknown>,
+): Promise<boolean> {
+  const dispatch = await deviceExecutionArbiter.runObservedEgress({
+    deviceId,
+    boundary: "edge_workflow",
+    operationId: workflowId,
+    wireType: "WORKFLOW_START",
+    actor: "transport.g3.edge_workflow",
+    metadata: { templateId: template.id ?? null },
+    wireDispatch: (handle) => directWsServer.sendWorkflowStartWithHandle(handle, template, variables),
+  });
+  return dispatch.sent;
+}
+
+export async function sendWorkflowCancellationControl(deviceId: string, workflowId: string): Promise<boolean> {
+  await deviceExecutionArbiter.recordControlEgress({
+    deviceId,
+    operationId: workflowId,
+    controlKind: "workflow_cancel",
+    actor: "transport.control.workflow_cancel",
+  });
+  return directWsServer.sendWorkflowCancel(deviceId, workflowId);
 }
 
 /**
@@ -198,14 +286,26 @@ function observeJobDispatch(deviceId: string, payload: JobDispatchPayload, sent:
   });
 }
 
-async function nextQueuedJobEnvelope(deviceId: string): Promise<JobDispatchPayload | null> {
-  const result = await getDb().query<{ metadata: Record<string, unknown> }>(
+async function nextQueuedJobEnvelope(deviceId: string): Promise<DeviceExecutionJobReplayEnvelopeV1 | null> {
+  const result = await getDb().query<{
+    root_id: string;
+    root_kind: DeviceExecutionRootKind;
+    root_external_id: string;
+    operation_id: string;
+    owner_generation: string | number;
+    metadata: Record<string, unknown>;
+  }>(
     `
-    SELECT operations.metadata
+    SELECT roots.id AS root_id,
+           roots.root_kind,
+           roots.external_id AS root_external_id,
+           roots.owner_generation,
+           operations.operation_id,
+           operations.metadata
     FROM device_execution_roots roots
     JOIN device_execution_operations operations ON operations.root_id = roots.id
     WHERE roots.device_id = $1
-      AND roots.root_kind = 'job'
+      AND roots.root_kind IN ('job', 'server_workflow')
       AND roots.state = 'queued'
       AND operations.operation_kind = 'job'
     ORDER BY roots.fifo_sequence ASC
@@ -213,10 +313,47 @@ async function nextQueuedJobEnvelope(deviceId: string): Promise<JobDispatchPaylo
     `,
     [deviceId]
   );
-  const envelope = result.rows[0]?.metadata?.dispatchEnvelope;
-  return isJobDispatchPayload(envelope) ? envelope : null;
+  const row = result.rows[0];
+  if (!row) return null;
+  const envelope = row.metadata?.dispatchEnvelope;
+  if (isJobReplayEnvelope(envelope, {
+    deviceId,
+    rootKind: row.root_kind,
+    rootExternalId: row.root_external_id,
+    operationId: row.operation_id,
+  })) {
+    return structuredClone(envelope);
+  }
+  await deviceExecutionArbiter.markCorruptQueueHead({
+    deviceId,
+    rootId: row.root_id,
+    rootKind: row.root_kind,
+    ownerGeneration: Number(row.owner_generation),
+    operationId: row.operation_id,
+    actor: "transport.queue_replay",
+    reason: "invalid_or_mismatched_dispatch_envelope",
+    metadata: { envelope: envelope ?? null },
+  });
+  return null;
 }
 
-function isJobDispatchPayload(value: unknown): value is JobDispatchPayload {
-  return !!value && typeof value === "object" && typeof (value as JobDispatchPayload).jobId === "string";
+export function isJobReplayEnvelope(
+  value: unknown,
+  identity: Pick<DeviceExecutionJobReplayEnvelopeV1, "deviceId" | "rootKind" | "rootExternalId" | "operationId">,
+): value is DeviceExecutionJobReplayEnvelopeV1 {
+  if (!value || typeof value !== "object") return false;
+  const envelope = value as Partial<DeviceExecutionJobReplayEnvelopeV1>;
+  return envelope.schemaVersion === "pnq.job-dispatch/v1" &&
+    envelope.deviceId === identity.deviceId &&
+    envelope.rootKind === identity.rootKind &&
+    envelope.rootExternalId === identity.rootExternalId &&
+    envelope.operationKind === "job" &&
+    envelope.operationId === identity.operationId &&
+    typeof envelope.boundary === "string" &&
+    envelope.boundary in DEVICE_EXECUTION_BOUNDARY_MATRIX &&
+    DEVICE_EXECUTION_BOUNDARY_MATRIX[envelope.boundary as DeviceExecutionBoundaryKind].rootKind === envelope.rootKind &&
+    !!envelope.payload &&
+    typeof envelope.payload === "object" &&
+    envelope.payload.jobId === identity.operationId &&
+    typeof envelope.payload.type === "string";
 }

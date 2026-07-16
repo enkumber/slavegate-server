@@ -213,11 +213,12 @@ async function bootstrap(): Promise<void> {
   sweepQueuedJobsForOnlineDevices("startup.queue_pump").catch(err =>
     console.error("[device-execution] startup queue pump error:", (err as Error).message)
   );
-  setInterval(() => {
+  const queueSweepTimer = setInterval(() => {
     sweepQueuedJobsForOnlineDevices("periodic.queue_sweep").catch(err =>
       console.error("[device-execution] periodic queue sweep error:", (err as Error).message)
     );
   }, 30_000);
+  queueSweepTimer.unref();
 
   // ─── Startup check: warn if no openclaw_agent API token ────────────────────
   {
@@ -251,6 +252,7 @@ async function bootstrap(): Promise<void> {
   async function shutdown(signal: string): Promise<void> {
     console.log(`\n[server] ${signal} received — shutting down...`);
     httpServer.close();
+    clearInterval(queueSweepTimer);
     await directWsServer.close();
     await dashboardWorkflowWsServer.close();
     await dispatcherService.close();

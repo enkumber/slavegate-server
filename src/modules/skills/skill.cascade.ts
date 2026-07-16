@@ -14,12 +14,12 @@
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../../db/client";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { sendJobToDevice, isDeviceOnline } from "../../transport/transport";
+import { sendStandaloneJobToDevice, isDeviceOnline } from "../../transport/transport";
 
 function getTransportAdapter() {
   return {
     sendJob: (deviceId: string, payload: any) => {
-      return Promise.resolve(sendJobToDevice(deviceId, payload));
+      return sendStandaloneJobToDevice(deviceId, payload).then((result) => result.sent);
     },
     isDeviceOnline: (deviceId: string) => {
       return isDeviceOnline(deviceId);

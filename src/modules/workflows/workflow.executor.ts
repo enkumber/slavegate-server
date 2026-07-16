@@ -23,8 +23,8 @@ import { getRedisConnectionOptions } from "../../redis/client";
 import { workflowService } from "./workflow.service";
 import { hbeService } from "../hbe/hbe.service";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { sendDeviceExecutionJobToDevice, isDeviceOnline } from "../../transport/transport";
-import { directWsServer } from "../../ws/direct-ws.server";
+import { sendBatchToDeviceEnforced, sendDeviceExecutionJobToDevice, isDeviceOnline } from "../../transport/transport";
+import { deviceExecutionArbiter } from "../device-execution";
 import { scalabilityConfig } from "../../config/scalability.config";
 import { getDb } from "../../db/client";
 import type {
@@ -267,7 +267,7 @@ async function dispatchGeneratedWorkflowProbe(
     });
     const dispatch = await sendDeviceExecutionJobToDevice(deviceId, { jobId, type, params: {}, timeoutMs }, {
       boundary: "self_healing_child",
-      rootKind: "job",
+      rootExternalId: workflowId,
       requestKey: workflowId,
       actor: "generated_workflow_executor",
       metadata: { observeSource: "generatedWorkflow.dispatchProbe", workflowId, stepIndex },
@@ -596,6 +596,16 @@ export function startWorkflowWorker(): Worker {
     if (job.attemptsMade >= 3) {
       console.error(`[workflow] DLQ: ${workflowId} failed after 3 attempts: ${err.message}`);
       await workflowService.markFailed(workflowId, err.message);
+      const workflow = await workflowService.get(workflowId);
+      if (workflow?.deviceId) {
+        await deviceExecutionArbiter.finishServerWorkflowRoot({
+          deviceId: workflow.deviceId,
+          workflowId,
+          status: "failed",
+          actor: "workflow_worker",
+          reason: err.message,
+        });
+      }
     } else {
       console.warn(`[workflow] ${workflowId} attempt ${job.attemptsMade} failed — retrying from checkpoint: ${err.message}`);
     }
@@ -647,6 +657,12 @@ async function runWorkflow(workflowId: string, job: import("bullmq").Job): Promi
   );
 
   await workflowService.markCompleted(workflowId);
+  await deviceExecutionArbiter.finishServerWorkflowRoot({
+    deviceId: wf.deviceId,
+    workflowId,
+    status: "completed",
+    actor: "workflow_executor",
+  });
   console.log(`[workflow] ${workflowId} completed`);
 }
 
@@ -943,7 +959,7 @@ async function executeSkillActionStep(
       });
       const dispatch = await sendDeviceExecutionJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs }, {
         boundary: "generated_child",
-        rootKind: "job",
+        rootExternalId: workflowId,
         requestKey: workflowId,
         actor: "generated_workflow_executor",
         metadata: { observeSource: "generatedWorkflow.dispatchAndWait", workflowId, stepIndex },
@@ -1223,7 +1239,7 @@ async function executeActionStep(
     l2SettleMs:           hbeStep.l2SettleMs,
   }, {
     boundary: "generated_child",
-    rootKind: "job",
+    rootExternalId: workflowId,
     requestKey: workflowId,
     actor: "generated_workflow_executor",
     metadata: {
@@ -1717,15 +1733,11 @@ export async function executeBatchSteps(
     },
   };
 
-  const sent = directWsServer.sendBatch(deviceId, batchPayload);
-  if (!sent) {
-    throw new Error(`Device ${deviceId} offline — cannot send batch ${batchId}`);
-  }
-
   console.log(`[workflow] Batch ${batchId.slice(0,8)} sent to ${deviceId.slice(0,8)}: ${steps.length} steps`);
 
-  const result = await directWsServer.waitForBatchResult(
-    batchId,
+  const result = await sendBatchToDeviceEnforced(
+    deviceId,
+    batchPayload,
     (batchPayload.options as Record<string, unknown>).batchTimeoutMs as number + 30_000,
   );
 

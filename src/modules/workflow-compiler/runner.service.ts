@@ -18,8 +18,7 @@
 
 import { v4 as uuidv4 } from "uuid";
 import { getDb } from "../../db/client";
-import { sendDeviceExecutionJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
-import { directWsServer } from "../../ws/direct-ws.server";
+import { sendBatchToDeviceEnforced, sendDeviceExecutionJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import type { BATCH_RESULT, BatchStep } from "../../protocol/batch-types";
 import { computePageSignature, isSamePage } from "../app-mapping/page-fingerprint";
 import type { UiTreeNode } from "../app-mapping/schema";
@@ -506,11 +505,7 @@ async function executeCompiledBatch(
     },
   };
 
-  if (!directWsServer.sendBatch(deviceId, batchPayload)) {
-    throw new Error(`Device ${deviceId} offline — cannot send compiled batch ${batchId}`);
-  }
-
-  const result = await directWsServer.waitForBatchResult(batchId, batchTimeoutMs + 30_000);
+  const result = await sendBatchToDeviceEnforced(deviceId, batchPayload, batchTimeoutMs + 30_000);
   return {
     type: "BATCH_RESULT",
     batchId: result.batchId,
