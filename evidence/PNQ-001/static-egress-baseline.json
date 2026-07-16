@@ -18,58 +18,16 @@
     "classification": "generic-sendto-device-match"
   },
   {
-    "file": "src/modules/agents/orchestrator.ts",
-    "kind": "sendJobToDevice",
-    "count": 16,
-    "classification": "orchestrator-device-jobs"
-  },
-  {
     "file": "src/modules/skills/skill.cascade.ts",
     "kind": "adapter.sendJob",
     "count": 9,
     "classification": "skill-cascade-adapter-jobs"
   },
   {
-    "file": "src/modules/skills/skill.cascade.ts",
-    "kind": "sendJobToDevice",
-    "count": 1,
-    "classification": "skill-cascade-transport-adapter"
-  },
-  {
-    "file": "src/modules/workflow-compiler/runner.service.ts",
-    "kind": "directWsServer.sendBatch",
-    "count": 1,
-    "classification": "compiled-workflow-batch-egress"
-  },
-  {
     "file": "src/modules/workflow-events/workflow-event.service.ts",
     "kind": "ws.send",
     "count": 2,
     "classification": "dashboard-event-websocket-egress"
-  },
-  {
-    "file": "src/modules/workflows/generated-workflow-execution.service.ts",
-    "kind": "directWsServer.sendWorkflowStart",
-    "count": 1,
-    "classification": "generated-edge-workflow-egress"
-  },
-  {
-    "file": "src/modules/workflows/workflow-dispatch.service.ts",
-    "kind": "sendJobToDevice",
-    "count": 1,
-    "classification": "workflow-dispatch-device-jobs"
-  },
-  {
-    "file": "src/modules/workflows/workflow.executor.ts",
-    "kind": "directWsServer.sendBatch",
-    "count": 1,
-    "classification": "workflow-executor-batch-egress"
-  },
-  {
-    "file": "src/transport/transport.ts",
-    "kind": "directWsServer.sendJob",
-    "count": 1,
-    "classification": "direct-ws-job-transport-internal"
   },
   {
     "file": "src/transport/transport.ts",
@@ -82,6 +40,12 @@
     "kind": "sendJobToDevice",
     "count": 1,
     "classification": "transport-facade"
+  },
+  {
+    "file": "src/transport/transport.ts",
+    "kind": "directWsServer.sendWorkflowCancel",
+    "count": 1,
+    "classification": "audited-workflow-control-egress"
   },
   {
     "file": "src/ws/direct-ws.server.ts",

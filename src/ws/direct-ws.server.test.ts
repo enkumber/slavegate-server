@@ -232,7 +232,7 @@ describe("DirectWS typed pending lifecycle", () => {
         pendingJobs: Map<string, unknown>;
         pendingBatches: Map<string, unknown>;
         pendingWorkflows: Map<string, { handle: DeviceExecutionHandle; timer: ReturnType<typeof setTimeout> }>;
-        expirePendingJob: (jobId: string, timeoutMs: number, permit: typeof permit) => Promise<void>;
+        expirePendingJob: (jobId: string, timeoutMs: number, jobDispatchPermit: ReturnType<typeof jobPermit>) => Promise<void>;
         expirePendingBatch: (handle: DeviceExecutionHandle, timeoutMs: number) => Promise<void>;
         expirePendingWorkflow: (handle: DeviceExecutionHandle) => Promise<void>;
       };

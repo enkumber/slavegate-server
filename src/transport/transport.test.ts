@@ -58,13 +58,15 @@ describe("PNQ job replay envelope", () => {
     expect(transportSource).toContain("invalid_or_mismatched_dispatch_envelope");
   });
 
-  it("tracks and clears the queue sweep and awaits shutdown ambiguity writes", () => {
+  it("tracks and clears the queue sweep and awaits fail-closed shutdown ambiguity handling", () => {
     const indexSource = fs.readFileSync(path.join(process.cwd(), "src/index.ts"), "utf8");
     const directWsSource = fs.readFileSync(path.join(process.cwd(), "src/ws/direct-ws.server.ts"), "utf8");
     expect(indexSource).toContain("const queueSweepTimer = setInterval");
     expect(indexSource).toContain("queueSweepTimer.unref()");
     expect(indexSource).toContain("clearInterval(queueSweepTimer)");
-    expect(directWsSource).toContain("await Promise.allSettled(ambiguityWrites)");
+    expect(directWsSource).toContain("await Promise.all(confirmations)");
+    expect(directWsSource).toContain("pending work retained");
+    expect(directWsSource).toContain("this.confirmAmbiguityBeforeCleanup");
   });
 });
 

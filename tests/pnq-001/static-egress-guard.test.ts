@@ -450,18 +450,7 @@ describe("PNQ-001 production egress inventory guard", () => {
   it("matches the reviewed static sender baseline", () => {
     const baselinePath = path.join(repoRoot, "evidence/PNQ-001/static-egress-baseline.json");
     const expected = (JSON.parse(fs.readFileSync(baselinePath, "utf8")) as BaselineEntry[])
-      // Historical raw DirectWS JOB egress was removed by G3 enforcement.
-      .filter((entry) => !(
-        (entry.file === "src/transport/transport.ts" && entry.kind === "directWsServer.sendJob") ||
-        (entry.file === "src/modules/agents/orchestrator.ts" && entry.kind === "sendJobToDevice") ||
-        (entry.file === "src/modules/skills/skill.cascade.ts" && entry.kind === "sendJobToDevice") ||
-        (entry.file === "src/modules/workflow-compiler/runner.service.ts" && entry.kind === "directWsServer.sendBatch") ||
-        (entry.file === "src/modules/workflows/generated-workflow-execution.service.ts" && entry.kind === "directWsServer.sendWorkflowStart") ||
-        (entry.file === "src/modules/workflows/workflow-dispatch.service.ts" && entry.kind === "sendJobToDevice") ||
-        (entry.file === "src/modules/workflows/workflow.executor.ts" && entry.kind === "directWsServer.sendBatch")
-      ))
       .map(({ file, kind, count }) => ({ file, kind, count }))
-      .concat([{ file: "src/transport/transport.ts", kind: "directWsServer.sendWorkflowCancel", count: 1 }])
       .sort((a, b) => a.file.localeCompare(b.file) || a.kind.localeCompare(b.kind));
 
     expect(currentEgressBaseline()).toEqual(expected);
