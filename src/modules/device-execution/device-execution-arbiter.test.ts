@@ -635,6 +635,14 @@ describe("DeviceExecutionArbiter observe mode", () => {
     const result = await arbiterFor(client).acceptJobResult({
       deviceId: DEVICE_A,
       jobId: "job-accepted",
+      reportedHandle: {
+        rootId: "root-accepted",
+        deviceId: DEVICE_A,
+        rootKind: "job",
+        ownerGeneration: 3,
+        operationKind: "job",
+        operationId: "job-accepted",
+      },
       status: "completed",
       actor: "test",
     });
@@ -645,7 +653,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
     expect(client.events.map((event) => event.event_type)).toEqual(["job_result_accepted"]);
   });
 
-  it("rejects duplicate, late, or wrong-device job results without mutating ledgers", async () => {
+  it("rejects duplicate, late, or wrong-device job results without mutating root and operation ledgers", async () => {
     const client = new FakeClient();
     client.roots.push(root({
       id: "root-late",
@@ -662,21 +670,144 @@ describe("DeviceExecutionArbiter observe mode", () => {
       owner_generation: 2,
     }));
 
-    const before = JSON.stringify({ roots: client.roots, operations: client.operations, events: client.events });
+    const before = JSON.stringify({ roots: client.roots, operations: client.operations });
     const result = await arbiterFor(client).acceptJobResult({
       deviceId: DEVICE_B,
       jobId: "job-late",
+      reportedHandle: {
+        rootId: "root-late",
+        deviceId: DEVICE_A,
+        rootKind: "job",
+        ownerGeneration: 2,
+        operationKind: "job",
+        operationId: "job-late",
+      },
       status: "failed",
       actor: "test",
     });
-    const after = JSON.stringify({ roots: client.roots, operations: client.operations, events: client.events });
+    const after = JSON.stringify({ roots: client.roots, operations: client.operations });
 
     expect(result).toMatchObject({
       accepted: false,
       decision: "rejected",
-      reason: "job_result_not_current_dispatched_owner",
+      reason: "job_result_not_current_dispatch_owner",
     });
     expect(after).toBe(before);
+    expect(client.events.map((event) => event.event_type)).toEqual(["job_result_rejected_not_current_owner"]);
+  });
+
+  it("accepts a current-owner result that arrives synchronously before wireDispatch returns", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({ id: "root-fast", external_id: "job-fast", fifo_sequence: 1 }));
+    const arbiter = arbiterFor(client);
+
+    const result = await arbiter.runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "job-fast",
+      registerWaiter: () => undefined,
+      wireDispatch: async (permit) => {
+        const accepted = await arbiter.acceptJobResult({
+          deviceId: DEVICE_A,
+          jobId: "job-fast",
+          handle: permit.handle,
+          reportedHandle: permit.handle,
+          status: "completed",
+          actor: "test.fast_result",
+        });
+        expect(accepted.accepted).toBe(true);
+        return true;
+      },
+    });
+
+    expect(result).toMatchObject({ decision: "terminal", sent: true, reason: "result_already_terminal" });
+    expect(client.roots[0].state).toBe("completed");
+    expect(client.operations[0].state).toBe("completed");
+    expect(client.events.map((event) => event.event_type)).toEqual([
+      "root_dispatching",
+      "job_result_accepted",
+      "dispatch_completion_after_terminal",
+    ]);
+  });
+
+  it("requires the exact device-reported handle on the enforced result path", async () => {
+    const makeCurrentOwner = () => {
+      const client = new FakeClient();
+      client.roots.push(root({
+        id: "root-handle",
+        external_id: "job-handle",
+        state: "dispatched",
+        owner_generation: 4,
+      }));
+      client.operations.push(operation({
+        root_id: "root-handle",
+        operation_id: "job-handle",
+        state: "dispatched",
+        owner_generation: 4,
+      }));
+      return client;
+    };
+
+    const missingClient = makeCurrentOwner();
+    const missing = await arbiterFor(missingClient).acceptJobResult({
+      deviceId: DEVICE_A,
+      jobId: "job-handle",
+      status: "completed",
+    });
+    expect(missing).toMatchObject({ accepted: false, reason: "job_result_handle_required" });
+    expect(missingClient.roots[0].state).toBe("dispatched");
+    expect(missingClient.events[0]).toMatchObject({
+      event_type: "job_result_rejected_handle",
+      reason: "job_result_handle_required",
+    });
+
+    const wrongClient = makeCurrentOwner();
+    const wrong = await arbiterFor(wrongClient).acceptJobResult({
+      deviceId: DEVICE_A,
+      jobId: "job-handle",
+      reportedHandle: {
+        rootId: "root-handle",
+        deviceId: DEVICE_A,
+        rootKind: "job",
+        ownerGeneration: 99,
+        operationKind: "job",
+        operationId: "job-handle",
+      },
+      status: "completed",
+    });
+    expect(wrong).toMatchObject({ accepted: false, reason: "job_result_reported_handle_mismatch" });
+    expect(wrongClient.roots[0].state).toBe("dispatched");
+    expect(wrongClient.events[0]).toMatchObject({
+      event_type: "job_result_rejected_handle",
+      reason: "job_result_reported_handle_mismatch",
+    });
+  });
+
+  it("fails closed and audits when typed waiter registration throws", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({ id: "root-waiter", external_id: "job-waiter", fifo_sequence: 1 }));
+    const wireDispatch = vi.fn(() => true);
+
+    const result = await arbiterFor(client).runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "job-waiter",
+      registerWaiter: () => {
+        throw new Error("collision");
+      },
+      wireDispatch,
+    });
+
+    expect(result).toMatchObject({
+      decision: "offline",
+      sent: false,
+      reason: "waiter_registration_failed: collision",
+    });
+    expect(wireDispatch).not.toHaveBeenCalled();
+    expect(client.roots[0].state).toBe("blocked");
+    expect(client.operations[0].state).toBe("blocked");
+    expect(client.events.at(-1)).toMatchObject({
+      event_type: "egress_not_sent_fail_closed",
+      reason: "waiter_registration_failed: collision",
+    });
   });
 
   it("fails closed by reconciling in-flight roots at startup", async () => {

@@ -340,11 +340,16 @@ export class DirectWsServer {
   ): Promise<JobResult> {
     const existing = this.pendingJobs.get(jobId);
     if (existing) {
-      if (permit && !existing.permit) {
-        clearTimeout(existing.timer);
-        existing.permit = permit;
-        existing.deviceId = permit.handle.deviceId;
-        existing.timer = this.createJobTimeout(jobId, timeoutMs, existing.reject, permit);
+      if (permit) {
+        const samePermit = existing.permit &&
+          existing.permit.handle.rootId === permit.handle.rootId &&
+          existing.permit.handle.deviceId === permit.handle.deviceId &&
+          existing.permit.handle.ownerGeneration === permit.handle.ownerGeneration &&
+          existing.permit.handle.operationKind === permit.handle.operationKind &&
+          existing.permit.handle.operationId === permit.handle.operationId;
+        if (!samePermit) {
+          throw new Error(`Job waiter collision for ${jobId}`);
+        }
       }
       return existing.promise;
     }
@@ -887,20 +892,24 @@ export class DirectWsServer {
     const status = Boolean(msg.success) ? "completed" : "failed";
     const durationMs = (msg.durationMs as number | undefined) ?? 0;
     const wireHandle = isRecord(msg.pnqHandle) ? msg.pnqHandle : null;
-    const handle = pending?.permit?.handle ?? decodeDeviceExecutionHandle(wireHandle);
+    const reportedHandle = decodeDeviceExecutionHandle(wireHandle);
 
     try {
       const accepted = await deviceExecutionArbiter.acceptJobResult({
         deviceId: conn.deviceId,
         jobId,
-        handle,
+        handle: pending?.permit?.handle,
+        reportedHandle,
+        allowLegacyMissingHandle: !pending?.permit,
         status,
         actor: "direct_ws",
         reason: (msg.error as string | undefined) ?? status,
         metadata: {
           durationMs,
           observeSource: "directWsServer.handleJobResult",
-          handle: pending?.permit?.wireHandle ?? wireHandle,
+          expectedHandle: pending?.permit?.wireHandle ?? null,
+          reportedHandle: wireHandle,
+          legacyMissingHandleAllowed: !pending?.permit,
         },
       });
       if (!accepted.accepted) {

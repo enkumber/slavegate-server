@@ -884,12 +884,15 @@ export class DeviceExecutionArbiter {
 
     if (!prepared.permit) return prepared;
 
-    await input.registerWaiter?.(prepared.permit);
-
     let sent = false;
     let wireError: string | undefined;
     try {
-      sent = await input.wireDispatch(prepared.permit);
+      await input.registerWaiter?.(prepared.permit);
+    } catch (err) {
+      wireError = `waiter_registration_failed: ${(err as Error).message}`;
+    }
+    try {
+      if (!wireError) sent = await input.wireDispatch(prepared.permit);
     } catch (err) {
       wireError = (err as Error).message;
       sent = false;
@@ -915,9 +918,44 @@ export class DeviceExecutionArbiter {
       }
 
       const expectedGeneration = prepared.permit.handle.ownerGeneration;
+      const sameOwner =
+        root.device_id === input.deviceId &&
+        operation.root_id === root.id &&
+        operation.device_id === input.deviceId &&
+        operation.operation_kind === prepared.permit.handle.operationKind &&
+        operation.operation_id === prepared.permit.handle.operationId &&
+        toNumber(root.owner_generation) === expectedGeneration &&
+        toNumber(operation.owner_generation) === expectedGeneration;
+
+      if (sameOwner && isTerminalState(root.state) && isTerminalOperationState(operation.state)) {
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: root.device_id,
+          eventType: "dispatch_completion_after_terminal",
+          previousState: root.state,
+          newState: root.state,
+          actor,
+          reason: sent ? "result_arrived_before_wire_dispatch_returned" : "terminal_result_precedes_transport_failure",
+          metadata: {
+            ...metadata,
+            handle: prepared.permit.wireHandle,
+            sent,
+            wireError: wireError ?? null,
+          },
+        });
+        return {
+          decision: "terminal" as const,
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          handle: prepared.permit.handle,
+          permit: prepared.permit,
+          sent,
+          reason: "result_already_terminal",
+        };
+      }
+
       if (
-        root.device_id !== input.deviceId ||
-        toNumber(root.owner_generation) !== expectedGeneration ||
+        !sameOwner ||
         root.state !== "dispatching"
       ) {
         await insertEvent(client, {
@@ -1831,7 +1869,12 @@ export class DeviceExecutionArbiter {
   async acceptJobResult(input: {
     deviceId: string;
     jobId: string;
+    /** Server-side expected permit handle, when a typed waiter exists. */
     handle?: DeviceExecutionHandle | null;
+    /** Handle echoed by the device on the wire. Never substitute `handle` for this. */
+    reportedHandle?: DeviceExecutionHandle | null;
+    /** Explicit compatibility lane for jobs dispatched before typed PNQ handles existed. */
+    allowLegacyMissingHandle?: boolean;
     status: "completed" | "failed" | "cancelled" | string;
     actor?: string;
     reason?: string;
@@ -1840,10 +1883,17 @@ export class DeviceExecutionArbiter {
     const terminalState = normalizeTerminalState(input.status);
     return this.withTransaction(async (client) => {
       await lockDevice(client, input.deviceId);
-      const operationKind = input.handle?.operationKind ?? "job";
-      const operationId = input.handle?.operationId ?? input.jobId;
+      const operationKind: DeviceExecutionOperationKind = "job";
+      const operationId = input.jobId;
       const operation = await selectOperationByIdentity(client, operationKind, operationId, true);
       if (!operation) {
+        await insertEvent(client, {
+          deviceId: input.deviceId,
+          eventType: "job_result_rejected_missing_operation",
+          actor: input.actor ?? "transport",
+          reason: "no_matching_operation",
+          metadata: { jobId: input.jobId, ...(input.metadata ?? {}) },
+        });
         return { accepted: false, decision: "missing", root: null, reason: "no_matching_operation" };
       }
 
@@ -1853,47 +1903,95 @@ export class DeviceExecutionArbiter {
         forUpdate: true,
       });
       if (!root) {
+        await insertEvent(client, {
+          deviceId: input.deviceId,
+          eventType: "job_result_rejected_missing_root",
+          actor: input.actor ?? "transport",
+          reason: "no_matching_root",
+          metadata: { jobId: input.jobId, operationRootId: operation.root_id, ...(input.metadata ?? {}) },
+        });
         return { accepted: false, decision: "missing", root: null, reason: "no_matching_root" };
       }
 
       const handle = operationRowToHandle(operation);
-      const expectedGeneration = input.handle?.ownerGeneration ?? toNumber(operation.owner_generation);
-      if (
-        operation.operation_id !== input.jobId ||
-        operation.operation_kind !== "job" ||
-        operation.root_id !== root.id ||
-        root.device_id !== input.deviceId ||
-        operation.device_id !== input.deviceId ||
-        toNumber(root.owner_generation) !== expectedGeneration ||
-        toNumber(operation.owner_generation) !== expectedGeneration ||
-        operation.state !== "dispatched" ||
-        root.state !== "dispatched"
-      ) {
+      const expectedGeneration = toNumber(operation.owner_generation);
+
+      const expectedHandleMismatch = input.handle && !deviceExecutionHandlesEqual(input.handle, handle);
+      const reportedHandleMissing = !input.reportedHandle && !input.allowLegacyMissingHandle;
+      const reportedHandleMismatch = input.reportedHandle && !deviceExecutionHandlesEqual(input.reportedHandle, handle);
+      if (expectedHandleMismatch || reportedHandleMissing || reportedHandleMismatch) {
+        const reason = expectedHandleMismatch
+          ? "job_result_expected_handle_mismatch"
+          : reportedHandleMissing
+            ? "job_result_handle_required"
+            : "job_result_reported_handle_mismatch";
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: input.deviceId,
+          eventType: "job_result_rejected_handle",
+          previousState: root.state,
+          newState: root.state,
+          actor: input.actor ?? "transport",
+          reason,
+          metadata: {
+            jobId: input.jobId,
+            expectedHandle: encodeDeviceExecutionHandle(handle),
+            serverHandle: input.handle ? encodeDeviceExecutionHandle(input.handle) : null,
+            reportedHandle: input.reportedHandle ? encodeDeviceExecutionHandle(input.reportedHandle) : null,
+            legacyMissingHandleAllowed: input.allowLegacyMissingHandle === true,
+            ...(input.metadata ?? {}),
+          },
+        });
         return {
           accepted: false,
           decision: "rejected",
           root: rowToRoot(root),
           operation: rowToOperation(operation),
           handle,
-          reason: "job_result_not_current_dispatched_owner",
+          reason,
         };
       }
 
+      const isCurrentDispatchOwner =
+        operation.operation_id === input.jobId &&
+        operation.operation_kind === "job" &&
+        operation.root_id === root.id &&
+        root.device_id === input.deviceId &&
+        operation.device_id === input.deviceId &&
+        toNumber(root.owner_generation) === expectedGeneration &&
+        ((operation.state === "dispatching" && root.state === "dispatching") ||
+          (operation.state === "dispatched" && root.state === "dispatched"));
       if (
-        input.handle &&
-        (input.handle.rootId !== root.id ||
-          input.handle.deviceId !== input.deviceId ||
-          input.handle.rootKind !== root.root_kind ||
-          input.handle.operationKind !== operation.operation_kind ||
-          input.handle.operationId !== operation.operation_id)
+        !isCurrentDispatchOwner ||
+        toNumber(operation.owner_generation) !== expectedGeneration
       ) {
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: input.deviceId,
+          eventType: "job_result_rejected_not_current_owner",
+          previousState: root.state,
+          newState: root.state,
+          actor: input.actor ?? "transport",
+          reason: "job_result_not_current_dispatch_owner",
+          metadata: {
+            jobId: input.jobId,
+            expectedHandle: encodeDeviceExecutionHandle(handle),
+            rootDeviceId: root.device_id,
+            operationDeviceId: operation.device_id,
+            rootGeneration: toNumber(root.owner_generation),
+            operationGeneration: toNumber(operation.owner_generation),
+            rootState: root.state,
+            operationState: operation.state,
+            ...(input.metadata ?? {}),
+          },
+        });
         return {
           accepted: false,
           decision: "rejected",
           root: rowToRoot(root),
           operation: rowToOperation(operation),
           handle,
-          reason: "job_result_handle_mismatch",
+          reason: "job_result_not_current_dispatch_owner",
         };
       }
 
@@ -1906,6 +2004,16 @@ export class DeviceExecutionArbiter {
         metadata: input.metadata,
       });
       if (!terminal) {
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: root.device_id,
+          eventType: "job_result_rejected_terminal_cas_missed",
+          previousState: root.state,
+          newState: root.state,
+          actor: input.actor ?? "transport",
+          reason: "terminal_cas_missed",
+          metadata: { jobId: input.jobId, handle: encodeDeviceExecutionHandle(handle), ...(input.metadata ?? {}) },
+        });
         return {
           accepted: false,
           decision: "rejected",
@@ -1919,7 +2027,7 @@ export class DeviceExecutionArbiter {
       const terminalOperation = await updateOperationState(client, {
         operationKind: operation.operation_kind,
         operationId: operation.operation_id,
-        fromStates: ["dispatched"],
+        fromStates: ["dispatching", "dispatched"],
         toState: terminalState,
         ownerGeneration: expectedGeneration,
         metadata: input.metadata,
@@ -2664,6 +2772,15 @@ function isTerminalState(state: DeviceExecutionState): boolean {
 
 function isTerminalOperationState(state: DeviceExecutionOperationState): boolean {
   return (["completed", "failed", "cancelled"] as readonly string[]).includes(state);
+}
+
+function deviceExecutionHandlesEqual(left: DeviceExecutionHandle, right: DeviceExecutionHandle): boolean {
+  return left.rootId === right.rootId &&
+    left.deviceId === right.deviceId &&
+    left.rootKind === right.rootKind &&
+    left.ownerGeneration === right.ownerGeneration &&
+    left.operationKind === right.operationKind &&
+    left.operationId === right.operationId;
 }
 
 function rootKindToOperationKind(rootKind: DeviceExecutionRootKind): DeviceExecutionOperationKind {
