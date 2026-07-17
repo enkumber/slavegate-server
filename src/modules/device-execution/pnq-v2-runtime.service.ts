@@ -8,6 +8,21 @@ export interface ShadowObservation {
   metadata?: Record<string, unknown>;
 }
 
+export function runPnqV2ShadowSideEffect<T>(
+  label: string,
+  operation: () => Promise<T>,
+  onResolved?: (value: T) => void,
+): void {
+  Promise.resolve()
+    .then(operation)
+    .then((value) => {
+      onResolved?.(value);
+    })
+    .catch((err) =>
+      console.error(`[pnq-v2-shadow] ${label} side effect rejected:`, (err as Error).message),
+    );
+}
+
 export class PnqV2RuntimeService {
   private readonly repo = new PnqV2RuntimeRepository();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;

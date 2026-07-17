@@ -156,6 +156,47 @@ describe("PNQ-003 Queue v2 shadow runtime PostgreSQL integration", () => {
       observedDispatchGeneration: 1,
     });
   });
+
+  it("records results only for the socket-bound epoch and audits stale epoch attempts", async () => {
+    await repo.enqueueMappedJob({
+      legacyJobId: "current-result",
+      nodeId: NODE_A,
+      payload: { n: "current" },
+      timeoutMs: 10_000,
+    });
+    await repo.claimAndStart("current-result", 0, "33000000-0000-4000-8000-0000000000a1");
+
+    const done = await repo.recordResult("current-result", 0, true, { ok: true });
+    expect(done).toMatchObject({ status: "DONE", terminalReason: "result_succeeded" });
+
+    await repo.enqueueMappedJob({
+      legacyJobId: "stale-result",
+      nodeId: NODE_B,
+      payload: { n: "stale" },
+      timeoutMs: 10_000,
+    });
+    await repo.claimAndStart("stale-result", 0, "33000000-0000-4000-8000-0000000000b2");
+    await repo.bumpEpoch(NODE_B, 0);
+
+    const stale = await repo.recordResult("stale-result", 0, true, { ok: true });
+    expect(stale).toMatchObject({ status: "RUNNING" });
+
+    const audit = await pool.query<{ event_type: string; decision: string; evidence: Record<string, unknown> }>(
+      `SELECT event_type, decision, evidence
+       FROM pnq_resolution_audit
+       WHERE event_type = 'stale_result'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    );
+    expect(audit.rows[0]).toMatchObject({
+      event_type: "stale_result",
+      decision: "rejected",
+    });
+    expect(audit.rows[0]!.evidence).toMatchObject({
+      claimed_connection_epoch: 0,
+      reason: "connection_epoch_mismatch",
+    });
+  });
 });
 
 async function assertRealPostgres(pool: Pool): Promise<void> {

@@ -39,8 +39,8 @@ describe("server-workflow child timeout clock", () => {
 describe("PNQ v2 shadow dispatch side effect", () => {
   it("does not await shadow enqueue before returning the legacy dispatch response", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src/modules/dispatcher/dispatcher.service.ts"), "utf8");
-    expect(source).toContain("void pnqV2RuntimeService.enqueueShadowJob");
-    expect(source).toContain("enqueue side effect rejected");
+    expect(source).toContain('runPnqV2ShadowSideEffect("enqueue"');
+    expect(source).toContain("pnqV2RuntimeService.enqueueShadowJob");
     expect(source).not.toContain("await pnqV2RuntimeService.enqueueShadowJob");
   });
 });

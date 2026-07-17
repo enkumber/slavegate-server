@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import { PnqV2RuntimeRepository } from "./pnq-v2-runtime.repository";
-import { PnqV2RuntimeService } from "./pnq-v2-runtime.service";
+import { PnqV2RuntimeService, runPnqV2ShadowSideEffect } from "./pnq-v2-runtime.service";
 import { setPnqV2RuntimeConfigForTest } from "./pnq-v2-runtime-config";
 
 afterEach(() => {
@@ -63,5 +63,37 @@ describe("PNQ v2 shadow runtime service", () => {
   it("keeps runtime mode parsing restricted to disabled and shadow", () => {
     const source = fs.readFileSync(`${process.cwd()}/src/modules/device-execution/pnq-v2-runtime-config.ts`, "utf8");
     expect(source).toContain('return value === "shadow" ? "shadow" : "disabled"');
+  });
+
+  it("detaches side effects and handles synchronous throws as telemetry", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const resolved = vi.fn();
+    const operation = vi.fn(() => {
+      throw new Error("sync shadow failure");
+    });
+
+    expect(() => runPnqV2ShadowSideEffect("test", operation, resolved)).not.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(resolved).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(
+      "[pnq-v2-shadow] test side effect rejected:",
+      "sync shadow failure",
+    );
+  });
+
+  it("handles asynchronous rejections without surfacing them to legacy callers", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const operation = vi.fn(() => Promise.reject(new Error("async shadow failure")));
+
+    expect(() => runPnqV2ShadowSideEffect("test-async", operation)).not.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(
+      "[pnq-v2-shadow] test-async side effect rejected:",
+      "async shadow failure",
+    );
   });
 });

@@ -159,10 +159,11 @@ describe("PNQ v2 shadow DirectWS side effects", () => {
 
   it("keeps auth and result shadow hooks as handled side effects in source", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src/ws/direct-ws.server.ts"), "utf8");
-    expect(source).toContain("const epochObservation = pnqV2RuntimeService.onConnectionAuthenticated(finalDeviceId)");
+    expect(source).toContain("const epochObservation = Promise.resolve()");
+    expect(source).toContain("pnqV2RuntimeService.onConnectionAuthenticated(finalDeviceId)");
     expect(source).toContain("conn.pnqV2ConnectionEpochPromise = epochObservation");
     expect(source).toContain("this.connections.get(finalDeviceId) === conn");
-    expect(source).toContain("void pnqV2RuntimeService.recordShadowResult");
+    expect(source).toContain('runPnqV2ShadowSideEffect("direct-ws result"');
     expect(source).not.toContain("conn.pnqV2ConnectionEpoch = await pnqV2RuntimeService.onConnectionAuthenticated");
     expect(source).not.toContain("await pnqV2RuntimeService.recordShadowResult");
   });

@@ -11,7 +11,7 @@ import { getRedisConnectionOptions } from "../../redis/client";
 import { getDb } from "../../db/client";
 import { isKillSwitchActive } from "../../api/routes";
 import { deviceExecutionArbiter } from "../device-execution";
-import { pnqV2RuntimeService } from "../device-execution/pnq-v2-runtime.service";
+import { pnqV2RuntimeService, runPnqV2ShadowSideEffect } from "../device-execution/pnq-v2-runtime.service";
 // NOTE: wsServer is intentionally NOT imported here — would create circular dependency.
 // Job dispatch to device WebSocket is handled by routes.ts (after calling dispatcher.dispatch()).
 // dispatcher only manages the DB + queue layer.
@@ -188,14 +188,12 @@ export class DispatcherService {
       { jobId }
     );
 
-    void pnqV2RuntimeService.enqueueShadowJob({
+    runPnqV2ShadowSideEffect("enqueue", () => pnqV2RuntimeService.enqueueShadowJob({
       deviceId: req.deviceId,
       legacyJobId: jobId,
       payload: { type: req.type, params: req.params, workflowId: req.workflowId ?? null },
       timeoutMs,
-    }).catch((err) =>
-      console.error("[pnq-v2-shadow] enqueue side effect rejected:", (err as Error).message),
-    );
+    }));
 
     // Server-side timeout enforcement:
     // If device executes job but never sends JOB_RESULT (crash, connection loss),

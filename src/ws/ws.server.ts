@@ -24,7 +24,7 @@ import { devicesService } from "../modules/devices/devices.service";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { getDb } from "../db/client";
 import { decodeDeviceExecutionHandle, deviceExecutionArbiter } from "../modules/device-execution";
-import { pnqV2RuntimeService } from "../modules/device-execution/pnq-v2-runtime.service";
+import { pnqV2RuntimeService, runPnqV2ShadowSideEffect } from "../modules/device-execution/pnq-v2-runtime.service";
 import {
   devicesConnected, deviceOfflineEvents, recordDeviceHealth,
 } from "../modules/observability/metrics";
@@ -498,17 +498,14 @@ export class WsServer {
 
     // Send HELLO_ACK
     this.send(ws, "HELLO_ACK", { deviceId });
-    const epochObservation = pnqV2RuntimeService.onConnectionAuthenticated(deviceId);
+    const epochObservation = Promise.resolve()
+      .then(() => pnqV2RuntimeService.onConnectionAuthenticated(deviceId));
     conn.pnqV2ConnectionEpochPromise = epochObservation;
-    epochObservation
-      .then((epoch) => {
+    runPnqV2ShadowSideEffect("ws auth", () => epochObservation, (epoch) => {
         if (this.connections.get(deviceId) === conn) {
           conn.pnqV2ConnectionEpoch = epoch;
         }
-      })
-      .catch((err) =>
-        console.error("[pnq-v2-shadow] ws auth side effect rejected:", (err as Error).message),
-      );
+    });
     
     // Verify connection was added
     const verifyInMap = this.connections.has(deviceId);
@@ -534,7 +531,7 @@ export class WsServer {
     conn: DeviceConnection
   ): Promise<void> {
     const deviceId = conn.deviceId;
-    void pnqV2RuntimeService.recordShadowResult({
+    runPnqV2ShadowSideEffect("ws result", () => pnqV2RuntimeService.recordShadowResult({
       legacyJobId: payload.jobId,
       socketEpoch: conn.pnqV2ConnectionEpoch,
       success: payload.status === "completed",
@@ -544,9 +541,7 @@ export class WsServer {
         error: payload.error,
         durationMs: payload.durationMs,
       },
-    }).catch((err) =>
-      console.error("[pnq-v2-shadow] ws result side effect rejected:", (err as Error).message),
-    );
+    }));
     const wireHandle = (payload as JobResultPayload & { pnqHandle?: unknown }).pnqHandle;
     const handle = decodeDeviceExecutionHandle(wireHandle);
     const accepted = await deviceExecutionArbiter.acceptJobResult({
