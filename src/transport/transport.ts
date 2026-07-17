@@ -296,10 +296,13 @@ async function sendBatchThroughBoundary(
   const batchId = batchPayload.batchId;
   if (typeof batchId !== "string" || !batchId) throw new Error("BATCH_START requires batchId");
   if (!isDeviceExecutionEnforced()) {
-    const resultPromise = directWsServer.waitForBatchResult(batchId, timeoutMs);
+    const resultPromise = directWsServer.waitForBatchResult(batchId, timeoutMs, deviceId);
     const sent = sendObserveOnlyBatchToDevice(deviceId, batchPayload);
     void deviceExecutionArbiter.observeDispatch({ deviceId, rootKind: options.boundary === "edge_batch" ? "batch" : "server_workflow", externalId: options.rootExternalId ?? batchId, requestKey: options.rootExternalId ?? batchId, sent, actor: options.actor, metadata: { authorityMode: "observe_only" } });
-    if (!sent) throw new Error(`Batch ${batchId} was not sent: offline`);
+    if (!sent) {
+      directWsServer.rejectObserveOnlyBatchWaiter(batchId, deviceId, "batch_not_sent_offline");
+      throw new Error(`Batch ${batchId} was not sent: offline`);
+    }
     return resultPromise;
   }
   let resultPromise: Promise<any> | undefined;

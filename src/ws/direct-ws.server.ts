@@ -453,6 +453,11 @@ export class DirectWsServer {
         pending.reject(new Error("Server shutting down"));
       }));
     }
+    for (const [batchId, pending] of this.observeOnlyPendingBatches) {
+      clearTimeout(pending.timer);
+      this.observeOnlyPendingBatches.delete(batchId);
+      pending.reject(new Error("Server shutting down"));
+    }
     for (const [workflowId, pending] of this.pendingWorkflows) {
       confirmations.push(this.confirmAmbiguityBeforeCleanup({
         deviceId: pending.handle.deviceId,
@@ -797,11 +802,16 @@ export class DirectWsServer {
    * Returns a Promise that resolves when BATCH_RESULT arrives for this batchId.
    * Rejects after timeoutMs (default: 10 min — batches can be long).
    */
-  waitForBatchResult(batchId: string, timeoutMs = 600_000): Promise<BatchResult> {
+  waitForBatchResult(batchId: string, timeoutMs = 600_000, deviceId?: string): Promise<BatchResult> {
     const existing = this.pendingBatches.get(batchId);
     if (existing) return existing.promise;
     const observeOnlyExisting = this.observeOnlyPendingBatches.get(batchId);
-    if (observeOnlyExisting) return observeOnlyExisting.promise;
+    if (observeOnlyExisting) {
+      if (observeOnlyExisting.deviceId !== deviceId) {
+        throw new Error(`Observe-only batch waiter collision for ${batchId}`);
+      }
+      return observeOnlyExisting.promise;
+    }
     if (isDeviceExecutionEnforced()) throw new Error(`Batch ${batchId} has no typed PNQ waiter`);
 
     let resolve!: (result: BatchResult) => void;
@@ -818,8 +828,16 @@ export class DirectWsServer {
       pending.reject(new Error(`Batch ${batchId} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     timer.unref();
-    this.observeOnlyPendingBatches.set(batchId, { promise, resolve, reject, timer });
+    this.observeOnlyPendingBatches.set(batchId, { promise, resolve, reject, timer, deviceId });
     return promise;
+  }
+
+  rejectObserveOnlyBatchWaiter(batchId: string, deviceId: string, reason: string): void {
+    const pending = this.observeOnlyPendingBatches.get(batchId);
+    if (!pending || pending.deviceId !== deviceId) return;
+    clearTimeout(pending.timer);
+    this.observeOnlyPendingBatches.delete(batchId);
+    pending.reject(new Error(reason));
   }
 
   registerBatchWaiterWithHandle(handle: DeviceExecutionHandle, timeoutMs = 600_000): Promise<BatchResult> {
@@ -1404,6 +1422,18 @@ export class DirectWsServer {
     const reportedHandle = handleResolution?.reportedHandle ?? pending?.handle ?? null;
     if (!isDeviceExecutionEnforced()) {
       const observeOnlyPending = this.observeOnlyPendingBatches.get(batchId);
+      if (observeOnlyPending?.deviceId && observeOnlyPending.deviceId !== conn.deviceId) {
+        await deviceExecutionArbiter.recordRejectedEgress({
+          deviceId: conn.deviceId,
+          operationId: batchId,
+          wireType: "BATCH_RESULT",
+          actor: "direct_ws.observe_only",
+          reason: "batch_result_device_mismatch",
+          metadata: { expectedDeviceId: observeOnlyPending.deviceId },
+        });
+        this._send(conn.ws, { type: "ACK", ref: batchId });
+        return;
+      }
       await deviceExecutionArbiter.observeTerminal({
         deviceId: conn.deviceId,
         rootKind: "batch",

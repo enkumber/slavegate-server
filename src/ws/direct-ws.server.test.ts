@@ -133,10 +133,10 @@ describe("DirectWS typed BATCH serializer identity", () => {
 });
 
 describe("PNQ-003 observe-only DirectWS ingress compatibility", () => {
-  function connection(send = vi.fn()) {
+  function connection(send = vi.fn(), deviceId = expectedHandle.deviceId) {
     return {
       ws: { readyState: 1, send },
-      deviceId: expectedHandle.deviceId,
+      deviceId,
       connectedAt: Date.now(),
       lastSeenAt: Date.now(),
       lastPongAt: Date.now(),
@@ -150,14 +150,14 @@ describe("PNQ-003 observe-only DirectWS ingress compatibility", () => {
     setDeviceExecutionAuthorityForTest("observe_only");
     const server = new DirectWsServer();
     const internals = server as unknown as {
-      waitForBatchResult: (batchId: string, timeoutMs: number) => Promise<unknown>;
+      waitForBatchResult: (batchId: string, timeoutMs: number, deviceId?: string) => Promise<unknown>;
       _handleBatchResult: (conn: ReturnType<typeof connection>, msg: Record<string, unknown>) => Promise<void>;
     };
     const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal").mockResolvedValue({
       decision: "terminal",
       root: null,
     });
-    const pending = internals.waitForBatchResult("observe-batch", 60_000);
+    const pending = internals.waitForBatchResult("observe-batch", 60_000, expectedHandle.deviceId);
 
     await internals._handleBatchResult(connection(), {
       type: "BATCH_RESULT",
@@ -180,6 +180,41 @@ describe("PNQ-003 observe-only DirectWS ingress compatibility", () => {
       status: "completed",
       actor: "direct_ws.observe_only",
     }));
+  });
+
+  it("rejects a mismatched device result without consuming the observe-only BATCH waiter", async () => {
+    setDeviceExecutionAuthorityForTest("observe_only");
+    const server = new DirectWsServer();
+    const internals = server as unknown as {
+      waitForBatchResult: (batchId: string, timeoutMs: number, deviceId?: string) => Promise<unknown>;
+      rejectObserveOnlyBatchWaiter: (batchId: string, deviceId: string, reason: string) => void;
+      observeOnlyPendingBatches: Map<string, unknown>;
+      _handleBatchResult: (conn: ReturnType<typeof connection>, msg: Record<string, unknown>) => Promise<void>;
+    };
+    const rejected = vi.spyOn(deviceExecutionArbiter, "recordRejectedEgress").mockResolvedValue(undefined as never);
+    const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal");
+    const pending = internals.waitForBatchResult("device-bound-batch", 60_000, expectedHandle.deviceId);
+
+    await internals._handleBatchResult(
+      connection(vi.fn(), "99999999-9999-4999-8999-999999999999"),
+      { type: "BATCH_RESULT", batchId: "device-bound-batch", status: "completed", results: [] },
+    );
+
+    expect(rejected).toHaveBeenCalledWith(expect.objectContaining({ reason: "batch_result_device_mismatch" }));
+    expect(observeTerminal).not.toHaveBeenCalled();
+    expect(internals.observeOnlyPendingBatches.has("device-bound-batch")).toBe(true);
+    internals.rejectObserveOnlyBatchWaiter("device-bound-batch", expectedHandle.deviceId, "test_cleanup");
+    await expect(pending).rejects.toThrow("test_cleanup");
+  });
+
+  it("drains observe-only BATCH waiters during shutdown", async () => {
+    setDeviceExecutionAuthorityForTest("observe_only");
+    const server = new DirectWsServer();
+    const pending = server.waitForBatchResult("shutdown-batch", 60_000, expectedHandle.deviceId);
+
+    await server.close();
+
+    await expect(pending).rejects.toThrow("Server shutting down");
   });
 
   it("keeps enforced BATCH_RESULT fail-closed without a typed PNQ waiter", async () => {

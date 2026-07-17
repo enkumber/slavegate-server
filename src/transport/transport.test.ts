@@ -55,6 +55,23 @@ describe("PNQ-003 observe-only production transport", () => {
     expect(observe).toHaveBeenCalledTimes(1);
     internals.connections.delete(DEVICE_ID);
   });
+
+  it("cleans the observe-only BATCH waiter when the device is offline", async () => {
+    setDeviceExecutionAuthorityForTest("observe_only");
+    vi.spyOn(deviceExecutionArbiter, "observeDispatch").mockResolvedValue({ decision: "offline", root: null });
+    const wait = vi.spyOn(directWsServer, "waitForBatchResult").mockReturnValue(Promise.resolve({} as never));
+    const reject = vi.spyOn(directWsServer, "rejectObserveOnlyBatchWaiter");
+
+    await expect(sendBatchToDeviceEnforced(DEVICE_ID, {
+      type: "BATCH_START",
+      batchId: "offline-batch",
+      workflowId: "offline-workflow",
+      steps: [],
+    }, 60_000)).rejects.toThrow("not sent: offline");
+
+    expect(wait).toHaveBeenCalledWith("offline-batch", 60_000, DEVICE_ID);
+    expect(reject).toHaveBeenCalledWith("offline-batch", DEVICE_ID, "batch_not_sent_offline");
+  });
 });
 
 function envelope(): DeviceExecutionJobReplayEnvelopeV1 {
