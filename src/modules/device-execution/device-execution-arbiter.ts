@@ -3060,6 +3060,25 @@ export class DeviceExecutionArbiter {
     };
 
     return this.withTransaction(async (client) => {
+      // Serialize this bulk startup repair with every normal PNQ mutation for
+      // the affected devices. The final CTE still re-checks all evidence after
+      // the locks are held, avoiding a read-then-release TOCTOU window.
+      const candidateDevices = await client.query<{ device_id: string }>(
+        `SELECT DISTINCT roots.device_id
+         FROM device_execution_roots roots
+         JOIN workflows workflows
+           ON workflows.id::text = roots.external_id
+          AND workflows.device_id = roots.device_id
+         WHERE roots.root_kind = 'server_workflow'
+           AND roots.state IN ('blocked', 'reconciling')
+           AND workflows.status IN ('completed', 'failed', 'cancelled')
+           AND workflows.completed_at IS NOT NULL
+         ORDER BY roots.device_id`,
+      );
+      for (const candidate of candidateDevices.rows) {
+        await lockDevice(client, candidate.device_id);
+      }
+
       const reconciled = await client.query<{ id: string }>(
         `
         WITH candidates AS (
@@ -3130,7 +3149,7 @@ export class DeviceExecutionArbiter {
           WHERE operations.root_id = candidates.id
             AND operations.device_id = candidates.device_id
             AND operations.owner_generation = candidates.owner_generation
-            AND operations.state NOT IN ('completed', 'failed', 'cancelled')
+            AND operations.state IN ('registered', 'dispatching', 'dispatched', 'reconciling', 'blocked')
           RETURNING operations.id
         )
         INSERT INTO device_execution_events
