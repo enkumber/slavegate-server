@@ -214,6 +214,37 @@ describe("PNQ-003 Queue v2 PostgreSQL contract", () => {
     expect(await auditCount("cas_lost")).toBe(1);
   });
 
+  it("cannot enter RUNNING when a reconnect wins the node lock before start", async () => {
+    const job = await enqueue(NODE_A, "start-epoch-race", { value: "race" });
+    const executionId = "23000000-0000-4000-8000-000000000001";
+    const claimed = await claimNextJob(NODE_A, executionId, 0);
+    const reconnect = await pool.connect();
+
+    try {
+      await reconnect.query("BEGIN");
+      await reconnect.query("SELECT id FROM pnq_nodes WHERE id = $1 FOR UPDATE", [NODE_A]);
+
+      const startPromise = startExecution(
+        job.id,
+        executionId,
+        0,
+        Number(claimed.job_version),
+        Number(claimed.dispatch_generation),
+      );
+
+      await reconnect.query("SELECT pnq_bump_connection_epoch($1, $2)", [NODE_A, 0]);
+      await reconnect.query("COMMIT");
+
+      const staleStart = await startPromise;
+      expect(staleStart.status).toBe("DISPATCHING");
+      expect((await jobById(job.id)).status).toBe("DISPATCHING");
+      expect(await auditCount("epoch_rejected")).toBe(1);
+    } finally {
+      await reconnect.query("ROLLBACK").catch(() => undefined);
+      reconnect.release();
+    }
+  });
+
   it("keeps queue, dispatch, execution, and result deadlines distinct and coherent", async () => {
     await expect(
       enqueueWithDeadlines(NODE_A, "bad-deadline", { value: "bad" }, {
@@ -265,6 +296,32 @@ describe("PNQ-003 Queue v2 PostgreSQL contract", () => {
     const late = await recordResult(job.id, executing.execution_id, Number(executing.dispatch_generation), false);
     expect(late.status).toBe("DONE");
     expect(await auditCount("late_result")).toBe(1);
+  });
+
+  it("rejects a same-attempt result from an old connection_epoch and preserves RUNNING", async () => {
+    const job = await enqueue(NODE_A, "stale-result-epoch", { value: "epoch" });
+    const executing = await claimAndStart(job, "24000000-0000-4000-8000-000000000001", 0);
+    await pool.query("SELECT pnq_bump_connection_epoch($1, $2)", [NODE_A, 0]);
+
+    const stale = await recordResult(
+      job.id,
+      executing.execution_id,
+      Number(executing.dispatch_generation),
+      true,
+      0,
+    );
+
+    expect(stale.status).toBe("RUNNING");
+    expect((await jobById(job.id)).status).toBe("RUNNING");
+    const audit = await pool.query(
+      `SELECT observed_epoch, expected_epoch, evidence
+       FROM pnq_resolution_audit
+       WHERE job_id = $1 AND event_type = 'stale_result'`,
+      [job.id],
+    );
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0]).toMatchObject({ observed_epoch: "0", expected_epoch: "1" });
+    expect(audit.rows[0]?.evidence?.reason).toBe("connection_epoch_mismatch");
   });
 
   it("is fail-closed for inconsistent resolution and keeps audit append-only", async () => {
@@ -385,10 +442,11 @@ async function recordResult(
   executionId: string,
   dispatchGeneration: number,
   success: boolean,
+  epoch = 0,
 ) {
   const result = await pool.query(
-    `SELECT * FROM pnq_record_result($1, $2, $3, $4, '{"ok": true}'::jsonb)`,
-    [jobId, executionId, dispatchGeneration, success],
+    `SELECT * FROM pnq_record_result($1, $2, $3, $4, $5, '{"ok": true}'::jsonb)`,
+    [jobId, executionId, epoch, dispatchGeneration, success],
   );
   return result.rows[0];
 }

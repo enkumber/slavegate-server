@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS pnq_jobs (
   job_version                BIGINT NOT NULL DEFAULT 1,
   dispatch_generation        BIGINT NOT NULL DEFAULT 0,
   execution_id               UUID,
+  claimed_connection_epoch   BIGINT,
   queue_deadline_at          TIMESTAMPTZ NOT NULL,
   dispatch_deadline_at       TIMESTAMPTZ NOT NULL,
   execution_deadline_at      TIMESTAMPTZ NOT NULL,
@@ -51,9 +52,16 @@ CREATE TABLE IF NOT EXISTS pnq_jobs (
   ),
   CONSTRAINT pnq_jobs_job_version_check CHECK (job_version >= 1),
   CONSTRAINT pnq_jobs_dispatch_generation_check CHECK (dispatch_generation >= 0),
+  CONSTRAINT pnq_jobs_claimed_connection_epoch_check CHECK (
+    claimed_connection_epoch IS NULL OR claimed_connection_epoch >= 0
+  ),
   CONSTRAINT pnq_jobs_execution_id_required_check CHECK (
-    (status = 'PENDING' AND execution_id IS NULL)
-    OR (status IN ('DISPATCHING', 'RUNNING', 'DONE') AND execution_id IS NOT NULL)
+    (status = 'PENDING' AND execution_id IS NULL AND claimed_connection_epoch IS NULL)
+    OR (
+      status IN ('DISPATCHING', 'RUNNING', 'DONE')
+      AND execution_id IS NOT NULL
+      AND claimed_connection_epoch IS NOT NULL
+    )
     OR (status = 'STUCK')
   ),
   CONSTRAINT pnq_jobs_terminal_state_check CHECK (
@@ -300,7 +308,8 @@ BEGIN
   SELECT n.connection_epoch INTO v_epoch
   FROM pnq_jobs j
   JOIN pnq_nodes n ON n.id = j.node_id
-  WHERE j.id = p_job_id;
+  WHERE j.id = p_job_id
+  FOR UPDATE OF n;
 
   IF NOT FOUND THEN
     RAISE EXCEPTION 'pnq job % does not exist', p_job_id USING ERRCODE = '23503';
@@ -323,8 +332,15 @@ BEGIN
   WHERE j.id = p_job_id
     AND j.status = 'DISPATCHING'
     AND j.execution_id = p_execution_id
+    AND j.claimed_connection_epoch = p_connection_epoch
     AND j.job_version = p_expected_job_version
     AND j.dispatch_generation = p_expected_dispatch_generation
+    AND EXISTS (
+      SELECT 1
+      FROM pnq_nodes n
+      WHERE n.id = j.node_id
+        AND n.connection_epoch = p_connection_epoch
+    )
   RETURNING * INTO v_job;
 
   IF NOT FOUND THEN
@@ -398,6 +414,7 @@ BEGIN
   UPDATE pnq_jobs job
   SET status = 'DISPATCHING',
       execution_id = p_execution_id,
+      claimed_connection_epoch = p_connection_epoch,
       dispatch_started_at = COALESCE(dispatch_started_at, NOW()),
       job_version = job.job_version + 1,
       dispatch_generation = job.dispatch_generation + 1
@@ -417,6 +434,7 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION pnq_record_result(
   p_job_id UUID,
   p_execution_id UUID,
+  p_connection_epoch BIGINT,
   p_dispatch_generation BIGINT,
   p_success BOOLEAN,
   p_result_payload JSONB DEFAULT '{}'::jsonb,
@@ -425,8 +443,19 @@ CREATE OR REPLACE FUNCTION pnq_record_result(
 DECLARE
   v_current pnq_jobs;
   v_job pnq_jobs;
+  v_epoch BIGINT;
   v_event_type TEXT;
 BEGIN
+  SELECT n.connection_epoch INTO v_epoch
+  FROM pnq_jobs j
+  JOIN pnq_nodes n ON n.id = j.node_id
+  WHERE j.id = p_job_id
+  FOR UPDATE OF n;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'pnq job % does not exist', p_job_id USING ERRCODE = '23503';
+  END IF;
+
   SELECT * INTO v_current
   FROM pnq_jobs
   WHERE id = p_job_id
@@ -434,6 +463,28 @@ BEGIN
 
   IF NOT FOUND THEN
     RAISE EXCEPTION 'pnq job % does not exist', p_job_id USING ERRCODE = '23503';
+  END IF;
+
+  IF v_current.claimed_connection_epoch IS DISTINCT FROM p_connection_epoch
+    OR v_epoch <> p_connection_epoch THEN
+    INSERT INTO pnq_resolution_audit (
+      job_id, node_id, event_type, decision,
+      observed_epoch, expected_epoch,
+      observed_generation, expected_generation,
+      execution_id, evidence, actor
+    ) VALUES (
+      v_current.id, v_current.node_id, 'stale_result', 'rejected',
+      p_connection_epoch, v_epoch,
+      p_dispatch_generation, v_current.dispatch_generation,
+      p_execution_id,
+      jsonb_build_object(
+        'claimed_connection_epoch', v_current.claimed_connection_epoch,
+        'current_status', v_current.status,
+        'reason', 'connection_epoch_mismatch'
+      ),
+      p_actor
+    );
+    RETURN v_current;
   END IF;
 
   IF v_current.status <> 'RUNNING'

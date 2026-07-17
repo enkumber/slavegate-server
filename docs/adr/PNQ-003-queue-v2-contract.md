@@ -19,7 +19,7 @@ The canonical contract is:
 - `(node_id, request_key)` makes enqueue idempotent, with payload conflicts
   rejected and audited.
 - `execution_id` identifies a concrete execution attempt.
-- `connection_epoch` fences stale node connections before ownership changes.
+- `connection_epoch` is captured on each claim and fences stale node connections at both execution start and result admission.
 - `job_version` plus `dispatch_generation` protect ownership and result
   transitions with compare-and-swap checks.
 - `queue_deadline_at`, `dispatch_deadline_at`, `execution_deadline_at`, and

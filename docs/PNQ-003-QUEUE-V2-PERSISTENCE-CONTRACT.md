@@ -44,7 +44,7 @@ The contract permits parallelism across nodes because each enqueue locks only it
 
 `connection_epoch` is monotonically bumped by `pnq_bump_connection_epoch`. `pnq_claim_next_job` and `pnq_start_execution` require the caller's observed epoch to match the current node epoch. Stale epochs are rejected from ownership changes and audited.
 
-Every dispatch attempt has a `dispatch_generation`. `pnq_claim_next_job` moves the FIFO head from `PENDING` to `DISPATCHING`, assigns `execution_id`, and increments both CAS counters. `pnq_start_execution` requires that same execution identity plus the expected `job_version` and `dispatch_generation`, then moves the job to `RUNNING` and increments `job_version`. `pnq_record_result` requires the current `execution_id` and `dispatch_generation`; stale or late results return the current row unchanged and append audit evidence.
+Every dispatch attempt has a `dispatch_generation` and a persisted `claimed_connection_epoch`. `pnq_claim_next_job` moves the FIFO head from `PENDING` to `DISPATCHING`, assigns `execution_id`, captures the current epoch, and increments both CAS counters. `pnq_start_execution` locks the node before checking epoch, then requires the same execution identity, claimed epoch, `job_version`, and `dispatch_generation` before moving the job to `RUNNING`. `pnq_record_result` also locks the node and requires both the claimed and current node epoch to match the result epoch, in addition to `execution_id` and `dispatch_generation`; stale or late results return the current row unchanged and append durable audit evidence.
 
 ## Deadline Semantics
 

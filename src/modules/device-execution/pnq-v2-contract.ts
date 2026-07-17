@@ -27,6 +27,7 @@ export interface PnqV2Job {
   jobVersion: number;
   dispatchGeneration: number;
   executionId: string | null;
+  claimedConnectionEpoch: number | null;
   queueDeadlineAt: Date;
   dispatchDeadlineAt: Date;
   executionDeadlineAt: Date;
