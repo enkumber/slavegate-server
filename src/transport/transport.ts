@@ -16,6 +16,7 @@ import type {
   DeviceExecutionStandaloneJobEgressResult,
 } from "../modules/device-execution";
 import { DEVICE_EXECUTION_BOUNDARY_MATRIX, encodeDeviceExecutionHandle } from "../modules/device-execution";
+import { isDeviceExecutionEnforced } from "../modules/device-execution/device-execution-authority";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
 import { promoteReplayedEdgeWorkflowToRunning } from "../modules/workflows/edge-workflow-lifecycle.service";
 
@@ -75,6 +76,11 @@ export interface EdgeWorkflowSendResult {
  * Returns true if sent successfully, false if device unreachable.
  */
 export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
+  if (!isDeviceExecutionEnforced()) {
+    const sent = directWsServer.sendJob(deviceId, payload);
+    observeJobDispatch(deviceId, payload, sent);
+    return sent;
+  }
   console.error(
     `[device-execution] blocked unauthorized raw JOB egress: device=${deviceId.slice(0, 8)} job=${payload.jobId.slice(0, 8)}`
   );
@@ -120,6 +126,10 @@ export async function sendDeviceExecutionJobToDevice(
   payload: JobDispatchPayload,
   options: DeviceExecutionJobSendOptions = {},
 ): Promise<StandaloneJobSendResult> {
+  if (!isDeviceExecutionEnforced()) {
+    const sent = sendJobToDevice(deviceId, payload);
+    return { decision: sent ? "dispatched" : "offline", root: null, operation: undefined, handle: undefined, sent, queued: false };
+  }
   const boundaryPolicy = options.boundary ? DEVICE_EXECUTION_BOUNDARY_MATRIX[options.boundary] : undefined;
   const effectiveRootKind = boundaryPolicy?.requiresExistingRootHandle ? boundaryPolicy.rootKind : (options.rootKind ?? boundaryPolicy?.rootKind ?? "job");
   const rootExternalId = options.rootExternalId ?? payload.jobId;
@@ -272,6 +282,13 @@ async function sendBatchThroughBoundary(
 ): Promise<any> {
   const batchId = batchPayload.batchId;
   if (typeof batchId !== "string" || !batchId) throw new Error("BATCH_START requires batchId");
+  if (!isDeviceExecutionEnforced()) {
+    const resultPromise = directWsServer.waitForBatchResult(batchId, timeoutMs);
+    const sent = directWsServer.sendBatch(deviceId, batchPayload);
+    void deviceExecutionArbiter.observeDispatch({ deviceId, rootKind: options.boundary === "edge_batch" ? "batch" : "server_workflow", externalId: options.rootExternalId ?? batchId, requestKey: options.rootExternalId ?? batchId, sent, actor: options.actor, metadata: { authorityMode: "observe_only" } });
+    if (!sent) throw new Error(`Batch ${batchId} was not sent: offline`);
+    return resultPromise;
+  }
   let resultPromise: Promise<any> | undefined;
   const dispatch = await deviceExecutionArbiter.runObservedEgress({
     deviceId,
@@ -303,6 +320,11 @@ export async function sendEdgeWorkflowToDeviceEnforced(
   variables?: Record<string, unknown>,
   options: { actor?: string; observeSource?: string } = {},
 ): Promise<EdgeWorkflowSendResult> {
+  if (!isDeviceExecutionEnforced()) {
+    const sent = directWsServer.sendWorkflowStart(deviceId, template, variables, workflowId);
+    void deviceExecutionArbiter.observeDispatch({ deviceId, rootKind: "edge_workflow", externalId: workflowId, requestKey: workflowId, sent, actor: options.actor ?? "transport.observe_only.edge_workflow", metadata: { authorityMode: "observe_only" } });
+    return { decision: sent ? "dispatched" : "offline", root: null, operation: undefined, handle: undefined, sent, queued: false };
+  }
   const replayEnvelope: DeviceExecutionEdgeWorkflowReplayEnvelopeV1 = {
     schemaVersion: "pnq.edge-workflow-dispatch/v1",
     deviceId,

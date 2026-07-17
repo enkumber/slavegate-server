@@ -32,6 +32,7 @@ import { runMigrations } from "./db/migrate";
 import { startTaskRunner } from "./modules/task-runner";
 import { dashboardWorkflowWsServer } from "./modules/workflow-events/dashboard-ws.server";
 import { deviceExecutionArbiter } from "./modules/device-execution";
+import { isDeviceExecutionEnforced } from "./modules/device-execution/device-execution-authority";
 import { sweepQueuedJobsForOnlineDevices } from "./transport/transport";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
@@ -69,22 +70,26 @@ async function bootstrap(): Promise<void> {
   // acts on blocked/reconciling roots with complete database evidence; running
   // it before this transition leaves old claimed/dispatching/dispatched roots
   // invisible to cleanup and blocks every successor on the device forever.
-  const deviceExecutionReconciliation = await deviceExecutionArbiter.reconcileInFlightAtStartup();
+  const deviceExecutionReconciliation = isDeviceExecutionEnforced()
+    ? await deviceExecutionArbiter.reconcileInFlightAtStartup()
+    : { reconciledRoots: 0, activeAmbiguousRoots: 0 };
   console.log(
     `[server] Device execution startup reconciliation: reconciled=${deviceExecutionReconciliation.reconciledRoots} ` +
     `ambiguousBeforeEvidenceCleanup=${deviceExecutionReconciliation.activeAmbiguousRoots}.`
   );
 
-  const terminalWorkflowReconciliation =
-    await deviceExecutionArbiter.reconcileTerminalServerWorkflowRoots();
+  const terminalWorkflowReconciliation = isDeviceExecutionEnforced()
+    ? await deviceExecutionArbiter.reconcileTerminalServerWorkflowRoots()
+    : { reconciledRoots: 0 };
   if (terminalWorkflowReconciliation.reconciledRoots > 0) {
     console.warn(
       `[device-execution] reconciled ${terminalWorkflowReconciliation.reconciledRoots} ` +
       "blocked server workflow root(s) with complete terminal database evidence",
     );
   }
-  const undispatchedWorkflowReconciliation =
-    await deviceExecutionArbiter.reconcileUndispatchedTimedOutServerWorkflows();
+  const undispatchedWorkflowReconciliation = isDeviceExecutionEnforced()
+    ? await deviceExecutionArbiter.reconcileUndispatchedTimedOutServerWorkflows()
+    : { reconciledRoots: 0 };
   if (undispatchedWorkflowReconciliation.reconciledRoots > 0) {
     console.warn(
       `[device-execution] reconciled ${undispatchedWorkflowReconciliation.reconciledRoots} ` +

@@ -1,4 +1,5 @@
 import { deviceExecutionArbiter } from "../device-execution";
+import { isDeviceExecutionEnforced } from "../device-execution/device-execution-authority";
 import { workflowService } from "./workflow.service";
 
 function cancellationError(code: string, message: string, status: number): Error & { code: string; status: number } {
@@ -42,6 +43,23 @@ export async function cancelPersistedWorkflowSafely(workflowId: string): Promise
       "Cancellation is supported only before workflow dispatch; execution ownership remains active",
       409,
     );
+  }
+
+  if (!isDeviceExecutionEnforced()) {
+    const cancelled = await workflowService.cancel(workflowId);
+    if (!cancelled) {
+      throw cancellationError("CANCELLATION_UNSUPPORTED_IN_FLIGHT", "Workflow became active before cancellation", 409);
+    }
+    void deviceExecutionArbiter.observeTerminal({
+      deviceId: workflow.deviceId,
+      rootKind: "server_workflow",
+      externalId: workflowId,
+      status: "cancelled",
+      actor: "workflow_api.cancel.observe_only",
+      reason: "api_cancelled_before_dispatch",
+      metadata: { authorityMode: "observe_only" },
+    });
+    return { workflowId, status: "cancelled" };
   }
 
   const pnq = await deviceExecutionArbiter.cancelQueuedPersistedWorkflow({

@@ -25,6 +25,7 @@ import { hbeService } from "../hbe/hbe.service";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
 import { sendServerWorkflowBatchChildToDevice, sendDeviceExecutionJobToDevice, isDeviceOnline } from "../../transport/transport";
 import { deviceExecutionArbiter } from "../device-execution";
+import { isDeviceExecutionEnforced } from "../device-execution/device-execution-authority";
 import { scalabilityConfig } from "../../config/scalability.config";
 import { getDb } from "../../db/client";
 import type {
@@ -780,7 +781,7 @@ export async function runWorkflow(workflowId: string, job: import("bullmq").Job)
   // the next attempt can resume from its checkpoint. Only claim rows that are
   // not already running; treating a failed claim as success can strand the
   // server_workflow PNQ root forever.
-  if (wf.status !== "running" && admissionDecision !== "would_wait") {
+  if (wf.status !== "running" && (!isDeviceExecutionEnforced() || admissionDecision !== "would_wait")) {
     const started = await workflowService.markRunning(workflowId);
     if (!started) {
       const latest = await workflowService.get(workflowId);

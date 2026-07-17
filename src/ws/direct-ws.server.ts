@@ -34,6 +34,7 @@ import {
   type DeviceExecutionHandle,
   type DeviceExecutionRootKind,
 } from "../modules/device-execution";
+import { isDeviceExecutionEnforced } from "../modules/device-execution/device-execution-authority";
 import { devicesService } from "../modules/devices/devices.service";
 import { devicesConnected, deviceOfflineEvents, recordDeviceHealth } from "../modules/observability/metrics";
 import { alerting } from "../modules/observability/alerts";
@@ -305,6 +306,10 @@ export class DirectWsServer {
     cleanup: () => void,
     attempt = 1,
   ): Promise<boolean> {
+    if (!isDeviceExecutionEnforced()) {
+      cleanup();
+      return true;
+    }
     try {
       const transition = await deviceExecutionArbiter.markAmbiguous(input);
       const confirmed = transition.decision === "ambiguous" ||
@@ -341,6 +346,10 @@ export class DirectWsServer {
     cleanup: () => void,
     attempt = 1,
   ): Promise<boolean> {
+    if (!isDeviceExecutionEnforced()) {
+      cleanup();
+      return true;
+    }
     try {
       const transition = await deviceExecutionArbiter.expireServerWorkflowChild(input);
       if (transition.decision !== "terminal") {
@@ -640,6 +649,12 @@ export class DirectWsServer {
    * Returns true if sent, false if device not connected.
    */
   sendBatch(deviceId: string, batchPayload: Record<string, unknown>): boolean {
+    if (!isDeviceExecutionEnforced()) {
+      const conn = this.connections.get(deviceId);
+      if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+      this._send(conn.ws, batchPayload);
+      return true;
+    }
     console.error(`[device-execution] blocked raw BATCH egress: device=${deviceId.slice(0, 8)} batch=${String(batchPayload.batchId ?? "?").slice(0, 8)}`);
     void deviceExecutionArbiter.recordRejectedEgress({
       deviceId,
@@ -675,6 +690,12 @@ export class DirectWsServer {
     variables?: Record<string, unknown>,
     workflowId?: string,
   ): boolean {
+    if (!isDeviceExecutionEnforced()) {
+      const conn = this.connections.get(deviceId);
+      if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+      this._send(conn.ws, { ...template, type: "WORKFLOW_START", workflowId, variables });
+      return true;
+    }
     console.error(`[device-execution] blocked raw WORKFLOW_START egress: device=${deviceId.slice(0, 8)} workflow=${workflowId?.slice(0, 8) ?? "missing"}`);
     void deviceExecutionArbiter.recordRejectedEgress({
       deviceId,
@@ -1260,6 +1281,9 @@ export class DirectWsServer {
     const reportedHandle = handleResolution?.reportedHandle ?? decodeDeviceExecutionHandle(wireHandle);
 
     try {
+      if (!isDeviceExecutionEnforced()) {
+        void deviceExecutionArbiter.observeTerminal({ deviceId: conn.deviceId, rootKind: "job", externalId: jobId, status, actor: "direct_ws.observe_only", reason: (msg.error as string | undefined) ?? status, metadata: { authorityMode: "observe_only" } });
+      } else {
       const accepted = await deviceExecutionArbiter.acceptJobResult({
         deviceId: conn.deviceId,
         jobId,
@@ -1284,6 +1308,7 @@ export class DirectWsServer {
         );
         this._send(conn.ws, { type: "ACK", ref: jobId });
         return;
+      }
       }
     } catch (err) {
       console.error("[device-execution] enforced JOB result ingress failed:", (err as Error).message);

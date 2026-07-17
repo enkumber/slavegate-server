@@ -8,10 +8,11 @@ import {
   sendBatchToDeviceEnforced,
   sendEdgeWorkflowToDeviceEnforced,
   sendServerWorkflowBatchChildToDevice,
+  sendDeviceExecutionJobToDevice,
   type DeviceExecutionEdgeWorkflowReplayEnvelopeV1,
   type DeviceExecutionJobReplayEnvelopeV1,
 } from "./transport";
-import { deviceExecutionArbiter, type DeviceExecutionHandle } from "../modules/device-execution";
+import { deviceExecutionArbiter, setDeviceExecutionAuthorityForTest, type DeviceExecutionHandle } from "../modules/device-execution";
 import { directWsServer } from "../ws/direct-ws.server";
 import * as dbClient from "../db/client";
 
@@ -23,8 +24,36 @@ const lifecycleMocks = vi.hoisted(() => ({
 vi.mock("../modules/workflows/edge-workflow-lifecycle.service", () => lifecycleMocks);
 
 afterEach(() => {
+  setDeviceExecutionAuthorityForTest(null);
   vi.restoreAllMocks();
   lifecycleMocks.promoteReplayedEdgeWorkflowToRunning.mockReset();
+});
+
+describe("PNQ-003 observe-only production transport", () => {
+  it("uses the real DirectWS transport without requiring a PNQ permit or queue claim", async () => {
+    setDeviceExecutionAuthorityForTest("observe_only");
+    const send = vi.fn();
+    const internals = directWsServer as unknown as {
+      connections: Map<string, { ws: { readyState: number; send: typeof send }; lastSeenAt: number }>;
+    };
+    internals.connections.set(DEVICE_ID, { ws: { readyState: 1, send }, lastSeenAt: Date.now() });
+    const observe = vi.spyOn(deviceExecutionArbiter, "observeDispatch").mockResolvedValue({ decision: "dispatched", root: null });
+    const enforce = vi.spyOn(deviceExecutionArbiter, "runStandaloneJobEgress");
+
+    const result = await sendDeviceExecutionJobToDevice(DEVICE_ID, envelope().payload, {
+      boundary: "generated_child",
+      rootKind: "server_workflow",
+      rootExternalId: "cron-workflow-1",
+      actor: "task_runner.cron.integration",
+    });
+
+    expect(result).toMatchObject({ sent: true, queued: false, decision: "dispatched" });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(send.mock.calls[0]![0]))).toMatchObject({ type: "JOB", jobId: "job-1" });
+    expect(enforce).not.toHaveBeenCalled();
+    expect(observe).toHaveBeenCalledTimes(1);
+    internals.connections.delete(DEVICE_ID);
+  });
 });
 
 function envelope(): DeviceExecutionJobReplayEnvelopeV1 {
