@@ -1,16 +1,16 @@
 # PNQ-003: Controlled PNQ enforcement rollback and PostgreSQL Queue v2
 
-**Priority:** P0/P1, Dan-authorized GO  
-**Requester:** Dan via ATLAS  
-**PM / Entry point:** ATLAS  
-**Primary owner:** FORGE  
-**QA owners:** VOLT + SPARK  
-**Review owners:** LENS + ECHO  
-**Final integrator:** FORGE  
-**Created:** 2026-07-17  
-**Base:** `origin/master` `081dfb3973e088f09c61fe455643a3a19eeb2887`  
-**Branch:** `feature/pnq-v2-controlled-rollback`  
-**Status:** Ready for FORGE implementation  
+**Priority:** P0/P1, Dan-authorized GO
+**Requester:** Dan via ATLAS
+**PM / Entry point:** ATLAS
+**Primary owner:** FORGE
+**QA owners:** VOLT + SPARK
+**Review owners:** LENS + ECHO
+**Final integrator:** FORGE
+**Created:** 2026-07-17
+**Base:** `origin/master` `081dfb3973e088f09c61fe455643a3a19eeb2887`
+**Branch:** `feature/pnq-v2-controlled-rollback`
+**Status:** Ready for FORGE implementation
 
 ## Scope guardrails
 

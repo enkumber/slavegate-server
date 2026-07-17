@@ -25,6 +25,18 @@
   },
   {
     "file": "src/transport/transport.ts",
+    "kind": "directWsServer.sendBatch",
+    "count": 1,
+    "classification": "pnq-003-observe-only-batch-compatibility-helper"
+  },
+  {
+    "file": "src/transport/transport.ts",
+    "kind": "directWsServer.sendJob",
+    "count": 1,
+    "classification": "pnq-003-observe-only-job-compatibility-helper"
+  },
+  {
+    "file": "src/transport/transport.ts",
     "kind": "directWsServer.sendJobWithPermit",
     "count": 1,
     "classification": "direct-ws-job-permit-transport-internal"
@@ -32,7 +44,7 @@
   {
     "file": "src/transport/transport.ts",
     "kind": "sendJobToDevice",
-    "count": 1,
+    "count": 2,
     "classification": "transport-facade"
   },
   {
@@ -40,6 +52,12 @@
     "kind": "directWsServer.sendWorkflowCancel",
     "count": 1,
     "classification": "audited-workflow-control-egress"
+  },
+  {
+    "file": "src/transport/transport.ts",
+    "kind": "directWsServer.sendWorkflowStart",
+    "count": 1,
+    "classification": "pnq-003-observe-only-workflow-compatibility-helper"
   },
   {
     "file": "src/ws/direct-ws.server.ts",

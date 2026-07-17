@@ -77,9 +77,7 @@ export interface EdgeWorkflowSendResult {
  */
 export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
   if (!isDeviceExecutionEnforced()) {
-    const sent = directWsServer.sendJob(deviceId, payload);
-    observeJobDispatch(deviceId, payload, sent);
-    return sent;
+    return sendObserveOnlyJobToDevice(deviceId, payload);
   }
   console.error(
     `[device-execution] blocked unauthorized raw JOB egress: device=${deviceId.slice(0, 8)} job=${payload.jobId.slice(0, 8)}`
@@ -93,6 +91,19 @@ export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): 
     metadata: { jobType: payload.type },
   }).catch((err) => console.error("[device-execution] raw sender rejection audit failed:", (err as Error).message));
   return false;
+}
+
+function assertObserveOnlyTransportBoundary(boundary: string): void {
+  if (isDeviceExecutionEnforced()) {
+    throw new Error(`${boundary} is available only while device execution authority is observe-only`);
+  }
+}
+
+function sendObserveOnlyJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
+  assertObserveOnlyTransportBoundary("observe-only JOB transport compatibility");
+  const sent = directWsServer.sendJob(deviceId, payload);
+  observeJobDispatch(deviceId, payload, sent);
+  return sent;
 }
 
 /**
@@ -284,7 +295,7 @@ async function sendBatchThroughBoundary(
   if (typeof batchId !== "string" || !batchId) throw new Error("BATCH_START requires batchId");
   if (!isDeviceExecutionEnforced()) {
     const resultPromise = directWsServer.waitForBatchResult(batchId, timeoutMs);
-    const sent = directWsServer.sendBatch(deviceId, batchPayload);
+    const sent = sendObserveOnlyBatchToDevice(deviceId, batchPayload);
     void deviceExecutionArbiter.observeDispatch({ deviceId, rootKind: options.boundary === "edge_batch" ? "batch" : "server_workflow", externalId: options.rootExternalId ?? batchId, requestKey: options.rootExternalId ?? batchId, sent, actor: options.actor, metadata: { authorityMode: "observe_only" } });
     if (!sent) throw new Error(`Batch ${batchId} was not sent: offline`);
     return resultPromise;
@@ -313,6 +324,11 @@ async function sendBatchThroughBoundary(
   return resultPromise;
 }
 
+function sendObserveOnlyBatchToDevice(deviceId: string, batchPayload: Record<string, unknown>): boolean {
+  assertObserveOnlyTransportBoundary("observe-only BATCH transport compatibility");
+  return directWsServer.sendBatch(deviceId, batchPayload);
+}
+
 export async function sendEdgeWorkflowToDeviceEnforced(
   deviceId: string,
   workflowId: string,
@@ -321,7 +337,7 @@ export async function sendEdgeWorkflowToDeviceEnforced(
   options: { actor?: string; observeSource?: string } = {},
 ): Promise<EdgeWorkflowSendResult> {
   if (!isDeviceExecutionEnforced()) {
-    const sent = directWsServer.sendWorkflowStart(deviceId, template, variables, workflowId);
+    const sent = sendObserveOnlyWorkflowStartToDevice(deviceId, workflowId, template, variables);
     void deviceExecutionArbiter.observeDispatch({ deviceId, rootKind: "edge_workflow", externalId: workflowId, requestKey: workflowId, sent, actor: options.actor ?? "transport.observe_only.edge_workflow", metadata: { authorityMode: "observe_only" } });
     return { decision: sent ? "dispatched" : "offline", root: null, operation: undefined, handle: undefined, sent, queued: false };
   }
@@ -358,6 +374,16 @@ export async function sendEdgeWorkflowToDeviceEnforced(
     sent: dispatch.sent,
     queued: dispatch.decision === "would_wait" || (dispatch.root?.state === "queued" && !dispatch.sent),
   };
+}
+
+function sendObserveOnlyWorkflowStartToDevice(
+  deviceId: string,
+  workflowId: string,
+  template: Record<string, unknown>,
+  variables?: Record<string, unknown>,
+): boolean {
+  assertObserveOnlyTransportBoundary("observe-only WORKFLOW transport compatibility");
+  return directWsServer.sendWorkflowStart(deviceId, template, variables, workflowId);
 }
 
 async function cancelUnreplayableObservedAttempt(

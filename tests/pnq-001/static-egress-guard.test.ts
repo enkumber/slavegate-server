@@ -31,6 +31,7 @@ type EgressFinding = {
   callee: string;
   importedName?: string;
   sourceKind?: "transport" | "direct-ws";
+  enclosingFunction?: string;
 };
 
 const repoRoot = path.resolve(__dirname, "../..");
@@ -116,16 +117,17 @@ function scanSource(sourceText: string, fileName: string): {
   const findings: EgressFinding[] = [];
   const rawImports = collectRawImportBoundaries(fileName, importBindings);
 
-  const visit = (node: ts.Node): void => {
+  const visit = (node: ts.Node, enclosingFunction?: string): void => {
+    const nextEnclosingFunction = functionName(node) ?? enclosingFunction;
     if (ts.isCallExpression(node)) {
-      findings.push(...classifyCall(node, sourceFile, importBindings, fileName));
+      findings.push(...classifyCall(node, sourceFile, importBindings, fileName, enclosingFunction));
     } else if (ts.isFunctionDeclaration(node)) {
       findings.push(...classifyFunctionDeclaration(node, fileName));
     } else if (ts.isMethodDeclaration(node)) {
       findings.push(...classifyMethodDeclaration(node, fileName));
     }
 
-    ts.forEachChild(node, visit);
+    ts.forEachChild(node, (child) => visit(child, nextEnclosingFunction));
   };
 
   visit(sourceFile);
@@ -204,16 +206,17 @@ function classifyCall(
   sourceFile: ts.SourceFile,
   importBindings: Map<string, ImportBinding>,
   file: string,
+  enclosingFunction?: string,
 ): EgressFinding[] {
   const callee = node.expression;
 
   if (ts.isIdentifier(callee)) {
     const binding = importBindings.get(callee.text);
     if (binding?.importedName === "sendJobToDevice" && rawSourceKind(binding.moduleSpecifier) === "transport") {
-      return [findingForIdentifier(file, "sendJobToDevice", callee.text, importBindings)];
+      return [findingForIdentifier(file, "sendJobToDevice", callee.text, importBindings, enclosingFunction)];
     }
     if (callee.text === "sendJobToDevice") {
-      return [findingForIdentifier(file, "sendJobToDevice", callee.text, importBindings)];
+      return [findingForIdentifier(file, "sendJobToDevice", callee.text, importBindings, enclosingFunction)];
     }
     if (callee.text === "sendToDevice") return [{ file, kind: "sendToDevice", callee: callee.text }];
     return [];
@@ -230,7 +233,7 @@ function classifyCall(
     directWsServerMethods.has(method) &&
     (receiver === "directWsServer" || receiverBinding?.importedName === "directWsServer")
   ) {
-    findings.push(findingForProperty(file, `directWsServer.${method}`, receiver, method, importBindings));
+    findings.push(findingForProperty(file, `directWsServer.${method}`, receiver, method, importBindings, enclosingFunction));
   }
   if (
     method === "sendJobToDevice" &&
@@ -254,6 +257,7 @@ function classifyCall(
         callee: `${receiver}.${method}`,
         importedName: "directWsServer",
         sourceKind: "direct-ws",
+        enclosingFunction,
       });
     }
   }
@@ -289,6 +293,7 @@ function findingForIdentifier(
   kind: string,
   callee: string,
   importBindings: Map<string, ImportBinding>,
+  enclosingFunction?: string,
 ): EgressFinding {
   const binding = importBindings.get(callee);
   return {
@@ -297,6 +302,7 @@ function findingForIdentifier(
     callee,
     importedName: binding?.importedName,
     sourceKind: binding ? rawSourceKind(binding.moduleSpecifier) ?? undefined : undefined,
+    enclosingFunction,
   };
 }
 
@@ -306,6 +312,7 @@ function findingForProperty(
   receiver: string,
   method: string,
   importBindings: Map<string, ImportBinding>,
+  enclosingFunction?: string,
 ): EgressFinding {
   const binding = importBindings.get(receiver);
   return {
@@ -314,7 +321,26 @@ function findingForProperty(
     callee: `${receiver}.${method}`,
     importedName: binding?.importedName,
     sourceKind: binding ? rawSourceKind(binding.moduleSpecifier) ?? undefined : undefined,
+    enclosingFunction,
   };
+}
+
+function functionName(node: ts.Node): string | undefined {
+  if ((ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) && node.name) {
+    return node.name.text;
+  }
+  if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) {
+    return node.name.text;
+  }
+  if (
+    ts.isVariableDeclaration(node) &&
+    ts.isIdentifier(node.name) &&
+    node.initializer &&
+    (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+  ) {
+    return node.name.text;
+  }
+  return undefined;
 }
 
 function classifyFunctionDeclaration(node: ts.FunctionDeclaration, file: string): EgressFinding[] {
@@ -424,10 +450,26 @@ function isReviewedCallBoundary(finding: EgressFinding): boolean {
   if (finding.kind === "sendJobToDevice" && finding.callee === "function sendJobToDevice") {
     return finding.file === "src/transport/transport.ts";
   }
+  if (finding.kind === "sendJobToDevice" && finding.file === "src/transport/transport.ts") {
+    return finding.callee === "sendJobToDevice" &&
+      finding.enclosingFunction === "sendDeviceExecutionJobToDevice";
+  }
   if (finding.kind === "sendJobToDevice") {
     return finding.importedName === "sendJobToDevice" && finding.sourceKind === "transport";
   }
   if (finding.kind.startsWith("directWsServer.")) {
+    if (
+      finding.file === "src/transport/transport.ts" &&
+      ["directWsServer.sendJob", "directWsServer.sendBatch", "directWsServer.sendWorkflowStart"].includes(finding.kind)
+    ) {
+      return finding.importedName === "directWsServer" &&
+        finding.sourceKind === "direct-ws" &&
+        [
+          "sendObserveOnlyJobToDevice",
+          "sendObserveOnlyBatchToDevice",
+          "sendObserveOnlyWorkflowStartToDevice",
+        ].includes(finding.enclosingFunction ?? "");
+    }
     return finding.importedName === "directWsServer" && finding.sourceKind === "direct-ws";
   }
   if (finding.kind === "transport.sendJob") return finding.file === "src/api/routes.ts";
@@ -484,10 +526,31 @@ describe("PNQ-001 production egress inventory guard", () => {
   it("keeps the legacy synchronous JOB sender fail-closed before any wire call", () => {
     const source = fs.readFileSync(path.join(repoRoot, "src/transport/transport.ts"), "utf8");
     const start = source.indexOf("export function sendJobToDevice");
-    const end = source.indexOf("export async function sendStandaloneJobToDevice", start);
+    const end = source.indexOf("function assertObserveOnlyTransportBoundary", start);
     const legacySender = source.slice(start, end);
     expect(legacySender).toContain("raw_job_sender_disabled_use_permit_path");
     expect(legacySender).not.toContain("directWsServer.sendJob(");
+  });
+
+  it("keeps PNQ-003 observe-only raw transport calls inside named compatibility helpers", () => {
+    const { findings } = scanSource(
+      fs.readFileSync(path.join(repoRoot, "src/transport/transport.ts"), "utf8"),
+      "src/transport/transport.ts",
+    );
+    const observeOnlyDirectWsCalls = findings
+      .filter((finding) => [
+        "directWsServer.sendJob",
+        "directWsServer.sendBatch",
+        "directWsServer.sendWorkflowStart",
+      ].includes(finding.kind))
+      .map((finding) => `${finding.kind}:${finding.enclosingFunction ?? "none"}`)
+      .sort();
+
+    expect(observeOnlyDirectWsCalls).toEqual([
+      "directWsServer.sendBatch:sendObserveOnlyBatchToDevice",
+      "directWsServer.sendJob:sendObserveOnlyJobToDevice",
+      "directWsServer.sendWorkflowStart:sendObserveOnlyWorkflowStartToDevice",
+    ]);
   });
 
   it("detects aliased and namespace raw transport sender bypasses", () => {
