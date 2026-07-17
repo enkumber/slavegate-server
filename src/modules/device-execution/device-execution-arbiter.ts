@@ -3112,6 +3112,24 @@ export class DeviceExecutionArbiter {
                   AND child.operation_id = roots.external_id
                 )
                 AND child.state NOT IN ('completed', 'failed', 'cancelled', 'rejected')
+                AND NOT (
+                  child.operation_kind = 'job'
+                  AND child.device_id = roots.device_id
+                  AND child.owner_generation = roots.owner_generation
+                  AND child.state IN ('blocked', 'reconciling')
+                  AND EXISTS (
+                    SELECT 1
+                    FROM jobs child_job
+                    JOIN command_log child_command
+                      ON child_command.job_id = child_job.id
+                    WHERE child_job.id::text = child.operation_id
+                      AND child_job.device_id = roots.device_id
+                      AND child_job.status IN ('completed', 'failed', 'timeout', 'cancelled')
+                      AND child_job.completed_at IS NOT NULL
+                      AND child_job.completed_at <= NOW() - INTERVAL '5 minutes'
+                      AND child_command.command_raw LIKE ('workflow:' || roots.external_id || ' step:%')
+                  )
+                )
             )
             AND NOT EXISTS (
               SELECT 1

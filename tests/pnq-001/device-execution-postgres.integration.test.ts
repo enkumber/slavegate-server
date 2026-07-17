@@ -475,6 +475,7 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
 
   it("releases a stale blocked terminal workflow root after restart and admits its successor", async () => {
     const workflowId = "00000000-0000-4000-8000-00000000d001";
+    const childJobId = "00000000-0000-4000-8000-00000000d0f1";
     await insertDevice(pool, DEVICE_A, "pnq-terminal-restart-a");
     await insertWorkflow(pool, workflowId, DEVICE_A, "running");
     await arbiter.observeAdmission({
@@ -496,6 +497,22 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       "UPDATE workflows SET status = 'failed', completed_at = NOW(), error = 'RECOVERY_BUDGET_EXCEEDED' WHERE id = $1",
       [workflowId],
     );
+    const blockedRoot = await rootForExternalId(pool, workflowId);
+    await pool.query(
+      `INSERT INTO jobs (id, device_id, status, completed_at)
+       VALUES ($1, $2, 'timeout', NOW() - INTERVAL '6 minutes')`,
+      [childJobId, DEVICE_A],
+    );
+    await pool.query(
+      `INSERT INTO command_log (job_id, command_raw) VALUES ($1, $2)`,
+      [childJobId, `workflow:${workflowId} step:0 screen_wake`],
+    );
+    await pool.query(
+      `INSERT INTO device_execution_operations
+         (root_id, device_id, root_kind, operation_kind, operation_id, owner_generation, state, egress_lane, wire_handle)
+       VALUES ($1, $2, 'server_workflow', 'job', $3, $4, 'blocked', 'device_execution', '{}'::jsonb)`,
+      [blockedRoot!.id, DEVICE_A, childJobId, blockedRoot!.owner_generation],
+    );
 
     const restartedArbiter = new DeviceExecutionArbiter(() => pool);
     const competingReconciler = new DeviceExecutionArbiter(() => pool);
@@ -515,6 +532,51 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     });
     await expect(restartedArbiter.claimNextRoot({ deviceId: DEVICE_A, actor: "post-restart-worker" }))
       .resolves.not.toBeNull();
+  });
+
+  it("keeps a recently terminal ambiguous child fail-closed during the quiet period", async () => {
+    const workflowId = "00000000-0000-4000-8000-00000000d0f2";
+    const childJobId = "00000000-0000-4000-8000-00000000d0f3";
+    await insertDevice(pool, DEVICE_A, "pnq-recent-terminal-child-a");
+    await insertWorkflow(pool, workflowId, DEVICE_A, "running");
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "server_workflow",
+      externalId: workflowId,
+      requestKey: workflowId,
+    });
+    await arbiter.runObservedEgress({
+      deviceId: DEVICE_A,
+      boundary: "server_workflow_root",
+      rootExternalId: workflowId,
+      operationId: workflowId,
+      wireType: "WORKFLOW_START",
+      registerWaiter: () => undefined,
+      wireDispatch: () => { throw new Error("pre_wire_timeout"); },
+    });
+    await pool.query(
+      "UPDATE workflows SET status = 'failed', completed_at = NOW(), error = 'terminal recent child' WHERE id = $1",
+      [workflowId],
+    );
+    const blockedRoot = await rootForExternalId(pool, workflowId);
+    await pool.query(
+      `INSERT INTO jobs (id, device_id, status, completed_at) VALUES ($1, $2, 'timeout', NOW())`,
+      [childJobId, DEVICE_A],
+    );
+    await pool.query(
+      `INSERT INTO command_log (job_id, command_raw) VALUES ($1, $2)`,
+      [childJobId, `workflow:${workflowId} step:0 screen_wake`],
+    );
+    await pool.query(
+      `INSERT INTO device_execution_operations
+         (root_id, device_id, root_kind, operation_kind, operation_id, owner_generation, state, egress_lane, wire_handle)
+       VALUES ($1, $2, 'server_workflow', 'job', $3, $4, 'blocked', 'device_execution', '{}'::jsonb)`,
+      [blockedRoot!.id, DEVICE_A, childJobId, blockedRoot!.owner_generation],
+    );
+
+    await expect(arbiter.reconcileTerminalServerWorkflowRoots()).resolves.toEqual({ reconciledRoots: 0 });
+    expect(await stateForExternalId(pool, workflowId)).toBe("blocked");
+    expect(await activeRootCount(pool, DEVICE_A)).toBe(1);
   });
 
   it("reconciles an in-flight terminal workflow in startup order before admitting its successor", async () => {
