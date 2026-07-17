@@ -24,6 +24,7 @@ import { devicesService } from "../modules/devices/devices.service";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { getDb } from "../db/client";
 import { decodeDeviceExecutionHandle, deviceExecutionArbiter } from "../modules/device-execution";
+import { pnqV2RuntimeService } from "../modules/device-execution/pnq-v2-runtime.service";
 import {
   devicesConnected, deviceOfflineEvents, recordDeviceHealth,
 } from "../modules/observability/metrics";
@@ -61,6 +62,7 @@ interface DeviceConnection {
   msgCount: number;
   windowStart: number;
   supersededAt?: number;  // Timestamp when this connection was replaced by a newer one
+  pnqV2ConnectionEpoch?: number | null;
 }
 
 interface HelloPayload {
@@ -136,6 +138,10 @@ export class WsServer {
     const result = this.sendToDevice(deviceId, "JOB_DISPATCH", payload);
     console.log(`[ws] sendJob: deviceId=${deviceId.slice(0,8)} type=${payload.type} jobId=${payload.jobId?.slice(0,8)} sent=${result}`);
     return result;
+  }
+
+  getConnectionEpoch(deviceId: string): number | null {
+    return this.connections.get(deviceId)?.pnqV2ConnectionEpoch ?? null;
   }
 
   sendRevoked(deviceId: string): boolean {
@@ -289,7 +295,7 @@ export class WsServer {
 
       case "JOB_RESULT":
         if (state.conn) {
-          await this.handleJobResult(msg.payload as JobResultPayload, state.conn.deviceId);
+          await this.handleJobResult(msg.payload as JobResultPayload, state.conn);
         }
         break;
 
@@ -491,6 +497,7 @@ export class WsServer {
 
     // Send HELLO_ACK
     this.send(ws, "HELLO_ACK", { deviceId });
+    conn.pnqV2ConnectionEpoch = await pnqV2RuntimeService.onConnectionAuthenticated(deviceId);
     
     // Verify connection was added
     const verifyInMap = this.connections.has(deviceId);
@@ -513,8 +520,20 @@ export class WsServer {
 
   private async handleJobResult(
     payload: JobResultPayload,
-    deviceId: string
+    conn: DeviceConnection
   ): Promise<void> {
+    const deviceId = conn.deviceId;
+    await pnqV2RuntimeService.recordShadowResult({
+      legacyJobId: payload.jobId,
+      socketEpoch: conn.pnqV2ConnectionEpoch,
+      success: payload.status === "completed",
+      result: {
+        status: payload.status,
+        output: payload.output,
+        error: payload.error,
+        durationMs: payload.durationMs,
+      },
+    });
     const wireHandle = (payload as JobResultPayload & { pnqHandle?: unknown }).pnqHandle;
     const handle = decodeDeviceExecutionHandle(wireHandle);
     const accepted = await deviceExecutionArbiter.acceptJobResult({
@@ -741,6 +760,7 @@ export class WsServer {
       heartbeatInterval: "idle",
       msgCount: 0,
       windowStart: Date.now(),
+      pnqV2ConnectionEpoch: null,
     };
     this.connections.set(deviceId, conn);
     devicesConnected?.set(this.connections.size);

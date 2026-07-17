@@ -41,6 +41,7 @@ import { alerting } from "../modules/observability/alerts";
 import { visionService } from "../modules/vision/vision.service";
 import { workflowEvents } from "../modules/workflow-events";
 import { llmComplete } from "../utils/llm";
+import { pnqV2RuntimeService } from "../modules/device-execution/pnq-v2-runtime.service";
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -213,6 +214,7 @@ interface ConnectedDevice {
   msgCount:     number;
   windowStart:  number;
   agentVersion: string;  // For backward compat routing (ADR-001)
+  pnqV2ConnectionEpoch?: number | null;
 }
 
 interface PendingJob {
@@ -494,6 +496,10 @@ export class DirectWsServer {
     });
     console.log(`[direct-ws] sendJob: device=${deviceId.slice(0,8)} jobId=${payload.jobId?.slice(0,8)} type=${payload.type}`);
     return true;
+  }
+
+  getConnectionEpoch(deviceId: string): number | null {
+    return this.connections.get(deviceId)?.pnqV2ConnectionEpoch ?? null;
   }
 
   sendJobWithPermit(permit: DeviceExecutionJobDispatchPermit, payload: JobDispatchPayload): boolean {
@@ -1250,6 +1256,7 @@ export class DirectWsServer {
         msgCount:    0,
         windowStart: now,
         agentVersion: deviceInfo?.agentVersion ?? "unknown",
+        pnqV2ConnectionEpoch: null,
       };
       this.connections.set(finalDeviceId, conn);
       devicesConnected?.set(this.connections.size);
@@ -1299,6 +1306,7 @@ export class DirectWsServer {
       });
       console.log(`[direct-ws] Device ${finalDeviceId.slice(0,8)} authenticated (status=${finalStatus}) from ${remoteIp}`);
       onAuth(conn);
+      conn.pnqV2ConnectionEpoch = await pnqV2RuntimeService.onConnectionAuthenticated(finalDeviceId);
       void import("../transport/transport")
         .then(({ dispatchQueuedJobsForDevice }) => dispatchQueuedJobsForDevice(finalDeviceId, "direct_ws.reconnect_queue_pump"))
         .catch(err => console.error("[device-execution] reconnect queue pump error:", (err as Error).message));
@@ -1316,6 +1324,17 @@ export class DirectWsServer {
     const jobId = msg.jobId as string;
     if (!jobId) return;
     console.log(`[direct-ws] JOB_RESULT received: jobId=${jobId.slice(0,8)} success=${msg.success} error=${msg.error || 'none'} device=${conn.deviceId.slice(0,8)}`);
+    await pnqV2RuntimeService.recordShadowResult({
+      legacyJobId: jobId,
+      socketEpoch: conn.pnqV2ConnectionEpoch,
+      success: Boolean(msg.success),
+      result: {
+        status: Boolean(msg.success) ? "completed" : "failed",
+        output: msg.output,
+        error: msg.error as string | undefined,
+        durationMs: (msg.durationMs as number | undefined) ?? 0,
+      },
+    });
 
     const pending = this.pendingJobs.get(jobId);
     const status = Boolean(msg.success) ? "completed" : "failed";

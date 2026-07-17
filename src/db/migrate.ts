@@ -36,7 +36,10 @@ async function applyFile(client: any, filePath: string): Promise<{ ok: boolean; 
 }
 
 function isFailClosedMigration(fileName: string): boolean {
-  return fileName.includes("device_execution_queue") || fileName.includes("queue_v2_contract");
+  return fileName.includes("device_execution_queue") ||
+    fileName.includes("queue_v2_contract") ||
+    fileName.includes("queue_v2_runtime") ||
+    fileName.includes("pnq_v2_runtime");
 }
 
 /**

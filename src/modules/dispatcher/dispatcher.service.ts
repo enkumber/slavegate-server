@@ -11,6 +11,7 @@ import { getRedisConnectionOptions } from "../../redis/client";
 import { getDb } from "../../db/client";
 import { isKillSwitchActive } from "../../api/routes";
 import { deviceExecutionArbiter } from "../device-execution";
+import { pnqV2RuntimeService } from "../device-execution/pnq-v2-runtime.service";
 // NOTE: wsServer is intentionally NOT imported here — would create circular dependency.
 // Job dispatch to device WebSocket is handled by routes.ts (after calling dispatcher.dispatch()).
 // dispatcher only manages the DB + queue layer.
@@ -186,6 +187,13 @@ export class DispatcherService {
       { jobId, deviceId: req.deviceId, type: req.type, params: req.params, timeoutMs },
       { jobId }
     );
+
+    await pnqV2RuntimeService.enqueueShadowJob({
+      deviceId: req.deviceId,
+      legacyJobId: jobId,
+      payload: { type: req.type, params: req.params, workflowId: req.workflowId ?? null },
+      timeoutMs,
+    });
 
     // Server-side timeout enforcement:
     // If device executes job but never sends JOB_RESULT (crash, connection loss),

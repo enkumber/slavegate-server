@@ -19,6 +19,7 @@ import { DEVICE_EXECUTION_BOUNDARY_MATRIX, encodeDeviceExecutionHandle } from ".
 import { isDeviceExecutionEnforced } from "../modules/device-execution/device-execution-authority";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
 import { promoteReplayedEdgeWorkflowToRunning } from "../modules/workflows/edge-workflow-lifecycle.service";
+import { pnqV2RuntimeService } from "../modules/device-execution/pnq-v2-runtime.service";
 
 export type StandaloneJobSendResult = Pick<
   DeviceExecutionStandaloneJobEgressResult,
@@ -101,6 +102,10 @@ function assertObserveOnlyTransportBoundary(boundary: string): void {
 
 function sendObserveOnlyJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
   assertObserveOnlyTransportBoundary("observe-only JOB transport compatibility");
+  pnqV2RuntimeService.prepareShadowDispatch(
+    payload.jobId,
+    directWsServer.getConnectionEpoch(deviceId),
+  ).catch((err) => console.error("[pnq-v2-runtime] prepare shadow dispatch failed:", (err as Error).message));
   const sent = directWsServer.sendJob(deviceId, payload);
   observeJobDispatch(deviceId, payload, sent);
   return sent;

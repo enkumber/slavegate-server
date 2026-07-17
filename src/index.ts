@@ -34,6 +34,8 @@ import { dashboardWorkflowWsServer } from "./modules/workflow-events/dashboard-w
 import { deviceExecutionArbiter } from "./modules/device-execution";
 import { isDeviceExecutionEnforced } from "./modules/device-execution/device-execution-authority";
 import { sweepQueuedJobsForOnlineDevices } from "./transport/transport";
+import { pnqV2RuntimeService } from "./modules/device-execution/pnq-v2-runtime.service";
+import { describePnqV2RuntimeConfig, isPnqV2ShadowRuntimeEnabled } from "./modules/device-execution/pnq-v2-runtime-config";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
@@ -64,6 +66,12 @@ async function bootstrap(): Promise<void> {
   // PNQ-001 observe mode still requires authoritative queue schema.
   await deviceExecutionArbiter.validateSchema();
   console.log("[server] Device execution arbiter schema verified.");
+  const pnqV2RuntimeConfig = describePnqV2RuntimeConfig();
+  console.log(`[server] Queue v2 runtime mode=${pnqV2RuntimeConfig.mode} (restart required to change).`);
+  if (isPnqV2ShadowRuntimeEnabled()) {
+    const summary = await pnqV2RuntimeService.reconcileStartup();
+    console.log(`[server] Queue v2 shadow startup reconciliation: ok=${summary.ok} error=${summary.observed_error ?? "none"}.`);
+  }
 
   // First move every pre-restart in-flight root into the fail-closed
   // reconciliation state. Terminal workflow cleanup below deliberately only
@@ -252,6 +260,7 @@ async function bootstrap(): Promise<void> {
     );
   }
   if (queueSweepTimer) queueSweepTimer.unref();
+  pnqV2RuntimeService.startPeriodicSweep();
 
   // ─── Startup check: warn if no openclaw_agent API token ────────────────────
   {
@@ -286,6 +295,7 @@ async function bootstrap(): Promise<void> {
     console.log(`\n[server] ${signal} received — shutting down...`);
     httpServer.close();
     if (queueSweepTimer) clearInterval(queueSweepTimer);
+    await pnqV2RuntimeService.close();
     await directWsServer.close();
     await dashboardWorkflowWsServer.close();
     await dispatcherService.close();
