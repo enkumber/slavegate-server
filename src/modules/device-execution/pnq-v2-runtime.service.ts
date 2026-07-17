@@ -26,6 +26,7 @@ export function runPnqV2ShadowSideEffect<T>(
 export class PnqV2RuntimeService {
   private readonly repo = new PnqV2RuntimeRepository();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly enqueueObservations = new Map<string, Promise<ShadowObservation>>();
 
   async enqueueShadowJob(args: {
     legacyJobId: string;
@@ -34,7 +35,7 @@ export class PnqV2RuntimeService {
     timeoutMs: number;
   }): Promise<ShadowObservation> {
     if (!isPnqV2ShadowRuntimeEnabled()) return { ok: true, metadata: { mode: "disabled" } };
-    return this.observe("enqueue", async () => {
+    const observation = this.observe("enqueue", async () => {
       const mapping = await this.repo.enqueueMappedJob({
         legacyJobId: args.legacyJobId,
         nodeId: args.deviceId,
@@ -43,6 +44,13 @@ export class PnqV2RuntimeService {
       });
       return { mapping };
     });
+    this.enqueueObservations.set(args.legacyJobId, observation);
+    observation.finally(() => {
+      if (this.enqueueObservations.get(args.legacyJobId) === observation) {
+        this.enqueueObservations.delete(args.legacyJobId);
+      }
+    });
+    return observation;
   }
 
   async onConnectionAuthenticated(deviceId: string): Promise<number | null> {
@@ -60,6 +68,7 @@ export class PnqV2RuntimeService {
     if (!isPnqV2ShadowRuntimeEnabled()) return { ok: true, metadata: { mode: "disabled" } };
     if (socketEpoch == null) return { ok: false, observed_error: "missing_socket_epoch" };
     return this.observe("dispatch", async () => {
+      await this.enqueueObservations.get(legacyJobId);
       const mapping = await this.repo.claimAndStart(legacyJobId, socketEpoch, uuidv4());
       return { mapping };
     });

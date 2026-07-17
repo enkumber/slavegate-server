@@ -1355,7 +1355,9 @@ export class DirectWsServer {
 
     try {
       if (!isDeviceExecutionEnforced()) {
-        void deviceExecutionArbiter.observeTerminal({ deviceId: conn.deviceId, rootKind: "job", externalId: jobId, status, actor: "direct_ws.observe_only", reason: (msg.error as string | undefined) ?? status, metadata: { authorityMode: "observe_only" } });
+        runPnqV2ShadowSideEffect("direct-ws observe-only result", () =>
+          deviceExecutionArbiter.observeTerminal({ deviceId: conn.deviceId, rootKind: "job", externalId: jobId, status, actor: "direct_ws.observe_only", reason: (msg.error as string | undefined) ?? status, metadata: { authorityMode: "observe_only" } }),
+        );
       } else {
       const accepted = await deviceExecutionArbiter.acceptJobResult({
         deviceId: conn.deviceId,
@@ -1401,7 +1403,7 @@ export class DirectWsServer {
     }
 
     // ── Resolve workflow executor's pending promise (critical for blocking workflows) ──
-    const { resolveJobResult } = require("../modules/workflows/workflow.executor");
+    const { resolveJobResult } = await import("../modules/workflows/workflow.executor");
     const resolved = resolveJobResult(jobId, {
       status,
       output:     msg.output,

@@ -42,6 +42,9 @@ describe("PNQ v2 shadow dispatch side effect", () => {
     expect(source).toContain('runPnqV2ShadowSideEffect("enqueue"');
     expect(source).toContain("pnqV2RuntimeService.enqueueShadowJob");
     expect(source).not.toContain("await pnqV2RuntimeService.enqueueShadowJob");
+    expect(source.indexOf("const shadowEnqueueObservation = pnqV2RuntimeService.enqueueShadowJob"))
+      .toBeLessThan(source.indexOf('runPnqV2ShadowSideEffect("enqueue"'));
+    expect(source).toContain('runPnqV2ShadowSideEffect("enqueue", () => shadowEnqueueObservation)');
   });
 
   it("keeps terminal telemetry detached in observe-only and awaited in enforced mode", () => {

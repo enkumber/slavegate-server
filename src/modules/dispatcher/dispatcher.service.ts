@@ -189,12 +189,16 @@ export class DispatcherService {
       { jobId }
     );
 
-    runPnqV2ShadowSideEffect("enqueue", () => pnqV2RuntimeService.enqueueShadowJob({
+    // Create the observation promise synchronously so prepareShadowDispatch()
+    // can always see and await this job's mapping, even though neither shadow
+    // operation is allowed to delay the legacy route.
+    const shadowEnqueueObservation = pnqV2RuntimeService.enqueueShadowJob({
       deviceId: req.deviceId,
       legacyJobId: jobId,
       payload: { type: req.type, params: req.params, workflowId: req.workflowId ?? null },
       timeoutMs,
-    }));
+    });
+    runPnqV2ShadowSideEffect("enqueue", () => shadowEnqueueObservation);
 
     // Server-side timeout enforcement:
     // If device executes job but never sends JOB_RESULT (crash, connection loss),
