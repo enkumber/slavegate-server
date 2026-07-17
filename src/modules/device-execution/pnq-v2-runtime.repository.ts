@@ -82,10 +82,15 @@ export class PnqV2RuntimeRepository {
          INSERT INTO pnq_legacy_job_map (legacy_job_id, pnq_job_id, pnq_node_id)
          SELECT $2, id, node_id FROM job
          ON CONFLICT (legacy_job_id) DO NOTHING
+         RETURNING legacy_job_id, pnq_job_id, pnq_node_id, attempt_execution_id, dispatch_generation
        )
        SELECT m.legacy_job_id, m.pnq_job_id, m.pnq_node_id, m.attempt_execution_id, m.dispatch_generation
+       FROM mapping m
+       UNION ALL
+       SELECT m.legacy_job_id, m.pnq_job_id, m.pnq_node_id, m.attempt_execution_id, m.dispatch_generation
        FROM pnq_legacy_job_map m
-       WHERE m.legacy_job_id = $2`,
+       WHERE m.legacy_job_id = $2
+         AND NOT EXISTS (SELECT 1 FROM mapping)`,
       [
         args.nodeId,
         args.legacyJobId,
@@ -143,19 +148,53 @@ export class PnqV2RuntimeRepository {
     return toJob(result.rows[0]);
   }
 
-  async markActiveStuck(reason: string): Promise<number> {
-    const active = await db(this.pool).query<{ id: string }>(
-      "SELECT id FROM pnq_jobs WHERE status IN ('DISPATCHING', 'RUNNING')",
-    );
-    for (const row of active.rows) {
-      await db(this.pool).query("SELECT pnq_mark_stuck($1, $2, $3::jsonb, $4)", [
-        row.id,
-        reason,
-        JSON.stringify({ source: "pnq-v2-shadow-runtime" }),
-        "pnq-v2-shadow-runtime",
-      ]);
+  async markExpiredActiveStuck(reason: string, now = new Date()): Promise<number> {
+    const pool = db(this.pool);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const expired = await client.query<{
+        id: string;
+        status: string;
+        job_version: string;
+        dispatch_generation: string;
+        dispatch_deadline_at: Date;
+        result_deadline_at: Date;
+      }>(
+        `SELECT id, status, job_version, dispatch_generation, dispatch_deadline_at, result_deadline_at
+         FROM pnq_jobs
+         WHERE (status = 'DISPATCHING' AND dispatch_deadline_at <= $1)
+            OR (status = 'RUNNING' AND result_deadline_at <= $1)
+         ORDER BY node_id, node_seq
+         FOR UPDATE SKIP LOCKED`,
+        [now],
+      );
+      let marked = 0;
+      for (const row of expired.rows) {
+        const result = await client.query("SELECT status FROM pnq_mark_stuck($1, $2, $3::jsonb, $4)", [
+          row.id,
+          reason,
+          JSON.stringify({
+            source: "pnq-v2-shadow-runtime",
+            expiredAt: now.toISOString(),
+            observedStatus: row.status,
+            observedJobVersion: Number(row.job_version),
+            observedDispatchGeneration: Number(row.dispatch_generation),
+            observedDispatchDeadlineAt: row.dispatch_deadline_at,
+            observedResultDeadlineAt: row.result_deadline_at,
+          }),
+          "pnq-v2-shadow-runtime",
+        ]);
+        if (result.rows[0]?.status === "STUCK") marked += 1;
+      }
+      await client.query("COMMIT");
+      return marked;
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
     }
-    return active.rowCount ?? 0;
   }
 
   private async mappingForLegacyJob(legacyJobId: string): Promise<PnqV2LegacyMapping | null> {

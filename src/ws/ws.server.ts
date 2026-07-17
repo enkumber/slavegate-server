@@ -63,6 +63,7 @@ interface DeviceConnection {
   windowStart: number;
   supersededAt?: number;  // Timestamp when this connection was replaced by a newer one
   pnqV2ConnectionEpoch?: number | null;
+  pnqV2ConnectionEpochPromise?: Promise<number | null>;
 }
 
 interface HelloPayload {
@@ -497,7 +498,17 @@ export class WsServer {
 
     // Send HELLO_ACK
     this.send(ws, "HELLO_ACK", { deviceId });
-    conn.pnqV2ConnectionEpoch = await pnqV2RuntimeService.onConnectionAuthenticated(deviceId);
+    const epochObservation = pnqV2RuntimeService.onConnectionAuthenticated(deviceId);
+    conn.pnqV2ConnectionEpochPromise = epochObservation;
+    epochObservation
+      .then((epoch) => {
+        if (this.connections.get(deviceId) === conn) {
+          conn.pnqV2ConnectionEpoch = epoch;
+        }
+      })
+      .catch((err) =>
+        console.error("[pnq-v2-shadow] ws auth side effect rejected:", (err as Error).message),
+      );
     
     // Verify connection was added
     const verifyInMap = this.connections.has(deviceId);
@@ -523,7 +534,7 @@ export class WsServer {
     conn: DeviceConnection
   ): Promise<void> {
     const deviceId = conn.deviceId;
-    await pnqV2RuntimeService.recordShadowResult({
+    void pnqV2RuntimeService.recordShadowResult({
       legacyJobId: payload.jobId,
       socketEpoch: conn.pnqV2ConnectionEpoch,
       success: payload.status === "completed",
@@ -533,7 +544,9 @@ export class WsServer {
         error: payload.error,
         durationMs: payload.durationMs,
       },
-    });
+    }).catch((err) =>
+      console.error("[pnq-v2-shadow] ws result side effect rejected:", (err as Error).message),
+    );
     const wireHandle = (payload as JobResultPayload & { pnqHandle?: unknown }).pnqHandle;
     const handle = decodeDeviceExecutionHandle(wireHandle);
     const accepted = await deviceExecutionArbiter.acceptJobResult({

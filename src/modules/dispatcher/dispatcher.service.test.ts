@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { shouldBlockRootForTimedOutJob, workflowChildTimeoutDisposition } from "./dispatcher.service";
 
 describe("server-workflow child timeout clock", () => {
@@ -31,5 +33,14 @@ describe("server-workflow child timeout clock", () => {
   it("leaves a timed-out child under workflow ownership instead of blocking the canonical root", () => {
     expect(shouldBlockRootForTimedOutJob("workflow-1")).toBe(false);
     expect(shouldBlockRootForTimedOutJob()).toBe(true);
+  });
+});
+
+describe("PNQ v2 shadow dispatch side effect", () => {
+  it("does not await shadow enqueue before returning the legacy dispatch response", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src/modules/dispatcher/dispatcher.service.ts"), "utf8");
+    expect(source).toContain("void pnqV2RuntimeService.enqueueShadowJob");
+    expect(source).toContain("enqueue side effect rejected");
+    expect(source).not.toContain("await pnqV2RuntimeService.enqueueShadowJob");
   });
 });

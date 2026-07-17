@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
-import { isPnqV2ShadowRuntimeEnabled } from "./pnq-v2-runtime-config";
+import { getPnqV2RuntimeConfig, isPnqV2ShadowRuntimeEnabled } from "./pnq-v2-runtime-config";
 import { PnqV2RuntimeRepository } from "./pnq-v2-runtime.repository";
 
 export interface ShadowObservation {
@@ -66,21 +66,26 @@ export class PnqV2RuntimeService {
 
   async reconcileStartup(): Promise<ShadowObservation> {
     if (!isPnqV2ShadowRuntimeEnabled()) return { ok: true, metadata: { mode: "disabled" } };
-    return this.observe("reconcile_startup", async () => ({ stuck: await this.repo.markActiveStuck("startup_recovery_required") }));
+    return this.observe("reconcile_startup", async () => ({
+      stuck: await this.repo.markExpiredActiveStuck("startup_recovery_required"),
+    }));
   }
 
   async sweepDeadlines(): Promise<ShadowObservation> {
     if (!isPnqV2ShadowRuntimeEnabled()) return { ok: true, metadata: { mode: "disabled" } };
-    return this.observe("sweep_deadlines", async () => ({ stuck: await this.repo.markActiveStuck("deadline_or_crash_window_recovery_required") }));
+    return this.observe("sweep_deadlines", async () => ({
+      stuck: await this.repo.markExpiredActiveStuck("deadline_or_crash_window_recovery_required"),
+    }));
   }
 
   startPeriodicSweep(): void {
     if (!isPnqV2ShadowRuntimeEnabled() || this.sweepTimer) return;
+    const { sweepIntervalMs } = getPnqV2RuntimeConfig();
     this.sweepTimer = setInterval(() => {
       this.sweepDeadlines().catch((err) =>
         console.error("[pnq-v2-shadow] periodic sweep failed:", (err as Error).message),
       );
-    }, 30_000);
+    }, sweepIntervalMs);
     this.sweepTimer.unref?.();
   }
 

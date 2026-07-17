@@ -188,12 +188,14 @@ export class DispatcherService {
       { jobId }
     );
 
-    await pnqV2RuntimeService.enqueueShadowJob({
+    void pnqV2RuntimeService.enqueueShadowJob({
       deviceId: req.deviceId,
       legacyJobId: jobId,
       payload: { type: req.type, params: req.params, workflowId: req.workflowId ?? null },
       timeoutMs,
-    });
+    }).catch((err) =>
+      console.error("[pnq-v2-shadow] enqueue side effect rejected:", (err as Error).message),
+    );
 
     // Server-side timeout enforcement:
     // If device executes job but never sends JOB_RESULT (crash, connection loss),

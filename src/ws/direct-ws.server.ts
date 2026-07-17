@@ -215,6 +215,7 @@ interface ConnectedDevice {
   windowStart:  number;
   agentVersion: string;  // For backward compat routing (ADR-001)
   pnqV2ConnectionEpoch?: number | null;
+  pnqV2ConnectionEpochPromise?: Promise<number | null>;
 }
 
 interface PendingJob {
@@ -1306,7 +1307,17 @@ export class DirectWsServer {
       });
       console.log(`[direct-ws] Device ${finalDeviceId.slice(0,8)} authenticated (status=${finalStatus}) from ${remoteIp}`);
       onAuth(conn);
-      conn.pnqV2ConnectionEpoch = await pnqV2RuntimeService.onConnectionAuthenticated(finalDeviceId);
+      const epochObservation = pnqV2RuntimeService.onConnectionAuthenticated(finalDeviceId);
+      conn.pnqV2ConnectionEpochPromise = epochObservation;
+      epochObservation
+        .then((epoch) => {
+          if (this.connections.get(finalDeviceId) === conn) {
+            conn.pnqV2ConnectionEpoch = epoch;
+          }
+        })
+        .catch((err) =>
+          console.error("[pnq-v2-shadow] direct-ws auth side effect rejected:", (err as Error).message),
+        );
       void import("../transport/transport")
         .then(({ dispatchQueuedJobsForDevice }) => dispatchQueuedJobsForDevice(finalDeviceId, "direct_ws.reconnect_queue_pump"))
         .catch(err => console.error("[device-execution] reconnect queue pump error:", (err as Error).message));
@@ -1324,7 +1335,7 @@ export class DirectWsServer {
     const jobId = msg.jobId as string;
     if (!jobId) return;
     console.log(`[direct-ws] JOB_RESULT received: jobId=${jobId.slice(0,8)} success=${msg.success} error=${msg.error || 'none'} device=${conn.deviceId.slice(0,8)}`);
-    await pnqV2RuntimeService.recordShadowResult({
+    void pnqV2RuntimeService.recordShadowResult({
       legacyJobId: jobId,
       socketEpoch: conn.pnqV2ConnectionEpoch,
       success: Boolean(msg.success),
@@ -1334,7 +1345,9 @@ export class DirectWsServer {
         error: msg.error as string | undefined,
         durationMs: (msg.durationMs as number | undefined) ?? 0,
       },
-    });
+    }).catch((err) =>
+      console.error("[pnq-v2-shadow] direct-ws result side effect rejected:", (err as Error).message),
+    );
 
     const pending = this.pendingJobs.get(jobId);
     const status = Boolean(msg.success) ? "completed" : "failed";
