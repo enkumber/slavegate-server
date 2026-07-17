@@ -1,12 +1,12 @@
 # PNQ-002: Clear stale blocked root workflow gates after terminal workflows
 
-**Priority:** P0 incident  
-**Owner:** FORGE  
-**Requester:** ATLAS  
-**Created:** 2026-07-17  
-**Base:** `slavegate-server` `master` commit `1b7e583789eb52fba2cbfbcf2d0e5509c845985c` (`fix(workflows): register result waiter before dispatch`)  
-**Branch:** `fix/pnq-stale-blocked-root-cleanup`  
-**Status:** Ready for implementation  
+**Priority:** P0 incident
+**Owner:** FORGE
+**Requester:** ATLAS
+**Created:** 2026-07-17
+**Base:** `slavegate-server` `master` commit `1b7e583789eb52fba2cbfbcf2d0e5509c845985c` (`fix(workflows): register result waiter before dispatch`)
+**Branch:** `fix/pnq-stale-blocked-root-cleanup`
+**Status:** Ready for implementation
 
 ## Incident
 
