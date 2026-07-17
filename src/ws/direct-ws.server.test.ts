@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { DirectWsServer, mergeWorkflowStatusVariables, resolveDirectWsResultHandle } from "./direct-ws.server";
-import { deviceExecutionArbiter, type DeviceExecutionHandle } from "../modules/device-execution";
+import { deviceExecutionArbiter, setDeviceExecutionAuthorityForTest, type DeviceExecutionHandle } from "../modules/device-execution";
 
 const expectedHandle: DeviceExecutionHandle = {
   rootId: "00000000-0000-4000-8000-000000000001",
@@ -23,6 +23,7 @@ const wireHandle = {
 };
 
 afterEach(() => {
+  setDeviceExecutionAuthorityForTest(null);
   vi.restoreAllMocks();
 });
 
@@ -128,6 +129,156 @@ describe("DirectWS typed BATCH serializer identity", () => {
     const server = new DirectWsServer();
     expect(() => server.sendBatchWithHandle(handle, { type: "BATCH_START", batchId: "batch-child" }))
       .toThrow("DirectWS BATCH handle does not match payload identity");
+  });
+});
+
+describe("PNQ-003 observe-only DirectWS ingress compatibility", () => {
+  function connection(send = vi.fn()) {
+    return {
+      ws: { readyState: 1, send },
+      deviceId: expectedHandle.deviceId,
+      connectedAt: Date.now(),
+      lastSeenAt: Date.now(),
+      lastPongAt: Date.now(),
+      msgCount: 0,
+      windowStart: Date.now(),
+      agentVersion: "4.0.0",
+    };
+  }
+
+  it("resolves observe-only BATCH_RESULT without a typed PNQ waiter handle", async () => {
+    setDeviceExecutionAuthorityForTest("observe_only");
+    const server = new DirectWsServer();
+    const internals = server as unknown as {
+      waitForBatchResult: (batchId: string, timeoutMs: number) => Promise<unknown>;
+      _handleBatchResult: (conn: ReturnType<typeof connection>, msg: Record<string, unknown>) => Promise<void>;
+    };
+    const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal").mockResolvedValue({
+      decision: "terminal",
+      root: null,
+    });
+    const pending = internals.waitForBatchResult("observe-batch", 60_000);
+
+    await internals._handleBatchResult(connection(), {
+      type: "BATCH_RESULT",
+      batchId: "observe-batch",
+      workflowId: "observe-workflow",
+      status: "completed",
+      results: [{ id: 1, status: "completed" }],
+      totalDurationMs: 42,
+    });
+
+    await expect(pending).resolves.toMatchObject({
+      batchId: "observe-batch",
+      workflowId: "observe-workflow",
+      status: "completed",
+      totalDurationMs: 42,
+    });
+    expect(observeTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      rootKind: "batch",
+      externalId: "observe-batch",
+      status: "completed",
+      actor: "direct_ws.observe_only",
+    }));
+  });
+
+  it("keeps enforced BATCH_RESULT fail-closed without a typed PNQ waiter", async () => {
+    setDeviceExecutionAuthorityForTest("enforced");
+    const server = new DirectWsServer();
+    const internals = server as unknown as {
+      _handleBatchResult: (conn: ReturnType<typeof connection>, msg: Record<string, unknown>) => Promise<void>;
+    };
+    const rejected = vi.spyOn(deviceExecutionArbiter, "recordRejectedEgress").mockResolvedValue(undefined as never);
+    const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal");
+
+    await internals._handleBatchResult(connection(), {
+      type: "BATCH_RESULT",
+      batchId: "untyped-batch",
+      status: "completed",
+      results: [],
+    });
+
+    expect(rejected).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: "untyped-batch",
+      wireType: "BATCH_RESULT",
+      reason: "batch_result_without_waiter",
+    }));
+    expect(observeTerminal).not.toHaveBeenCalled();
+  });
+
+  it("persists and publishes observe-only terminal WORKFLOW_STATUS without a pending PNQ handle", async () => {
+    setDeviceExecutionAuthorityForTest("observe_only");
+    const server = new DirectWsServer();
+    const internals = server as unknown as {
+      _handleWorkflowStatus: (conn: ReturnType<typeof connection>, msg: Record<string, unknown>) => Promise<void>;
+      _persistWorkflowStatus: (...args: unknown[]) => Promise<void>;
+    };
+    const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal").mockResolvedValue({
+      decision: "terminal",
+      root: null,
+    });
+    const rejected = vi.spyOn(deviceExecutionArbiter, "recordRejectedEgress");
+    const persist = vi.spyOn(internals, "_persistWorkflowStatus").mockResolvedValue(undefined);
+    const { workflowEvents } = await import("../modules/workflow-events");
+    const publish = vi.spyOn(workflowEvents, "publish");
+
+    await internals._handleWorkflowStatus(connection(), {
+      type: "WORKFLOW_STATUS",
+      workflowId: "observe-workflow",
+      status: "completed",
+      currentStep: 2,
+      totalSteps: 2,
+      variables: { controlPlaneContext: { taskId: "task-1" }, value: true },
+    });
+
+    expect(rejected).not.toHaveBeenCalled();
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({
+      workflowId: "observe-workflow",
+      event: "completed",
+      status: "completed",
+      taskId: "task-1",
+    }));
+    expect(observeTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      rootKind: "edge_workflow",
+      externalId: "observe-workflow",
+      status: "completed",
+      actor: "direct_ws.observe_only",
+    }));
+    expect(persist).toHaveBeenCalledWith(
+      expectedHandle.deviceId,
+      "observe-workflow",
+      "completed",
+      2,
+      2,
+      undefined,
+      expect.objectContaining({ value: true }),
+    );
+  });
+
+  it("keeps enforced WORKFLOW_STATUS fail-closed without a pending PNQ handle", async () => {
+    setDeviceExecutionAuthorityForTest("enforced");
+    const server = new DirectWsServer();
+    const internals = server as unknown as {
+      _handleWorkflowStatus: (conn: ReturnType<typeof connection>, msg: Record<string, unknown>) => Promise<void>;
+      _persistWorkflowStatus: (...args: unknown[]) => Promise<void>;
+    };
+    const rejected = vi.spyOn(deviceExecutionArbiter, "recordRejectedEgress").mockResolvedValue(undefined as never);
+    const persist = vi.spyOn(internals, "_persistWorkflowStatus").mockResolvedValue(undefined);
+
+    await internals._handleWorkflowStatus(connection(), {
+      type: "WORKFLOW_STATUS",
+      workflowId: "untyped-workflow",
+      status: "completed",
+      currentStep: 1,
+      totalSteps: 1,
+    });
+
+    expect(rejected).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: "untyped-workflow",
+      wireType: "WORKFLOW_STATUS",
+      reason: "workflow_status_without_pending_handle",
+    }));
+    expect(persist).not.toHaveBeenCalled();
   });
 });
 

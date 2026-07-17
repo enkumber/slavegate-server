@@ -9,6 +9,7 @@ import {
   sendEdgeWorkflowToDeviceEnforced,
   sendServerWorkflowBatchChildToDevice,
   sendDeviceExecutionJobToDevice,
+  sweepQueuedJobsForOnlineDevices,
   type DeviceExecutionEdgeWorkflowReplayEnvelopeV1,
   type DeviceExecutionJobReplayEnvelopeV1,
 } from "./transport";
@@ -132,12 +133,50 @@ describe("PNQ job replay envelope", () => {
   it("tracks and clears the queue sweep and awaits fail-closed shutdown ambiguity handling", () => {
     const indexSource = fs.readFileSync(path.join(process.cwd(), "src/index.ts"), "utf8");
     const directWsSource = fs.readFileSync(path.join(process.cwd(), "src/ws/direct-ws.server.ts"), "utf8");
-    expect(indexSource).toContain("const queueSweepTimer = setInterval");
+    expect(indexSource).toContain("const queueSweepTimer = isDeviceExecutionEnforced()");
+    expect(indexSource).toContain("if (isDeviceExecutionEnforced())");
     expect(indexSource).toContain("queueSweepTimer.unref()");
-    expect(indexSource).toContain("clearInterval(queueSweepTimer)");
+    expect(indexSource).toContain("if (queueSweepTimer) clearInterval(queueSweepTimer)");
     expect(directWsSource).toContain("await Promise.all(confirmations)");
     expect(directWsSource).toContain("pending work retained");
     expect(directWsSource).toContain("this.confirmAmbiguityBeforeCleanup");
+  });
+
+  it("disables observe-only queue replay before reading stale queued envelopes or sending wire frames", async () => {
+    setDeviceExecutionAuthorityForTest("observe_only");
+    const staleEnvelope = edgeWorkflowEnvelope();
+    const staleSnapshot = structuredClone(staleEnvelope);
+    const send = vi.fn();
+    const internals = directWsServer as unknown as {
+      connections: Map<string, { ws: { readyState: number; send: typeof send }; lastSeenAt: number }>;
+    };
+    internals.connections.set(DEVICE_ID, { ws: { readyState: 1, send }, lastSeenAt: Date.now() });
+    const query = vi.fn().mockResolvedValue({
+      rows: [{
+        root_id: "stale-root",
+        root_kind: "edge_workflow",
+        root_external_id: staleEnvelope.rootExternalId,
+        owner_generation: "1",
+        operation_id: staleEnvelope.operationId,
+        metadata: { dispatchEnvelope: staleEnvelope },
+      }],
+    });
+    vi.spyOn(dbClient, "getDb").mockReturnValue({ query } as never);
+
+    await expect(dispatchQueuedJobsForDevice(DEVICE_ID, "test.observe_only_queue_pump")).resolves.toEqual({
+      attempted: 0,
+      sent: 0,
+    });
+    await expect(sweepQueuedJobsForOnlineDevices("test.observe_only_queue_sweep")).resolves.toEqual({
+      devices: 0,
+      attempted: 0,
+      sent: 0,
+    });
+
+    expect(query).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(staleEnvelope).toEqual(staleSnapshot);
+    internals.connections.delete(DEVICE_ID);
   });
 });
 

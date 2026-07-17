@@ -232,6 +232,14 @@ interface PendingBatch {
   handle: DeviceExecutionHandle;
 }
 
+interface ObserveOnlyPendingBatch {
+  promise: Promise<BatchResult>;
+  resolve: (result: BatchResult) => void;
+  reject:  (err: Error) => void;
+  timer:   ReturnType<typeof setTimeout>;
+  deviceId?: string;
+}
+
 interface PendingWorkflow {
   handle: DeviceExecutionHandle;
   timer: ReturnType<typeof setTimeout>;
@@ -287,6 +295,7 @@ export class DirectWsServer {
   private connections = new Map<string, ConnectedDevice>();   // deviceId → conn
   private pendingJobs = new Map<string, PendingJob>();        // jobId → awaiter
   private pendingBatches = new Map<string, PendingBatch>();   // batchId → awaiter
+  private observeOnlyPendingBatches = new Map<string, ObserveOnlyPendingBatch>();
   private pendingWorkflows = new Map<string, PendingWorkflow>();
   // LLM_REQUEST is single-flight per device: concurrent requests are rejected
   // with a stable retryable LLM_RESULT so requestId ownership stays unambiguous.
@@ -791,7 +800,26 @@ export class DirectWsServer {
   waitForBatchResult(batchId: string, timeoutMs = 600_000): Promise<BatchResult> {
     const existing = this.pendingBatches.get(batchId);
     if (existing) return existing.promise;
-    throw new Error(`Batch ${batchId} has no typed PNQ waiter`);
+    const observeOnlyExisting = this.observeOnlyPendingBatches.get(batchId);
+    if (observeOnlyExisting) return observeOnlyExisting.promise;
+    if (isDeviceExecutionEnforced()) throw new Error(`Batch ${batchId} has no typed PNQ waiter`);
+
+    let resolve!: (result: BatchResult) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<BatchResult>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    promise.catch(() => {});
+    const timer = setTimeout(() => {
+      const pending = this.observeOnlyPendingBatches.get(batchId);
+      if (!pending) return;
+      this.observeOnlyPendingBatches.delete(batchId);
+      pending.reject(new Error(`Batch ${batchId} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref();
+    this.observeOnlyPendingBatches.set(batchId, { promise, resolve, reject, timer });
+    return promise;
   }
 
   registerBatchWaiterWithHandle(handle: DeviceExecutionHandle, timeoutMs = 600_000): Promise<BatchResult> {
@@ -1374,6 +1402,33 @@ export class DirectWsServer {
     const pending = this.pendingBatches.get(batchId);
     const handleResolution = pending ? resolveDirectWsResultHandle(pending.handle, msg) : null;
     const reportedHandle = handleResolution?.reportedHandle ?? pending?.handle ?? null;
+    if (!isDeviceExecutionEnforced()) {
+      const observeOnlyPending = this.observeOnlyPendingBatches.get(batchId);
+      await deviceExecutionArbiter.observeTerminal({
+        deviceId: conn.deviceId,
+        rootKind: "batch",
+        externalId: batchId,
+        status,
+        actor: "direct_ws.observe_only",
+        reason: msg.error as string | undefined,
+        metadata: { authorityMode: "observe_only", totalDurationMs, resultCount: results.length },
+      });
+      if (observeOnlyPending) {
+        clearTimeout(observeOnlyPending.timer);
+        this.observeOnlyPendingBatches.delete(batchId);
+        observeOnlyPending.resolve({
+          batchId,
+          workflowId: msg.workflowId as string ?? "",
+          status,
+          results,
+          executedAt: msg.executedAt as string ?? new Date().toISOString(),
+          totalDurationMs,
+          error: msg.error as string | undefined,
+        });
+      }
+      this._send(conn.ws, { type: "ACK", ref: batchId });
+      return;
+    }
     if (!pending || !handleResolution?.accepted || !reportedHandle || reportedHandle.deviceId !== conn.deviceId) {
       await deviceExecutionArbiter.recordRejectedEgress({
         deviceId: conn.deviceId,
@@ -1480,7 +1535,7 @@ export class DirectWsServer {
     const expectedHandle = pendingWorkflow?.handle;
     const handleResolution = expectedHandle ? resolveDirectWsResultHandle(expectedHandle, msg) : null;
     const reportedHandle = handleResolution?.reportedHandle ?? expectedHandle ?? null;
-    if (!expectedHandle || !handleResolution?.accepted || !reportedHandle || reportedHandle.deviceId !== conn.deviceId) {
+    if (isDeviceExecutionEnforced() && (!expectedHandle || !handleResolution?.accepted || !reportedHandle || reportedHandle.deviceId !== conn.deviceId)) {
       await deviceExecutionArbiter.recordRejectedEgress({
         deviceId: conn.deviceId,
         operationId: workflowId || "missing",
@@ -1530,18 +1585,32 @@ export class DirectWsServer {
       });
 
       if (status === "completed" || status === "failed" || status === "cancelled") {
-        const terminal = await deviceExecutionArbiter.observeTerminal({
-          deviceId: conn.deviceId,
-          handle: reportedHandle,
-          status,
-          actor: "direct_ws",
-          reason: error,
-          metadata: {
-            step: typeof step === "number" ? step : null,
-            total: typeof total === "number" ? total : null,
-            handleCompatibility: handleResolution.compatibility,
-          },
-        });
+        const terminal = isDeviceExecutionEnforced()
+          ? await deviceExecutionArbiter.observeTerminal({
+              deviceId: conn.deviceId,
+              handle: reportedHandle!,
+              status,
+              actor: "direct_ws",
+              reason: error,
+              metadata: {
+                step: typeof step === "number" ? step : null,
+                total: typeof total === "number" ? total : null,
+                handleCompatibility: handleResolution!.compatibility,
+              },
+            })
+          : await deviceExecutionArbiter.observeTerminal({
+              deviceId: conn.deviceId,
+              rootKind: "edge_workflow",
+              externalId: workflowId,
+              status,
+              actor: "direct_ws.observe_only",
+              reason: error,
+              metadata: {
+                authorityMode: "observe_only",
+                step: typeof step === "number" ? step : null,
+                total: typeof total === "number" ? total : null,
+              },
+            });
         if (terminal.decision !== "terminal") return;
         if (pendingWorkflow) clearTimeout(pendingWorkflow.timer);
         this.pendingWorkflows.delete(workflowId);

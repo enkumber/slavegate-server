@@ -200,6 +200,7 @@ export async function dispatchQueuedJobsForDevice(
   deviceId: string,
   actor = "transport.queue_pump",
 ): Promise<{ attempted: number; sent: number }> {
+  if (!isDeviceExecutionEnforced()) return { attempted: 0, sent: 0 };
   if (!directWsServer.isDeviceOnline(deviceId)) return { attempted: 0, sent: 0 };
 
   let attempted = 0;
@@ -242,6 +243,7 @@ export async function dispatchQueuedJobsForDevice(
 export async function sweepQueuedJobsForOnlineDevices(
   actor = "transport.queue_sweep",
 ): Promise<{ devices: number; attempted: number; sent: number }> {
+  if (!isDeviceExecutionEnforced()) return { devices: 0, attempted: 0, sent: 0 };
   const deviceIds = directWsServer.getConnectedDeviceIds();
   let attempted = 0;
   let sent = 0;
