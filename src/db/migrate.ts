@@ -5,8 +5,8 @@
  *
  * Each migration is wrapped in its own transaction with ROLLBACK on failure.
  * Most historical migration failures are LOGGED but DO NOT block server startup.
- * PNQ-001 device execution queue migrations fail closed because the arbiter must
- * never start with partial or missing queue authority.
+ * PNQ queue authority migrations fail closed because the arbiter must never
+ * start with partial or missing queue authority.
  */
 
 import fs from "fs";
@@ -36,7 +36,7 @@ async function applyFile(client: any, filePath: string): Promise<{ ok: boolean; 
 }
 
 function isFailClosedMigration(fileName: string): boolean {
-  return fileName.includes("device_execution_queue");
+  return fileName.includes("device_execution_queue") || fileName.includes("queue_v2_contract");
 }
 
 /**
