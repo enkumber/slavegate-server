@@ -13,6 +13,7 @@ import { isKillSwitchActive } from "../../api/routes";
 import { deviceExecutionArbiter } from "../device-execution";
 import { isDeviceExecutionEnforced } from "../device-execution/device-execution-authority";
 import { pnqV2RuntimeService, runPnqV2ShadowSideEffect } from "../device-execution/pnq-v2-runtime.service";
+import { isPnqV2ShadowRuntimeEnabled } from "../device-execution/pnq-v2-runtime-config";
 // NOTE: wsServer is intentionally NOT imported here — would create circular dependency.
 // Job dispatch to device WebSocket is handled by routes.ts (after calling dispatcher.dispatch()).
 // dispatcher only manages the DB + queue layer.
@@ -189,16 +190,17 @@ export class DispatcherService {
       { jobId }
     );
 
-    // Create the observation promise synchronously so prepareShadowDispatch()
-    // can always see and await this job's mapping, even though neither shadow
-    // operation is allowed to delay the legacy route.
-    const shadowEnqueueObservation = pnqV2RuntimeService.enqueueShadowJob({
-      deviceId: req.deviceId,
-      legacyJobId: jobId,
-      payload: { type: req.type, params: req.params, workflowId: req.workflowId ?? null },
-      timeoutMs,
-    });
-    runPnqV2ShadowSideEffect("enqueue", () => shadowEnqueueObservation);
+    if (isPnqV2ShadowRuntimeEnabled()) {
+      // Create the observation promise synchronously so prepareShadowDispatch()
+      // can always see and await this job's mapping in shadow mode.
+      const shadowEnqueueObservation = pnqV2RuntimeService.enqueueShadowJob({
+        deviceId: req.deviceId,
+        legacyJobId: jobId,
+        payload: { type: req.type, params: req.params, workflowId: req.workflowId ?? null },
+        timeoutMs,
+      });
+      runPnqV2ShadowSideEffect("enqueue", () => shadowEnqueueObservation);
+    }
 
     // Server-side timeout enforcement:
     // If device executes job but never sends JOB_RESULT (crash, connection loss),
@@ -340,10 +342,7 @@ export class DispatcherService {
     if (isDeviceExecutionEnforced()) {
       await deviceExecutionArbiter.observeTerminal(terminalObservation);
     } else {
-      runPnqV2ShadowSideEffect(
-        "dispatcher observe-only result",
-        () => deviceExecutionArbiter.observeTerminal(terminalObservation),
-      );
+      void deviceExecutionArbiter.observeTerminal(terminalObservation);
     }
   }
 

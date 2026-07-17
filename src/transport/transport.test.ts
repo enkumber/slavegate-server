@@ -16,6 +16,8 @@ import {
 import { deviceExecutionArbiter, setDeviceExecutionAuthorityForTest, type DeviceExecutionHandle } from "../modules/device-execution";
 import { directWsServer } from "../ws/direct-ws.server";
 import * as dbClient from "../db/client";
+import { pnqV2RuntimeService } from "../modules/device-execution/pnq-v2-runtime.service";
+import { setPnqV2RuntimeConfigForTest } from "../modules/device-execution/pnq-v2-runtime-config";
 
 const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
 const lifecycleMocks = vi.hoisted(() => ({
@@ -26,6 +28,7 @@ vi.mock("../modules/workflows/edge-workflow-lifecycle.service", () => lifecycleM
 
 afterEach(() => {
   setDeviceExecutionAuthorityForTest(null);
+  setPnqV2RuntimeConfigForTest(null);
   vi.restoreAllMocks();
   lifecycleMocks.promoteReplayedEdgeWorkflowToRunning.mockReset();
 });
@@ -40,6 +43,7 @@ describe("PNQ-003 observe-only production transport", () => {
     internals.connections.set(DEVICE_ID, { ws: { readyState: 1, send }, lastSeenAt: Date.now() });
     const observe = vi.spyOn(deviceExecutionArbiter, "observeDispatch").mockResolvedValue({ decision: "dispatched", root: null });
     const enforce = vi.spyOn(deviceExecutionArbiter, "runStandaloneJobEgress");
+    const prepareShadowDispatch = vi.spyOn(pnqV2RuntimeService, "prepareShadowDispatch");
 
     const result = await sendDeviceExecutionJobToDevice(DEVICE_ID, envelope().payload, {
       boundary: "generated_child",
@@ -52,6 +56,7 @@ describe("PNQ-003 observe-only production transport", () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(send.mock.calls[0]![0]))).toMatchObject({ type: "JOB", jobId: "job-1" });
     expect(enforce).not.toHaveBeenCalled();
+    expect(prepareShadowDispatch).not.toHaveBeenCalled();
     expect(observe).toHaveBeenCalledTimes(1);
     internals.connections.delete(DEVICE_ID);
   });

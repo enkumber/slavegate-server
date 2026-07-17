@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { DirectWsServer, mergeWorkflowStatusVariables, resolveDirectWsResultHandle } from "./direct-ws.server";
+import { DirectWsServer, mergeWorkflowStatusVariables, resolveDirectWsResultHandle, setWorkflowJobResultResolverForTest } from "./direct-ws.server";
 import { deviceExecutionArbiter, setDeviceExecutionAuthorityForTest, type DeviceExecutionHandle } from "../modules/device-execution";
 import { pnqV2RuntimeService } from "../modules/device-execution/pnq-v2-runtime.service";
+import { setPnqV2RuntimeConfigForTest } from "../modules/device-execution/pnq-v2-runtime-config";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 
 const expectedHandle: DeviceExecutionHandle = {
@@ -26,6 +27,8 @@ const wireHandle = {
 
 afterEach(() => {
   setDeviceExecutionAuthorityForTest(null);
+  setPnqV2RuntimeConfigForTest(null);
+  setWorkflowJobResultResolverForTest(null);
   vi.restoreAllMocks();
 });
 
@@ -117,6 +120,7 @@ describe("DirectWS Android result handle compatibility", () => {
 
 describe("PNQ v2 shadow DirectWS side effects", () => {
   it("does not await shadow result bookkeeping before legacy result admission", async () => {
+    setPnqV2RuntimeConfigForTest({ mode: "shadow", sweepIntervalMs: 30_000 });
     setDeviceExecutionAuthorityForTest("enforced");
     const server = new DirectWsServer();
     const send = vi.fn();
@@ -157,8 +161,61 @@ describe("PNQ v2 shadow DirectWS side effects", () => {
     expect(send).toHaveBeenCalledWith(expect.stringContaining("\"ACK\""));
   });
 
-  it("keeps auth and result shadow hooks as handled side effects in source", () => {
+  it("bypasses Queue v2 result bookkeeping completely while runtime is disabled", async () => {
+    setPnqV2RuntimeConfigForTest({ mode: "disabled", sweepIntervalMs: 30_000 });
+    setDeviceExecutionAuthorityForTest("observe_only");
+    const server = new DirectWsServer();
+    const send = vi.fn();
+    const conn = {
+      ws: { readyState: 1, send },
+      deviceId: expectedHandle.deviceId,
+      connectedAt: Date.now(),
+      lastSeenAt: Date.now(),
+      lastPongAt: Date.now(),
+      msgCount: 0,
+      windowStart: Date.now(),
+      agentVersion: "3.9.165",
+    };
+    const recordShadowResult = vi.spyOn(pnqV2RuntimeService, "recordShadowResult");
+    const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal").mockResolvedValue({
+      decision: "terminal",
+      root: null,
+    } as never);
+    vi.spyOn(dispatcherService, "handleJobResult").mockResolvedValue(undefined as never);
+    const resolveWorkflowResult = vi.fn(() => true);
+    setWorkflowJobResultResolverForTest(resolveWorkflowResult);
+    const internals = server as unknown as {
+      waitForJobResult: (jobId: string, timeoutMs: number, deviceId?: string) => Promise<unknown>;
+      _handleJobResult: (connection: typeof conn, msg: Record<string, unknown>) => Promise<void>;
+    };
+    const pending = internals.waitForJobResult(expectedHandle.operationId, 60_000, expectedHandle.deviceId);
+
+    const handling = internals._handleJobResult(conn, {
+      type: "JOB_RESULT",
+      jobId: expectedHandle.operationId,
+      success: true,
+      output: { ok: true },
+      durationMs: 5,
+    });
+
+    await expect(pending).resolves.toMatchObject({
+      jobId: expectedHandle.operationId,
+      success: true,
+      status: "completed",
+      output: { ok: true },
+    });
+    await expect(handling).resolves.toBeUndefined();
+    expect(resolveWorkflowResult).toHaveBeenCalledWith(expectedHandle.operationId, expect.objectContaining({
+      status: "completed",
+      output: { ok: true },
+    }));
+    expect(recordShadowResult).not.toHaveBeenCalled();
+    expect(observeTerminal).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps auth and result shadow hooks behind the shadow runtime guard in source", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src/ws/direct-ws.server.ts"), "utf8");
+    expect(source).toContain("if (isPnqV2ShadowRuntimeEnabled())");
     expect(source).toContain("const epochObservation = Promise.resolve()");
     expect(source).toContain("pnqV2RuntimeService.onConnectionAuthenticated(finalDeviceId)");
     expect(source).toContain("conn.pnqV2ConnectionEpochPromise = epochObservation");
@@ -166,6 +223,7 @@ describe("PNQ v2 shadow DirectWS side effects", () => {
     expect(source).toContain('runPnqV2ShadowSideEffect("direct-ws result"');
     expect(source).not.toContain("conn.pnqV2ConnectionEpoch = await pnqV2RuntimeService.onConnectionAuthenticated");
     expect(source).not.toContain("await pnqV2RuntimeService.recordShadowResult");
+    expect(source).toContain('require("../modules/workflows/workflow.executor")');
   });
 });
 

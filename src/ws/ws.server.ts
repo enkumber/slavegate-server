@@ -25,6 +25,7 @@ import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { getDb } from "../db/client";
 import { decodeDeviceExecutionHandle } from "../modules/device-execution";
 import { pnqV2RuntimeService, runPnqV2ShadowSideEffect } from "../modules/device-execution/pnq-v2-runtime.service";
+import { isPnqV2ShadowRuntimeEnabled } from "../modules/device-execution/pnq-v2-runtime-config";
 import { evaluateWsJobResultAuthority } from "./ws-job-result-authority";
 import {
   devicesConnected, deviceOfflineEvents, recordDeviceHealth,
@@ -499,14 +500,16 @@ export class WsServer {
 
     // Send HELLO_ACK
     this.send(ws, "HELLO_ACK", { deviceId });
-    const epochObservation = Promise.resolve()
-      .then(() => pnqV2RuntimeService.onConnectionAuthenticated(deviceId));
-    conn.pnqV2ConnectionEpochPromise = epochObservation;
-    runPnqV2ShadowSideEffect("ws auth", () => epochObservation, (epoch) => {
+    if (isPnqV2ShadowRuntimeEnabled()) {
+      const epochObservation = Promise.resolve()
+        .then(() => pnqV2RuntimeService.onConnectionAuthenticated(deviceId));
+      conn.pnqV2ConnectionEpochPromise = epochObservation;
+      runPnqV2ShadowSideEffect("ws auth", () => epochObservation, (epoch) => {
         if (this.connections.get(deviceId) === conn) {
           conn.pnqV2ConnectionEpoch = epoch;
         }
-    });
+      });
+    }
     
     // Verify connection was added
     const verifyInMap = this.connections.has(deviceId);
@@ -532,17 +535,19 @@ export class WsServer {
     conn: DeviceConnection
   ): Promise<void> {
     const deviceId = conn.deviceId;
-    runPnqV2ShadowSideEffect("ws result", () => pnqV2RuntimeService.recordShadowResult({
-      legacyJobId: payload.jobId,
-      socketEpoch: conn.pnqV2ConnectionEpoch,
-      success: payload.status === "completed",
-      result: {
-        status: payload.status,
-        output: payload.output,
-        error: payload.error,
-        durationMs: payload.durationMs,
-      },
-    }));
+    if (isPnqV2ShadowRuntimeEnabled()) {
+      runPnqV2ShadowSideEffect("ws result", () => pnqV2RuntimeService.recordShadowResult({
+        legacyJobId: payload.jobId,
+        socketEpoch: conn.pnqV2ConnectionEpoch,
+        success: payload.status === "completed",
+        result: {
+          status: payload.status,
+          output: payload.output,
+          error: payload.error,
+          durationMs: payload.durationMs,
+        },
+      }));
+    }
     const wireHandle = (payload as JobResultPayload & { pnqHandle?: unknown }).pnqHandle;
     const handle = decodeDeviceExecutionHandle(wireHandle);
     const accepted = await evaluateWsJobResultAuthority({

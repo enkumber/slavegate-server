@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { deviceExecutionArbiter } from "../modules/device-execution";
 import { setDeviceExecutionAuthorityForTest } from "../modules/device-execution/device-execution-authority";
 import { evaluateWsJobResultAuthority, type WsJobResultAuthorityInput } from "./ws-job-result-authority";
+import { setPnqV2RuntimeConfigForTest } from "../modules/device-execution/pnq-v2-runtime-config";
 
 const authorityInput: WsJobResultAuthorityInput = {
   deviceId: "00000000-0000-4000-8000-000000000001",
@@ -17,13 +18,15 @@ const authorityInput: WsJobResultAuthorityInput = {
 
 afterEach(() => {
   setDeviceExecutionAuthorityForTest(null);
+  setPnqV2RuntimeConfigForTest(null);
   vi.restoreAllMocks();
 });
 
 describe("PNQ v2 shadow ECDSA WebSocket side effects", () => {
-  it("does not await shadow auth or result bookkeeping on the legacy ingress path", () => {
+  it("keeps shadow auth and result bookkeeping behind the shadow runtime guard", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src/ws/ws.server.ts"), "utf8");
 
+    expect(source).toContain("if (isPnqV2ShadowRuntimeEnabled())");
     expect(source).toContain("const epochObservation = Promise.resolve()");
     expect(source).toContain("pnqV2RuntimeService.onConnectionAuthenticated(deviceId)");
     expect(source).toContain("conn.pnqV2ConnectionEpochPromise = epochObservation");
@@ -33,6 +36,13 @@ describe("PNQ v2 shadow ECDSA WebSocket side effects", () => {
     expect(source).not.toContain("deviceExecutionArbiter.acceptJobResult({");
     expect(source).not.toContain("conn.pnqV2ConnectionEpoch = await pnqV2RuntimeService.onConnectionAuthenticated");
     expect(source).not.toContain("await pnqV2RuntimeService.recordShadowResult");
+  });
+
+  it("keeps auth and result Queue v2 hooks structurally behind the shadow guard", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src/ws/ws.server.ts"), "utf8");
+    expect(source).toContain("if (isPnqV2ShadowRuntimeEnabled())");
+    expect(source).toContain("pnqV2RuntimeService.onConnectionAuthenticated(deviceId)");
+    expect(source).toContain("pnqV2RuntimeService.recordShadowResult({");
   });
 });
 

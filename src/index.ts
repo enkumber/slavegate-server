@@ -260,7 +260,9 @@ async function bootstrap(): Promise<void> {
     );
   }
   if (queueSweepTimer) queueSweepTimer.unref();
-  pnqV2RuntimeService.startPeriodicSweep();
+  if (isPnqV2ShadowRuntimeEnabled()) {
+    pnqV2RuntimeService.startPeriodicSweep();
+  }
 
   // ─── Startup check: warn if no openclaw_agent API token ────────────────────
   {
@@ -295,7 +297,9 @@ async function bootstrap(): Promise<void> {
     console.log(`\n[server] ${signal} received — shutting down...`);
     httpServer.close();
     if (queueSweepTimer) clearInterval(queueSweepTimer);
-    await pnqV2RuntimeService.close();
+    if (isPnqV2ShadowRuntimeEnabled()) {
+      await pnqV2RuntimeService.close();
+    }
     await directWsServer.close();
     await dashboardWorkflowWsServer.close();
     await dispatcherService.close();

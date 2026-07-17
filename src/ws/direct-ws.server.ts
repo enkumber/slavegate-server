@@ -42,10 +42,33 @@ import { visionService } from "../modules/vision/vision.service";
 import { workflowEvents } from "../modules/workflow-events";
 import { llmComplete } from "../utils/llm";
 import { pnqV2RuntimeService, runPnqV2ShadowSideEffect } from "../modules/device-execution/pnq-v2-runtime.service";
+import { isPnqV2ShadowRuntimeEnabled } from "../modules/device-execution/pnq-v2-runtime-config";
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+type WorkflowJobResultResolver = (
+  jobId: string,
+  result: import("../modules/workflows/workflow.executor").JobStepResult,
+) => boolean;
+
+let workflowJobResultResolverForTest: WorkflowJobResultResolver | null = null;
+
+export function setWorkflowJobResultResolverForTest(resolver: WorkflowJobResultResolver | null): void {
+  workflowJobResultResolverForTest = resolver;
+}
+
+function resolveWorkflowExecutorJobResult(
+  jobId: string,
+  result: import("../modules/workflows/workflow.executor").JobStepResult,
+): boolean {
+  const resolver = workflowJobResultResolverForTest
+    ?? (require("../modules/workflows/workflow.executor") as {
+      resolveJobResult: WorkflowJobResultResolver;
+    }).resolveJobResult;
+  return resolver(jobId, result);
 }
 
 function classifyLlmError(err: unknown): string {
@@ -1307,14 +1330,16 @@ export class DirectWsServer {
       });
       console.log(`[direct-ws] Device ${finalDeviceId.slice(0,8)} authenticated (status=${finalStatus}) from ${remoteIp}`);
       onAuth(conn);
-      const epochObservation = Promise.resolve()
-        .then(() => pnqV2RuntimeService.onConnectionAuthenticated(finalDeviceId));
-      conn.pnqV2ConnectionEpochPromise = epochObservation;
-      runPnqV2ShadowSideEffect("direct-ws auth", () => epochObservation, (epoch) => {
+      if (isPnqV2ShadowRuntimeEnabled()) {
+        const epochObservation = Promise.resolve()
+          .then(() => pnqV2RuntimeService.onConnectionAuthenticated(finalDeviceId));
+        conn.pnqV2ConnectionEpochPromise = epochObservation;
+        runPnqV2ShadowSideEffect("direct-ws auth", () => epochObservation, (epoch) => {
           if (this.connections.get(finalDeviceId) === conn) {
             conn.pnqV2ConnectionEpoch = epoch;
           }
-      });
+        });
+      }
       void import("../transport/transport")
         .then(({ dispatchQueuedJobsForDevice }) => dispatchQueuedJobsForDevice(finalDeviceId, "direct_ws.reconnect_queue_pump"))
         .catch(err => console.error("[device-execution] reconnect queue pump error:", (err as Error).message));
@@ -1332,17 +1357,19 @@ export class DirectWsServer {
     const jobId = msg.jobId as string;
     if (!jobId) return;
     console.log(`[direct-ws] JOB_RESULT received: jobId=${jobId.slice(0,8)} success=${msg.success} error=${msg.error || 'none'} device=${conn.deviceId.slice(0,8)}`);
-    runPnqV2ShadowSideEffect("direct-ws result", () => pnqV2RuntimeService.recordShadowResult({
-      legacyJobId: jobId,
-      socketEpoch: conn.pnqV2ConnectionEpoch,
-      success: Boolean(msg.success),
-      result: {
-        status: Boolean(msg.success) ? "completed" : "failed",
-        output: msg.output,
-        error: msg.error as string | undefined,
-        durationMs: (msg.durationMs as number | undefined) ?? 0,
-      },
-    }));
+    if (isPnqV2ShadowRuntimeEnabled()) {
+      runPnqV2ShadowSideEffect("direct-ws result", () => pnqV2RuntimeService.recordShadowResult({
+        legacyJobId: jobId,
+        socketEpoch: conn.pnqV2ConnectionEpoch,
+        success: Boolean(msg.success),
+        result: {
+          status: Boolean(msg.success) ? "completed" : "failed",
+          output: msg.output,
+          error: msg.error as string | undefined,
+          durationMs: (msg.durationMs as number | undefined) ?? 0,
+        },
+      }));
+    }
 
     const pending = this.pendingJobs.get(jobId);
     const status = Boolean(msg.success) ? "completed" : "failed";
@@ -1355,9 +1382,7 @@ export class DirectWsServer {
 
     try {
       if (!isDeviceExecutionEnforced()) {
-        runPnqV2ShadowSideEffect("direct-ws observe-only result", () =>
-          deviceExecutionArbiter.observeTerminal({ deviceId: conn.deviceId, rootKind: "job", externalId: jobId, status, actor: "direct_ws.observe_only", reason: (msg.error as string | undefined) ?? status, metadata: { authorityMode: "observe_only" } }),
-        );
+        void deviceExecutionArbiter.observeTerminal({ deviceId: conn.deviceId, rootKind: "job", externalId: jobId, status, actor: "direct_ws.observe_only", reason: (msg.error as string | undefined) ?? status, metadata: { authorityMode: "observe_only" } });
       } else {
       const accepted = await deviceExecutionArbiter.acceptJobResult({
         deviceId: conn.deviceId,
@@ -1403,8 +1428,10 @@ export class DirectWsServer {
     }
 
     // ── Resolve workflow executor's pending promise (critical for blocking workflows) ──
-    const { resolveJobResult } = await import("../modules/workflows/workflow.executor");
-    const resolved = resolveJobResult(jobId, {
+    // Keep the legacy waiter resolution synchronous with JOB_RESULT handling.
+    // A dynamic import here defers the critical workflow wake-up and caused
+    // generated workflows to remain pending even after the device replied.
+    const resolved = resolveWorkflowExecutorJobResult(jobId, {
       status,
       output:     msg.output,
       error:      msg.error as string | undefined,

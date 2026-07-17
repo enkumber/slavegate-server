@@ -1,6 +1,5 @@
 import { deviceExecutionArbiter } from "../modules/device-execution";
 import { isDeviceExecutionEnforced } from "../modules/device-execution/device-execution-authority";
-import { runPnqV2ShadowSideEffect } from "../modules/device-execution/pnq-v2-runtime.service";
 
 export type WsJobResultAuthorityInput = Parameters<typeof deviceExecutionArbiter.acceptJobResult>[0];
 
@@ -14,18 +13,20 @@ export async function evaluateWsJobResultAuthority(
   input: WsJobResultAuthorityInput,
 ): Promise<WsJobResultAuthorityDecision> {
   if (!isDeviceExecutionEnforced()) {
-    runPnqV2ShadowSideEffect("ws observe-only result", () => deviceExecutionArbiter.observeTerminal({
-      deviceId: input.deviceId,
-      rootKind: "job",
-      externalId: input.jobId,
-      status: input.status,
-      actor: "ws.observe_only",
-      reason: input.reason ?? input.status,
-      metadata: {
-        ...(input.metadata ?? {}),
-        authorityMode: "observe_only",
-      },
-    }));
+    void Promise.resolve()
+      .then(() => deviceExecutionArbiter.observeTerminal({
+        deviceId: input.deviceId,
+        rootKind: "job",
+        externalId: input.jobId,
+        status: input.status,
+        actor: "ws.observe_only",
+        reason: input.reason ?? input.status,
+        metadata: {
+          ...(input.metadata ?? {}),
+          authorityMode: "observe_only",
+        },
+      }))
+      .catch((err) => console.error("[device-execution] observe-only WS JOB result telemetry failed:", (err as Error).message));
     return { accepted: true, decision: "observe_only" };
   }
 

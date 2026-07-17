@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { setDeviceExecutionAuthorityForTest } from "../../src/modules/device-execution";
 import { setPnqV2RuntimeConfigForTest } from "../../src/modules/device-execution/pnq-v2-runtime-config";
 import { pnqV2RuntimeService } from "../../src/modules/device-execution/pnq-v2-runtime.service";
+import { setWorkflowJobResultResolverForTest } from "../../src/ws/direct-ws.server";
 
 const repoRoot = path.resolve(__dirname, "../..");
 const postgresUrl = process.env.PNQ003_PG_URL
@@ -60,12 +61,18 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
 
   beforeEach(async () => {
     setPnqV2RuntimeConfigForTest({ mode: "shadow", sweepIntervalMs: 30_000 });
+    // This suite validates the Queue v2 shadow lifecycle, not the workflow
+    // executor's CommonJS cycle. Production keeps the original synchronous
+    // resolver; inject a no-op here so Vitest does not try to require a TS
+    // module through Node's CommonJS loader.
+    setWorkflowJobResultResolverForTest(() => false);
     await cleanupRows();
     await seedDevice(DEVICE_A);
     await seedDevice(DEVICE_B);
   });
 
   afterEach(async () => {
+    setWorkflowJobResultResolverForTest(null);
     setPnqV2RuntimeConfigForTest(null);
     vi.restoreAllMocks();
     // Observe-only terminal bookkeeping is intentionally detached from the

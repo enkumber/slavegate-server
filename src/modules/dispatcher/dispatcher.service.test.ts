@@ -37,8 +37,9 @@ describe("server-workflow child timeout clock", () => {
 });
 
 describe("PNQ v2 shadow dispatch side effect", () => {
-  it("does not await shadow enqueue before returning the legacy dispatch response", () => {
+  it("keeps Queue v2 enqueue behind the shadow runtime guard", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src/modules/dispatcher/dispatcher.service.ts"), "utf8");
+    expect(source).toContain("if (isPnqV2ShadowRuntimeEnabled())");
     expect(source).toContain('runPnqV2ShadowSideEffect("enqueue"');
     expect(source).toContain("pnqV2RuntimeService.enqueueShadowJob");
     expect(source).not.toContain("await pnqV2RuntimeService.enqueueShadowJob");
@@ -51,6 +52,6 @@ describe("PNQ v2 shadow dispatch side effect", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "src/modules/dispatcher/dispatcher.service.ts"), "utf8");
     expect(source).toContain("if (isDeviceExecutionEnforced()) {");
     expect(source).toContain("await deviceExecutionArbiter.observeTerminal(terminalObservation)");
-    expect(source).toContain('runPnqV2ShadowSideEffect(\n        "dispatcher observe-only result"');
+    expect(source).toContain("void deviceExecutionArbiter.observeTerminal(terminalObservation)");
   });
 });
