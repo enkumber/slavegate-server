@@ -38,7 +38,7 @@ Payload conflict behavior is fail-closed: if `pnq_enqueue_job` sees an existing 
 
 FIFO allocation is transactional. `pnq_enqueue_job` locks the node row `FOR UPDATE`, reads `next_node_seq`, increments it, and inserts the job with `UNIQUE(node_id, node_seq)` as the final database invariant.
 
-The contract permits parallelism across nodes because each enqueue locks only its node row. Claim/start and result paths lock only the target job row, with epoch checks against the node and CAS checks against `job_version` plus `dispatch_generation`.
+The contract permits parallelism across nodes because each enqueue locks only its node row. Claim, start, and result paths serialize through the target node row before locking or mutating the job, with epoch checks against the node and CAS checks against `job_version` plus `dispatch_generation`.
 
 ## Fencing And CAS
 
