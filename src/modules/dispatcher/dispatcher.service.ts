@@ -11,6 +11,7 @@ import { getRedisConnectionOptions } from "../../redis/client";
 import { getDb } from "../../db/client";
 import { isKillSwitchActive } from "../../api/routes";
 import { deviceExecutionArbiter } from "../device-execution";
+import { isDeviceExecutionEnforced } from "../device-execution/device-execution-authority";
 import { pnqV2RuntimeService, runPnqV2ShadowSideEffect } from "../device-execution/pnq-v2-runtime.service";
 // NOTE: wsServer is intentionally NOT imported here — would create circular dependency.
 // Job dispatch to device WebSocket is handled by routes.ts (after calling dispatcher.dispatch()).
@@ -320,9 +321,9 @@ export class DispatcherService {
       [payload.status, payload.jobId]
     );
 
-    await deviceExecutionArbiter.observeTerminal({
+    const terminalObservation = {
       deviceId: payload.deviceId,
-      rootKind: "job",
+      rootKind: "job" as const,
       externalId: payload.jobId,
       status: payload.status,
       actor: "dispatcher_result",
@@ -331,7 +332,15 @@ export class DispatcherService {
         outputPresent: payload.output !== undefined,
         durationMs: payload.durationMs,
       },
-    });
+    };
+    if (isDeviceExecutionEnforced()) {
+      await deviceExecutionArbiter.observeTerminal(terminalObservation);
+    } else {
+      runPnqV2ShadowSideEffect(
+        "dispatcher observe-only result",
+        () => deviceExecutionArbiter.observeTerminal(terminalObservation),
+      );
+    }
   }
 
   async getJob(jobId: string): Promise<Job | null> {

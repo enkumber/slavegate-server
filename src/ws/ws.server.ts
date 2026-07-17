@@ -23,8 +23,9 @@ import { authService } from "../modules/auth/auth.service";
 import { devicesService } from "../modules/devices/devices.service";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
 import { getDb } from "../db/client";
-import { decodeDeviceExecutionHandle, deviceExecutionArbiter } from "../modules/device-execution";
+import { decodeDeviceExecutionHandle } from "../modules/device-execution";
 import { pnqV2RuntimeService, runPnqV2ShadowSideEffect } from "../modules/device-execution/pnq-v2-runtime.service";
+import { evaluateWsJobResultAuthority } from "./ws-job-result-authority";
 import {
   devicesConnected, deviceOfflineEvents, recordDeviceHealth,
 } from "../modules/observability/metrics";
@@ -544,7 +545,7 @@ export class WsServer {
     }));
     const wireHandle = (payload as JobResultPayload & { pnqHandle?: unknown }).pnqHandle;
     const handle = decodeDeviceExecutionHandle(wireHandle);
-    const accepted = await deviceExecutionArbiter.acceptJobResult({
+    const accepted = await evaluateWsJobResultAuthority({
       deviceId,
       jobId: payload.jobId,
       handle,
