@@ -3041,6 +3041,119 @@ export class DeviceExecutionArbiter {
     });
   }
 
+  /**
+   * Terminalize blocked/reconciling server-workflow roots only when the
+   * persisted workflow is already terminal and every ownership/work item is
+   * unambiguous. This is deliberately separate from finishServerWorkflowRoot:
+   * the generic finish path must keep ambiguous roots fail-closed.
+   */
+  async reconcileTerminalServerWorkflowRoots(input: {
+    actor?: string;
+    reason?: string;
+    metadata?: Record<string, unknown>;
+  } = {}): Promise<{ reconciledRoots: number }> {
+    const actor = input.actor ?? "startup";
+    const reason = input.reason ?? "terminal_workflow_root_reconciled";
+    const metadata = {
+      ...(input.metadata ?? {}),
+      proof: "terminal_workflow_exact_identity_no_active_children",
+    };
+
+    return this.withTransaction(async (client) => {
+      const reconciled = await client.query<{ id: string }>(
+        `
+        WITH candidates AS (
+          SELECT roots.id,
+                 roots.device_id,
+                 roots.external_id,
+                 roots.owner_generation,
+                 roots.state AS previous_state,
+                 workflows.status AS terminal_state
+          FROM device_execution_roots roots
+          JOIN workflows workflows
+            ON workflows.id::text = roots.external_id
+           AND workflows.device_id = roots.device_id
+          JOIN device_execution_operations root_operation
+            ON root_operation.root_id = roots.id
+           AND root_operation.device_id = roots.device_id
+           AND root_operation.root_kind = 'server_workflow'
+           AND root_operation.operation_kind = 'workflow'
+           AND root_operation.operation_id = roots.external_id
+           AND root_operation.owner_generation = roots.owner_generation
+          WHERE roots.root_kind = 'server_workflow'
+            AND roots.state IN ('blocked', 'reconciling')
+            AND workflows.status IN ('completed', 'failed', 'cancelled')
+            AND workflows.completed_at IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1
+              FROM device_execution_operations child
+              WHERE child.root_id = roots.id
+                AND NOT (
+                  child.operation_kind = 'workflow'
+                  AND child.operation_id = roots.external_id
+                )
+                AND child.state NOT IN ('completed', 'failed', 'cancelled', 'rejected')
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM command_log commands
+              JOIN jobs jobs ON jobs.id = commands.job_id
+              WHERE commands.command_raw LIKE ('workflow:' || roots.external_id || ' step:%')
+                AND (jobs.device_id IS DISTINCT FROM roots.device_id
+                     OR jobs.status NOT IN ('completed', 'failed', 'timeout', 'cancelled')
+                     OR jobs.completed_at IS NULL)
+            )
+          FOR UPDATE OF roots, workflows, root_operation
+        ),
+        terminal_roots AS (
+          UPDATE device_execution_roots roots
+          SET state = candidates.terminal_state,
+              terminal_at = COALESCE(roots.terminal_at, NOW()),
+              terminal_reason = $1,
+              updated_at = NOW(),
+              metadata = roots.metadata || $3::jsonb
+          FROM candidates
+          WHERE roots.id = candidates.id
+            AND roots.device_id = candidates.device_id
+            AND roots.external_id = candidates.external_id
+            AND roots.owner_generation = candidates.owner_generation
+            AND roots.state = candidates.previous_state
+          RETURNING roots.id, roots.device_id
+        ),
+        terminal_operations AS (
+          UPDATE device_execution_operations operations
+          SET state = candidates.terminal_state,
+              updated_at = NOW(),
+              metadata = operations.metadata || $3::jsonb
+          FROM candidates
+          JOIN terminal_roots ON terminal_roots.id = candidates.id
+          WHERE operations.root_id = candidates.id
+            AND operations.device_id = candidates.device_id
+            AND operations.owner_generation = candidates.owner_generation
+            AND operations.state NOT IN ('completed', 'failed', 'cancelled')
+          RETURNING operations.id
+        )
+        INSERT INTO device_execution_events
+          (root_id, device_id, event_type, previous_state, new_state, actor, reason, metadata)
+        SELECT candidates.id,
+               candidates.device_id,
+               'terminal_workflow_root_reconciled',
+               candidates.previous_state,
+               candidates.terminal_state,
+               $2,
+               $1,
+               $3::jsonb
+        FROM candidates
+        JOIN terminal_roots ON terminal_roots.id = candidates.id
+        RETURNING root_id AS id
+        `,
+        [reason, actor, JSON.stringify(metadata)],
+      );
+
+      return { reconciledRoots: reconciled.rowCount ?? reconciled.rows.length };
+    });
+  }
+
   async reconcileInFlightAtStartup(input: {
     actor?: string;
     reason?: string;

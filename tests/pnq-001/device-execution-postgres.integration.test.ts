@@ -20,6 +20,7 @@ const DEVICE_A = "00000000-0000-4000-8000-0000000000a1";
 const DEVICE_B = "00000000-0000-4000-8000-0000000000b2";
 const DEVICE_C = "00000000-0000-4000-8000-0000000000c3";
 const DEVICE_D = "00000000-0000-4000-8000-0000000000d4";
+const DEVICE_E = "00000000-0000-4000-8000-0000000000e5";
 const ACTIVE_STATES = ["claimed", "dispatching", "dispatched", "reconciling", "blocked"] as const;
 
 let pool: Pool;
@@ -472,6 +473,109 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     expect(await stateForExternalId(pool, startedWorkflowId)).toBe("claimed");
   });
 
+  it("releases a stale blocked terminal workflow root after restart and admits its successor", async () => {
+    const workflowId = "00000000-0000-4000-8000-00000000d001";
+    await insertDevice(pool, DEVICE_A, "pnq-terminal-restart-a");
+    await insertWorkflow(pool, workflowId, DEVICE_A, "running");
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "server_workflow",
+      externalId: workflowId,
+      requestKey: workflowId,
+    });
+    await arbiter.runObservedEgress({
+      deviceId: DEVICE_A,
+      boundary: "server_workflow_root",
+      rootExternalId: workflowId,
+      operationId: workflowId,
+      wireType: "WORKFLOW_START",
+      registerWaiter: () => undefined,
+      wireDispatch: () => { throw new Error("pre_wire_timeout"); },
+    });
+    await pool.query(
+      "UPDATE workflows SET status = 'failed', completed_at = NOW(), error = 'RECOVERY_BUDGET_EXCEEDED' WHERE id = $1",
+      [workflowId],
+    );
+
+    const restartedArbiter = new DeviceExecutionArbiter(() => pool);
+    const competingReconciler = new DeviceExecutionArbiter(() => pool);
+    const reconciliationResults = await Promise.all([
+      restartedArbiter.reconcileTerminalServerWorkflowRoots(),
+      competingReconciler.reconcileTerminalServerWorkflowRoots(),
+    ]);
+    expect(reconciliationResults.reduce((sum, result) => sum + result.reconciledRoots, 0)).toBe(1);
+    await expect(restartedArbiter.reconcileTerminalServerWorkflowRoots()).resolves.toEqual({ reconciledRoots: 0 });
+    expect(await stateForExternalId(pool, workflowId)).toBe("failed");
+    expect(await eventCount(pool, "terminal_workflow_root_reconciled")).toBe(1);
+
+    await restartedArbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "server_workflow",
+      externalId: "00000000-0000-4000-8000-00000000d002",
+    });
+    await expect(restartedArbiter.claimNextRoot({ deviceId: DEVICE_A, actor: "post-restart-worker" }))
+      .resolves.not.toBeNull();
+  });
+
+  it("keeps stale workflow roots blocked when terminal ownership evidence is incomplete or active", async () => {
+    const cases = [
+      { suffix: "11", workflowStatus: "running", completed: false, mutate: "none" },
+      { suffix: "12", workflowStatus: "failed", completed: false, mutate: "none" },
+      { suffix: "13", workflowStatus: "failed", completed: true, mutate: "identity" },
+      { suffix: "14", workflowStatus: "failed", completed: true, mutate: "active-child" },
+      { suffix: "15", workflowStatus: "cancelled", completed: true, mutate: "queued-job" },
+    ] as const;
+    const insertedDevices = new Set<string>();
+
+    for (const testCase of cases) {
+      const workflowId = `00000000-0000-4000-8000-00000000d0${testCase.suffix}`;
+      const deviceId = testCase.suffix === "11" ? DEVICE_A
+        : testCase.suffix === "12" ? DEVICE_B
+          : testCase.suffix === "13" ? DEVICE_C
+            : testCase.suffix === "14" ? DEVICE_D : DEVICE_E;
+      if (!insertedDevices.has(deviceId)) {
+        await insertDevice(pool, deviceId, `pnq-negative-${testCase.suffix}`);
+        insertedDevices.add(deviceId);
+      }
+      await insertWorkflow(pool, workflowId, deviceId, "running");
+      await arbiter.observeAdmission({ deviceId, rootKind: "server_workflow", externalId: workflowId });
+      await arbiter.runObservedEgress({
+        deviceId,
+        boundary: "server_workflow_root",
+        rootExternalId: workflowId,
+        operationId: workflowId,
+        wireType: "WORKFLOW_START",
+        registerWaiter: () => undefined,
+        wireDispatch: () => { throw new Error("ambiguous_send"); },
+      });
+      await pool.query(
+        "UPDATE workflows SET status = $2, completed_at = CASE WHEN $3 THEN NOW() ELSE NULL END WHERE id = $1",
+        [workflowId, testCase.workflowStatus, testCase.completed],
+      );
+      if (testCase.mutate === "identity") {
+        await pool.query(
+          "UPDATE device_execution_operations SET operation_id = operation_id || '-mismatch' WHERE operation_kind = 'workflow' AND operation_id = $1",
+          [workflowId],
+        );
+      } else if (testCase.mutate === "active-child") {
+        const root = await rootForExternalId(pool, workflowId);
+        await pool.query(
+          `INSERT INTO device_execution_operations
+             (root_id, device_id, root_kind, operation_kind, operation_id, owner_generation, state, egress_lane, wire_handle)
+           VALUES ($1, $2, 'server_workflow', 'job', $3, $4, 'dispatched', 'device_execution', '{}'::jsonb)`,
+          [root!.id, deviceId, `${workflowId}-child`, root!.owner_generation],
+        );
+      } else if (testCase.mutate === "queued-job") {
+        const jobId = "00000000-0000-4000-8000-00000000d099";
+        await pool.query("INSERT INTO jobs (id, device_id, status) VALUES ($1, $2, 'pending')", [jobId, deviceId]);
+        await pool.query("INSERT INTO command_log (job_id, command_raw) VALUES ($1, $2)", [jobId, `workflow:${workflowId} step:0`]);
+      }
+    }
+
+    await expect(arbiter.reconcileTerminalServerWorkflowRoots()).resolves.toEqual({ reconciledRoots: 0 });
+    expect(await activeRootCount(pool)).toBe(cases.length);
+  });
+
   it.each([
     ["timeout", "job_timeout", "blocked"] as const,
     ["disconnect", "device_disconnect", "blocked"] as const,
@@ -869,7 +973,7 @@ async function insertWorkflow(
   db: Pool,
   workflowId: string,
   deviceId: string,
-  status: "queued" | "running",
+  status: "queued" | "running" | "completed" | "failed" | "cancelled",
 ): Promise<void> {
   await db.query(
     "INSERT INTO workflows (id, device_id, status) VALUES ($1, $2, $3)",
