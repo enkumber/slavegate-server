@@ -584,6 +584,17 @@ describe("PNQ-001 production egress inventory guard", () => {
     expect(requiresExistingRootIdentityViolations()).toEqual([]);
   });
 
+  it("classifies pre-restart in-flight roots before terminal evidence cleanup", () => {
+    const source = fs.readFileSync(path.join(repoRoot, "src/index.ts"), "utf8");
+    const classifyAt = source.indexOf("reconcileInFlightAtStartup()");
+    const terminalCleanupAt = source.indexOf("reconcileTerminalServerWorkflowRoots()");
+    const undispatchedCleanupAt = source.indexOf("reconcileUndispatchedTimedOutServerWorkflows()");
+
+    expect(classifyAt).toBeGreaterThan(-1);
+    expect(terminalCleanupAt).toBeGreaterThan(classifyAt);
+    expect(undispatchedCleanupAt).toBeGreaterThan(terminalCleanupAt);
+  });
+
   it("ignores comments and string literals that merely mention sender names", () => {
     const source = `
       const text = "sendJobToDevice(deviceId, payload); directWsServer.sendBatch(deviceId, payload);";

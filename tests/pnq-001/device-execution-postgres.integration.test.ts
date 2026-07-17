@@ -517,6 +517,59 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       .resolves.not.toBeNull();
   });
 
+  it("reconciles an in-flight terminal workflow in startup order before admitting its successor", async () => {
+    const workflowId = "00000000-0000-4000-8000-00000000d003";
+    const successorId = "00000000-0000-4000-8000-00000000d004";
+    await insertDevice(pool, DEVICE_A, "pnq-terminal-inflight-restart-a");
+    await insertWorkflow(pool, workflowId, DEVICE_A, "running");
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "server_workflow",
+      externalId: workflowId,
+      requestKey: workflowId,
+    });
+    const permit = await arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: "workflow-worker" });
+    expect(permit).not.toBeNull();
+    await arbiter.observeDispatch({
+      deviceId: DEVICE_A,
+      rootKind: "server_workflow",
+      externalId: workflowId,
+      handle: {
+        rootId: permit!.rootId,
+        deviceId: DEVICE_A,
+        rootKind: "server_workflow",
+        ownerGeneration: permit!.ownerGeneration,
+        operationKind: "workflow",
+        operationId: workflowId,
+      },
+      sent: true,
+      actor: "workflow-transport",
+    });
+    await pool.query(
+      "UPDATE workflows SET status = 'failed', completed_at = NOW(), error = 'terminal before restart' WHERE id = $1",
+      [workflowId],
+    );
+
+    // This is the production bootstrap order: classify old in-flight roots as
+    // reconciling first, then apply the narrow terminal-evidence cleanup.
+    await expect(arbiter.reconcileInFlightAtStartup()).resolves.toEqual({
+      reconciledRoots: 1,
+      activeAmbiguousRoots: 1,
+    });
+    expect(await stateForExternalId(pool, workflowId)).toBe("reconciling");
+    await expect(arbiter.reconcileTerminalServerWorkflowRoots()).resolves.toEqual({ reconciledRoots: 1 });
+    expect(await stateForExternalId(pool, workflowId)).toBe("failed");
+
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "server_workflow",
+      externalId: successorId,
+      requestKey: successorId,
+    });
+    await expect(arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: "post-restart-worker" }))
+      .resolves.not.toBeNull();
+  });
+
   it("keeps stale workflow roots blocked when terminal ownership evidence is incomplete or active", async () => {
     const cases = [
       { suffix: "11", workflowStatus: "running", completed: false, mutate: "none" },

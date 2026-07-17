@@ -63,6 +63,18 @@ async function bootstrap(): Promise<void> {
   // PNQ-001 observe mode still requires authoritative queue schema.
   await deviceExecutionArbiter.validateSchema();
   console.log("[server] Device execution arbiter schema verified.");
+
+  // First move every pre-restart in-flight root into the fail-closed
+  // reconciliation state. Terminal workflow cleanup below deliberately only
+  // acts on blocked/reconciling roots with complete database evidence; running
+  // it before this transition leaves old claimed/dispatching/dispatched roots
+  // invisible to cleanup and blocks every successor on the device forever.
+  const deviceExecutionReconciliation = await deviceExecutionArbiter.reconcileInFlightAtStartup();
+  console.log(
+    `[server] Device execution startup reconciliation: reconciled=${deviceExecutionReconciliation.reconciledRoots} ` +
+    `ambiguousBeforeEvidenceCleanup=${deviceExecutionReconciliation.activeAmbiguousRoots}.`
+  );
+
   const terminalWorkflowReconciliation =
     await deviceExecutionArbiter.reconcileTerminalServerWorkflowRoots();
   if (terminalWorkflowReconciliation.reconciledRoots > 0) {
@@ -79,10 +91,6 @@ async function bootstrap(): Promise<void> {
       "server workflow root(s) whose child jobs timed out before device start",
     );
   }
-  const deviceExecutionReconciliation = await deviceExecutionArbiter.reconcileInFlightAtStartup();
-  console.log(
-    `[server] Device execution startup reconciliation: reconciled=${deviceExecutionReconciliation.reconciledRoots} ambiguous=${deviceExecutionReconciliation.activeAmbiguousRoots}.`
-  );
 
   // ─── Verify Redis connection — required for BullMQ (dispatcher + workflows) ──
   {
