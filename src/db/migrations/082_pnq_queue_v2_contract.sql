@@ -52,9 +52,9 @@ CREATE TABLE IF NOT EXISTS pnq_jobs (
   CONSTRAINT pnq_jobs_job_version_check CHECK (job_version >= 1),
   CONSTRAINT pnq_jobs_dispatch_generation_check CHECK (dispatch_generation >= 0),
   CONSTRAINT pnq_jobs_execution_id_required_check CHECK (
-    (status IN ('PENDING', 'DISPATCHING') AND execution_id IS NULL)
-    OR (status = 'RUNNING' AND execution_id IS NOT NULL)
-    OR (status IN ('DONE', 'STUCK'))
+    (status = 'PENDING' AND execution_id IS NULL)
+    OR (status IN ('DISPATCHING', 'RUNNING', 'DONE') AND execution_id IS NOT NULL)
+    OR (status = 'STUCK')
   ),
   CONSTRAINT pnq_jobs_terminal_state_check CHECK (
     (status IN ('DONE', 'STUCK') AND terminal_at IS NOT NULL)
@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS pnq_jobs (
 CREATE INDEX IF NOT EXISTS pnq_jobs_fifo_idx
   ON pnq_jobs(node_id, node_seq)
   WHERE status = 'PENDING';
+
+CREATE UNIQUE INDEX IF NOT EXISTS pnq_jobs_one_active_per_node_idx
+  ON pnq_jobs(node_id)
+  WHERE status IN ('DISPATCHING', 'RUNNING');
 
 CREATE INDEX IF NOT EXISTS pnq_jobs_recovery_idx
   ON pnq_jobs(status, updated_at, result_deadline_at)
@@ -193,7 +197,8 @@ BEGIN
       p_node_id, 'epoch_rejected', 'rejected', p_expected_epoch,
       jsonb_build_object('operation', 'bump_connection_epoch')
     );
-    RAISE EXCEPTION 'stale connection epoch for node %', p_node_id USING ERRCODE = '40001';
+    SELECT * INTO v_node FROM pnq_nodes WHERE id = p_node_id;
+    RETURN v_node;
   END IF;
 
   RETURN v_node;
@@ -313,13 +318,11 @@ BEGIN
 
   UPDATE pnq_jobs AS j
   SET status = 'RUNNING',
-      execution_id = p_execution_id,
-      dispatch_started_at = COALESCE(j.dispatch_started_at, NOW()),
       execution_started_at = NOW(),
-      job_version = j.job_version + 1,
-      dispatch_generation = j.dispatch_generation + 1
+      job_version = j.job_version + 1
   WHERE j.id = p_job_id
-    AND j.status = 'PENDING'
+    AND j.status = 'DISPATCHING'
+    AND j.execution_id = p_execution_id
     AND j.job_version = p_expected_job_version
     AND j.dispatch_generation = p_expected_dispatch_generation
   RETURNING * INTO v_job;
@@ -368,7 +371,16 @@ BEGIN
     ) VALUES (
       p_node_id, 'epoch_rejected', 'rejected', p_connection_epoch, v_epoch, p_execution_id, p_actor
     );
-    RAISE EXCEPTION 'stale connection epoch for node %', p_node_id USING ERRCODE = '40001';
+    RETURN NULL;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pnq_jobs
+    WHERE node_id = p_node_id
+      AND status IN ('DISPATCHING', 'RUNNING')
+  ) THEN
+    RETURN NULL;
   END IF;
 
   SELECT * INTO v_job
@@ -384,10 +396,9 @@ BEGIN
   END IF;
 
   UPDATE pnq_jobs job
-  SET status = 'RUNNING',
+  SET status = 'DISPATCHING',
       execution_id = p_execution_id,
       dispatch_started_at = COALESCE(dispatch_started_at, NOW()),
-      execution_started_at = NOW(),
       job_version = job.job_version + 1,
       dispatch_generation = job.dispatch_generation + 1
   WHERE job.id = v_job.id
@@ -487,7 +498,6 @@ CREATE OR REPLACE FUNCTION pnq_mark_stuck(
 DECLARE
   v_current pnq_jobs;
   v_job pnq_jobs;
-  v_execution_id UUID;
 BEGIN
   SELECT * INTO v_current
   FROM pnq_jobs
@@ -498,11 +508,8 @@ BEGIN
     RAISE EXCEPTION 'pnq job % does not exist', p_job_id USING ERRCODE = '23503';
   END IF;
 
-  v_execution_id := COALESCE(v_current.execution_id, gen_random_uuid());
-
   UPDATE pnq_jobs
   SET status = 'STUCK',
-      execution_id = v_execution_id,
       terminal_at = NOW(),
       terminal_reason = p_reason,
       last_error = p_reason,

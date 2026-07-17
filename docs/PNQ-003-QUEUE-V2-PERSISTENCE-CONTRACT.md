@@ -12,7 +12,7 @@ The existing repository already has a legacy `jobs` table. Queue v2 therefore us
 
 `pnq_nodes` owns device/node coordination. Each node has a monotonically increasing `next_node_seq` used to allocate FIFO positions and a monotonically increasing `connection_epoch` used for fencing stale connections.
 
-`pnq_jobs` is the durable node-scoped queue. FIFO is per node through `UNIQUE(node_id, node_seq)`. Idempotency is scoped to `(node_id, request_key)` and enforced by `pnq_jobs_request_key_unique`. Execution identity is `execution_id`, which is unique globally and required once a job enters execution or a terminal state. Concurrent mutation uses `job_version` plus `dispatch_generation`.
+`pnq_jobs` is the durable node-scoped queue. FIFO is per node through `UNIQUE(node_id, node_seq)`, while `pnq_jobs_one_active_per_node_idx` permits at most one `DISPATCHING` or `RUNNING` job per node. Idempotency is scoped to `(node_id, request_key)` and enforced by `pnq_jobs_request_key_unique`. Execution identity is `execution_id`, which is unique globally and required once a job is claimed for dispatch or completed. `STUCK` may preserve an existing attempt id when one exists, but a pre-dispatch ambiguity can terminalize without inventing an execution attempt. Concurrent mutation uses `job_version` plus `dispatch_generation`.
 
 `pnq_resolution_audit` is append-only evidence for resolution decisions: idempotent replays, payload conflicts, stale epochs, CAS losses, stale or late results, recovery decisions, and explicit stuck/resolution events.
 
@@ -20,13 +20,13 @@ The existing repository already has a legacy `jobs` table. Queue v2 therefore us
 
 Allowed job states:
 
-- `PENDING`: job has a node FIFO sequence and has not entered execution.
-- `DISPATCHING`: reserved for the durable server-to-device handoff phase.
+- `PENDING`: job has a node FIFO sequence and has not been claimed.
+- `DISPATCHING`: a specific `execution_id` owns the durable server-to-device handoff phase.
 - `RUNNING`: a specific `execution_id` owns the current dispatch attempt.
 - `DONE`: terminal result state; `terminal_reason` and `result_payload` preserve outcome details.
 - `STUCK`: terminal fail-closed state requiring explicit audited resolution.
 
-The migration enforces the state vocabulary, terminal timestamp requirements, and non-null execution identity for executing/terminal states. `STUCK` is terminal; the schema does not provide an implicit retry path out of it.
+The migration enforces the state vocabulary, terminal timestamp requirements, and non-null execution identity for `DISPATCHING`, `RUNNING`, and `DONE`. `STUCK` may have no execution identity when ambiguity is discovered before dispatch. It is terminal and the schema provides no implicit retry path out of it.
 
 ## Ownership And Idempotency
 
@@ -42,9 +42,9 @@ The contract permits parallelism across nodes because each enqueue locks only it
 
 ## Fencing And CAS
 
-`connection_epoch` is monotonically bumped by `pnq_bump_connection_epoch`. `pnq_start_execution` requires the caller's observed epoch to match the current node epoch. Stale epochs are rejected and audited.
+`connection_epoch` is monotonically bumped by `pnq_bump_connection_epoch`. `pnq_claim_next_job` and `pnq_start_execution` require the caller's observed epoch to match the current node epoch. Stale epochs are rejected from ownership changes and audited.
 
-Every dispatch attempt has a `dispatch_generation`. `pnq_start_execution` requires both expected `job_version` and expected `dispatch_generation`, then increments both and sets the `execution_id`. `pnq_record_result` requires the current `execution_id` and `dispatch_generation`; stale or late results return the current row unchanged and append audit evidence.
+Every dispatch attempt has a `dispatch_generation`. `pnq_claim_next_job` moves the FIFO head from `PENDING` to `DISPATCHING`, assigns `execution_id`, and increments both CAS counters. `pnq_start_execution` requires that same execution identity plus the expected `job_version` and `dispatch_generation`, then moves the job to `RUNNING` and increments `job_version`. `pnq_record_result` requires the current `execution_id` and `dispatch_generation`; stale or late results return the current row unchanged and append audit evidence.
 
 ## Deadline Semantics
 

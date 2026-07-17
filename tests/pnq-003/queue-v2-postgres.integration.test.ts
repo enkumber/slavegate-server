@@ -91,6 +91,39 @@ describe("PNQ-003 Queue v2 PostgreSQL contract", () => {
     }
   });
 
+  it("allows only one active claim per node and preserves the FIFO head under concurrency", async () => {
+    const first = await enqueue(NODE_A, "claim-first", { order: 1 });
+    await enqueue(NODE_A, "claim-second", { order: 2 });
+
+    const [left, right] = await Promise.all([
+      claimNextJob(NODE_A, "21000000-0000-4000-8000-000000000001"),
+      claimNextJob(NODE_A, "21000000-0000-4000-8000-000000000002"),
+    ]);
+
+    const claimed = [left, right].filter(Boolean);
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]).toMatchObject({ id: first.id, node_seq: "1", status: "DISPATCHING" });
+
+    const active = await pool.query(
+      "SELECT id FROM pnq_jobs WHERE node_id = $1 AND status IN ('DISPATCHING', 'RUNNING')",
+      [NODE_A],
+    );
+    expect(active.rows).toHaveLength(1);
+  });
+
+  it("permits independent claims on different nodes", async () => {
+    const firstA = await enqueue(NODE_A, "claim-a", { node: "a" });
+    const firstB = await enqueue(NODE_B, "claim-b", { node: "b" });
+
+    const [claimedA, claimedB] = await Promise.all([
+      claimNextJob(NODE_A, "22000000-0000-4000-8000-000000000001"),
+      claimNextJob(NODE_B, "22000000-0000-4000-8000-000000000002"),
+    ]);
+
+    expect(claimedA).toMatchObject({ id: firstA.id, status: "DISPATCHING" });
+    expect(claimedB).toMatchObject({ id: firstB.id, status: "DISPATCHING" });
+  });
+
   it("enforces request_key idempotency per node and rejects payload conflicts", async () => {
     const first = await enqueue(NODE_A, "idem", { value: 1 });
     const replay = await enqueue(NODE_A, "idem", { value: 1 });
@@ -110,15 +143,31 @@ describe("PNQ-003 Queue v2 PostgreSQL contract", () => {
     const second = await enqueue(NODE_A, "exec-b", { value: "b" });
     const executionId = "20000000-0000-4000-8000-000000000001";
 
-    const executing = await startExecution(first.id, executionId);
+    const claimed = await claimNextJob(NODE_A, executionId);
+    expect(claimed).toMatchObject({ id: first.id, status: "DISPATCHING", execution_id: executionId });
+    const executing = await startExecution(
+      first.id,
+      executionId,
+      0,
+      Number(claimed.job_version),
+      Number(claimed.dispatch_generation),
+    );
     expect(executing).toMatchObject({
       status: "RUNNING",
       execution_id: executionId,
-      job_version: "2",
+      job_version: "3",
       dispatch_generation: "1",
     });
 
-    await expect(startExecution(second.id, executionId)).rejects.toThrow();
+    await expect(
+      pool.query(
+        `UPDATE pnq_jobs
+         SET status = 'DISPATCHING',
+             execution_id = $1
+         WHERE id = $2`,
+        [executionId, second.id],
+      ),
+    ).rejects.toThrow();
     await expect(
       pool.query(
         `UPDATE pnq_jobs
@@ -133,19 +182,29 @@ describe("PNQ-003 Queue v2 PostgreSQL contract", () => {
     const job = await enqueue(NODE_A, "stale-epoch", { value: "epoch" });
     await pool.query("SELECT pnq_bump_connection_epoch($1, $2)", [NODE_A, 0]);
 
-    const stale = await startExecution(job.id, "20000000-0000-4000-8000-000000000002", 0);
-    expect(stale.status).toBe("PENDING");
+    const stale = await claimNextJob(NODE_A, "20000000-0000-4000-8000-000000000002", 0);
+    expect(stale).toBeUndefined();
 
     const current = await jobById(job.id);
     expect(current.status).toBe("PENDING");
     expect(await auditCount("epoch_rejected")).toBe(1);
   });
 
+  it("keeps a stale epoch bump non-mutating and persists rejection evidence", async () => {
+    await pool.query("SELECT pnq_bump_connection_epoch($1, $2)", [NODE_A, 0]);
+    const stale = await pool.query("SELECT * FROM pnq_bump_connection_epoch($1, $2)", [NODE_A, 0]);
+
+    expect(stale.rows[0]?.connection_epoch).toBe("1");
+    expect(await auditCount("epoch_rejected")).toBe(1);
+  });
+
   it("uses job_version plus dispatch_generation CAS so only one dispatcher wins", async () => {
     const job = await enqueue(NODE_A, "cas", { value: "cas" });
+    const executionId = "20000000-0000-4000-8000-000000000003";
+    const claimed = await claimNextJob(NODE_A, executionId);
     const attempts = await Promise.allSettled([
-      startExecution(job.id, "20000000-0000-4000-8000-000000000003"),
-      startExecution(job.id, "20000000-0000-4000-8000-000000000004"),
+      startExecution(job.id, executionId, 0, Number(claimed.job_version), Number(claimed.dispatch_generation)),
+      startExecution(job.id, executionId, 0, Number(claimed.job_version), Number(claimed.dispatch_generation)),
     ]);
 
     expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(2);
@@ -173,7 +232,7 @@ describe("PNQ-003 Queue v2 PostgreSQL contract", () => {
 
   it("exposes crash/restart recovery rows and terminalizes ambiguous state as STUCK", async () => {
     const job = await enqueue(NODE_A, "recovery", { value: "recover" });
-    const executing = await startExecution(job.id, "20000000-0000-4000-8000-000000000005");
+    const executing = await claimAndStart(job, "20000000-0000-4000-8000-000000000005");
 
     const recoveryRows = await pool.query<{ id: string }>(
       `SELECT id
@@ -193,7 +252,7 @@ describe("PNQ-003 Queue v2 PostgreSQL contract", () => {
 
   it("does not let stale or late results terminalize the current job and writes audit", async () => {
     const job = await enqueue(NODE_A, "stale-result", { value: "result" });
-    const executing = await startExecution(job.id, "20000000-0000-4000-8000-000000000006");
+    const executing = await claimAndStart(job, "20000000-0000-4000-8000-000000000006");
 
     const stale = await recordResult(job.id, "20000000-0000-4000-8000-000000000099", 1, true);
     expect(stale.status).toBe("RUNNING");
@@ -299,6 +358,26 @@ async function startExecution(
     [jobId, epoch, jobVersion, dispatchGeneration, executionId],
   );
   return result.rows[0];
+}
+
+async function claimNextJob(nodeId: string, executionId: string, epoch = 0) {
+  const result = await pool.query(
+    `SELECT * FROM pnq_claim_next_job($1, $2, $3)`,
+    [nodeId, epoch, executionId],
+  );
+  return result.rows[0]?.id ? result.rows[0] : undefined;
+}
+
+async function claimAndStart(job: { id: string; node_id: string }, executionId: string, epoch = 0) {
+  const claimed = await claimNextJob(job.node_id, executionId, epoch);
+  expect(claimed?.id).toBe(job.id);
+  return startExecution(
+    job.id,
+    executionId,
+    epoch,
+    Number(claimed.job_version),
+    Number(claimed.dispatch_generation),
+  );
 }
 
 async function recordResult(
