@@ -80,6 +80,12 @@ export type LegacyGeneratedWorkflowJobSendResult = Pick<
   resultPromise: Promise<unknown>;
 };
 
+export const LEGACY_GENERATED_WORKFLOW_RESULT_GRACE_MS = 5_000;
+
+export interface LegacyGeneratedWorkflowJobSendOptions {
+  resultTimeoutMs?: number;
+}
+
 /**
  * Send a job to a device via DirectWS transport.
  * Returns true if sent successfully, false if device unreachable.
@@ -144,11 +150,13 @@ export async function sendStandaloneJobToDevice(
 export async function sendLegacyGeneratedWorkflowJobToDevice(
   deviceId: string,
   payload: JobDispatchPayload,
+  options: LegacyGeneratedWorkflowJobSendOptions = {},
 ): Promise<LegacyGeneratedWorkflowJobSendResult> {
+  const executionTimeoutMs = payload.timeoutMs ?? 300_000;
   const { sent, resultPromise } = directWsServer.sendLegacyGeneratedWorkflowJob(
     deviceId,
     payload,
-    payload.timeoutMs ?? 300_000,
+    options.resultTimeoutMs ?? executionTimeoutMs + LEGACY_GENERATED_WORKFLOW_RESULT_GRACE_MS,
   );
   return {
     decision: sent ? "dispatched" : "offline",

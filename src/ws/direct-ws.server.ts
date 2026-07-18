@@ -561,9 +561,9 @@ export class DirectWsServer {
   sendLegacyGeneratedWorkflowJob(
     deviceId: string,
     payload: JobDispatchPayload,
-    timeoutMs = 300_000,
+    resultTimeoutMs = 300_000,
   ): { sent: boolean; resultPromise: Promise<JobResult> } {
-    const resultPromise = this.registerJobWaiter(payload.jobId, timeoutMs, undefined, {
+    const resultPromise = this.registerJobWaiter(payload.jobId, resultTimeoutMs, undefined, {
       deviceId,
       legacyMode: "generated_workflow",
     });
