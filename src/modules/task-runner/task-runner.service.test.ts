@@ -722,6 +722,7 @@ describe("task-runner generated_workflow routine", () => {
       requestKey: REQUEST_KEY,
       source: "dashboard_human",
       allowCandidateArtifact: true,
+      maxSelfHealingAttempts: 1,
       agencyWorkflowRunId: TASK_ID,
       intent: "Deschide Gmail si verifica inbox",
     }), "android");

@@ -23,7 +23,7 @@ import { getRedisConnectionOptions } from "../../redis/client";
 import { workflowService } from "./workflow.service";
 import { hbeService } from "../hbe/hbe.service";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { sendServerWorkflowBatchChildToDevice, sendDeviceExecutionJobToDevice, isDeviceOnline } from "../../transport/transport";
+import { sendServerWorkflowBatchChildToDevice, sendDeviceExecutionJobToDevice, sendLegacyGeneratedWorkflowJobToDevice, isDeviceOnline } from "../../transport/transport";
 import { deviceExecutionArbiter } from "../device-execution";
 import { isDeviceExecutionEnforced } from "../device-execution/device-execution-authority";
 import { scalabilityConfig } from "../../config/scalability.config";
@@ -61,6 +61,10 @@ import type { WorkflowRecord } from "./workflow.service";
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
 export const WORKFLOW_QUEUE = scalabilityConfig.workflowQueueName;
+
+type GeneratedChildDispatchResult =
+  | Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>
+  | Awaited<ReturnType<typeof sendLegacyGeneratedWorkflowJobToDevice>>;
 
 function defaultExecutionStats(mode: "edge" | "server" = "server"): WorkflowExecutionStats {
   return {
@@ -280,20 +284,15 @@ async function dispatchGeneratedWorkflowProbe(
       timeoutMs,
       workflowId,
       stepIndex,
+      executionLane: "legacy_generated_workflow",
     });
     const prepared = prepareGeneratedChildJobResult(
       jobId,
       Math.max(timeoutMs + 5_000, scalabilityConfig.jobResultTimeout),
     );
-    let dispatch: Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>;
+    let dispatch: GeneratedChildDispatchResult;
     try {
-      dispatch = await sendDeviceExecutionJobToDevice(deviceId, { jobId, type, params: {}, timeoutMs }, {
-        boundary: "self_healing_child",
-        rootExternalId: workflowId,
-        requestKey: workflowId,
-        actor: "generated_workflow_executor",
-        metadata: { observeSource: "generatedWorkflow.dispatchProbe", workflowId, stepIndex },
-      });
+      dispatch = await sendLegacyGeneratedWorkflowJobToDevice(deviceId, { jobId, type, params: {}, timeoutMs });
     } catch (err) {
       prepared.cancel();
       throw err;
@@ -636,7 +635,7 @@ export function prepareGeneratedChildJobResult(
 export function awaitGeneratedChildJobResult(
   workflowId: string,
   jobId: string,
-  dispatch: Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>,
+  dispatch: GeneratedChildDispatchResult,
   executionTimeoutMs: number,
   prepared?: PreparedGeneratedChildJobResult,
 ): Promise<JobStepResult> {
@@ -1121,20 +1120,15 @@ async function executeSkillActionStep(
         timeoutMs,
         workflowId,
         stepIndex,
+        executionLane: "legacy_generated_workflow",
       });
       const prepared = prepareGeneratedChildJobResult(
         jobId,
         Math.max(dispatchedTimeoutMs + 5_000, scalabilityConfig.jobResultTimeout),
       );
-      let dispatch: Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>;
+      let dispatch: GeneratedChildDispatchResult;
       try {
-        dispatch = await sendDeviceExecutionJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs }, {
-          boundary: "generated_child",
-          rootExternalId: workflowId,
-          requestKey: workflowId,
-          actor: "generated_workflow_executor",
-          metadata: { observeSource: "generatedWorkflow.dispatchAndWait", workflowId, stepIndex },
-        });
+        dispatch = await sendLegacyGeneratedWorkflowJobToDevice(deviceId, { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs });
       } catch (err) {
         prepared.cancel();
         throw err;
@@ -1391,6 +1385,7 @@ async function executeActionStep(
     verificationStrategy: strategy,
     l1TimeoutMs: hbeStep.l1TimeoutMs,
     l2SettleMs:  hbeStep.l2SettleMs,
+    executionLane: "legacy_generated_workflow",
   });
 
   // Write audit log entry at dispatch
@@ -1406,9 +1401,9 @@ async function executeActionStep(
     jobId,
     Math.max(dispatchedTimeoutMs + 5_000, scalabilityConfig.jobResultTimeout),
   );
-  let dispatch: Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>;
+  let dispatch: GeneratedChildDispatchResult;
   try {
-    dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
+    dispatch = await sendLegacyGeneratedWorkflowJobToDevice(deviceId, {
       jobId,
       type:     jobType,
       params:   finalParams as import("../../../shared/protocol/messages").JobParams,
@@ -1417,17 +1412,6 @@ async function executeActionStep(
       verificationStrategy: strategy,
       l1TimeoutMs:          hbeStep.l1TimeoutMs,
       l2SettleMs:           hbeStep.l2SettleMs,
-    }, {
-      boundary: "generated_child",
-      rootExternalId: workflowId,
-      requestKey: workflowId,
-      actor: "generated_workflow_executor",
-      metadata: {
-        observeSource: "generatedWorkflow.dispatchStep",
-        workflowId,
-        stepIndex,
-        stepAction: step.action,
-      },
     });
   } catch (err) {
     prepared.cancel();

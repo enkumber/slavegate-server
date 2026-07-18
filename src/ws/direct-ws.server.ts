@@ -248,6 +248,7 @@ interface PendingJob {
   timer:   ReturnType<typeof setTimeout>;
   deviceId?: string;
   permit?: DeviceExecutionJobDispatchPermit;
+  legacyMode?: "generated_workflow";
 }
 
 interface PendingBatch {
@@ -557,6 +558,22 @@ export class DirectWsServer {
     return true;
   }
 
+  sendLegacyGeneratedWorkflowJob(
+    deviceId: string,
+    payload: JobDispatchPayload,
+    timeoutMs = 300_000,
+  ): { sent: boolean; resultPromise: Promise<JobResult> } {
+    const resultPromise = this.registerJobWaiter(payload.jobId, timeoutMs, undefined, {
+      deviceId,
+      legacyMode: "generated_workflow",
+    });
+    const sent = this.sendJob(deviceId, payload);
+    if (!sent) {
+      this.rejectLegacyGeneratedWorkflowJobWaiter(payload.jobId, "legacy_generated_workflow_device_offline");
+    }
+    return { sent, resultPromise };
+  }
+
   registerJobWaiterWithPermit(
     permit: DeviceExecutionJobDispatchPermit,
     timeoutMs = 300_000,
@@ -593,6 +610,7 @@ export class DirectWsServer {
     jobId: string,
     timeoutMs: number,
     permit?: DeviceExecutionJobDispatchPermit,
+    options: { deviceId?: string; legacyMode?: "generated_workflow" } = {},
   ): Promise<JobResult> {
     const existing = this.pendingJobs.get(jobId);
     if (existing) {
@@ -625,10 +643,20 @@ export class DirectWsServer {
       resolve,
       reject,
       timer,
-      deviceId: permit?.handle.deviceId,
+      deviceId: permit?.handle.deviceId ?? options.deviceId,
       permit,
+      legacyMode: options.legacyMode,
     });
     return promise;
+  }
+
+  private rejectLegacyGeneratedWorkflowJobWaiter(jobId: string, reason: string): boolean {
+    const pending = this.pendingJobs.get(jobId);
+    if (pending?.legacyMode !== "generated_workflow") return false;
+    clearTimeout(pending.timer);
+    this.pendingJobs.delete(jobId);
+    pending.reject(new Error(reason));
+    return true;
   }
 
   private createJobTimeout(
@@ -1357,7 +1385,9 @@ export class DirectWsServer {
     const jobId = msg.jobId as string;
     if (!jobId) return;
     console.log(`[direct-ws] JOB_RESULT received: jobId=${jobId.slice(0,8)} success=${msg.success} error=${msg.error || 'none'} device=${conn.deviceId.slice(0,8)}`);
-    if (isPnqV2ShadowRuntimeEnabled()) {
+    const pending = this.pendingJobs.get(jobId);
+    const isLegacyGeneratedWorkflowResult = pending?.legacyMode === "generated_workflow";
+    if (!isLegacyGeneratedWorkflowResult && isPnqV2ShadowRuntimeEnabled()) {
       runPnqV2ShadowSideEffect("direct-ws result", () => pnqV2RuntimeService.recordShadowResult({
         legacyJobId: jobId,
         socketEpoch: conn.pnqV2ConnectionEpoch,
@@ -1371,7 +1401,6 @@ export class DirectWsServer {
       }));
     }
 
-    const pending = this.pendingJobs.get(jobId);
     const status = Boolean(msg.success) ? "completed" : "failed";
     const durationMs = (msg.durationMs as number | undefined) ?? 0;
     const wireHandle = isRecord(msg.pnqHandle) ? msg.pnqHandle : null;
@@ -1381,7 +1410,10 @@ export class DirectWsServer {
     const reportedHandle = handleResolution?.reportedHandle ?? decodeDeviceExecutionHandle(wireHandle);
 
     try {
-      if (!isDeviceExecutionEnforced()) {
+      if (isLegacyGeneratedWorkflowResult) {
+        // Gate A: generated_workflow production compatibility remains the
+        // legacy DirectWS JOB/JOB_RESULT contract with no PNQ result authority.
+      } else if (!isDeviceExecutionEnforced()) {
         void deviceExecutionArbiter.observeTerminal({ deviceId: conn.deviceId, rootKind: "job", externalId: jobId, status, actor: "direct_ws.observe_only", reason: (msg.error as string | undefined) ?? status, metadata: { authorityMode: "observe_only" } });
       } else {
       const accepted = await deviceExecutionArbiter.acceptJobResult({
@@ -1449,13 +1481,16 @@ export class DirectWsServer {
       output:     msg.output as Record<string, unknown>,
       error:      msg.error as string | undefined,
       durationMs,
+      authority: isLegacyGeneratedWorkflowResult ? "legacy_generated_workflow" : undefined,
     }).catch(err => console.error("[direct-ws] handleJobResult error:", err.message));
 
     // ACK
     this._send(conn.ws, { type: "ACK", ref: jobId });
-    void import("../transport/transport")
-      .then(({ dispatchQueuedJobsForDevice }) => dispatchQueuedJobsForDevice(conn.deviceId, "direct_ws.job_result_queue_pump"))
-      .catch(err => console.error("[device-execution] direct-ws queue pump error:", (err as Error).message));
+    if (!isLegacyGeneratedWorkflowResult) {
+      void import("../transport/transport")
+        .then(({ dispatchQueuedJobsForDevice }) => dispatchQueuedJobsForDevice(conn.deviceId, "direct_ws.job_result_queue_pump"))
+        .catch(err => console.error("[device-execution] direct-ws queue pump error:", (err as Error).message));
+    }
   }
 
   // ─── Batch result handler ────────────────────────────────────────────────

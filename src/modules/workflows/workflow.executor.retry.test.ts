@@ -19,6 +19,7 @@ vi.mock("../../transport/transport", async (importOriginal) => {
     ...actual,
     isDeviceOnline: vi.fn(actual.isDeviceOnline),
     sendDeviceExecutionJobToDevice: vi.fn(actual.sendDeviceExecutionJobToDevice),
+    sendLegacyGeneratedWorkflowJobToDevice: vi.fn(actual.sendLegacyGeneratedWorkflowJobToDevice),
   };
 });
 
@@ -131,7 +132,7 @@ describe("workflow BullMQ retry semantics", () => {
         jobId: `job-${++jobCounter}-${input.type}`,
         timeoutMs: input.timeoutMs ?? 1,
       }));
-      vi.mocked(transport.sendDeviceExecutionJobToDevice).mockImplementation(async (_deviceId, command) => {
+      vi.mocked(transport.sendLegacyGeneratedWorkflowJobToDevice).mockImplementation(async (_deviceId, command) => {
         dispatched.push(command.type);
         if (command.type === "unlock") {
           setTimeout(() => resolveJobResult(command.jobId, {
@@ -147,7 +148,15 @@ describe("workflow BullMQ retry semantics", () => {
             durationMs: 1,
           })).toBe(true);
         }
-        return { decision: "admitted", root: null, sent: true, queued: false };
+        return {
+          decision: "dispatched",
+          root: null,
+          operation: undefined,
+          handle: undefined,
+          sent: true,
+          queued: false,
+          resultPromise: Promise.resolve({}),
+        };
       });
 
       const pending = runWorkflow(WORKFLOW_ID, job());

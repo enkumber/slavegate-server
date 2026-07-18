@@ -73,6 +73,13 @@ export interface EdgeWorkflowSendResult {
   queued: boolean;
 }
 
+export type LegacyGeneratedWorkflowJobSendResult = Pick<
+  StandaloneJobSendResult,
+  "decision" | "root" | "operation" | "handle" | "reason" | "sent" | "queued"
+> & {
+  resultPromise: Promise<unknown>;
+};
+
 /**
  * Send a job to a device via DirectWS transport.
  * Returns true if sent successfully, false if device unreachable.
@@ -132,6 +139,27 @@ export async function sendStandaloneJobToDevice(
     actor: "transport.g2",
     metadata: { observeSource: "transport.sendStandaloneJobToDevice" },
   });
+}
+
+export async function sendLegacyGeneratedWorkflowJobToDevice(
+  deviceId: string,
+  payload: JobDispatchPayload,
+): Promise<LegacyGeneratedWorkflowJobSendResult> {
+  const { sent, resultPromise } = directWsServer.sendLegacyGeneratedWorkflowJob(
+    deviceId,
+    payload,
+    payload.timeoutMs ?? 300_000,
+  );
+  return {
+    decision: sent ? "dispatched" : "offline",
+    root: null,
+    operation: undefined,
+    handle: undefined,
+    reason: sent ? undefined : "device_offline",
+    sent,
+    queued: false,
+    resultPromise,
+  };
 }
 
 /**

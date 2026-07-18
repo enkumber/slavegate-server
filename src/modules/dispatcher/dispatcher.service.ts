@@ -108,6 +108,8 @@ export class DispatcherService {
   }
 
   async dispatch(req: DispatchJobRequest): Promise<{ jobId: string; timeoutMs: number }> {
+    const legacyCompatibilityLane = req.executionLane === "legacy_generated_workflow";
+
     // 0. Kill switch — block all dispatches when active (B4 fix)
     if (await isKillSwitchActive()) {
       throw new Error("Kill switch active — job dispatch blocked");
@@ -155,20 +157,22 @@ export class DispatcherService {
       [jobId, req.deviceId, req.type, JSON.stringify(req.params), timeoutMs]
     );
 
-    await deviceExecutionArbiter.observeAdmission({
-      deviceId: req.deviceId,
-      rootKind: req.workflowId ? "server_workflow" : "job",
-      externalId: req.workflowId ?? jobId,
-      requestKey: req.workflowId ?? jobId,
-      actor: "dispatcher",
-      metadata: {
-        jobType: req.type,
-        workflowId: req.workflowId ?? null,
-        canonicalRoot: Boolean(req.workflowId),
-        stepIndex: req.stepIndex ?? null,
-        observeSource: "dispatcher.dispatch",
-      },
-    });
+    if (!legacyCompatibilityLane) {
+      await deviceExecutionArbiter.observeAdmission({
+        deviceId: req.deviceId,
+        rootKind: req.workflowId ? "server_workflow" : "job",
+        externalId: req.workflowId ?? jobId,
+        requestKey: req.workflowId ?? jobId,
+        actor: "dispatcher",
+        metadata: {
+          jobType: req.type,
+          workflowId: req.workflowId ?? null,
+          canonicalRoot: Boolean(req.workflowId),
+          stepIndex: req.stepIndex ?? null,
+          observeSource: "dispatcher.dispatch",
+        },
+      });
+    }
 
     // 5. Audit log (dispatch record — result_status updated when JOB_RESULT arrives)
     // Skip if workflowId present — workflow executor writes its own audit log entry
@@ -190,16 +194,18 @@ export class DispatcherService {
       { jobId }
     );
 
-    if (isPnqV2ShadowRuntimeEnabled()) {
-      // Create the observation promise synchronously so prepareShadowDispatch()
-      // can always see and await this job's mapping in shadow mode.
-      const shadowEnqueueObservation = pnqV2RuntimeService.enqueueShadowJob({
-        deviceId: req.deviceId,
-        legacyJobId: jobId,
-        payload: { type: req.type, params: req.params, workflowId: req.workflowId ?? null },
-        timeoutMs,
-      });
-      runPnqV2ShadowSideEffect("enqueue", () => shadowEnqueueObservation);
+    if (!legacyCompatibilityLane) {
+      if (isPnqV2ShadowRuntimeEnabled()) {
+        // Create the observation promise synchronously so prepareShadowDispatch()
+        // can always see and await this job's mapping in shadow mode.
+        const shadowEnqueueObservation = pnqV2RuntimeService.enqueueShadowJob({
+          deviceId: req.deviceId,
+          legacyJobId: jobId,
+          payload: { type: req.type, params: req.params, workflowId: req.workflowId ?? null },
+          timeoutMs,
+        });
+        runPnqV2ShadowSideEffect("enqueue", () => shadowEnqueueObservation);
+      }
     }
 
     // Server-side timeout enforcement:
@@ -218,7 +224,7 @@ export class DispatcherService {
           // the wire.  Otherwise a perfectly valid queued child is timed out
           // locally and the whole workflow root is marked ambiguous before it
           // ever reaches the phone.
-          if (!shouldBlockRootForTimedOutJob(req.workflowId)) {
+          if (!legacyCompatibilityLane && !shouldBlockRootForTimedOutJob(req.workflowId)) {
             const ownership = await db.query<{
               root_state: string;
               operation_state: string;
@@ -261,15 +267,17 @@ export class DispatcherService {
             // next idempotent readiness child (notably unlock) from dispatching.
             return;
           }
-          await deviceExecutionArbiter.markAmbiguous({
-            deviceId: req.deviceId,
-            rootKind: "job",
-            externalId: jobId,
-            reason: "job_timeout",
-            actor: "dispatcher_timeout",
-            state: "blocked",
-            metadata: { timeoutMs, jobType: req.type },
-          });
+          if (!legacyCompatibilityLane) {
+            await deviceExecutionArbiter.markAmbiguous({
+              deviceId: req.deviceId,
+              rootKind: "job",
+              externalId: jobId,
+              reason: "job_timeout",
+              actor: "dispatcher_timeout",
+              state: "blocked",
+              metadata: { timeoutMs, jobType: req.type },
+            });
+          }
         }
       } catch (err) {
         console.error(`[dispatcher] Timeout handler error for job ${jobId}:`, (err as Error).message);
@@ -291,6 +299,7 @@ export class DispatcherService {
     output?: unknown;
     error?: string;
     durationMs: number;
+    authority?: "legacy_generated_workflow";
   }): Promise<void> {
     const db = getDb();
     const completedAt = new Date();
@@ -326,6 +335,8 @@ export class DispatcherService {
       "UPDATE command_log SET result_status = $1 WHERE job_id = $2",
       [payload.status, payload.jobId]
     );
+
+    if (payload.authority === "legacy_generated_workflow") return;
 
     const terminalObservation = {
       deviceId: payload.deviceId,

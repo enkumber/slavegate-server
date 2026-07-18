@@ -648,7 +648,7 @@ async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerR
 
 function generatedWorkflowSelfHealingLimit(task: TaskRow): number {
   const value = task.params?.maxSelfHealingAttempts;
-  if (typeof value !== "number" || !Number.isFinite(value)) return 2;
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(5, Math.floor(value)));
 }
 
