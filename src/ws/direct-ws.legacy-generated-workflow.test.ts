@@ -164,5 +164,50 @@ describe("DirectWS legacy generated workflow lane", () => {
       jobId,
       authority: "legacy_generated_workflow",
     }));
+    const source = fs.readFileSync(path.join(process.cwd(), "src/ws/direct-ws.server.ts"), "utf8");
+    expect(source).toContain("if (!isLegacyGeneratedWorkflowResult) {");
+    expect(source).toContain("dispatchQueuedJobsForDevice(conn.deviceId, \"direct_ws.job_result_queue_pump\")");
+  });
+
+  it("rejects and removes a legacy waiter after the full result grace window", async () => {
+    vi.useFakeTimers();
+    const server = new DirectWsServer();
+    const send = vi.fn();
+    const conn = {
+      ws: { readyState: 1, send },
+      deviceId,
+      connectedAt: Date.now(),
+      lastSeenAt: Date.now(),
+      lastPongAt: Date.now(),
+      msgCount: 0,
+      windowStart: Date.now(),
+      agentVersion: "3.9.167",
+      pnqV2ConnectionEpoch: 11,
+    };
+    const internals = server as unknown as {
+      connections: Map<string, typeof conn>;
+      pendingJobs: Map<string, unknown>;
+      sendLegacyGeneratedWorkflowJob: (targetDeviceId: string, payload: {
+        jobId: string;
+        type: "ui_tree_dump";
+        params: Record<string, never>;
+        timeoutMs: number;
+      }, resultTimeoutMs?: number) => { sent: boolean; resultPromise: Promise<unknown> };
+    };
+    internals.connections.set(deviceId, conn);
+
+    const resultTimeoutMs = 1_250;
+    const { resultPromise } = internals.sendLegacyGeneratedWorkflowJob(deviceId, {
+      jobId,
+      type: "ui_tree_dump",
+      params: {},
+      timeoutMs: 1_000,
+    }, resultTimeoutMs);
+
+    expect(internals.pendingJobs.has(jobId)).toBe(true);
+    await vi.advanceTimersByTimeAsync(resultTimeoutMs + 1);
+
+    await expect(resultPromise).rejects.toThrow(`Job ${jobId} timed out after ${resultTimeoutMs}ms`);
+    expect(internals.pendingJobs.has(jobId)).toBe(false);
   });
 });
