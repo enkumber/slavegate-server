@@ -2,7 +2,7 @@ name: Build & Push Docker Image
 
 on:
   push:
-    branches: [master]
+    branches: [master, rebuild/workflow-queue-from-pre-pnq]
 
 env:
   REGISTRY: ghcr.io
