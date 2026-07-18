@@ -37,6 +37,7 @@ const mocks = vi.hoisted(() => ({
     getGeneratedPlanCache: vi.fn(),
     saveTemplate: vi.fn(),
     saveGeneratedPlanCache: vi.fn(),
+    saveExecutableGeneratedPlanCache: vi.fn(),
   },
   llmJson: vi.fn(),
   loadMap: vi.fn(),
@@ -458,6 +459,7 @@ describe("dashboard human workflow routes", () => {
     mocks.workflowService.getGeneratedPlanCache.mockResolvedValue(cachedPlan());
     mocks.workflowService.saveTemplate.mockResolvedValue(undefined);
     mocks.workflowService.saveGeneratedPlanCache.mockResolvedValue(undefined);
+    mocks.workflowService.saveExecutableGeneratedPlanCache.mockResolvedValue(undefined);
     mocks.loadMap.mockResolvedValue(null);
     mocks.llmJson.mockResolvedValue(cachedPlan().workflow);
     mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValue(null);
@@ -1124,7 +1126,7 @@ describe("dashboard human workflow routes", () => {
     const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
     await runner();
 
-    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
+    expect(mocks.workflowService.saveExecutableGeneratedPlanCache).toHaveBeenCalledWith(
       expect.objectContaining({
         steps: expect.arrayContaining([
           expect.objectContaining({ id: "wake_screen", action: "screen_wake" }),
@@ -1137,7 +1139,7 @@ describe("dashboard human workflow routes", () => {
       requestKey(ASKREDDIT_NAV_INTENT),
       expect.objectContaining({ source: "dashboard_human", intent: ASKREDDIT_NAV_INTENT }),
     );
-    const savedTemplate = mocks.workflowService.saveGeneratedPlanCache.mock.calls[0][0];
+    const savedTemplate = mocks.workflowService.saveExecutableGeneratedPlanCache.mock.calls[0][0];
     expect(savedTemplate.steps.slice(0, 2).map((step: { action: string }) => step.action)).toEqual([
       "screen_wake",
       "unlock",
@@ -1280,7 +1282,7 @@ describe("dashboard human workflow routes", () => {
     const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
     await runner();
 
-    const savedTemplate = mocks.workflowService.saveGeneratedPlanCache.mock.calls[0][0];
+    const savedTemplate = mocks.workflowService.saveExecutableGeneratedPlanCache.mock.calls[0][0];
     expect(savedTemplate.steps).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: "open",
@@ -1339,7 +1341,7 @@ describe("dashboard human workflow routes", () => {
     const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
     await runner();
 
-    const savedTemplate = mocks.workflowService.saveGeneratedPlanCache.mock.calls[0][0];
+    const savedTemplate = mocks.workflowService.saveExecutableGeneratedPlanCache.mock.calls[0][0];
     expect(savedTemplate.steps).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: "open",
@@ -1395,7 +1397,7 @@ describe("dashboard human workflow routes", () => {
     const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
     await runner();
 
-    const savedTemplate = mocks.workflowService.saveGeneratedPlanCache.mock.calls[0][0];
+    const savedTemplate = mocks.workflowService.saveExecutableGeneratedPlanCache.mock.calls[0][0];
     expect(savedTemplate.steps).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1463,7 +1465,7 @@ describe("dashboard human workflow routes", () => {
     const ready = await runner() as { safetyClass: string };
 
     expect(ready.safetyClass).toBe("standard");
-    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
+    expect(mocks.workflowService.saveExecutableGeneratedPlanCache).toHaveBeenCalledWith(
       expect.objectContaining({
         safetyClass: "standard",
         steps: expect.arrayContaining([
@@ -2014,6 +2016,7 @@ describe("dashboard human workflow routes", () => {
       workflowRunId: RUN_ID,
       intent: INTENT,
       source: "dashboard_human",
+      maxSelfHealingAttempts: 0,
     }));
 
     const runInsert = mocks.client.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO agency_workflow_runs"));
@@ -2071,6 +2074,7 @@ describe("dashboard human workflow routes", () => {
       workflowRunId: RUN_ID,
       intent: INTENT,
       source: "dashboard_human",
+      maxSelfHealingAttempts: 0,
     }));
 
     const runInsert = mocks.client.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO agency_workflow_runs"));

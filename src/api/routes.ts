@@ -287,6 +287,7 @@ async function queueHumanAgencyWorkflowRun(input: {
       workflowRunId: runId,
       intent: input.intent,
       source: "dashboard_human",
+      maxSelfHealingAttempts: 0,
     };
     if (input.allowCandidateArtifact === true) taskParams.allowCandidateArtifact = true;
     const taskResult = await client.query<{ id: string }>(
@@ -1241,7 +1242,8 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
   if (!workflow && !cacheKey && !requestKey) {
     return res.status(400).json({ ok: false, error: "workflow, cacheKey or requestKey required" });
   }
-  if (workflow && (cacheKey || requestKey)) {
+  const allowsWorkflowRequestKeyPersistence = !!workflow && !!requestKey && dryRun === true && persist === true;
+  if (workflow && (cacheKey || (requestKey && !allowsWorkflowRequestKeyPersistence))) {
     return res.status(400).json({
       ok: false,
       error: "workflow payload is not allowed with cacheKey or requestKey execution",
@@ -1333,8 +1335,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
     if (dryRun) {
       const shouldPersist = persist === true;
       if (shouldPersist && !resolvedCache) {
-        await workflowService.saveTemplate(template);
-        await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+        await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, requestKey, {
           source: "generated_workflow_execute_dry_run",
           persisted: true,
         });
@@ -1345,13 +1346,13 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         data: {
           cacheHit,
           canonicalHit: cacheHit,
-          canExecuteFromCache: cacheHit,
+          canExecuteFromCache: cacheHit || shouldPersist,
           cacheKey: resolvedCache?.cacheKey ?? compiledPlan.cacheKey,
           requestKey: resolvedCache?.requestKey ?? requestKey ?? null,
           canonicalWorkflowId: resolvedCache?.canonicalWorkflowId ?? template.id,
           canonicalWorkflowVersion: resolvedCache?.canonicalWorkflowVersion ?? template.version,
           compiledPlanHash: resolvedCache?.compiledPlanHash ?? null,
-          artifactState: resolvedCache?.artifactState ?? (shouldPersist ? "candidate" : null),
+          artifactState: resolvedCache?.artifactState ?? (shouldPersist ? "promoted" : null),
           controlPlaneContext,
           ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist, compiledPlan }),
         },
@@ -1362,8 +1363,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
     controlPlaneContext.deviceId = dispatchDeviceId;
 
     if (!resolvedCache) {
-      await workflowService.saveTemplate(template);
-      await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
+      await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, requestKey, {
         source: "generated_workflow_execute",
         persisted: true,
       });

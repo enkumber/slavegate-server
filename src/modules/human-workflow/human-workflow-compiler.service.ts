@@ -1041,8 +1041,7 @@ export class HumanWorkflowCompilerService {
     const safetyClass = inferHumanWorkflowSafetyClass(input.intent);
     let compiledPlan = compileGeneratedWorkflowTemplate(template);
     compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
-    await workflowService.saveTemplate(template);
-    await workflowService.saveGeneratedPlanCache(template, compiledPlan, input.requestKey, {
+    await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, input.requestKey, {
       source: "dashboard_human",
       compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
       intent: input.intent,

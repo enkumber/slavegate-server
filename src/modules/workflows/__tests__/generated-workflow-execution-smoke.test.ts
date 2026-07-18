@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => {
       getGeneratedPlanCacheByRequestKey: vi.fn(),
       saveTemplate: vi.fn(),
       saveGeneratedPlanCache: vi.fn(),
+      saveExecutableGeneratedPlanCache: vi.fn(),
       countActiveByDevice: vi.fn(),
       countByStatus: vi.fn(),
       create: vi.fn(),
@@ -284,6 +285,7 @@ describe("generated workflow cache-only execution route", () => {
     vi.clearAllMocks();
     mocks.workflowService.saveTemplate.mockResolvedValue(undefined);
     mocks.workflowService.saveGeneratedPlanCache.mockResolvedValue(undefined);
+    mocks.workflowService.saveExecutableGeneratedPlanCache.mockResolvedValue(undefined);
     mocks.workflowService.countActiveByDevice.mockResolvedValue(0);
     mocks.workflowService.countByStatus.mockResolvedValue(0);
     mocks.workflowService.create.mockResolvedValue({ id: "wf-cache-smoke" });

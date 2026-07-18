@@ -93,6 +93,10 @@ export interface GeneratedWorkflowOutcomeInput {
   totalSteps?: number | null;
 }
 
+type Queryable = {
+  query: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
+};
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export class WorkflowService {
@@ -305,6 +309,10 @@ export class WorkflowService {
 
   async saveTemplate(template: WorkflowTemplate): Promise<void> {
     const db = getDb();
+    await this.saveTemplateWithDb(db, template);
+  }
+
+  private async saveTemplateWithDb(db: Queryable, template: WorkflowTemplate): Promise<void> {
     await db.query(
       `INSERT INTO workflow_templates
          (id, platform, definition, data_retention_days, default_verification_strategy)
@@ -352,6 +360,40 @@ export class WorkflowService {
     sourceMetadataOrOptions: Record<string, unknown> | SaveGeneratedPlanCacheOptions = {}
   ): Promise<void> {
     const db = getDb();
+    await this.saveGeneratedPlanCacheWithDb(db, template, compiledPlan, requestKey, sourceMetadataOrOptions);
+  }
+
+  async saveExecutableGeneratedPlanCache(
+    template: WorkflowTemplate,
+    compiledPlan: GeneratedWorkflowCompiledPlan,
+    requestKey: string | undefined,
+    sourceMetadata: Record<string, unknown>
+  ): Promise<void> {
+    const db = getDb();
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      await this.saveTemplateWithDb(client, template);
+      await this.saveGeneratedPlanCacheWithDb(client, template, compiledPlan, requestKey, {
+        artifactState: "promoted",
+        sourceMetadata,
+      });
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async saveGeneratedPlanCacheWithDb(
+    db: Queryable,
+    template: WorkflowTemplate,
+    compiledPlan: GeneratedWorkflowCompiledPlan,
+    requestKey?: string,
+    sourceMetadataOrOptions: Record<string, unknown> | SaveGeneratedPlanCacheOptions = {}
+  ): Promise<void> {
     const options = normalizeSaveGeneratedPlanCacheOptions(sourceMetadataOrOptions);
     const artifactState = options.artifactState ?? "candidate";
     const validation = validateGeneratedWorkflowTemplate(template);
