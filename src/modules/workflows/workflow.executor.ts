@@ -56,6 +56,7 @@ import { llmJson } from "../../utils/llm";
 import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 import { workflowQueueService, type WorkflowQueueRecord } from "./workflow-queue.service";
 import { workflowEvents } from "../workflow-events";
+import { compileDeviceWorkflowBundle } from "./workflow-bundle.compiler";
 
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
@@ -1835,9 +1836,15 @@ async function dispatchClaimedWorkflow(record: WorkflowQueueRecord): Promise<voi
     if (!template) throw new Error(`Template ${workflow.templateId} not found`);
 
     await workflowService.markRunning(record.workflowId);
+    const bundle = compileDeviceWorkflowBundle(template, {
+      workflowId: record.workflowId,
+      browserSocialHbeOptIn: Boolean(
+        (workflow.checkpoint.variables as Record<string, unknown> | undefined)?.browserSocialHbeOptIn,
+      ),
+    });
     const sent = directWsServer.sendWorkflowStart(
       record.deviceId,
-      template as unknown as Record<string, unknown>,
+      bundle as unknown as Record<string, unknown>,
       workflow.checkpoint.variables,
       record.workflowId,
     );
