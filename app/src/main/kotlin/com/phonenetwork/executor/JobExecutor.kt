@@ -115,8 +115,8 @@ class JobExecutor(
 
         // Idempotency: return cached result if already executed
         loadCachedResult(jobId)?.let { cached ->
-            Log.i(TAG, "Job $jobId already executed (cached=$cached) — skipping re-execution")
-            onResult(buildResult(jobId, cached, null, null, 0))
+            Log.i(TAG, "Job $jobId already executed — replaying cached JOB_RESULT without re-execution")
+            onResult(cached)
             return@withContext
         }
 
@@ -202,13 +202,12 @@ class JobExecutor(
             verificationStubPhase1()
         }
 
-        // Idempotency cache
-        Log.i(TAG, "Job $jobId: caching result status=$status")
-        cacheResult(jobId, status)
-
         // Always send JOB_RESULT — server audit log updated from this.
+        val result = buildResult(jobId, status, output, error, durationMs, verification)
+        Log.i(TAG, "Job $jobId: caching result status=$status")
+        cacheResult(jobId, result)
         Log.i(TAG, "Job $jobId: calling onResult status=$status")
-        onResult(buildResult(jobId, status, output, error, durationMs, verification))
+        onResult(result)
         Log.i(TAG, "Job $jobId: onResult returned")
     }
 
@@ -776,17 +775,20 @@ class JobExecutor(
     // ─── Idempotency cache (persistent) ──────────────────────────────────────
 
     /**
-     * Cache format: "$status|$timestampMs" — timestamp used for age-based pruning.
+     * Cache format: JSON object with the complete JOB_RESULT and timestamp.
+     * Replaying the full payload preserves observation outputs after reconnect
+     * and prevents duplicate execution from degrading into a status-only result.
      * SharedPreferences has no ordering; we embed timestamp to sort by age.
      */
-    private fun cacheResult(jobId: String, status: String) {
+    private fun cacheResult(jobId: String, result: JSONObject) {
         try {
             val all = idempotencyPrefs.all
             if (all.size >= MAX_CACHE_SIZE) {
                 // Sort by embedded timestamp (oldest first), remove ~10%
                 val toRemove = all.entries
                     .mapNotNull { (k, v) ->
-                        val ts = (v as? String)?.substringAfterLast('|')?.toLongOrNull() ?: 0L
+                        val raw = v as? String ?: return@mapNotNull null
+                        val ts = try { JSONObject(raw).optLong("_cachedAt", 0L) } catch (_: Exception) { 0L }
                         k to ts
                     }
                     .sortedBy { it.second }
@@ -797,17 +799,26 @@ class JobExecutor(
                     .apply()
                 Log.d(TAG, "Idempotency cache pruned ${toRemove.size} entries")
             }
+            val cached = JSONObject(result.toString()).apply {
+                put("_cachedAt", System.currentTimeMillis())
+            }
             idempotencyPrefs.edit()
-                .putString(jobId, "$status|${System.currentTimeMillis()}")
+                .putString(jobId, cached.toString())
                 .apply()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to cache job result: ${e.message}")
         }
     }
 
-    private fun loadCachedResult(jobId: String): String? =
-        // Strip the timestamp suffix before returning status
-        idempotencyPrefs.getString(jobId, null)?.substringBefore('|')
+    private fun loadCachedResult(jobId: String): JSONObject? {
+        val raw = idempotencyPrefs.getString(jobId, null) ?: return null
+        return try {
+            JSONObject(raw).apply { remove("_cachedAt") }
+        } catch (_: Exception) {
+            // Backward compatibility with the old "$status|$timestampMs" format.
+            buildResult(jobId, raw.substringBefore('|'), null, null, 0)
+        }
+    }
 
     // ─── Cascade helpers ─────────────────────────────────────────────────────
 

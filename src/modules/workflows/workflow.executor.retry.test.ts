@@ -7,6 +7,7 @@ import * as transport from "../../transport/transport";
 import { workflowService, type WorkflowRecord } from "./workflow.service";
 import {
   awaitGeneratedChildJobResult,
+  generatedChildResultTimeoutMs,
   prepareGeneratedChildJobResult,
   resolveJobResult,
   runWorkflow,
@@ -81,6 +82,14 @@ afterEach(() => {
 });
 
 describe("workflow BullMQ retry semantics", () => {
+  it("bounds effect result waits while observations retain strict execution grace", () => {
+    expect(generatedChildResultTimeoutMs(30_000, "screen_wake")).toBe(10_000);
+    expect(generatedChildResultTimeoutMs(30_000, "unlock")).toBe(10_000);
+    expect(generatedChildResultTimeoutMs(30_000, "intent_send")).toBe(10_000);
+    expect(generatedChildResultTimeoutMs(30_000, "ui_tree_dump")).toBe(35_000);
+    expect(generatedChildResultTimeoutMs(30_000, "ui_tree_dump", true)).toBe(300_000);
+  });
+
   it("continues only timeout-tolerant dispatched effects when JOB_RESULT is missing", () => {
     const timeout = new Error("JOB_RESULT timeout after 30000ms (jobId=test)");
 
@@ -135,20 +144,16 @@ describe("workflow BullMQ retry semantics", () => {
       }));
       vi.mocked(transport.sendLegacyGeneratedWorkflowJobToDevice).mockImplementation(async (_deviceId, command) => {
         dispatched.push(command.type);
-        if (command.type === "unlock") {
-          setTimeout(() => resolveJobResult(command.jobId, {
-            status: "completed",
-            output: { unlocked: true },
-            durationMs: 1,
-          }), 0);
-        }
-        if (command.type === "ui_tree_dump") {
-          expect(resolveJobResult(command.jobId, {
+        const resultPromise = command.type === "ui_tree_dump"
+          ? Promise.resolve({
             status: "completed",
             output: { tree: [{ text: "Bankroll 638.824 BTC" }] },
             durationMs: 1,
-          })).toBe(true);
-        }
+          })
+          : new Promise<never>((_resolve, reject) => setTimeout(
+            () => reject(new Error(`Job ${command.jobId} timed out after 10ms`)),
+            10,
+          ));
         return {
           decision: "dispatched",
           root: null,
@@ -156,7 +161,7 @@ describe("workflow BullMQ retry semantics", () => {
           handle: undefined,
           sent: true,
           queued: false,
-          resultPromise: Promise.resolve({}),
+          resultPromise,
         };
       });
 
@@ -201,13 +206,17 @@ describe("workflow BullMQ retry semantics", () => {
     });
   });
 
-  it("keeps a prepared sent-path waiter armed to the explicit result timeout", async () => {
+  it("uses the DirectWS waiter as the single sent-path result authority", async () => {
     vi.useFakeTimers();
     try {
       const jobId = "55555555-5555-4555-8555-555555555555";
       const resultTimeoutMs = 30_000;
       const prepared = prepareGeneratedChildJobResult(jobId, resultTimeoutMs);
-      let settled = false;
+      const directResult = {
+        status: "success",
+        output: { ok: true },
+        durationMs: 7,
+      };
       const resultPromise = awaitGeneratedChildJobResult(
         WORKFLOW_ID,
         jobId,
@@ -218,25 +227,14 @@ describe("workflow BullMQ retry semantics", () => {
           handle: undefined,
           sent: true,
           queued: false,
-          resultPromise: Promise.resolve({}),
+          resultPromise: Promise.resolve(directResult),
         },
         resultTimeoutMs,
         prepared,
-      ).finally(() => {
-        settled = true;
-      });
+      );
 
-      await vi.advanceTimersByTimeAsync(6_001);
-      expect(settled).toBe(false);
-      expect(resolveJobResult(jobId, {
-        status: "success",
-        output: { ok: true },
-        durationMs: 7,
-      })).toBe(true);
-      await expect(resultPromise).resolves.toMatchObject({
-        status: "success",
-        output: { ok: true },
-      });
+      await expect(resultPromise).resolves.toEqual(directResult);
+      expect(resolveJobResult(jobId, directResult)).toBe(false);
     } finally {
       vi.useRealTimers();
     }

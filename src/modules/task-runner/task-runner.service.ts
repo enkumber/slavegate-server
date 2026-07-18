@@ -652,6 +652,19 @@ function generatedWorkflowSelfHealingLimit(task: TaskRow): number {
   return Math.max(0, Math.min(5, Math.floor(value)));
 }
 
+function enforceGeneratedWorkflowRecoveryLimit(task: TaskRow, template: WorkflowTemplate): WorkflowTemplate {
+  if (task.params?.maxSelfHealingAttempts !== 0) return template;
+  return {
+    ...template,
+    recoveryPolicy: {
+      ...(template.recoveryPolicy ?? {}),
+      autonomy: "bounded",
+      maxAttemptsPerStep: 0,
+      maxAttemptsPerWorkflow: 0,
+    },
+  };
+}
+
 function withGeneratedWorkflowSelfHealingMetadata(
   result: TaskRunnerResult,
   selfHealing: NonNullable<NonNullable<TaskRunnerResult["generatedWorkflow"]>["selfHealing"]>,
@@ -1339,7 +1352,10 @@ async function executeGeneratedWorkflowTask(
       ...(clientId ? { clientId } : {}),
       ...(campaignId ? { campaignId } : {}),
     };
-    const executableWorkflow = normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata);
+    const executableWorkflow = enforceGeneratedWorkflowRecoveryLimit(
+      task,
+      normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata),
+    );
     const dispatch = await dispatchGeneratedWorkflowTemplate({
       templateId: executableWorkflow.id,
       template: executableWorkflow,

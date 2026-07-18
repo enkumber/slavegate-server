@@ -121,6 +121,7 @@ class DirectWsClient(
         private const val PREF_KEY = "direct_ws_device_key"
         private const val PREF_DEVICE_ID = "direct_ws_device_id"
         private const val PREF_ENABLED = "direct_ws_enabled"
+        private const val PREF_PENDING_JOB_RESULTS = "pending_job_results"
 
         private const val PING_INTERVAL_MS      = 15_000L
         private const val PONG_TIMEOUT_MS       = 10_000L   // 10s timeout per spec
@@ -148,6 +149,7 @@ class DirectWsClient(
     private var heartbeatJob: Job? = null
     private var pingJob: Job? = null
     private var reconnectJob: Job? = null
+    private var jobResultRetryJob: Job? = null
 
     @Volatile private var lastPongAt = 0L
     @Volatile private var lastPingSentAt = 0L
@@ -187,6 +189,7 @@ class DirectWsClient(
         heartbeatJob?.cancel(); heartbeatJob = null
         pingJob?.cancel();      pingJob = null
         reconnectJob?.cancel(); reconnectJob = null
+        jobResultRetryJob?.cancel(); jobResultRetryJob = null
         healthPollJob?.cancel(); healthPollJob = null
         unregisterNetworkCallback()
         ws?.close(1000, "Disconnecting"); ws = null
@@ -295,6 +298,8 @@ class DirectWsClient(
                 consecutiveReconnectAttempts = 0
                 Log.i(TAG, "AUTH_OK — deviceId=$deviceId")
                 startKeepalive(webSocket)
+                startJobResultRetry(webSocket)
+                flushPendingJobResults(webSocket)
                 onConnected(deviceId)
             }
 
@@ -329,7 +334,11 @@ class DirectWsClient(
                 Log.d(TAG, "HEARTBEAT_ACK received")
             }
 
-            "ACK" -> Log.d(TAG, "ACK: ${msg.optString("ref")}")
+            "ACK" -> {
+                val ref = msg.optString("ref")
+                Log.d(TAG, "ACK: $ref")
+                if (ref.isNotBlank()) removePendingJobResult(ref)
+            }
 
             "OTA_UPDATE" -> {
                 val version = msg.optString("version")
@@ -390,26 +399,31 @@ class DirectWsClient(
                 }
                 executor.execute(jobPayload) { result ->
                     val durationMs = System.currentTimeMillis() - startMs
-                    sendRaw(webSocket, JSONObject().apply {
+                    val resultPayload = JSONObject().apply {
                         put("type", "JOB_RESULT")
                         put("jobId", jobId)
                         put("success", result.optString("status") == "completed")
                         put("output", result.opt("output"))
                         put("error", result.optString("error", ""))
                         put("durationMs", durationMs)
-                    })
-                    Log.i(TAG, "JOB_RESULT sent: $jobId success=${result.optString("status")}")
+                        put("verification", result.opt("verification"))
+                    }
+                    queueJobResult(resultPayload)
+                    sendRaw(webSocket, resultPayload)
+                    Log.i(TAG, "JOB_RESULT queued/sent: $jobId success=${result.optString("status")}")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Job execution failed: ${e.message}")
-                sendRaw(webSocket, JSONObject().apply {
+                val resultPayload = JSONObject().apply {
                     put("type", "JOB_RESULT")
                     put("jobId", jobId)
                     put("success", false)
                     put("output", JSONObject.NULL)
                     put("error", e.message ?: "Unknown error")
                     put("durationMs", System.currentTimeMillis() - startMs)
-                })
+                }
+                queueJobResult(resultPayload)
+                sendRaw(webSocket, resultPayload)
             }
         }
     }
@@ -678,6 +692,57 @@ class DirectWsClient(
         } catch (e: Exception) {
             Log.w(TAG, "Send failed: ${e.message}")
         }
+    }
+
+    private fun startJobResultRetry(webSocket: WebSocket) {
+        jobResultRetryJob?.cancel()
+        jobResultRetryJob = scope.launch {
+            while (isActive && authenticated) {
+                flushPendingJobResults(webSocket)
+                delay(2_000L)
+            }
+        }
+    }
+
+    private fun queueJobResult(payload: JSONObject) {
+        val jobId = payload.optString("jobId")
+        if (jobId.isBlank()) return
+        try {
+            val pending = loadPendingJobResults().apply {
+                put(jobId, payload)
+            }
+            prefs.edit().putString(PREF_PENDING_JOB_RESULTS, pending.toString()).apply()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to persist JOB_RESULT for retry: ${e.message}")
+        }
+    }
+
+    private fun removePendingJobResult(jobId: String) {
+        try {
+            val pending = loadPendingJobResults()
+            if (!pending.has(jobId)) return
+            pending.remove(jobId)
+            prefs.edit().putString(PREF_PENDING_JOB_RESULTS, pending.toString()).apply()
+            Log.i(TAG, "JOB_RESULT acknowledged and removed: $jobId")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to remove acknowledged JOB_RESULT: ${e.message}")
+        }
+    }
+
+    private fun flushPendingJobResults(webSocket: WebSocket) {
+        val pending = loadPendingJobResults()
+        val keys = pending.keys()
+        while (keys.hasNext()) {
+            val jobId = keys.next()
+            val payload = pending.optJSONObject(jobId) ?: continue
+            sendRaw(webSocket, payload)
+            Log.d(TAG, "JOB_RESULT retry sent: $jobId")
+        }
+    }
+
+    private fun loadPendingJobResults(): JSONObject {
+        val raw = prefs.getString(PREF_PENDING_JOB_RESULTS, null) ?: return JSONObject()
+        return try { JSONObject(raw) } catch (_: Exception) { JSONObject() }
     }
 
     private fun getBatteryLevel(): Int {

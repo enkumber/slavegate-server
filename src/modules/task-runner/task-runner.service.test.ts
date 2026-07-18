@@ -372,6 +372,34 @@ describe("task-runner generated_workflow routine", () => {
     }));
   });
 
+  it("propagates maxSelfHealingAttempts=0 as a hard zero runtime recovery budget", async () => {
+    const cached = cacheRecord();
+    cached.workflow = {
+      ...cached.workflow,
+      recoveryPolicy: {
+        autonomy: "ai_autopilot",
+        maxAttemptsPerStep: 3,
+        maxAttemptsPerWorkflow: 6,
+      },
+    };
+    mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID, maxSelfHealingAttempts: 0 }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result.success).toBe(true);
+    expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      template: expect.objectContaining({
+        recoveryPolicy: expect.objectContaining({
+          autonomy: "bounded",
+          maxAttemptsPerStep: 0,
+          maxAttemptsPerWorkflow: 0,
+        }),
+      }),
+    }));
+    expect(mocks.llmJson).not.toHaveBeenCalled();
+  });
+
   it("fails cached dashboard human workflows that only wake and unlock for a real task", async () => {
     const cached = cacheRecord({
       sourceMetadata: {

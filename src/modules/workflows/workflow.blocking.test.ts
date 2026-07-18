@@ -491,9 +491,10 @@ describe("Generated workflow contract validation", () => {
     expect(executorSource).toContain("continuing because the dispatched effect is timeout-tolerant");
     expect(executorSource).toContain("timeoutMs: dispatchedTimeoutMs");
     expect(executorSource).toContain("awaitGeneratedChildJobResult");
-    expect(executorSource).toContain("function generatedChildResultTimeoutMs(executionTimeoutMs: number, queued = false): number");
+    expect(executorSource).toContain("export function generatedChildResultTimeoutMs(");
     expect(executorSource).toContain("const graceTimeoutMs = executionTimeoutMs + LEGACY_GENERATED_WORKFLOW_RESULT_GRACE_MS");
-    expect(executorSource).toContain("const resultTimeoutMs = Math.max(generatedChildResultTimeoutMs(dispatchedTimeoutMs), scalabilityConfig.jobResultTimeout)");
+    expect(executorSource).toContain("const EFFECT_RESULT_TIMEOUT_CAP_MS = 10_000");
+    expect(executorSource).toContain("generatedChildResultTimeoutMs(dispatchedTimeoutMs, jobType)");
     expect(executorSource).toContain("}, { resultTimeoutMs });");
     expect(executorSource).toContain("dispatch.queued");
     expect(executorSource).toContain("generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReasonFromError(err)).inc()");

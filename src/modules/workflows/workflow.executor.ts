@@ -72,8 +72,17 @@ type GeneratedChildDispatchResult =
   | Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>
   | Awaited<ReturnType<typeof sendLegacyGeneratedWorkflowJobToDevice>>;
 
-function generatedChildResultTimeoutMs(executionTimeoutMs: number, queued = false): number {
+const EFFECT_RESULT_TIMEOUT_CAP_MS = 10_000;
+
+export function generatedChildResultTimeoutMs(
+  executionTimeoutMs: number,
+  action: string,
+  queued = false,
+): number {
   const graceTimeoutMs = executionTimeoutMs + LEGACY_GENERATED_WORKFLOW_RESULT_GRACE_MS;
+  if (isTimeoutTolerantEffectAction(action)) {
+    return Math.min(graceTimeoutMs, EFFECT_RESULT_TIMEOUT_CAP_MS);
+  }
   return queued
     ? Math.max(graceTimeoutMs, scalabilityConfig.jobResultTimeout)
     : graceTimeoutMs;
@@ -156,7 +165,7 @@ function isTimeoutTolerantEffectAction(action: string): boolean {
 
 function isJobResultTimeoutError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
-  return message.includes("JOB_RESULT timeout");
+  return message.includes("JOB_RESULT timeout") || /Job .* timed out after \d+ms/.test(message);
 }
 
 export function shouldContinueAfterMissingJobResult(
@@ -298,7 +307,7 @@ async function dispatchGeneratedWorkflowProbe(
       workflowId,
       stepIndex,
     });
-    const resultTimeoutMs = Math.max(generatedChildResultTimeoutMs(timeoutMs), scalabilityConfig.jobResultTimeout);
+    const resultTimeoutMs = generatedChildResultTimeoutMs(timeoutMs, type);
     const prepared = prepareGeneratedChildJobResult(jobId, resultTimeoutMs);
     let dispatch: GeneratedChildDispatchResult;
     try {
@@ -666,6 +675,13 @@ export function awaitGeneratedChildJobResult(
     console.log(
       `[workflow] ${workflowId} child job ${jobId.slice(0, 8)} queued behind the active device root; awaiting PNQ replay`,
     );
+  }
+  if (dispatch.sent && "resultPromise" in dispatch && dispatch.resultPromise) {
+    // DirectWS owns the waiter registered before the JOB frame is serialized.
+    // Keeping a second workflow-local waiter for the same job loses results
+    // whenever only one result handler wins the race.
+    prepared?.cancel();
+    return dispatch.resultPromise as Promise<JobStepResult>;
   }
   if (prepared) {
     prepared.armTimeout(resultTimeoutMs);
@@ -1132,7 +1148,7 @@ async function executeSkillActionStep(
         workflowId,
         stepIndex,
       });
-      const resultTimeoutMs = Math.max(generatedChildResultTimeoutMs(dispatchedTimeoutMs), scalabilityConfig.jobResultTimeout);
+      const resultTimeoutMs = generatedChildResultTimeoutMs(dispatchedTimeoutMs, jobType);
       const prepared = prepareGeneratedChildJobResult(jobId, resultTimeoutMs);
       let dispatch: GeneratedChildDispatchResult;
       try {
@@ -1408,7 +1424,7 @@ async function executeActionStep(
   );
 
   // Send to device via DirectWS transport
-  const resultTimeoutMs = Math.max(generatedChildResultTimeoutMs(dispatchedTimeoutMs), scalabilityConfig.jobResultTimeout);
+  const resultTimeoutMs = generatedChildResultTimeoutMs(dispatchedTimeoutMs, jobType);
   const prepared = prepareGeneratedChildJobResult(jobId, resultTimeoutMs);
   let dispatch: GeneratedChildDispatchResult;
   try {
