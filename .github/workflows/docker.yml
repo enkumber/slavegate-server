@@ -2,7 +2,7 @@ name: Build & Push Docker Image
 
 on:
   push:
-    branches: [master, rebuild/workflow-queue-from-pre-pnq]
+    branches: [master, rebuild/workflow-queue-from-pre-pnq, nox/device-bundle-hbe-3.9.171]
 
 env:
   REGISTRY: ghcr.io
