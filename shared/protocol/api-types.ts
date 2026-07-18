@@ -104,8 +104,6 @@ export interface DispatchJobRequest {
   verificationStrategy?: "local_only" | "local_with_screenshot" | "full_cascade" | "vlm_required";
   l1TimeoutMs?: number;
   l2SettleMs?: number;
-  /** Server-side compatibility lane for production legacy generated workflows. */
-  executionLane?: "legacy_generated_workflow";
 }
 
 export interface DispatchJobResponse {

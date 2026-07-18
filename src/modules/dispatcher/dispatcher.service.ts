@@ -88,6 +88,10 @@ export function shouldBlockRootForTimedOutJob(workflowId?: string): boolean {
   return !workflowId;
 }
 
+interface DispatchCoreOptions {
+  legacyCompatibilityLane?: boolean;
+}
+
 export class DispatcherService {
   private queues = new Map<string, Queue>();
 
@@ -108,7 +112,17 @@ export class DispatcherService {
   }
 
   async dispatch(req: DispatchJobRequest): Promise<{ jobId: string; timeoutMs: number }> {
-    const legacyCompatibilityLane = req.executionLane === "legacy_generated_workflow";
+    return this.dispatchCore(req, {});
+  }
+
+  async dispatchLegacyGeneratedWorkflow(req: DispatchJobRequest): Promise<{ jobId: string; timeoutMs: number }> {
+    return this.dispatchCore(req, { legacyCompatibilityLane: true });
+  }
+
+  private async dispatchCore(
+    req: DispatchJobRequest,
+    { legacyCompatibilityLane = false }: DispatchCoreOptions,
+  ): Promise<{ jobId: string; timeoutMs: number }> {
 
     // 0. Kill switch — block all dispatches when active (B4 fix)
     if (await isKillSwitchActive()) {

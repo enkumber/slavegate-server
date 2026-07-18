@@ -7,6 +7,7 @@ import * as transport from "../../transport/transport";
 import { workflowService, type WorkflowRecord } from "./workflow.service";
 import {
   awaitGeneratedChildJobResult,
+  prepareGeneratedChildJobResult,
   resolveJobResult,
   runWorkflow,
   shouldContinueAfterMissingJobResult,
@@ -128,7 +129,7 @@ describe("workflow BullMQ retry semantics", () => {
         l1TimeoutMs: 1,
         l2SettleMs: 0,
       } as ReturnType<typeof hbeService.getActionParams>);
-      vi.spyOn(dispatcherService, "dispatch").mockImplementation(async (input) => ({
+      vi.spyOn(dispatcherService, "dispatchLegacyGeneratedWorkflow").mockImplementation(async (input) => ({
         jobId: `job-${++jobCounter}-${input.type}`,
         timeoutMs: input.timeoutMs ?? 1,
       }));
@@ -198,6 +199,47 @@ describe("workflow BullMQ retry semantics", () => {
       status: "success",
       output: { unlocked: true },
     });
+  });
+
+  it("keeps a prepared sent-path waiter armed to the explicit result timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const jobId = "55555555-5555-4555-8555-555555555555";
+      const resultTimeoutMs = 30_000;
+      const prepared = prepareGeneratedChildJobResult(jobId, resultTimeoutMs);
+      let settled = false;
+      const resultPromise = awaitGeneratedChildJobResult(
+        WORKFLOW_ID,
+        jobId,
+        {
+          decision: "dispatched",
+          root: null,
+          operation: undefined,
+          handle: undefined,
+          sent: true,
+          queued: false,
+          resultPromise: Promise.resolve({}),
+        },
+        resultTimeoutMs,
+        prepared,
+      ).finally(() => {
+        settled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(6_001);
+      expect(settled).toBe(false);
+      expect(resolveJobResult(jobId, {
+        status: "success",
+        output: { ok: true },
+        durationMs: 7,
+      })).toBe(true);
+      await expect(resultPromise).resolves.toMatchObject({
+        status: "success",
+        output: { ok: true },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("still rejects a server child that PNQ did not send or queue", () => {

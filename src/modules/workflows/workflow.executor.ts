@@ -290,14 +290,13 @@ async function dispatchGeneratedWorkflowProbe(
   timeoutMs: number,
 ): Promise<JobStepResult | null> {
   try {
-    const { jobId } = await dispatcherService.dispatch({
+    const { jobId } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
       deviceId,
       type,
       params: {},
       timeoutMs,
       workflowId,
       stepIndex,
-      executionLane: "legacy_generated_workflow",
     });
     const resultTimeoutMs = Math.max(generatedChildResultTimeoutMs(timeoutMs), scalabilityConfig.jobResultTimeout);
     const prepared = prepareGeneratedChildJobResult(jobId, resultTimeoutMs);
@@ -316,7 +315,7 @@ async function dispatchGeneratedWorkflowProbe(
       prepared.cancel();
       return null;
     }
-    return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, timeoutMs, prepared);
+    return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, resultTimeoutMs, prepared);
   } catch {
     return null;
   }
@@ -651,7 +650,7 @@ export function awaitGeneratedChildJobResult(
   workflowId: string,
   jobId: string,
   dispatch: GeneratedChildDispatchResult,
-  executionTimeoutMs: number,
+  resultTimeoutMs: number,
   prepared?: PreparedGeneratedChildJobResult,
 ): Promise<JobStepResult> {
   if (!dispatch.sent && !dispatch.queued) {
@@ -663,9 +662,6 @@ export function awaitGeneratedChildJobResult(
   // first child JOB is then persisted by PNQ and replayed by the queue pump
   // after the active root finishes. `would_wait` is therefore an accepted
   // dispatch state, not a device/recovery failure.
-  const resultTimeoutMs = dispatch.queued
-    ? generatedChildResultTimeoutMs(executionTimeoutMs, true)
-    : generatedChildResultTimeoutMs(executionTimeoutMs);
   if (dispatch.queued) {
     console.log(
       `[workflow] ${workflowId} child job ${jobId.slice(0, 8)} queued behind the active device root; awaiting PNQ replay`,
@@ -1128,14 +1124,13 @@ async function executeSkillActionStep(
     // Dispatch a device job (ui_tree_dump, a11y_find_tap, etc.) and await JOB_RESULT.
     async dispatchAndWait(type, params, timeoutMs = 30_000) {
       const jobType = type as import("../../../shared/protocol/messages").JobType;
-      const { jobId, timeoutMs: dispatchedTimeoutMs } = await dispatcherService.dispatch({
+      const { jobId, timeoutMs: dispatchedTimeoutMs } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
         deviceId,
         type:     jobType,
         params:   params as import("../../../shared/protocol/messages").JobParams,
         timeoutMs,
         workflowId,
         stepIndex,
-        executionLane: "legacy_generated_workflow",
       });
       const resultTimeoutMs = Math.max(generatedChildResultTimeoutMs(dispatchedTimeoutMs), scalabilityConfig.jobResultTimeout);
       const prepared = prepareGeneratedChildJobResult(jobId, resultTimeoutMs);
@@ -1150,7 +1145,7 @@ async function executeSkillActionStep(
         prepared.cancel();
         throw err;
       }
-      return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, dispatchedTimeoutMs, prepared);
+      return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, resultTimeoutMs, prepared);
     },
 
     // Cascade tap a named element (calls executeCascadeTap from skill.cascade).
@@ -1391,7 +1386,7 @@ async function executeActionStep(
   // action string → JobType (validated by dispatcher whitelist)
   const jobType = step.action as import("../../../shared/protocol/messages").JobType;
 
-  const { jobId, timeoutMs: dispatchedTimeoutMs } = await dispatcherService.dispatch({
+  const { jobId, timeoutMs: dispatchedTimeoutMs } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
     deviceId,
     type:        jobType,
     params:      finalParams as import("../../../shared/protocol/messages").JobParams,
@@ -1402,7 +1397,6 @@ async function executeActionStep(
     verificationStrategy: strategy,
     l1TimeoutMs: hbeStep.l1TimeoutMs,
     l2SettleMs:  hbeStep.l2SettleMs,
-    executionLane: "legacy_generated_workflow",
   });
 
   // Write audit log entry at dispatch
@@ -1436,7 +1430,7 @@ async function executeActionStep(
     workflowId,
     jobId,
     dispatch,
-    dispatchedTimeoutMs,
+    resultTimeoutMs,
     prepared,
   );
 
