@@ -147,6 +147,65 @@ describe("generated workflow plan cache service", () => {
     expect(values[11]).toBe(JSON.stringify(compiledPlan));
   });
 
+  it("atomically persists an executable template and promoted cache artifact", async () => {
+    const service = new WorkflowService();
+    const workflow = redditHomeWorkflow();
+    const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
+    const client = {
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+      release: vi.fn(),
+    };
+    vi.mocked(getDb).mockReturnValue({
+      connect: vi.fn().mockResolvedValue(client),
+    } as any);
+
+    await service.saveExecutableGeneratedPlanCache(
+      workflow,
+      compiledPlan,
+      "c02c59dfbe512562f8c65c97",
+      {
+        artifactState: "candidate",
+        sourceMetadata: { source: "atomic_test" },
+      },
+    );
+
+    expect(client.query.mock.calls[0][0]).toBe("BEGIN");
+    expect(client.query.mock.calls[1][0]).toContain("INSERT INTO workflow_templates");
+    expect(client.query.mock.calls[2][0]).toContain("DELETE FROM generated_workflow_plan_cache");
+    expect(client.query.mock.calls[3][0]).toContain("INSERT INTO generated_workflow_plan_cache");
+    expect(client.query.mock.calls[3][1][5]).toBe("promoted");
+    expect(JSON.parse(client.query.mock.calls[3][1][6])).toMatchObject({ source: "atomic_test" });
+    expect(client.query.mock.calls[4][0]).toBe("COMMIT");
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back atomic executable persistence on cache failure", async () => {
+    const service = new WorkflowService();
+    const workflow = redditHomeWorkflow();
+    const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
+    const client = {
+      query: vi.fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockRejectedValueOnce(new Error("cache write failed"))
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    };
+    vi.mocked(getDb).mockReturnValue({
+      connect: vi.fn().mockResolvedValue(client),
+    } as any);
+
+    await expect(service.saveExecutableGeneratedPlanCache(
+      workflow,
+      compiledPlan,
+      "c02c59dfbe512562f8c65c97",
+      { sourceMetadata: { source: "atomic_test" } },
+    )).rejects.toThrow("cache write failed");
+
+    expect(client.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
   it("replaces an existing canonical requestKey with the freshly compiled artifact", async () => {
     const service = new WorkflowService();
     const workflow = redditHomeWorkflow();

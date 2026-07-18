@@ -974,8 +974,7 @@ export class HumanWorkflowCompilerService {
     assertHumanWorkflowMeaningful(template, input.intent);
     let compiledPlan = compileGeneratedWorkflowTemplate(template);
     compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
-    await workflowService.saveTemplate(template);
-    await workflowService.saveGeneratedPlanCache(template, compiledPlan, input.requestKey, {
+    await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, input.requestKey, {
       artifactState: "promoted",
       sourceMetadata: {
         source: "dashboard_human",
@@ -1041,15 +1040,17 @@ export class HumanWorkflowCompilerService {
     const safetyClass = inferHumanWorkflowSafetyClass(input.intent);
     let compiledPlan = compileGeneratedWorkflowTemplate(template);
     compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
-    await workflowService.saveTemplate(template);
-    await workflowService.saveGeneratedPlanCache(template, compiledPlan, input.requestKey, {
-      source: "dashboard_human",
-      compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
-      intent: input.intent,
-      deviceId: input.target.device_id,
-      accountId: input.target.account_id,
-      platform,
-      compiledAt: new Date().toISOString(),
+    await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, input.requestKey, {
+      artifactState: "promoted",
+      sourceMetadata: {
+        source: "dashboard_human",
+        compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
+        intent: input.intent,
+        deviceId: input.target.device_id,
+        accountId: input.target.account_id,
+        platform,
+        compiledAt: new Date().toISOString(),
+      },
     });
     return {
       status: "ready",
