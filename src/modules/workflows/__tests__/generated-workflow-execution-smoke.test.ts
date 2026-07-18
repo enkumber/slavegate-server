@@ -42,6 +42,7 @@ const mocks = vi.hoisted(() => {
     appMapping: {
       loadMap: vi.fn(),
     },
+    startWorkflow: vi.fn(() => Promise.resolve()),
     metrics: {
       executionInc,
       executionLabels,
@@ -65,7 +66,7 @@ vi.mock("../../../modules/app-mapping/recorder.service", () => ({ loadMap: mocks
 vi.mock("../../../modules/workflows/workflow.service", () => ({
   workflowService: mocks.workflowService,
 }));
-vi.mock("../../../modules/workflows/workflow.executor", () => ({ startWorkflow: vi.fn(() => Promise.resolve()) }));
+vi.mock("../../../modules/workflows/workflow.executor", () => ({ startWorkflow: mocks.startWorkflow }));
 vi.mock("../../../modules/hbe/hbe.service", () => ({ hbeService: mocks.hbeService }));
 vi.mock("../../../modules/accounts/accounts.service", () => ({ accountsService: {} }));
 vi.mock("../../../modules/data-pipeline/data-pipeline.service", () => ({ dataPipelineService: {} }));
@@ -293,9 +294,7 @@ describe("generated workflow cache-only execution route", () => {
     vi.useRealTimers();
   });
 
-  it("fails an edge workflow when the device never acknowledges WORKFLOW_START", async () => {
-    vi.useFakeTimers();
-    process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS = "5";
+  it("queues edge workflows through the per-device workflow queue", async () => {
     const cached = cacheRecord();
     const { dispatchGeneratedWorkflowTemplate } = await import("../generated-workflow-execution.service");
 
@@ -310,33 +309,14 @@ describe("generated workflow cache-only execution route", () => {
 
     expect(result).toMatchObject({
       workflowId: "wf-cache-smoke",
-      status: "running",
+      status: "queued",
       mode: "edge",
     });
-    mocks.workflowService.get.mockResolvedValue({
-      id: "wf-cache-smoke",
-      status: "running",
-      currentStep: 0,
-      checkpoint: {
-        stepIndex: 0,
-        loopStack: [],
-        variables: {},
-        hbeParams: {},
-        checkpointAt: "2026-06-19T00:00:00.000Z",
-      },
-    });
-
-    await vi.advanceTimersByTimeAsync(6);
-
-    expect(mocks.workflowService.markFailed).toHaveBeenCalledWith(
-      "wf-cache-smoke",
-      expect.stringContaining("Edge workflow did not acknowledge WORKFLOW_START"),
-    );
+    expect(mocks.startWorkflow).toHaveBeenCalledWith("wf-cache-smoke");
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
   });
 
-  it("does not fail an edge workflow after the device acknowledgement checkpoint arrives", async () => {
-    vi.useFakeTimers();
-    process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS = "5";
+  it("does not mark a queued edge workflow running before the queue claims it", async () => {
     const cached = cacheRecord();
     const { dispatchGeneratedWorkflowTemplate } = await import("../generated-workflow-execution.service");
 
@@ -348,22 +328,8 @@ describe("generated workflow cache-only execution route", () => {
       variables: { generatedWorkflow: true },
       logPrefix: "test",
     });
-    mocks.workflowService.get.mockResolvedValue({
-      id: "wf-cache-smoke",
-      status: "running",
-      currentStep: 0,
-      checkpoint: {
-        source: "edge",
-        stepIndex: 0,
-        loopStack: [],
-        variables: {},
-        hbeParams: {},
-        checkpointAt: "2026-06-19T00:00:01.000Z",
-      },
-    });
-
-    await vi.advanceTimersByTimeAsync(6);
-
+    expect(mocks.startWorkflow).toHaveBeenCalledWith("wf-cache-smoke");
+    expect(mocks.workflowService.markRunning).not.toHaveBeenCalled();
     expect(mocks.workflowService.markFailed).not.toHaveBeenCalled();
   });
 
@@ -440,15 +406,8 @@ describe("generated workflow cache-only execution route", () => {
       },
     });
     expect(mocks.workflowService.getGeneratedPlanCache).toHaveBeenCalledWith(cached.cacheKey);
-    expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalledWith(
-      "11111111-1111-4111-8111-111111111111",
-      cached.workflow,
-      expect.objectContaining({
-        generatedWorkflow: true,
-        generatedWorkflowId: cached.templateId,
-      }),
-      "wf-cache-smoke",
-    );
+    expect(mocks.startWorkflow).toHaveBeenCalledWith("wf-cache-smoke");
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
     expect(mocks.workflowService.create).toHaveBeenCalledWith(expect.objectContaining({
       accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     }));
@@ -502,12 +461,8 @@ describe("generated workflow cache-only execution route", () => {
       },
     });
     expect(mocks.workflowService.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(cached.requestKey);
-    expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalledWith(
-      "11111111-1111-4111-8111-111111111111",
-      cached.workflow,
-      expect.any(Object),
-      "wf-cache-smoke",
-    );
+    expect(mocks.startWorkflow).toHaveBeenCalledWith("wf-cache-smoke");
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
     expect(mocks.metrics.executionLabels).toHaveBeenCalledWith("reddit", "true", "request_key");
     expect(mocks.metrics.llmAvoidedLabels).toHaveBeenCalledWith("reddit", "cache_hit");
   });
@@ -591,7 +546,7 @@ describe("generated workflow cache-only execution route", () => {
         ],
       },
     });
-    expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalled();
+    expect(mocks.startWorkflow).toHaveBeenCalledWith("wf-cache-smoke");
   });
 
   it("rejects workflow payloads in canonical cache execution mode", async () => {

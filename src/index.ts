@@ -24,7 +24,7 @@ import { getDb, closeDb } from "./db/client";
 import { closeRedis } from "./redis/client";
 import { dispatcherService } from "./modules/dispatcher/dispatcher.service";
 import { authService } from "./modules/auth/auth.service";
-import { startWorkflowWorker } from "./modules/workflows/workflow.executor";
+import { startWorkflowQueuePump, startWorkflowWorker } from "./modules/workflows/workflow.executor";
 import { bootstrapParsers } from "./modules/data-pipeline/parser-registry";
 import { lifecycleManager } from "./modules/accounts/lifecycle";
 import { canaryService } from "./modules/canary/canary.service";
@@ -88,6 +88,7 @@ async function bootstrap(): Promise<void> {
   // ─── Start workflow execution worker ─────────────────────────────────────
   startWorkflowWorker();
   console.log("[server] Workflow worker started.");
+  await startWorkflowQueuePump();
 
   // ─── Bootstrap data pipeline parsers ─────────────────────────────────────
   await bootstrapParsers();

@@ -798,8 +798,8 @@ describe("DB Pool configuration", () => {
 
 // ─── Per-device concurrency guard ──────────────────────────────────────────
 
-describe("Per-device concurrency guard", () => {
-  it("should check countActiveByDevice before creating workflow", async () => {
+describe("Per-device FIFO admission", () => {
+  it("should queue multiple workflows instead of rejecting a busy device", async () => {
     const fs = await import("fs");
     const path = await import("path");
     const workflowSection = fs.readFileSync(
@@ -807,15 +807,18 @@ describe("Per-device concurrency guard", () => {
       "utf8"
     );
 
-    // Should check per-device active workflows
-    expect(workflowSection).toContain("countActiveByDevice");
-    expect(workflowSection).toContain("maxWorkflowsPerDevice");
-    // Should return 409 (conflict) for device busy
-    expect(workflowSection).toContain("409");
-    expect(workflowSection).toContain("DEVICE_BUSY");
+    expect(workflowSection).not.toContain("DEVICE_BUSY");
+    expect(workflowSection).not.toContain("maxWorkflowsPerDevice");
+
+    const executor = fs.readFileSync(
+      path.join(__dirname, "workflow.executor.ts"),
+      "utf8"
+    );
+    expect(executor).toContain("workflowQueueService.enqueue(workflowId, workflow.deviceId)");
+    expect(executor).toContain("pumpWorkflowQueueForDevice(workflow.deviceId)");
   });
 
-  it("should check global concurrent limit", async () => {
+  it("should let PostgreSQL queue absorb work instead of rejecting at global capacity", async () => {
     const fs = await import("fs");
     const path = await import("path");
     const workflowSection = fs.readFileSync(
@@ -823,9 +826,8 @@ describe("Per-device concurrency guard", () => {
       "utf8"
     );
 
-    expect(workflowSection).toContain("maxGlobalConcurrentWorkflows");
-    expect(workflowSection).toContain("429");
-    expect(workflowSection).toContain("SERVER_BUSY");
+    expect(workflowSection).not.toContain("SERVER_BUSY");
+    expect(workflowSection).not.toContain("maxGlobalConcurrentWorkflows");
   });
 });
 

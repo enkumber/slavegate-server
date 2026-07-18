@@ -277,6 +277,21 @@ export class WorkflowService {
     );
   }
 
+  async setExecutionMode(id: string, mode: "edge" | "server"): Promise<void> {
+    const db = getDb();
+    await db.query(
+      `UPDATE workflows
+       SET checkpoint = jsonb_set(
+         checkpoint,
+         '{executionStats,mode}',
+         to_jsonb($2::text),
+         true
+       )
+       WHERE id = $1`,
+      [id, mode],
+    );
+  }
+
   async markPaused(id: string): Promise<void> {
     const db = getDb();
     await db.query(

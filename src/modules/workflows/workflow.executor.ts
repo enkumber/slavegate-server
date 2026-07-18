@@ -54,6 +54,8 @@ import {
 } from "../observability/metrics";
 import { llmJson } from "../../utils/llm";
 import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
+import { workflowQueueService, type WorkflowQueueRecord } from "./workflow-queue.service";
+import { workflowEvents } from "../workflow-events";
 
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
@@ -590,9 +592,26 @@ export function startWorkflowWorker(): Worker {
     if (job.attemptsMade >= 3) {
       console.error(`[workflow] DLQ: ${workflowId} failed after 3 attempts: ${err.message}`);
       await workflowService.markFailed(workflowId, err.message);
+      await workflowQueueService.markFailed(workflowId, err.message);
+      const workflow = await workflowService.get(workflowId);
+      if (workflow?.deviceId) await pumpWorkflowQueueForDevice(workflow.deviceId);
     } else {
       console.warn(`[workflow] ${workflowId} attempt ${job.attemptsMade} failed — retrying from checkpoint: ${err.message}`);
     }
+  });
+
+  worker.on("completed", async (job) => {
+    const { workflowId } = job.data as { workflowId: string };
+    const workflow = await workflowService.get(workflowId);
+    if (workflow?.status === "completed") {
+      await workflowQueueService.markDone(workflowId);
+    } else {
+      await workflowQueueService.markFailed(
+        workflowId,
+        workflow?.error ?? `workflow worker completed with status ${workflow?.status ?? "missing"}`,
+      );
+    }
+    if (workflow?.deviceId) await pumpWorkflowQueueForDevice(workflow.deviceId);
   });
 
   console.log("[workflow] Worker started");
@@ -1736,6 +1755,14 @@ function uuidv4Batch(): string {
  * if Redis is slow or unresponsive.
  */
 export async function startWorkflow(workflowId: string): Promise<void> {
+  const workflow = await workflowService.get(workflowId);
+  if (!workflow?.deviceId) throw new Error(`Workflow ${workflowId} has no deviceId`);
+
+  await workflowQueueService.enqueue(workflowId, workflow.deviceId);
+  await pumpWorkflowQueueForDevice(workflow.deviceId);
+}
+
+async function addWorkflowToBullMq(workflowId: string): Promise<void> {
   const queue = getWorkflowQueue();
   const addPromise = queue.add("execute-workflow", { workflowId }, {
     jobId: workflowId,  // Unic per workflow - previne duplicate jobs
@@ -1744,7 +1771,7 @@ export async function startWorkflow(workflowId: string): Promise<void> {
   });
 
   // Timeout — don't block the caller if Redis is slow
-  const result = await Promise.race([
+  await Promise.race([
     addPromise,
     new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error(`queue.add() timeout for ${workflowId}`)), scalabilityConfig.enqueueTimeout)
@@ -1752,6 +1779,126 @@ export async function startWorkflow(workflowId: string): Promise<void> {
   ]);
 
   console.log(`[workflow] ${workflowId} enqueued`);
+}
+
+const EDGE_WORKFLOW_ACK_TIMEOUT_MS = Number(process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS ?? 20_000);
+
+function scheduleQueuedEdgeWorkflowAckWatchdog(record: WorkflowQueueRecord): void {
+  const timeout = setTimeout(async () => {
+    try {
+      const latest = await workflowService.get(record.workflowId);
+      if (!latest || latest.status !== "running" || latest.currentStep !== 0) return;
+      if ((latest.checkpoint as unknown as Record<string, unknown>)?.source === "edge") return;
+
+      const error = `Edge workflow did not acknowledge WORKFLOW_START within ${EDGE_WORKFLOW_ACK_TIMEOUT_MS}ms`;
+      await workflowService.markFailed(record.workflowId, error);
+      await workflowQueueService.markFailed(record.workflowId, error);
+      workflowEvents.publish({
+        source: "workflow_executor",
+        event: "failed",
+        workflowId: record.workflowId,
+        deviceId: record.deviceId,
+        mode: "edge",
+        status: "failed",
+        currentStep: 0,
+        error,
+        details: { reason: "edge_ack_timeout", timeoutMs: EDGE_WORKFLOW_ACK_TIMEOUT_MS },
+      });
+      await pumpWorkflowQueueForDevice(record.deviceId);
+    } catch (err) {
+      console.error(`[workflow-queue] edge ACK watchdog failed for ${record.workflowId}: ${(err as Error).message}`);
+    }
+  }, EDGE_WORKFLOW_ACK_TIMEOUT_MS);
+  timeout.unref?.();
+}
+
+async function dispatchClaimedWorkflow(record: WorkflowQueueRecord): Promise<void> {
+  const workflow = await workflowService.get(record.workflowId);
+  if (!workflow) {
+    await workflowQueueService.markFailed(record.workflowId, "workflow row not found");
+    return;
+  }
+
+  if (workflow.status === "completed") {
+    await workflowQueueService.markDone(record.workflowId);
+    return;
+  }
+  if (["failed", "cancelled"].includes(workflow.status)) {
+    await workflowQueueService.markFailed(record.workflowId, workflow.error ?? `workflow is ${workflow.status}`);
+    return;
+  }
+
+  const requestedMode = workflow.checkpoint.executionStats?.mode ?? "server";
+  if (requestedMode === "edge" && directWsServer.supportsEdgeExecution(record.deviceId)) {
+    if (!workflow.templateId) throw new Error(`Workflow ${record.workflowId} has no template`);
+    const template = await workflowService.getTemplate(workflow.templateId);
+    if (!template) throw new Error(`Template ${workflow.templateId} not found`);
+
+    await workflowService.markRunning(record.workflowId);
+    const sent = directWsServer.sendWorkflowStart(
+      record.deviceId,
+      template as unknown as Record<string, unknown>,
+      workflow.checkpoint.variables,
+      record.workflowId,
+    );
+    if (sent) {
+      scheduleQueuedEdgeWorkflowAckWatchdog(record);
+      console.log(`[workflow-queue] ${record.workflowId} started on ${record.deviceId} in edge mode`);
+      return;
+    }
+
+    console.warn(`[workflow-queue] ${record.workflowId} edge dispatch unavailable; falling back to server mode`);
+    await workflowService.setExecutionMode(record.workflowId, "server");
+  }
+
+  await addWorkflowToBullMq(record.workflowId);
+}
+
+export async function pumpWorkflowQueueForDevice(deviceId: string): Promise<void> {
+  const claimed = await workflowQueueService.claimNext(deviceId);
+  if (!claimed) return;
+
+  try {
+    await dispatchClaimedWorkflow(claimed);
+  } catch (err) {
+    const message = (err as Error).message;
+    await workflowQueueService.releaseClaim(claimed.workflowId, message);
+    throw err;
+  }
+}
+
+let workflowQueuePumpTimer: ReturnType<typeof setInterval> | null = null;
+
+export async function startWorkflowQueuePump(): Promise<void> {
+  await workflowQueueService.reconcileTerminalWorkflows();
+
+  for (const working of await workflowQueueService.listWorking()) {
+    const workflow = await workflowService.get(working.workflowId);
+    if (workflow?.status === "queued") {
+      try {
+        await dispatchClaimedWorkflow(working);
+      } catch (err) {
+        await workflowQueueService.releaseClaim(working.workflowId, (err as Error).message);
+      }
+    }
+  }
+
+  const pumpAllReady = async (): Promise<void> => {
+    await workflowQueueService.reconcileTerminalWorkflows();
+    const devices = await workflowQueueService.listReadyDeviceIds();
+    await Promise.all(devices.map((deviceId) =>
+      pumpWorkflowQueueForDevice(deviceId).catch((err) =>
+        console.error(`[workflow-queue] pump failed for ${deviceId}: ${(err as Error).message}`)
+      )
+    ));
+  };
+
+  await pumpAllReady();
+  if (!workflowQueuePumpTimer) {
+    workflowQueuePumpTimer = setInterval(pumpAllReady, 1_000);
+    workflowQueuePumpTimer.unref?.();
+  }
+  console.log("[workflow-queue] PostgreSQL FIFO pump started");
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

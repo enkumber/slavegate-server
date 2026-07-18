@@ -1,4 +1,3 @@
-import { scalabilityConfig } from "../../config/scalability.config";
 import { directWsServer } from "../../ws/direct-ws.server";
 import { hbeService } from "../hbe/hbe.service";
 import { startWorkflow } from "./workflow.executor";
@@ -8,42 +7,6 @@ import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 import { workflowEvents } from "../workflow-events";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
-const EDGE_WORKFLOW_ACK_TIMEOUT_MS = Number(process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS ?? 20_000);
-const EDGE_WORKFLOW_ACK_TIMEOUT_ERROR = "Edge workflow did not acknowledge WORKFLOW_START";
-
-function scheduleEdgeWorkflowAckWatchdog(workflowId: string, deviceId: string, logPrefix: string): void {
-  const timeout = setTimeout(async () => {
-    try {
-      const latest = await workflowService.get(workflowId);
-      if (!latest || latest.status !== "running" || latest.currentStep !== 0) return;
-      if ((latest.checkpoint as unknown as Record<string, unknown> | undefined)?.source === "edge") return;
-
-      await workflowService.markFailed(
-        workflowId,
-        `${EDGE_WORKFLOW_ACK_TIMEOUT_ERROR} within ${EDGE_WORKFLOW_ACK_TIMEOUT_MS}ms`,
-      );
-      workflowEvents.publish({
-        source: "workflow_executor",
-        event: "failed",
-        workflowId,
-        deviceId,
-        mode: "edge",
-        status: "failed",
-        currentStep: 0,
-        error: EDGE_WORKFLOW_ACK_TIMEOUT_ERROR,
-        details: {
-          reason: "edge_ack_timeout",
-          timeoutMs: EDGE_WORKFLOW_ACK_TIMEOUT_MS,
-        },
-      });
-      console.warn(`[${logPrefix}] Edge workflow ${workflowId} on ${deviceId.slice(0, 8)} did not acknowledge start within ${EDGE_WORKFLOW_ACK_TIMEOUT_MS}ms`);
-    } catch (err) {
-      console.error(`[${logPrefix}] Edge workflow ack watchdog failed for ${workflowId}: ${(err as Error).message}`);
-    }
-  }, EDGE_WORKFLOW_ACK_TIMEOUT_MS);
-  timeout.unref?.();
-}
-
 export function resolveGeneratedWorkflowDeviceId(deviceId: string): string {
   if (UUID_RE.test(deviceId)) return deviceId;
 
@@ -136,22 +99,6 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     throw err;
   }
 
-  const activeForDevice = await workflowService.countActiveByDevice(deviceId);
-  if (activeForDevice >= scalabilityConfig.maxWorkflowsPerDevice) {
-    const err = new Error(`Device already has ${activeForDevice} active workflow(s). Max: ${scalabilityConfig.maxWorkflowsPerDevice} per device.`);
-    (err as Error & { status?: number; code?: string }).status = 409;
-    (err as Error & { status?: number; code?: string }).code = "DEVICE_BUSY";
-    throw err;
-  }
-
-  const globalRunning = await workflowService.countByStatus("running");
-  if (globalRunning >= scalabilityConfig.maxGlobalConcurrentWorkflows) {
-    const err = new Error(`Server at capacity: ${globalRunning}/${scalabilityConfig.maxGlobalConcurrentWorkflows} concurrent workflows. Retry later.`);
-    (err as Error & { status?: number; code?: string }).status = 429;
-    (err as Error & { status?: number; code?: string }).code = "SERVER_BUSY";
-    throw err;
-  }
-
   workflowEvents.publish({
     source: "workflow_executor",
     event: "dispatch_accepted",
@@ -186,42 +133,24 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
       hbeParams: hbeSession,
       checkpoint: createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "edge"),
     });
-    await workflowService.markRunning(wf.id);
-
-    const sent = directWsServer.sendWorkflowStart(
+    startWorkflow(wf.id).catch(err => {
+      console.error(`[${logPrefix}] Failed to queue edge workflow ${wf.id}: ${err.message}`);
+    });
+    workflowEvents.publish({
+      source: "workflow_executor",
+      event: "dispatch_queued",
+      workflowId: wf.id,
+      taskId: controlPlaneContext?.taskId,
+      agencyWorkflowRunId: controlPlaneContext?.agencyWorkflowRunId,
+      clientId: controlPlaneContext?.clientId,
+      accountId,
       deviceId,
-      template as unknown as Record<string, unknown>,
-      dispatchVariables,
-      wf.id,
-    );
-
-    if (sent) {
-      scheduleEdgeWorkflowAckWatchdog(wf.id, deviceId, logPrefix);
-      workflowEvents.publish({
-        source: "workflow_executor",
-        event: "dispatch_running",
-        workflowId: wf.id,
-        taskId: controlPlaneContext?.taskId,
-        agencyWorkflowRunId: controlPlaneContext?.agencyWorkflowRunId,
-        clientId: controlPlaneContext?.clientId,
-        accountId,
-        deviceId,
-        mode: "edge",
-        status: "running",
-        totalSteps: template.steps.length,
-        details: {
-          mode: "edge",
-          templateId,
-          accountId,
-          controlPlaneContext,
-        },
-      });
-      console.log(`[${logPrefix}] ${wf.id} dispatched to device (edge execution, agent=${directWsServer.getAgentVersion(deviceId)})`);
-      return { workflowId: wf.id, status: "running", mode: "edge", templateId, controlPlaneContext };
-    }
-
-    await workflowService.markFailed(wf.id, "Edge dispatch failed");
-    console.warn(`[${logPrefix}] Edge dispatch failed for ${deviceId} — falling back to server execution`);
+      mode: "edge",
+      status: "queued",
+      totalSteps: template.steps.length,
+      details: { mode: "edge", templateId, accountId, controlPlaneContext },
+    });
+    return { workflowId: wf.id, status: "queued", mode: "edge", templateId, controlPlaneContext };
   } else if (requiresServerMode) {
     console.log(`[${logPrefix}] semantic resolution required — using server execution`);
   }
