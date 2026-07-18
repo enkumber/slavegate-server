@@ -20,6 +20,7 @@ import { sendJobToDevice, isDeviceOnline } from "../transport/transport";
 import { loadMap } from "../modules/app-mapping/recorder.service";
 import { validateAppMapQuality, type AppMap, type AppMapQualityReport } from "../modules/app-mapping/schema";
 import { workflowService, type GeneratedWorkflowPlanCacheRecord } from "../modules/workflows/workflow.service";
+import { workflowQueueService } from "../modules/workflows/workflow-queue.service";
 import {
   buildGeneratedWorkflowAppMapHints,
   buildGeneratedWorkflowPrompt,
@@ -655,6 +656,14 @@ router.post("/jobs", async (req, res) => {
   if (!body.deviceId || !body.type || !body.params) {
     return res.status(400).json({ ok: false, error: "deviceId, type, params required" });
   }
+
+  if (await workflowQueueService.hasWorkingWorkflow(body.deviceId)) {
+    return res.status(409).json({
+      ok: false,
+      code: "DEVICE_WORKFLOW_BUSY",
+      error: "A workflow is already working on this device. Retry after it reaches done or failed.",
+    });
+  }
   
   // ⛔ BLOCK direct tap jobs — MUST use cascade-tap instead!
   // Reason: VLM coordinates are in screenshot space (e.g., 540x1080), 
@@ -946,10 +955,10 @@ router.post("/workflows", requireAuth, async (req, res) => {
   res.status(410).json({
     ok: false,
     code: "WORKFLOW_TEMPLATES_ARE_EXAMPLES_ONLY",
-    error: "Direct template workflow dispatch is deprecated. Use POST /api/workflow-runs with instruction, appId and deviceId.",
+    error: "Direct template workflow dispatch is deprecated. Compile with POST /api/workflows/human/compile, then run through POST /api/workflows/human/run.",
     data: {
-      replacement: "/api/workflow-runs",
-      requiredBody: ["instruction", "appId", "deviceId"],
+      replacement: "/api/workflows/human/compile",
+      next: "/api/workflows/human/run",
     },
   });
 });
@@ -1433,7 +1442,7 @@ router.get("/workflow-templates", requireAuth, async (_req, res) => {
     data: templates.map((template) => ({
       ...template,
       exampleOnly: true,
-      executableVia: "/api/workflow-runs",
+      executableVia: "/api/workflows/human/compile",
     })),
   });
 });
@@ -1446,7 +1455,7 @@ router.get("/workflow-templates/:id", requireAuth, async (req, res) => {
     data: {
       ...t,
       exampleOnly: true,
-      executableVia: "/api/workflow-runs",
+      executableVia: "/api/workflows/human/compile",
     },
   });
 });
@@ -2571,10 +2580,10 @@ router.post("/edge/push-template", requireAuth, async (req, res) => {
   res.status(410).json({
     ok: false,
     code: "WORKFLOW_TEMPLATES_ARE_EXAMPLES_ONLY",
-    error: "Direct edge template push is deprecated. Use POST /api/workflow-runs with instruction, appId and deviceId.",
+    error: "Direct edge template push is deprecated. Compile with POST /api/workflows/human/compile, then run through POST /api/workflows/human/run.",
     data: {
-      replacement: "/api/workflow-runs",
-      requiredBody: ["instruction", "appId", "deviceId"],
+      replacement: "/api/workflows/human/compile",
+      next: "/api/workflows/human/run",
     },
   });
 });
@@ -2589,7 +2598,7 @@ router.get("/edge/templates", requireAuth, async (_req, res) => {
       data: templates.map((template) => ({
         ...template,
         exampleOnly: true,
-        executableVia: "/api/workflow-runs",
+        executableVia: "/api/workflows/human/compile",
       })),
     });
   } catch (err) {
@@ -2603,10 +2612,10 @@ router.post("/edge/broadcast-template", requireAuth, async (req, res) => {
   res.status(410).json({
     ok: false,
     code: "WORKFLOW_TEMPLATES_ARE_EXAMPLES_ONLY",
-    error: "Direct edge template broadcast is deprecated. Use POST /api/workflow-runs with instruction, appId and deviceId.",
+    error: "Direct edge template broadcast is deprecated. Compile with POST /api/workflows/human/compile, then run through POST /api/workflows/human/run.",
     data: {
-      replacement: "/api/workflow-runs",
-      requiredBody: ["instruction", "appId", "deviceId"],
+      replacement: "/api/workflows/human/compile",
+      next: "/api/workflows/human/run",
     },
   });
 });

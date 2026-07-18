@@ -1,21 +1,15 @@
 import { Router } from "express";
 import { requireAdminAuth } from "./auth.middleware";
-import { createWorkflowRun } from "../modules/workflow-runs";
 
 const router = Router();
 
-router.post("/", requireAdminAuth, async (req, res) => {
-  try {
-    const result = await createWorkflowRun(req.body ?? {});
-    res.status(result.httpStatus).json({
-      ok: result.ok,
-      code: result.code,
-      data: result.data,
-      error: result.error,
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
+router.post("/", requireAdminAuth, (_req, res) => {
+  res.status(410).json({
+    ok: false,
+    code: "WORKFLOW_RUNS_ENDPOINT_DISABLED",
+    error: "POST /api/workflow-runs is disabled because it bypasses the per-device workflow queue.",
+    replacement: "/api/workflows/human/run",
+  });
 });
 
 export default router;

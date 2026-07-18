@@ -37,6 +37,17 @@ async function lockDevice(client: PoolClient, deviceId: string): Promise<void> {
 }
 
 export class WorkflowQueueService {
+  async hasWorkingWorkflow(deviceId: string): Promise<boolean> {
+    const result = await getDb().query(
+      `SELECT 1
+       FROM workflow_queue
+       WHERE device_id = $1 AND status = 'working'
+       LIMIT 1`,
+      [deviceId],
+    );
+    return Boolean(result.rows[0]);
+  }
+
   async enqueue(workflowId: string, deviceId: string): Promise<WorkflowQueueRecord> {
     const client = await getDb().connect();
     try {

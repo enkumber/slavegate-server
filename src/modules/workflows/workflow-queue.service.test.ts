@@ -35,6 +35,20 @@ describe("WorkflowQueueService", () => {
     vi.clearAllMocks();
   });
 
+  it("reports whether a device already has a working workflow", async () => {
+    mocks.pool.query
+      .mockResolvedValueOnce({ rows: [{ "?column?": 1 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const { WorkflowQueueService } = await import("./workflow-queue.service");
+    const service = new WorkflowQueueService();
+
+    await expect(service.hasWorkingWorkflow("22222222-2222-4222-8222-222222222222")).resolves.toBe(true);
+    await expect(service.hasWorkingWorkflow("55555555-5555-4555-8555-555555555555")).resolves.toBe(false);
+
+    expect(String(mocks.pool.query.mock.calls[0][0])).toContain("status = 'working'");
+    expect(mocks.pool.query.mock.calls[0][1]).toEqual(["22222222-2222-4222-8222-222222222222"]);
+  });
+
   it("allocates the next per-device sequence under an advisory transaction lock", async () => {
     mocks.query.mockImplementation(async (sql: string) => {
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };

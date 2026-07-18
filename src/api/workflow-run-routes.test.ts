@@ -1,13 +1,5 @@
 import express from "express";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-const mocks = vi.hoisted(() => ({
-  createWorkflowRun: vi.fn(),
-}));
-
-vi.mock("../modules/workflow-runs", () => ({
-  createWorkflowRun: mocks.createWorkflowRun,
-}));
+import { beforeEach, describe, expect, it } from "vitest";
 
 async function app() {
   const app = express();
@@ -59,64 +51,23 @@ async function postJson(server: express.Express, path: string, body: Record<stri
 
 describe("workflow-runs API", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
     process.env.API_KEY = "test-api-key";
     process.env.JWT_SECRET = "test-jwt-secret";
   });
 
-  it("exposes POST /api/workflow-runs as the unified workflow-run surface", async () => {
-    mocks.createWorkflowRun.mockResolvedValueOnce({
-      ok: true,
-      httpStatus: 201,
-      status: "completed",
-      data: {
-        id: "11111111-1111-4111-8111-111111111111",
-        instruction: "tap continue",
-        appId: "com.example.app",
-        deviceId: "device-1",
-        status: "completed",
-        workflowId: "55555555-5555-4555-8555-555555555555",
-        discoveryRan: false,
-      },
-    });
-
+  it("disables POST /api/workflow-runs because it bypasses the device queue", async () => {
     const response = await postWorkflowRun({
       instruction: "tap continue",
       appId: "com.example.app",
       deviceId: "device-1",
     });
 
-    expect(response.status).toBe(201);
-    expect(response.body).toMatchObject({
-      ok: true,
-      data: {
-        id: "11111111-1111-4111-8111-111111111111",
-        workflowId: "55555555-5555-4555-8555-555555555555",
-      },
-    });
-    expect(mocks.createWorkflowRun).toHaveBeenCalledWith({
-      instruction: "tap continue",
-      appId: "com.example.app",
-      deviceId: "device-1",
-    });
-  });
-
-  it("returns service validation failures without changing the route contract", async () => {
-    mocks.createWorkflowRun.mockResolvedValueOnce({
-      ok: false,
-      httpStatus: 400,
-      status: "validation_failed",
-      code: "WORKFLOW_RUN_MISSING_FIELDS",
-      error: "instruction, appId and deviceId required",
-    });
-
-    const response = await postWorkflowRun({ instruction: "tap continue" });
-
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(410);
     expect(response.body).toEqual({
       ok: false,
-      code: "WORKFLOW_RUN_MISSING_FIELDS",
-      error: "instruction, appId and deviceId required",
+      code: "WORKFLOW_RUNS_ENDPOINT_DISABLED",
+      error: "POST /api/workflow-runs is disabled because it bypasses the per-device workflow queue.",
+      replacement: "/api/workflows/human/run",
     });
   });
 
@@ -130,6 +81,5 @@ describe("workflow-runs API", () => {
 
     expect(response.status).toBe(401);
     expect(response.body).toEqual({ ok: false, error: "Unauthorized" });
-    expect(mocks.createWorkflowRun).not.toHaveBeenCalled();
   });
 });
