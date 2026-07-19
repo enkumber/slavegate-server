@@ -1,7 +1,7 @@
 import { getDb } from "../../db/client";
 
 export type HumanWorkflowCompileJobStatus = "queued" | "running" | "ready" | "failed" | "cancelled";
-export type HumanWorkflowCompileJobSource = "cache" | "shortcut" | "llm";
+export type HumanWorkflowCompileJobSource = "cache" | "shortcut" | "llm" | "hybrid";
 export type HumanWorkflowCompileJobErrorClass = "timeout" | "provider_error" | "validation_error" | "unknown";
 
 export interface HumanWorkflowCompileJobRecord {
@@ -175,7 +175,11 @@ export class HumanWorkflowCompileJobService {
     return rowToJob(result.rows[0]);
   }
 
-  runInProcess(jobId: string, runner: () => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>): void {
+  runInProcess(jobId: string, runner: () => Promise<Record<string, unknown> & {
+    cacheKey?: string;
+    shortcutId?: string | null;
+    source?: HumanWorkflowCompileJobSource;
+  }>): void {
     if (this.running.has(jobId)) return;
     this.running.add(jobId);
     setImmediate(async () => {
@@ -196,15 +200,15 @@ export class HumanWorkflowCompileJobService {
           `UPDATE human_workflow_compile_jobs
            SET status = 'ready',
                cache_key = $2,
-               source = 'llm',
+               source = $4,
                shortcut_id = $3,
                error = NULL,
-               result = $4,
+               result = $5,
                llm_completed_at = NOW(),
                completed_at = NOW(),
                updated_at = NOW()
            WHERE id = $1`,
-          [jobId, result.cacheKey ?? null, result.shortcutId ?? null, JSON.stringify(result)],
+          [jobId, result.cacheKey ?? null, result.shortcutId ?? null, result.source ?? "llm", JSON.stringify(result)],
         );
       } catch (err) {
         const typed = err as Error & { validationErrors?: string[] };

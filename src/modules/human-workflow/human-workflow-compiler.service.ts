@@ -110,7 +110,11 @@ function isBrowserWorkflowIntent(goal: string): boolean {
 
 function humanWorkflowPackageNameForIntent(platform: string, goal: string): string {
   if (platform.toLowerCase() === "android" && isBrowserWorkflowIntent(goal)) {
-    return "android";
+    // Browser VIEW intents intentionally omit params.packageName so Android can
+    // resolve the user's browser.  The compiler metadata still needs a real
+    // app scope, otherwise successful Chrome navigation is learned as
+    // system/android and can leak into unrelated applications.
+    return "com.android.chrome";
   }
   if (platform.toLowerCase() === "android" && isGmailAppWorkflowIntent(goal)) {
     return "com.google.android.gm";

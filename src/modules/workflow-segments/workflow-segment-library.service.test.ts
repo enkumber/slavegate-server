@@ -65,6 +65,25 @@ describe("workflow segment library", () => {
     expect(segments[1].semanticTokens).toEqual(expect.arrayContaining(["reddit", "askreddit"]));
   });
 
+  it("categorizes an implicit browser VIEW intent as Chrome instead of Android system", () => {
+    const segments = extractReusableWorkflowSegments({
+      workflow: workflow([
+        { id: "wake", type: "action", action: "screen_wake", params: {} },
+        { id: "unlock", type: "action", action: "unlock", params: {} },
+        { id: "open_web", type: "action", action: "intent_send", params: { uri: "https://example.com" } },
+        { id: "idle", type: "action", action: "wait_for_idle", params: {} },
+      ]),
+      packageName: "com.android.chrome",
+      intent: "Open example.com in Chrome",
+    });
+
+    expect(segments.map((segment) => segment.category)).toEqual([
+      "system/android",
+      "app/com.android.chrome",
+    ]);
+    expect(segments[1].steps.map((step) => step.id)).toEqual(["open_web", "idle"]);
+  });
+
   it("does not promote mutating app actions into an automatically reusable segment", () => {
     const segments = extractReusableWorkflowSegments({
       workflow: workflow([
@@ -127,6 +146,23 @@ describe("workflow segment library", () => {
     ], "Open AskReddit feed then inspect a post");
 
     expect(ranked.map((segment) => segment.id)).toEqual(["system", "reddit-ask"]);
+  });
+
+  it("rejects legacy system segments containing package-ambiguous browser navigation", () => {
+    const ranked = rankWorkflowSegments([
+      stored({
+        id: "contaminated-system",
+        category: "system/android",
+        semanticTokens: ["wake", "chrome", "example"],
+        steps: [
+          { id: "wake", type: "action", action: "screen_wake", params: {} },
+          { id: "web", type: "action", action: "intent_send", params: { uri: "https://example.com" } },
+        ],
+      }),
+      stored({ id: "clean-system", category: "system/android", semanticTokens: ["wake"] }),
+    ], "Wake Android and open Reddit");
+
+    expect(ranked.map((segment) => segment.id)).toEqual(["clean-system"]);
   });
 
   it("composes reusable A segments into B and removes steps the LLM repeated", () => {

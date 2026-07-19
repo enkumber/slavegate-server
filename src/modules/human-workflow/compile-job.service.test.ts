@@ -112,4 +112,19 @@ describe("humanWorkflowCompileJobService", () => {
     expect(job?.lastRetriedAt).toBe("2026-06-18T10:01:00.000Z");
     expect(mocks.db.query.mock.calls[0][0]).toContain("retry_count = COALESCE(retry_count, 0) + 1");
   });
+
+  it("persists hybrid as the public source for segment-assisted compile jobs", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [jobRow({ status: "running" })] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    humanWorkflowCompileJobService.runInProcess(
+      "66666666-6666-4666-8666-666666666666",
+      async () => ({ cacheKey: "cache-b", source: "hybrid", plan: { segmentReuse: {} } }),
+    );
+
+    await vi.waitFor(() => expect(mocks.db.query).toHaveBeenCalledTimes(2));
+    expect(mocks.db.query.mock.calls[1][0]).toContain("source = $4");
+    expect(mocks.db.query.mock.calls[1][1]).toEqual(expect.arrayContaining(["hybrid"]));
+  });
 });

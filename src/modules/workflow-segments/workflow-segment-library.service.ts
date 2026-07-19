@@ -44,6 +44,10 @@ const SYSTEM_PACKAGE_NAVIGATION_ACTIONS = new Set([
   "a11y_find_tap", "scroll",
 ]);
 
+const PACKAGE_SENSITIVE_SYSTEM_ACTIONS = new Set([
+  "open_app", "intent_send", "semantic_tap", "a11y_find_tap", "scroll",
+]);
+
 const REUSABLE_APP_ACTIONS = new Set([
   "open_app", "intent_send", "wait_for_idle", "detect_current_screen",
   "ui_tree_dump", "semantic_tap", "a11y_find_tap", "scroll",
@@ -235,9 +239,23 @@ export function rankWorkflowSegments(segments: WorkflowSegment[], intent: string
   };
   return segments
     .filter((segment) => segment.category === "system/android"
-      ? isReadinessSegment(segment) || segment.semanticTokens.some((token) => requested.has(token))
+      ? systemSegmentSafeForSelection(segment)
+        && (isReadinessSegment(segment) || segment.semanticTokens.some((token) => requested.has(token)))
       : segment.semanticTokens.some((token) => requested.has(token)))
     .sort((left, right) => score(right) - score(left));
+}
+
+function systemSegmentSafeForSelection(segment: WorkflowSegment): boolean {
+  return segment.steps.every((step) => {
+    if (step.type === "wait") return true;
+    if (step.type !== "action") return false;
+    if (SYSTEM_ACTIONS.has(step.action)) return true;
+    if (!SYSTEM_PACKAGE_NAVIGATION_ACTIONS.has(step.action)) return false;
+    if (!PACKAGE_SENSITIVE_SYSTEM_ACTIONS.has(step.action)) return true;
+    const params = isRecord(step.params) ? step.params : {};
+    const packageName = typeof params.packageName === "string" ? params.packageName.trim() : "";
+    return packageName.length > 0 && isSystemPackage(packageName);
+  });
 }
 
 function stepIdentity(step: WorkflowStep): string {
