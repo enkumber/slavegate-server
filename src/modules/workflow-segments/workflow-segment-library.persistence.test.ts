@@ -47,6 +47,7 @@ describe("workflow segment telemetry persistence", () => {
       workflowRunId: "run-a",
       stepsCompleted: 3,
       totalSteps: 3,
+      verifiedStepIds: ["wake", "unlock", "askreddit"],
     });
 
     expect(learned.map((segment) => segment.category)).toEqual([
@@ -71,6 +72,7 @@ describe("workflow segment telemetry persistence", () => {
       packageName: "com.reddit.frontpage",
       stepsCompleted: 2,
       totalSteps: 3,
+      verifiedStepIds: ["wake", "unlock"],
     });
 
     expect(learned).toEqual([]);
@@ -94,6 +96,7 @@ describe("workflow segment telemetry persistence", () => {
       stepsCompleted: 2,
       totalSteps: 2,
       excludeComposedReuseSteps: true,
+      verifiedStepIds: ["reuse_aaaaaaaa_0_wake", "new-observation"],
     });
 
     expect(learned).toHaveLength(1);

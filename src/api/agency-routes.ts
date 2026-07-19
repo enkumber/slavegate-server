@@ -1049,7 +1049,18 @@ function buildAgencyWorkflowTimeline(row: Record<string, unknown>): Record<strin
   const workflow = normalizeJsonObject(row.cached_workflow);
   const compiledPlan = normalizeJsonObject(row.cached_compiled_plan);
   const checkpoint = normalizeJsonObject(row.workflow_checkpoint);
-  const checkpointVariables = normalizeJsonObject(checkpoint.variables);
+  const checkpointResult = normalizeJsonObject(checkpoint.result);
+  const checkpointVariables = {
+    ...normalizeJsonObject(checkpoint.variables),
+    ...normalizeJsonObject(checkpointResult.variables),
+  };
+  const deviceStepResults = normalizeJsonArray(checkpointVariables._stepResults);
+  const reportedByStepId = new Map(deviceStepResults.flatMap((result) => {
+    const stepId = typeof result.stepId === "string" ? result.stepId : null;
+    return stepId ? [[stepId, result] as const] : [];
+  }));
+  const executionStats = normalizeJsonObject(checkpoint.executionStats);
+  const edgeExecution = checkpoint.source === "edge" || executionStats.mode === "edge";
   const steps = normalizeJsonArray(workflow.steps);
   const planSteps = normalizeJsonArray(compiledPlan.steps);
   const sourceSteps = steps.length > 0 ? steps : planSteps;
@@ -1071,17 +1082,34 @@ function buildAgencyWorkflowTimeline(row: Record<string, unknown>): Record<strin
   const workflowError = typeof row.workflow_error === "string" ? row.workflow_error : typeof row.error === "string" ? row.error : null;
 
   return fallbackSteps.map((step, index) => {
-    const status = stepStatus({ runStatus, workflowStatus, currentStep, stepIndex: index });
+    const stepId = typeof step.id === "string" ? step.id : `step_${index + 1}`;
+    const deviceResult = reportedByStepId.get(stepId);
+    const reportedStatus = typeof deviceResult?.status === "string" ? deviceResult.status : null;
+    const status = reportedStatus === "verified"
+      ? "succeeded"
+      : reportedStatus === "failed"
+        ? "failed"
+        : reportedStatus === "unverified"
+          ? "unverified"
+          : edgeExecution && step.type === "action"
+            ? "unverified"
+            : stepStatus({ runStatus, workflowStatus, currentStep, stepIndex: index });
     return {
       index,
-      id: typeof step.id === "string" ? step.id : `step_${index + 1}`,
+      id: stepId,
       label: stepLabel(step, index),
       action: typeof step.action === "string" ? step.action : null,
       type: typeof step.type === "string" ? step.type : null,
       status,
-      durationMs: null,
-      error: status === "failed" ? workflowError : null,
-      state: status === "failed" ? checkpointVariables.screenState ?? checkpointVariables.currentScreen ?? null : null,
+      durationMs: typeof deviceResult?.durationMs === "number" ? deviceResult.durationMs : null,
+      error: status === "failed"
+        ? (typeof deviceResult?.errorCode === "string" ? deviceResult.errorCode : workflowError)
+        : null,
+      state: deviceResult?.attempts ?? (status === "failed" ? checkpointVariables.screenState ?? checkpointVariables.currentScreen ?? null : null),
+      ...(deviceResult ? {
+        deviceVerified: deviceResult.deviceVerified === true,
+        verificationVersion: typeof deviceResult.verificationVersion === "string" ? deviceResult.verificationVersion : null,
+      } : {}),
     };
   });
 }

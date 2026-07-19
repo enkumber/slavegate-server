@@ -100,6 +100,7 @@ function stableStepShape(step: WorkflowStep): unknown {
       params: step.params ?? {},
       expectedScreen: step.expectedScreen ?? null,
       verification: step.verification ?? null,
+      deviceVerification: step.deviceVerification ?? null,
     };
   }
   if (step.type === "wait") {
@@ -339,14 +340,18 @@ export class WorkflowSegmentLibraryService {
     stepsCompleted: number;
     totalSteps: number;
     excludeComposedReuseSteps?: boolean;
+    verifiedStepIds: string[];
   }): Promise<ExtractedWorkflowSegment[]> {
     if (input.totalSteps <= 0 || input.stepsCompleted < input.totalSteps) return [];
-    const learningWorkflow = input.excludeComposedReuseSteps
-      ? {
-          ...input.workflow,
-          steps: input.workflow.steps.filter((step) => !step.id?.startsWith("reuse_")),
-        }
-      : input.workflow;
+    const verified = new Set(input.verifiedStepIds);
+    const learningWorkflow = {
+      ...input.workflow,
+      steps: input.workflow.steps.filter((step) => {
+        if (input.excludeComposedReuseSteps && step.id?.startsWith("reuse_")) return false;
+        return step.type !== "action" || (!!step.id && verified.has(step.id));
+      }),
+    };
+    if (!learningWorkflow.steps.some((step) => step.type === "action")) return [];
     const segments = extractReusableWorkflowSegments({ ...input, workflow: learningWorkflow });
     const db = getDb();
     for (const segment of segments) {
@@ -373,6 +378,8 @@ export class WorkflowSegmentLibraryService {
             workflowRunId: input.workflowRunId ?? null,
             stepsCompleted: input.stepsCompleted,
             totalSteps: input.totalSteps,
+            verificationSource: "device_step_results/v1",
+            verifiedStepIds: input.verifiedStepIds,
             validatedAt: new Date().toISOString(),
           }),
         ],
@@ -386,6 +393,7 @@ export class WorkflowSegmentLibraryService {
       `SELECT * FROM workflow_segment_library
        WHERE validation_state = 'promoted'
          AND compiler_eligible = TRUE
+         AND evidence->>'verificationSource' = 'device_step_results/v1'
          AND category = ANY($1::text[])
        ORDER BY success_count DESC, last_success_at DESC
        LIMIT 100`,

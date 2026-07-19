@@ -76,6 +76,7 @@ interface TaskRunnerResult extends TaskResult {
     llmBudget?: GeneratedWorkflowPlanCacheRecord["compiledPlan"]["llmBudget"];
     controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
     output?: Record<string, unknown>;
+    deviceStepResults?: DeviceStepResult[];
     failureCode?: string;
     selfHealing?: {
       status: "recovered" | "repair_unavailable" | "retry_failed" | "exhausted";
@@ -85,6 +86,16 @@ interface TaskRunnerResult extends TaskResult {
       lastReason?: string;
     };
   };
+}
+
+export interface DeviceStepResult {
+  stepId: string;
+  action?: string;
+  status: "verified" | "unverified" | "failed";
+  deviceVerified: boolean;
+  verificationVersion?: string;
+  attemptCount?: number;
+  errorCode?: string;
 }
 
 interface GeneratedWorkflowRepairCandidate {
@@ -351,6 +362,46 @@ function checkpointVariables(workflow: WorkflowRecord | null): Record<string, un
   return { ...variables, ...resultVariables };
 }
 
+export function parseDeviceStepResults(variables: Record<string, unknown>): DeviceStepResult[] {
+  const raw = variables._stepResults;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item): DeviceStepResult[] => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    if (typeof record.stepId !== "string" || !["verified", "unverified", "failed"].includes(String(record.status))) {
+      return [];
+    }
+    return [{
+      stepId: record.stepId,
+      action: typeof record.action === "string" ? record.action : undefined,
+      status: record.status as DeviceStepResult["status"],
+      deviceVerified: record.deviceVerified === true,
+      verificationVersion: typeof record.verificationVersion === "string" ? record.verificationVersion : undefined,
+      attemptCount: typeof record.attemptCount === "number" ? record.attemptCount : undefined,
+      errorCode: typeof record.errorCode === "string" ? record.errorCode : undefined,
+    }];
+  });
+}
+
+export function validateRequiredDeviceStepResults(
+  workflow: WorkflowTemplate,
+  results: DeviceStepResult[],
+): string | null {
+  const latest = new Map(results.map((result) => [result.stepId, result]));
+  const failed = results.find((result) => result.status === "failed");
+  if (failed) {
+    return `${failed.errorCode ?? "DEVICE_STEP_VERIFICATION_FAILED"}: ${failed.stepId} was rejected by the device`;
+  }
+  for (const step of workflow.steps) {
+    if (step.type !== "action" || step.deviceVerification?.required !== true) continue;
+    const result = step.id ? latest.get(step.id) : undefined;
+    if (!result || result.status !== "verified" || result.deviceVerified !== true) {
+      return `DEVICE_STEP_VERIFICATION_MISSING: ${step.id ?? step.action} has no verified device result`;
+    }
+  }
+  return null;
+}
+
 async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<WorkflowRecord> {
   const startedAt = Date.now();
   let latest: WorkflowRecord | null = null;
@@ -445,6 +496,9 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
       reason: result.success ? null : result.failReason ?? result.generatedWorkflow?.failureCode ?? "Unknown error",
     });
     if (result.success && cached) {
+      const verifiedStepIds = (result.generatedWorkflow?.deviceStepResults ?? [])
+        .filter((step) => step.status === "verified" && step.deviceVerified)
+        .map((step) => step.stepId);
       const metadataPackage = cached.sourceMetadata?.packageName;
       const platformPackages: Record<string, string> = {
         reddit: "com.reddit.frontpage",
@@ -460,7 +514,7 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
         ? metadataPackage
         : platformPackages[cached.platform.toLowerCase()] ?? cached.platform;
       await workflowSegmentLibraryService.learnFromSuccessfulWorkflow({
-        workflow: cached.workflow,
+        workflow: normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata),
         cacheKey: cached.cacheKey,
         intent: typeof cached.sourceMetadata?.intent === "string" ? cached.sourceMetadata.intent : null,
         packageName,
@@ -469,6 +523,7 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
         stepsCompleted: result.stepsCompleted ?? 0,
         totalSteps: result.totalSteps ?? cached.workflow.steps.length,
         excludeComposedReuseSteps: validSelectedSegmentIds.length > 0,
+        verifiedStepIds,
       });
     }
   } catch (err) {
@@ -1361,6 +1416,7 @@ async function executeGeneratedWorkflowTask(
     const finalWorkflow = await waitForGeneratedWorkflowFinal(dispatch.workflowId);
     const finalVariables = checkpointVariables(finalWorkflow);
     const finalOutput = generatedWorkflowOutput(cached, finalVariables);
+    const deviceStepResults = parseDeviceStepResults(finalVariables);
 
     const generatedWorkflowResult = {
       workflowId: dispatch.workflowId,
@@ -1375,6 +1431,7 @@ async function executeGeneratedWorkflowTask(
       llmBudget: cached.compiledPlan.llmBudget,
       controlPlaneContext,
       output: finalOutput,
+      deviceStepResults,
     };
 
     if (finalWorkflow.status !== "completed") {
@@ -1387,6 +1444,23 @@ async function executeGeneratedWorkflowTask(
         durationMs: Date.now() - startedAt,
         failReason: finalWorkflow.error ?? `Generated workflow ended with status ${finalWorkflow.status}`,
         generatedWorkflow: generatedWorkflowResult,
+      };
+    }
+
+    const deviceVerificationError = validateRequiredDeviceStepResults(executableWorkflow, deviceStepResults);
+    if (deviceVerificationError) {
+      return {
+        success: false,
+        stepsCompleted: finalWorkflow.currentStep,
+        totalSteps: finalWorkflow.totalSteps ?? executableWorkflow.steps.length,
+        output: finalOutput,
+        tokenUsage: zeroTokenUsage(),
+        durationMs: Date.now() - startedAt,
+        failReason: deviceVerificationError,
+        generatedWorkflow: {
+          ...generatedWorkflowResult,
+          failureCode: deviceVerificationError.split(":")[0],
+        },
       };
     }
 

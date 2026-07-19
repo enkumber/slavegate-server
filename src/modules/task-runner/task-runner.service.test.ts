@@ -88,6 +88,29 @@ const REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS = {
   error: "",
 };
 
+const VERIFIED_DEVICE_STEP_IDS = [
+  "open_reddit",
+  "wake_screen",
+  "unlock_device",
+  "open_android",
+  "open_gmail_web",
+  "open_gmail",
+  "open_askreddit",
+  "capture_final_ui_tree",
+  "capture_install_state",
+  "open_reddit_play_store",
+] as const;
+
+function verifiedDeviceStepResults() {
+  return VERIFIED_DEVICE_STEP_IDS.map((stepId) => ({
+    stepId,
+    status: "verified",
+    deviceVerified: true,
+    verificationVersion: "device-step-verification/v1",
+    attemptCount: 1,
+  }));
+}
+
 function generatedWorkflow(): WorkflowTemplate {
   return {
     id: "agent_generated_reddit_account_health_scan_v1",
@@ -191,7 +214,10 @@ function completedWorkflow(variables: Record<string, unknown> = REDDIT_ACCOUNT_H
     checkpoint: {
       stepIndex: 2,
       loopStack: [],
-      variables,
+      variables: {
+        ...variables,
+        _stepResults: verifiedDeviceStepResults(),
+      },
       hbeParams: {},
       checkpointAt: "2026-05-22T08:00:10.000Z",
       executionStats: {
@@ -316,7 +342,15 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
     expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateId: "agent_generated_reddit_account_health_scan_v1",
-      template: cached.workflow,
+      template: expect.objectContaining({
+        id: cached.workflow.id,
+        steps: expect.arrayContaining([
+          expect.objectContaining({
+            id: "open_reddit",
+            deviceVerification: expect.objectContaining({ required: true }),
+          }),
+        ]),
+      }),
       deviceId: DEVICE_ID,
       accountId: ACCOUNT_ID,
     }));

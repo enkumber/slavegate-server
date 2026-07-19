@@ -1,4 +1,4 @@
-import type { WorkflowTemplate } from "../workflows/types";
+import type { ActionStep, DeviceStepVerificationContract, WorkflowStep, WorkflowTemplate } from "../workflows/types";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -119,10 +119,94 @@ export function normalizeCachedHumanWorkflowTemplate(
   workflow: WorkflowTemplate,
   sourceMetadata: Record<string, unknown> | null | undefined,
 ): WorkflowTemplate {
-  if (sourceMetadata?.source !== "dashboard_human") return workflow;
+  if (sourceMetadata?.source !== "dashboard_human") return attachDeviceVerificationContracts(workflow, sourceMetadata);
   const intent = typeof sourceMetadata.intent === "string" ? sourceMetadata.intent : "";
   const packageName = workflow.platform === "reddit" ? "com.reddit.frontpage" : workflow.platform;
   const gmailNormalized = normalizeGmailAppWorkflow(workflow, intent);
   const browserNormalized = normalizeBrowserWorkflow(gmailNormalized, intent);
-  return normalizeHumanWorkflowForKnownRedditTargets(browserNormalized, { intent, packageName });
+  return attachDeviceVerificationContracts(
+    normalizeHumanWorkflowForKnownRedditTargets(browserNormalized, { intent, packageName }),
+    sourceMetadata,
+  );
+}
+
+function requiredContract(
+  postconditions: DeviceStepVerificationContract["postconditions"],
+  options: Partial<DeviceStepVerificationContract> = {},
+): DeviceStepVerificationContract {
+  return { required: true, settleMs: 100, postconditions, ...options };
+}
+
+function inferredTargetPackage(
+  workflow: WorkflowTemplate,
+  metadata: Record<string, unknown> | null | undefined,
+  step: ActionStep,
+): string | null {
+  const params = isRecord(step.params) ? step.params : {};
+  if (typeof params.expectedPackage === "string" && params.expectedPackage.trim()) return params.expectedPackage.trim();
+  if (typeof params.packageName === "string" && params.packageName.trim()) return params.packageName.trim();
+  const intent = typeof metadata?.intent === "string" ? metadata.intent : workflow.intent ?? "";
+  if (step.action === "intent_send" && (isExplicitBrowserWorkflowIntent(intent) || /^https?:\/\//i.test(String(params.uri ?? "")))) {
+    return "com.android.chrome";
+  }
+  const packages: Record<string, string> = {
+    reddit: "com.reddit.frontpage",
+    instagram: "com.instagram.android",
+    tiktok: "com.zhiliaoapp.musically",
+    twitter: "com.twitter.android",
+    gmail: "com.google.android.gm",
+    chrome: "com.android.chrome",
+    browser: "com.android.chrome",
+  };
+  return packages[workflow.platform.toLowerCase()] ?? null;
+}
+
+function defaultDeviceVerification(
+  workflow: WorkflowTemplate,
+  metadata: Record<string, unknown> | null | undefined,
+  step: ActionStep,
+): DeviceStepVerificationContract | undefined {
+  const targetPackage = inferredTargetPackage(workflow, metadata, step);
+  switch (step.action) {
+    case "screen_wake":
+      return requiredContract([{ path: "screen.interactive", expected: true }], {
+        settleMs: 150,
+        retryPolicy: { maxAttempts: 2, backoffMs: [250] },
+      });
+    case "unlock":
+      return requiredContract([{ path: "keyguard.locked", expected: false }], {
+        settleMs: 400,
+        preconditions: [{ path: "screen.interactive", expected: true }],
+        retryPolicy: { maxAttempts: 3, backoffMs: [300, 700] },
+      });
+    case "open_app":
+    case "intent_send":
+      return targetPackage
+        ? requiredContract([{ path: "foreground.package", expected: targetPackage }], { settleMs: 300 })
+        : undefined;
+    case "ui_tree_dump":
+      return requiredContract([{ path: "result.uiTreeValid", expected: true }]);
+    case "screenshot":
+      return requiredContract([{ path: "result.imagePresent", expected: true }]);
+    case "get_screen_state":
+      return requiredContract([{ path: "result.state", operator: "exists" }]);
+    case "get_foreground_app":
+      return requiredContract([{ path: "result.packageName", operator: "exists" }]);
+    default:
+      return undefined;
+  }
+}
+
+/** Adds device-local contracts without changing the workflow's step topology. */
+export function attachDeviceVerificationContracts(
+  workflow: WorkflowTemplate,
+  metadata?: Record<string, unknown> | null,
+): WorkflowTemplate {
+  const attach = (step: WorkflowStep): WorkflowStep => {
+    if (step.type !== "action") return step;
+    if (step.deviceVerification) return step;
+    const contract = defaultDeviceVerification(workflow, metadata, step);
+    return contract ? { ...step, deviceVerification: contract } : step;
+  };
+  return { ...workflow, steps: workflow.steps.map(attach) };
 }

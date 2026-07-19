@@ -48,6 +48,8 @@ export interface ActionStep {
   retries?:  number;
   /** Timeout for this step in ms (overrides workflow default) */
   timeoutMs?: number;
+  /** Declarative postcondition contract evaluated entirely by the Android edge engine. */
+  deviceVerification?: DeviceStepVerificationContract;
 
   // ─── Screen Verification (US-WORKFLOW-SCREEN-VERIFY) ────────────────────────
   
@@ -76,6 +78,24 @@ export interface ActionStep {
    * @internal
    */
   _screenRetryCount?: number;
+}
+
+export interface DeviceStepPredicate {
+  path: string;
+  operator?: "equals" | "notEquals" | "exists" | "notExists" | "contains";
+  expected?: unknown;
+  equals?: unknown;
+}
+
+export interface DeviceStepVerificationContract {
+  required?: boolean;
+  settleMs?: number;
+  preconditions?: DeviceStepPredicate[];
+  postconditions?: DeviceStepPredicate[];
+  retryPolicy?: {
+    maxAttempts?: number;
+    backoffMs?: number[];
+  };
 }
 
 /**

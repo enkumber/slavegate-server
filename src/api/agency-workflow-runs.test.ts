@@ -808,6 +808,44 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[1][0]).toContain("FROM agency_workflow_step_candidates");
   });
 
+  it("uses device step results for edge timelines instead of global completed status", async () => {
+    const attempts = [{ attempt: 1, status: "failed", phase: "postcondition" }];
+    const run = hydratedRun({
+      status: "completed",
+      workflow_status: "completed",
+      workflow_current_step: 3,
+      workflow_total_steps: 3,
+      workflow_checkpoint: {
+        source: "edge",
+        variables: {
+          _stepResults: [
+            { stepId: "wake", status: "verified", deviceVerified: true, verificationVersion: "device-step-verification/v1", durationMs: 120 },
+            { stepId: "unlock", status: "failed", deviceVerified: false, verificationVersion: "device-step-verification/v1", errorCode: "DEVICE_POSTCONDITION_FAILED", attempts },
+          ],
+        },
+      },
+      cached_workflow: {
+        steps: [
+          { id: "wake", type: "action", action: "screen_wake" },
+          { id: "unlock", type: "action", action: "unlock" },
+          { id: "open", type: "action", action: "intent_send" },
+        ],
+      },
+    });
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [run] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await getWorkflowRun(`/api/agency/workflow-runs/${run.id}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "wake", status: "succeeded", deviceVerified: true, durationMs: 120 }),
+      expect.objectContaining({ id: "unlock", status: "failed", deviceVerified: false, error: "DEVICE_POSTCONDITION_FAILED", state: attempts }),
+      expect.objectContaining({ id: "open", status: "unverified" }),
+    ]));
+  });
+
   it("lists step candidates for dashboard review", async () => {
     const candidate = {
       id: "44444444-4444-4444-8444-444444444444",

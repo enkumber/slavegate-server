@@ -591,6 +591,9 @@ function validateGeneratedWorkflowStepInput(
       if (step.timeoutMs !== undefined && (typeof step.timeoutMs !== "number" || step.timeoutMs < 1)) {
         errors.push(`${path}.timeoutMs must be a positive number when provided`);
       }
+      if (step.deviceVerification !== undefined) {
+        validateDeviceVerificationContract(step.deviceVerification, `${path}.deviceVerification`, errors);
+      }
       break;
     case "wait":
       if (step.duration === undefined && step.condition === undefined) {
@@ -644,6 +647,61 @@ function validateGeneratedWorkflowStepInput(
       break;
     default:
       errors.push(`${path}.type must be one of: ${GENERATED_WORKFLOW_STEP_TYPES.join(", ")}`);
+  }
+}
+
+function validateDeviceVerificationContract(value: unknown, path: string, errors: string[]): void {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object`);
+    return;
+  }
+  if (value.required !== undefined && typeof value.required !== "boolean") {
+    errors.push(`${path}.required must be a boolean`);
+  }
+  if (value.settleMs !== undefined && (
+    typeof value.settleMs !== "number" || value.settleMs < 0 || value.settleMs > 10_000
+  )) {
+    errors.push(`${path}.settleMs must be between 0 and 10000`);
+  }
+  const operators = ["equals", "notEquals", "exists", "notExists", "contains"];
+  for (const key of ["preconditions", "postconditions"] as const) {
+    const predicates = value[key];
+    if (predicates === undefined) continue;
+    if (!Array.isArray(predicates)) {
+      errors.push(`${path}.${key} must be an array`);
+      continue;
+    }
+    predicates.forEach((predicate, index) => {
+      const predicatePath = `${path}.${key}[${index}]`;
+      if (!isRecord(predicate)) {
+        errors.push(`${predicatePath} must be an object`);
+        return;
+      }
+      if (typeof predicate.path !== "string" || predicate.path.trim().length === 0) {
+        errors.push(`${predicatePath}.path must be a non-empty string`);
+      }
+      if (predicate.operator !== undefined && (
+        typeof predicate.operator !== "string" || !operators.includes(predicate.operator)
+      )) {
+        errors.push(`${predicatePath}.operator must be one of: ${operators.join(", ")}`);
+      }
+    });
+  }
+  if (value.retryPolicy !== undefined) {
+    if (!isRecord(value.retryPolicy)) {
+      errors.push(`${path}.retryPolicy must be an object`);
+    } else {
+      const maxAttempts = value.retryPolicy.maxAttempts;
+      if (maxAttempts !== undefined && (!Number.isInteger(maxAttempts) || Number(maxAttempts) < 1 || Number(maxAttempts) > 10)) {
+        errors.push(`${path}.retryPolicy.maxAttempts must be an integer between 1 and 10`);
+      }
+      const backoffMs = value.retryPolicy.backoffMs;
+      if (backoffMs !== undefined && (
+        !Array.isArray(backoffMs) || backoffMs.some((item) => typeof item !== "number" || item < 0 || item > 10_000)
+      )) {
+        errors.push(`${path}.retryPolicy.backoffMs must contain numbers between 0 and 10000`);
+      }
+    }
   }
 }
 
