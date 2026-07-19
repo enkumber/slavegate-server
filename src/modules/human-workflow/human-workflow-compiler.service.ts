@@ -22,6 +22,11 @@ import {
   normalizeCachedHumanWorkflowTemplate,
   normalizeHumanWorkflowForKnownRedditTargets,
 } from "./human-workflow-normalization";
+import {
+  composeWorkflowWithSegments,
+  workflowSegmentLibraryService,
+  type WorkflowSegment,
+} from "../workflow-segments/workflow-segment-library.service";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
@@ -55,7 +60,7 @@ export type HumanWorkflowCompileReady = {
   requestKey: string;
   cacheHit: boolean;
   cacheKey: string;
-  source: "cache" | "shortcut" | "llm";
+  source: "cache" | "shortcut" | "llm" | "hybrid";
   compileJobId?: string;
   plan: Record<string, unknown>;
   safetyClass: HumanWorkflowSafetyClass;
@@ -181,7 +186,11 @@ function humanWorkflowAsyncCompileTimeoutMs(): number {
   return Math.min(requested, MAX_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS);
 }
 
-function humanWorkflowPlanPreview(template: WorkflowTemplate, compiledPlan: GeneratedWorkflowCompiledPlan): Record<string, unknown> {
+function humanWorkflowPlanPreview(
+  template: WorkflowTemplate,
+  compiledPlan: GeneratedWorkflowCompiledPlan,
+  segmentReuse?: Record<string, unknown>,
+): Record<string, unknown> {
   return {
     templateId: template.id,
     version: template.version,
@@ -197,6 +206,7 @@ function humanWorkflowPlanPreview(template: WorkflowTemplate, compiledPlan: Gene
         usedAppMap: step.usedAppMap ?? false,
       })),
     compiledPlan,
+    ...(segmentReuse ? { segmentReuse } : {}),
   };
 }
 
@@ -336,6 +346,7 @@ function buildHumanWorkflowCompilePrompt(input: {
   goal: string;
   target: HumanWorkflowTarget;
   appMap: AppMap | null;
+  reusableSegments?: WorkflowSegment[];
 }): string {
   const safetyClass = inferHumanWorkflowSafetyClass(input.goal);
   const writeInstructions = safetyClass === "standard"
@@ -351,11 +362,24 @@ function buildHumanWorkflowCompilePrompt(input: {
     .filter((screen) => screen === "UNKNOWN" || screen.startsWith(input.platform.toUpperCase()))
     .slice(0, 8)
     .join(", ");
+  const reusableSegmentInstruction = input.reusableSegments?.length
+    ? [
+        "The server already selected the following telemetry-validated workflow segments.",
+        "They will be composed deterministically around your result. Generate only the missing steps for the goal; do not repeat these steps.",
+        JSON.stringify(input.reusableSegments.map((segment) => ({
+          id: segment.id,
+          category: segment.category,
+          placement: segment.placement,
+          steps: segment.steps,
+        }))),
+      ]
+    : ["No reusable segment matched. Generate all required steps."];
   return [
     "Return JSON only. Generate one Phone Network WorkflowTemplate.",
     `Goal: ${input.goal}`,
     `Context: platform ${input.platform}, package ${input.packageName}, account ${input.target.account_username ? `@${input.target.account_username}` : "(none; device-management workflow)"}, preview compile only.`,
     compactHumanWorkflowAppMapHints(input.appMap, input.goal),
+    ...reusableSegmentInstruction,
     "Required fields: id,name,platform,description,version,steps,defaultVerificationStrategy,dataRetentionDays.",
     `platform must be exactly ${input.platform}.`,
     "Every step needs id and type. Step types: action,wait,checkpoint. Wait steps must include duration or condition.",
@@ -985,6 +1009,7 @@ export class HumanWorkflowCompilerService {
         deviceId: input.target.device_id,
         accountId: input.target.account_id,
         platform,
+        packageName,
         compiledAt: new Date().toISOString(),
       },
     });
@@ -1011,12 +1036,22 @@ export class HumanWorkflowCompilerService {
     const platform = input.target.account_platform;
     const packageName = humanWorkflowPackageNameForIntent(platform, input.intent);
     const appMap = await loadMap(packageName);
+    let reusableSegments: WorkflowSegment[] = [];
+    try {
+      reusableSegments = await workflowSegmentLibraryService.selectForCompilation({
+        packageName,
+        intent: input.intent,
+      });
+    } catch (err) {
+      console.warn("[human-workflow] segment retrieval unavailable; compiling full workflow:", (err as Error).message);
+    }
     const prompt = buildHumanWorkflowCompilePrompt({
       platform,
       packageName,
       goal: input.intent,
       target: input.target,
       appMap,
+      reusableSegments,
     });
 
     const rawWorkflow = await llmJson<WorkflowTemplate>(prompt, undefined, {
@@ -1026,7 +1061,16 @@ export class HumanWorkflowCompilerService {
       temperature: 0,
       disableThinking: true,
     });
+    const llmCompiledGapStepCount = isRecord(rawWorkflow) && Array.isArray(rawWorkflow.steps)
+      ? rawWorkflow.steps.length
+      : 0;
     const normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, { platform, packageName, goal: input.intent });
+    if (reusableSegments.length > 0 && isRecord(normalizedWorkflow) && Array.isArray(normalizedWorkflow.steps)) {
+      normalizedWorkflow.steps = composeWorkflowWithSegments(
+        normalizedWorkflow.steps as WorkflowTemplate["steps"],
+        reusableSegments,
+      );
+    }
     const validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
     if (!validation.template) {
       throw Object.assign(new Error("workflow failed validation"), {
@@ -1049,7 +1093,15 @@ export class HumanWorkflowCompilerService {
         deviceId: input.target.device_id,
         accountId: input.target.account_id,
         platform,
+        packageName,
         compiledAt: new Date().toISOString(),
+        segmentReuse: {
+          selectedStepIds: reusableSegments.map((segment) => segment.id),
+          selectedFingerprints: reusableSegments.map((segment) => segment.fingerprint),
+          selectedCategories: reusableSegments.map((segment) => segment.category),
+          reusedStepCount: reusableSegments.reduce((total, segment) => total + segment.steps.length, 0),
+          llmCompiledGapStepCount,
+        },
       },
     });
     return {
@@ -1057,8 +1109,14 @@ export class HumanWorkflowCompilerService {
       requestKey: input.requestKey,
       cacheHit: false,
       cacheKey: compiledPlan.cacheKey,
-      source: "llm",
-      plan: humanWorkflowPlanPreview(template, compiledPlan),
+      source: reusableSegments.length > 0 ? "hybrid" : "llm",
+      plan: humanWorkflowPlanPreview(template, compiledPlan, reusableSegments.length > 0 ? {
+        selectedStepIds: reusableSegments.map((segment) => segment.id),
+        selectedFingerprints: reusableSegments.map((segment) => segment.fingerprint),
+        selectedCategories: reusableSegments.map((segment) => segment.category),
+        reusedStepCount: reusableSegments.reduce((total, segment) => total + segment.steps.length, 0),
+        llmCompiledGapStepCount,
+      } : undefined),
       safetyClass,
       platform,
       target: input.target,

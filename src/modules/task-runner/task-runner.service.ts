@@ -35,6 +35,7 @@ import { compileGeneratedWorkflowTemplate } from "../workflows/workflow-validato
 import { workflowEvents } from "../workflow-events";
 import { assertHumanWorkflowMeaningful } from "../human-workflow/human-workflow-compiler.service";
 import { normalizeCachedHumanWorkflowTemplate } from "../human-workflow/human-workflow-normalization";
+import { workflowSegmentLibraryService } from "../workflow-segments/workflow-segment-library.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -420,7 +421,7 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
   const cacheKey = result.generatedWorkflow?.cacheKey;
   if (!cacheKey) return;
   try {
-    await workflowService.recordGeneratedPlanCacheOutcome({
+    const cached = await workflowService.recordGeneratedPlanCacheOutcome({
       cacheKey,
       success: result.success,
       reason: result.success ? null : result.failReason ?? result.generatedWorkflow?.failureCode ?? "Unknown error",
@@ -430,6 +431,46 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
       stepsCompleted: result.stepsCompleted ?? null,
       totalSteps: result.totalSteps ?? null,
     });
+    const segmentReuse = cached?.sourceMetadata?.segmentReuse;
+    const selectedSegmentIds = segmentReuse && typeof segmentReuse === "object" && !Array.isArray(segmentReuse)
+      && Array.isArray((segmentReuse as Record<string, unknown>).selectedStepIds)
+      ? (segmentReuse as Record<string, unknown>).selectedStepIds as unknown[]
+      : [];
+    const validSelectedSegmentIds = selectedSegmentIds.filter((value): value is string => typeof value === "string");
+    await workflowSegmentLibraryService.recordSelectedSegmentOutcome({
+      segmentIds: validSelectedSegmentIds,
+      success: result.success,
+      taskId: task.id,
+      workflowRunId: result.generatedWorkflow?.workflowId ?? null,
+      reason: result.success ? null : result.failReason ?? result.generatedWorkflow?.failureCode ?? "Unknown error",
+    });
+    if (result.success && cached) {
+      const metadataPackage = cached.sourceMetadata?.packageName;
+      const platformPackages: Record<string, string> = {
+        reddit: "com.reddit.frontpage",
+        instagram: "com.instagram.android",
+        tiktok: "com.zhiliaoapp.musically",
+        facebook: "com.facebook.katana",
+        twitter: "com.twitter.android",
+        gmail: "com.google.android.gm",
+        chrome: "com.android.chrome",
+        browser: "com.android.chrome",
+      };
+      const packageName = typeof metadataPackage === "string" && metadataPackage.trim().length > 0
+        ? metadataPackage
+        : platformPackages[cached.platform.toLowerCase()] ?? cached.platform;
+      await workflowSegmentLibraryService.learnFromSuccessfulWorkflow({
+        workflow: cached.workflow,
+        cacheKey: cached.cacheKey,
+        intent: typeof cached.sourceMetadata?.intent === "string" ? cached.sourceMetadata.intent : null,
+        packageName,
+        taskId: task.id,
+        workflowRunId: result.generatedWorkflow?.workflowId ?? null,
+        stepsCompleted: result.stepsCompleted ?? 0,
+        totalSteps: result.totalSteps ?? cached.workflow.steps.length,
+        excludeComposedReuseSteps: validSelectedSegmentIds.length > 0,
+      });
+    }
   } catch (err) {
     console.error("[task-runner] generated workflow learning update failed:", err);
   }
