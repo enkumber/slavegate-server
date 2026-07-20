@@ -392,6 +392,7 @@ function buildHumanWorkflowCompilePrompt(input: {
     "For app install goals, open the Play Store listing with intent_send using packageName=com.android.vending and uri=market://details?id=<targetPackage>, then tap Install if visible.",
     "For Gmail app goals, use open_app with params.packageName=com.google.android.gm. Do not open mail.google.com unless the user explicitly asks for browser, Chrome, gmail.com, or a URL.",
     "For web/browser goals, open URLs with intent_send using uri=https://... and no packageName, so Android can choose an installed browser/app instead of assuming Chrome.",
+    "For Android Add Account goals when the requested app is unavailable, use intent_send with params.action=android.settings.ADD_ACCOUNT_SETTINGS and no uri, then select the requested account provider.",
     ...writeInstructions,
     "Start device workflows with action screen_wake, then action unlock, before opening or navigating apps.",
     isBrowserWorkflowIntent(input.goal)

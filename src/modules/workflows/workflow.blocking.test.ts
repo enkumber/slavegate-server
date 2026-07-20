@@ -595,6 +595,61 @@ describe("Generated workflow contract validation", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it("allows the Android Add Account settings intent without a uri", async () => {
+    const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+    const result = validateGeneratedWorkflowTemplate({
+      id: "android_add_google_account_v1",
+      name: "Add Google account",
+      platform: "android",
+      description: "Open Android Add Account settings and select Google.",
+      version: "1.0.0",
+      safetyClass: "standard",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [
+        { type: "action", id: "wake", action: "screen_wake" },
+        {
+          type: "action",
+          id: "open_add_account",
+          action: "intent_send",
+          params: { action: "android.settings.ADD_ACCOUNT_SETTINGS" },
+        },
+        { type: "checkpoint", id: "add_account_open" },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("rejects arbitrary uri-less Android intents", async () => {
+    const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
+    const result = validateGeneratedWorkflowTemplate({
+      id: "android_unsafe_intent_v1",
+      name: "Unsafe intent",
+      platform: "android",
+      description: "Attempt an unapproved implicit intent.",
+      version: "1.0.0",
+      safetyClass: "standard",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [
+        {
+          type: "action",
+          id: "open_unapproved",
+          action: "intent_send",
+          params: { action: "android.intent.action.DELETE" },
+        },
+        { type: "checkpoint", id: "done" },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain(
+      "workflow.steps[0].params.action is not allowed without a uri: android.intent.action.DELETE",
+    );
+  });
+
   it("allows standard generated workflows to create and type contextual comments", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
     const result = validateGeneratedWorkflowTemplate({

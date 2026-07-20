@@ -238,6 +238,10 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "wait_for_idle",
 ] as const;
 
+const GENERATED_WORKFLOW_ALLOWED_URI_LESS_INTENT_ACTIONS = [
+  "android.settings.ADD_ACCOUNT_SETTINGS",
+] as const;
+
 const GENERATED_WORKFLOW_INTENTS = [
   "device_unlock",
   "reddit_account_health_scan",
@@ -580,9 +584,18 @@ function validateGeneratedWorkflowStepInput(
         }
       }
       if (step.action === "intent_send") {
-        const uri = isRecord(step.params) ? step.params.uri : undefined;
-        if (typeof uri !== "string" || uri.trim().length === 0) {
-          errors.push(`${path}.params.uri is required for intent_send actions`);
+        const params = isRecord(step.params) ? step.params : {};
+        const uri = typeof params.uri === "string" ? params.uri.trim() : "";
+        const action = typeof params.action === "string" ? params.action.trim() : "";
+        if (!uri && !action) {
+          errors.push(`${path}.params.uri or params.action is required for intent_send actions`);
+        } else if (
+          !uri &&
+          !GENERATED_WORKFLOW_ALLOWED_URI_LESS_INTENT_ACTIONS.includes(
+            action as typeof GENERATED_WORKFLOW_ALLOWED_URI_LESS_INTENT_ACTIONS[number],
+          )
+        ) {
+          errors.push(`${path}.params.action is not allowed without a uri: ${action}`);
         }
       }
       if (step.retries !== undefined && (typeof step.retries !== "number" || step.retries < 0)) {
