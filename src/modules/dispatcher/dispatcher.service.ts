@@ -20,6 +20,7 @@ import { isPnqV2ShadowRuntimeEnabled } from "../device-execution/pnq-v2-runtime-
 import type { JobType, JobParams, JobDispatchPayload } from "../../../shared/protocol/messages";
 import type { Job, DispatchJobRequest } from "../../../shared/protocol/api-types";
 import { v4 as uuidv4 } from "uuid";
+import { recordJobExecutionEventDetached } from "../observability/job-execution-events";
 
 // ─── Whitelist ─────────────────────────────────────────────────────────────────
 // DO NOT add generic shell commands here. Extend only with explicit approval.
@@ -170,6 +171,19 @@ export class DispatcherService {
        VALUES ($1, $2, $3, $4, 'pending', $5)`,
       [jobId, req.deviceId, req.type, JSON.stringify(req.params), timeoutMs]
     );
+    recordJobExecutionEventDetached({
+      jobId,
+      deviceId: req.deviceId,
+      workflowId: req.workflowId ?? null,
+      source: "dispatcher",
+      eventType: "job_created",
+      details: {
+        jobType: req.type,
+        timeoutMs,
+        stepIndex: req.stepIndex ?? null,
+        legacyCompatibilityLane,
+      },
+    });
 
     if (!legacyCompatibilityLane) {
       await deviceExecutionArbiter.observeAdmission({
@@ -274,6 +288,14 @@ export class DispatcherService {
             "UPDATE command_log SET result_status = 'timeout' WHERE job_id = $1",
             [jobId]
           );
+          recordJobExecutionEventDetached({
+            jobId,
+            deviceId: req.deviceId,
+            workflowId: req.workflowId ?? null,
+            source: "dispatcher",
+            eventType: "dispatcher_timeout",
+            details: { jobType: req.type, timeoutMs },
+          });
           if (req.workflowId) {
             // The server workflow owns the device root and decides whether a
             // timed-out child is retried or the workflow is failed. Blocking
@@ -349,6 +371,18 @@ export class DispatcherService {
       "UPDATE command_log SET result_status = $1 WHERE job_id = $2",
       [payload.status, payload.jobId]
     );
+    recordJobExecutionEventDetached({
+      jobId: payload.jobId,
+      deviceId: payload.deviceId,
+      source: "dispatcher",
+      eventType: "job_result_persisted",
+      details: {
+        status: payload.status,
+        durationMs: payload.durationMs,
+        error: payload.error ?? null,
+        authority: payload.authority ?? null,
+      },
+    });
 
     if (payload.authority === "legacy_generated_workflow") return;
 

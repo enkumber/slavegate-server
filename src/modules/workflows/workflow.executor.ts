@@ -63,6 +63,7 @@ import {
 import { llmJson } from "../../utils/llm";
 import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 import type { WorkflowRecord } from "./workflow.service";
+import { recordJobExecutionEventDetached } from "../observability/job-execution-events";
 
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ type GeneratedChildDispatchResult =
   | Awaited<ReturnType<typeof sendDeviceExecutionJobToDevice>>
   | Awaited<ReturnType<typeof sendLegacyGeneratedWorkflowJobToDevice>>;
 
-function generatedChildResultTimeoutMs(executionTimeoutMs: number, queued = false): number {
+export function generatedChildResultTimeoutMs(executionTimeoutMs: number, queued = false): number {
   const graceTimeoutMs = executionTimeoutMs + LEGACY_GENERATED_WORKFLOW_RESULT_GRACE_MS;
   return queued
     ? Math.max(graceTimeoutMs, scalabilityConfig.jobResultTimeout)
@@ -102,6 +103,13 @@ function executionStats(checkpoint: WorkflowCheckpoint): WorkflowExecutionStats 
 }
 
 export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED";
+
+export function shouldTerminallyFailWorkflowJob(attemptsMade: number, err: unknown): boolean {
+  const typed = err as { code?: unknown; message?: unknown } | null;
+  return attemptsMade >= 3 ||
+    typed?.code === RECOVERY_BUDGET_EXCEEDED ||
+    typed?.message === RECOVERY_BUDGET_EXCEEDED;
+}
 const GENERATED_WORKFLOW_RECOVERY_ATTEMPTS_KEY = "_generatedWorkflowRecoveryAttemptsByStep";
 const GENERATED_WORKFLOW_RECOVERY_TOTAL_ATTEMPTS_KEY = "_generatedWorkflowRecoveryTotalAttempts";
 const GENERATED_WORKFLOW_RECOVERY_EVENTS_KEY = "_generatedWorkflowRecoveryEvents";
@@ -145,26 +153,21 @@ function recoveryReasonFromError(err: unknown): string {
   return "deterministic_failure";
 }
 
-function isTimeoutTolerantEffectAction(action: string): boolean {
-  // These commands may complete on Android even when the process/activity
-  // transition prevents the device from returning JOB_RESULT.  They are safe
-  // to treat as dispatched effects after a timeout while the device remains
-  // online.  State-bearing observation actions (ui_tree_dump, screenshot,
-  // classifiers, etc.) must still return their result.
-  return action === "screen_wake" || action === "unlock" || action === "intent_send";
-}
-
 function isJobResultTimeoutError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return message.includes("JOB_RESULT timeout");
 }
 
 export function shouldContinueAfterMissingJobResult(
-  action: string,
-  err: unknown,
-  deviceOnline: boolean,
+  _action: string,
+  _err: unknown,
+  _deviceOnline: boolean,
 ): boolean {
-  return deviceOnline && isTimeoutTolerantEffectAction(action) && isJobResultTimeoutError(err);
+  // Fail closed: never advances a workflow without a correlated JOB_RESULT.
+  // A live socket proves only that HEARTBEAT/PING traffic is flowing. It does
+  // not prove that Android received or executed this JOB. Advancing without a
+  // correlated JOB_RESULT creates false success and corrupts the checkpoint.
+  return false;
 }
 
 function generatedWorkflowRecoveryAttemptsByStep(checkpoint: WorkflowCheckpoint): Record<string, number> {
@@ -714,8 +717,8 @@ export function startWorkflowWorker(): Worker {
   worker.on("failed", async (job, err) => {
     if (!job) return;
     const { workflowId } = job.data as { workflowId: string };
-    if (job.attemptsMade >= 3) {
-      console.error(`[workflow] DLQ: ${workflowId} failed after 3 attempts: ${err.message}`);
+    if (shouldTerminallyFailWorkflowJob(job.attemptsMade, err)) {
+      console.error(`[workflow] terminal failure: ${workflowId} after ${job.attemptsMade} attempts: ${err.message}`);
       await workflowService.markFailed(workflowId, err.message);
       const workflow = await workflowService.get(workflowId);
       if (workflow?.deviceId) {
@@ -1408,8 +1411,19 @@ async function executeActionStep(
   );
 
   // Send to device via DirectWS transport
-  const resultTimeoutMs = Math.max(generatedChildResultTimeoutMs(dispatchedTimeoutMs), scalabilityConfig.jobResultTimeout);
+  // Keep the executor clock aligned with the dispatcher clock. The previous
+  // minimum of scalabilityConfig.jobResultTimeout (5 minutes) left workflows
+  // waiting long after the jobs table had already marked the child timed out.
+  const resultTimeoutMs = generatedChildResultTimeoutMs(dispatchedTimeoutMs);
   const prepared = prepareGeneratedChildJobResult(jobId, resultTimeoutMs);
+  recordJobExecutionEventDetached({
+    jobId,
+    deviceId,
+    workflowId,
+    source: "workflow_executor",
+    eventType: "result_wait_registered",
+    details: { jobType, stepIndex, executionTimeoutMs: dispatchedTimeoutMs, resultTimeoutMs },
+  });
   let dispatch: GeneratedChildDispatchResult;
   try {
     dispatch = await sendLegacyGeneratedWorkflowJobToDevice(deviceId, {
@@ -1424,8 +1438,24 @@ async function executeActionStep(
     }, { resultTimeoutMs });
   } catch (err) {
     prepared.cancel();
+    recordJobExecutionEventDetached({
+      jobId,
+      deviceId,
+      workflowId,
+      source: "workflow_executor",
+      eventType: "dispatch_failed",
+      details: { jobType, stepIndex, error: (err as Error).message },
+    });
     throw err;
   }
+  recordJobExecutionEventDetached({
+    jobId,
+    deviceId,
+    workflowId,
+    source: "workflow_executor",
+    eventType: dispatch.sent ? "dispatch_sent" : dispatch.queued ? "dispatch_queued" : "dispatch_rejected",
+    details: { jobType, stepIndex, decision: dispatch.decision, reason: dispatch.reason ?? null },
+  });
   const resultPromise = awaitGeneratedChildJobResult(
     workflowId,
     jobId,
@@ -1444,15 +1474,24 @@ async function executeActionStep(
   try {
     result = await resultPromise;
   } catch (err) {
-    if (shouldContinueAfterMissingJobResult(step.action, err, isDeviceOnline(deviceId))) {
-      console.warn(
-        `[workflow] ${workflowId} step ${stepIndex} ${step.action} timed out waiting for JOB_RESULT, ` +
-        "but device is online; continuing because the dispatched effect is timeout-tolerant"
-      );
-      return;
-    }
+    recordJobExecutionEventDetached({
+      jobId,
+      deviceId,
+      workflowId,
+      source: "workflow_executor",
+      eventType: isJobResultTimeoutError(err) ? "result_wait_timeout" : "result_wait_failed",
+      details: { jobType, stepIndex, error: (err as Error).message, deviceOnline: isDeviceOnline(deviceId) },
+    });
     throw err;
   }
+  recordJobExecutionEventDetached({
+    jobId,
+    deviceId,
+    workflowId,
+    source: "workflow_executor",
+    eventType: "result_accepted",
+    details: { jobType, stepIndex, status: result.status, durationMs: result.durationMs },
+  });
 
   if (result.status === "failed" || result.status === "timeout") {
     const retries = step.retries ?? 0;

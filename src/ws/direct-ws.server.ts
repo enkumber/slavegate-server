@@ -44,6 +44,7 @@ import { llmComplete } from "../utils/llm";
 import { pnqV2RuntimeService, runPnqV2ShadowSideEffect } from "../modules/device-execution/pnq-v2-runtime.service";
 import { isPnqV2ShadowRuntimeEnabled } from "../modules/device-execution/pnq-v2-runtime-config";
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
+import { recordJobExecutionEventDetached } from "../modules/observability/job-execution-events";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -509,7 +510,20 @@ export class DirectWsServer {
    */
   sendJob(deviceId: string, payload: JobDispatchPayload): boolean {
     const conn = this.connections.get(deviceId);
-    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
+      recordJobExecutionEventDetached({
+        jobId: payload.jobId,
+        deviceId,
+        source: "direct_ws",
+        eventType: "direct_ws_send_rejected",
+        details: {
+          jobType: payload.type,
+          reason: conn ? "socket_not_open" : "connection_missing",
+          readyState: conn?.ws.readyState ?? null,
+        },
+      });
+      return false;
+    }
 
     this._send(conn.ws, {
       type:    "JOB",
@@ -518,6 +532,17 @@ export class DirectWsServer {
       params:  payload.params,
       timeoutMs: payload.timeoutMs,
       requiresRoot: payload.requiresRoot,
+    });
+    recordJobExecutionEventDetached({
+      jobId: payload.jobId,
+      deviceId,
+      source: "direct_ws",
+      eventType: "direct_ws_frame_sent",
+      details: {
+        jobType: payload.type,
+        timeoutMs: payload.timeoutMs ?? null,
+        connectionEpoch: conn.pnqV2ConnectionEpoch,
+      },
     });
     console.log(`[direct-ws] sendJob: device=${deviceId.slice(0,8)} jobId=${payload.jobId?.slice(0,8)} type=${payload.type}`);
     return true;
@@ -543,7 +568,21 @@ export class DirectWsServer {
 
     const deviceId = permit.handle.deviceId;
     const conn = this.connections.get(deviceId);
-    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) {
+      recordJobExecutionEventDetached({
+        jobId: payload.jobId,
+        deviceId,
+        source: "direct_ws",
+        eventType: "direct_ws_send_rejected",
+        details: {
+          jobType: payload.type,
+          reason: conn ? "socket_not_open" : "connection_missing",
+          readyState: conn?.ws.readyState ?? null,
+          ownerGeneration: permit.handle.ownerGeneration,
+        },
+      });
+      return false;
+    }
 
     this._send(conn.ws, {
       type:    "JOB",
@@ -553,6 +592,18 @@ export class DirectWsServer {
       timeoutMs: payload.timeoutMs,
       requiresRoot: payload.requiresRoot,
       pnqHandle: permit.wireHandle,
+    });
+    recordJobExecutionEventDetached({
+      jobId: payload.jobId,
+      deviceId,
+      source: "direct_ws",
+      eventType: "direct_ws_frame_sent",
+      details: {
+        jobType: payload.type,
+        timeoutMs: payload.timeoutMs ?? null,
+        connectionEpoch: conn.pnqV2ConnectionEpoch,
+        ownerGeneration: permit.handle.ownerGeneration,
+      },
     });
     console.log(`[direct-ws] sendJobWithPermit: device=${deviceId.slice(0,8)} jobId=${payload.jobId?.slice(0,8)} type=${payload.type} gen=${permit.handle.ownerGeneration}`);
     return true;
@@ -1403,6 +1454,18 @@ export class DirectWsServer {
 
     const status = Boolean(msg.success) ? "completed" : "failed";
     const durationMs = (msg.durationMs as number | undefined) ?? 0;
+    recordJobExecutionEventDetached({
+      jobId,
+      deviceId: conn.deviceId,
+      source: "direct_ws",
+      eventType: "job_result_received",
+      details: {
+        status,
+        durationMs,
+        error: (msg.error as string | undefined) ?? null,
+        connectionEpoch: conn.pnqV2ConnectionEpoch,
+      },
+    });
     const wireHandle = isRecord(msg.pnqHandle) ? msg.pnqHandle : null;
     const handleResolution = pending?.permit
       ? resolveDirectWsResultHandle(pending.permit.handle, msg)

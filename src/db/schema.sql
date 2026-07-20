@@ -98,6 +98,25 @@ CREATE INDEX IF NOT EXISTS idx_jobs_device_id  ON jobs(device_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status     ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC);
 
+-- Runtime transport trace for debugging JOB delivery/result failures.
+-- Command params and outputs are intentionally excluded to avoid duplicating
+-- credentials or private data into observability records.
+CREATE TABLE IF NOT EXISTS job_execution_events (
+  id           BIGSERIAL   PRIMARY KEY,
+  job_id       UUID        NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  device_id    UUID        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  workflow_id  UUID,
+  source       TEXT        NOT NULL,
+  event_type   TEXT        NOT NULL,
+  details      JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_execution_events_job
+  ON job_execution_events(job_id, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_job_execution_events_device
+  ON job_execution_events(device_id, created_at DESC);
+
 -- ─── Command Audit Log (server-side ONLY — generated from dispatch + JOB_RESULT) ──────
 -- Audit log is NEVER transmitted by device. Device keeps ZERO permanent log.
 -- At dispatch: server writes command_type, params, device_id, job_id.

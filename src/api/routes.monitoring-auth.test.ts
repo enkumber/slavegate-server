@@ -107,4 +107,32 @@ describe("real API router monitoring auth", () => {
     expect(response.body).toMatchObject({ ok: true, data: { count: 0, connections: [] } });
     expect(mocks.db.query).not.toHaveBeenCalled();
   });
+
+  it("returns the persisted execution trace for an admin job lookup", async () => {
+    const jobId = "11111111-1111-4111-8111-111111111111";
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [{
+        id: jobId,
+        device_id: "22222222-2222-4222-8222-222222222222",
+        job_type: "open_app",
+        params: {},
+        status: "timeout",
+        timeout_ms: 30_000,
+        created_at: new Date(),
+      }] })
+      .mockResolvedValueOnce({ rows: [{
+        id: 1,
+        job_id: jobId,
+        source: "direct_ws",
+        event_type: "direct_ws_frame_sent",
+        details: { jobType: "open_app" },
+      }] });
+
+    const response = await getJson(`/api/jobs/${jobId}/events`, { "x-api-key": "test-api-key" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      expect.objectContaining({ event_type: "direct_ws_frame_sent" }),
+    ]);
+  });
 });

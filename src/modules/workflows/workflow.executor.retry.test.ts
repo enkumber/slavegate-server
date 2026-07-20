@@ -7,10 +7,12 @@ import * as transport from "../../transport/transport";
 import { workflowService, type WorkflowRecord } from "./workflow.service";
 import {
   awaitGeneratedChildJobResult,
+  generatedChildResultTimeoutMs,
   prepareGeneratedChildJobResult,
   resolveJobResult,
   runWorkflow,
   shouldContinueAfterMissingJobResult,
+  shouldTerminallyFailWorkflowJob,
 } from "./workflow.executor";
 import type { WorkflowTemplate } from "./types";
 
@@ -81,18 +83,31 @@ afterEach(() => {
 });
 
 describe("workflow BullMQ retry semantics", () => {
-  it("continues only timeout-tolerant dispatched effects when JOB_RESULT is missing", () => {
+  it("aligns a dispatched child result deadline with its execution timeout", () => {
+    expect(generatedChildResultTimeoutMs(30_000)).toBe(35_000);
+    expect(generatedChildResultTimeoutMs(30_000, true)).toBe(300_000);
+  });
+
+  it("terminates immediately when the bounded recovery budget is exhausted", () => {
+    expect(shouldTerminallyFailWorkflowJob(1, Object.assign(new Error("RECOVERY_BUDGET_EXCEEDED"), {
+      code: "RECOVERY_BUDGET_EXCEEDED",
+    }))).toBe(true);
+    expect(shouldTerminallyFailWorkflowJob(2, new Error("transient"))).toBe(false);
+    expect(shouldTerminallyFailWorkflowJob(3, new Error("transient"))).toBe(true);
+  });
+
+  it("never advances a workflow without a correlated JOB_RESULT", () => {
     const timeout = new Error("JOB_RESULT timeout after 30000ms (jobId=test)");
 
-    expect(shouldContinueAfterMissingJobResult("screen_wake", timeout, true)).toBe(true);
-    expect(shouldContinueAfterMissingJobResult("unlock", timeout, true)).toBe(true);
-    expect(shouldContinueAfterMissingJobResult("intent_send", timeout, true)).toBe(true);
+    expect(shouldContinueAfterMissingJobResult("screen_wake", timeout, true)).toBe(false);
+    expect(shouldContinueAfterMissingJobResult("unlock", timeout, true)).toBe(false);
+    expect(shouldContinueAfterMissingJobResult("intent_send", timeout, true)).toBe(false);
     expect(shouldContinueAfterMissingJobResult("ui_tree_dump", timeout, true)).toBe(false);
     expect(shouldContinueAfterMissingJobResult("intent_send", new Error("dispatch rejected"), true)).toBe(false);
     expect(shouldContinueAfterMissingJobResult("intent_send", timeout, false)).toBe(false);
   });
 
-  it("completes wake -> unlock -> intent_send -> ui_tree_dump when effect jobs omit JOB_RESULT", async () => {
+  it("fails closed at wake when the device omits JOB_RESULT", async () => {
     vi.useFakeTimers();
     try {
       const exactTemplate: WorkflowTemplate = {
@@ -161,15 +176,13 @@ describe("workflow BullMQ retry semantics", () => {
       });
 
       const pending = runWorkflow(WORKFLOW_ID, job());
-      const completedAssertion = expect(pending).resolves.toBeUndefined();
+      const failedAssertion = expect(pending).rejects.toThrow();
       await vi.runAllTimersAsync();
-      await completedAssertion;
+      await failedAssertion;
 
-      expect(dispatched).toEqual(["screen_wake", "unlock", "intent_send", "ui_tree_dump"]);
-      expect(completed).toHaveBeenCalledWith(WORKFLOW_ID);
-      expect(running.checkpoint.variables._finalUiTree).toEqual({
-        tree: [{ text: "Bankroll 638.824 BTC" }],
-      });
+      expect(dispatched).toEqual(["screen_wake", "screen_wake"]);
+      expect(completed).not.toHaveBeenCalled();
+      expect(running.checkpoint.variables._finalUiTree).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

@@ -486,14 +486,13 @@ describe("Generated workflow contract validation", () => {
     expect(executorSource).toContain("stats.runtimeLlmCalls++");
     expect(executorSource).toContain("normalizeA11yFindTapParams(finalParams)");
     expect(executorSource).toContain('params["resourceId"] = "add_comment_button"');
-    expect(executorSource).toContain("function isTimeoutTolerantEffectAction");
-    expect(executorSource).toContain('action === "intent_send"');
-    expect(executorSource).toContain("continuing because the dispatched effect is timeout-tolerant");
+    expect(executorSource).toContain("never advances a workflow without a correlated JOB_RESULT");
+    expect(executorSource).toContain("return false;");
     expect(executorSource).toContain("timeoutMs: dispatchedTimeoutMs");
     expect(executorSource).toContain("awaitGeneratedChildJobResult");
     expect(executorSource).toContain("function generatedChildResultTimeoutMs(executionTimeoutMs: number, queued = false): number");
     expect(executorSource).toContain("const graceTimeoutMs = executionTimeoutMs + LEGACY_GENERATED_WORKFLOW_RESULT_GRACE_MS");
-    expect(executorSource).toContain("const resultTimeoutMs = Math.max(generatedChildResultTimeoutMs(dispatchedTimeoutMs), scalabilityConfig.jobResultTimeout)");
+    expect(executorSource).toContain("const resultTimeoutMs = generatedChildResultTimeoutMs(dispatchedTimeoutMs)");
     expect(executorSource).toContain("}, { resultTimeoutMs });");
     expect(executorSource).toContain("dispatch.queued");
     expect(executorSource).toContain("generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReasonFromError(err)).inc()");

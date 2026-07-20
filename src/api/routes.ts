@@ -83,6 +83,7 @@ import {
   type HumanWorkflowTarget,
 } from "../modules/human-workflow/human-workflow-compiler.service";
 import type { HumanWorkflowCompileJobRecord } from "../modules/human-workflow/compile-job.service";
+import { listJobExecutionEvents } from "../modules/observability/job-execution-events";
 
 const router = Router();
 
@@ -649,6 +650,15 @@ router.get("/jobs/:id", async (req, res) => {
   const job = await dispatcherService.getJob(req.params.id);
   if (!job) return res.status(404).json({ ok: false, error: "Not found" });
   res.json({ ok: true, data: job });
+});
+
+router.get("/jobs/:id/events", requireAdminAuth, async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) {
+    return res.status(400).json({ ok: false, error: "job id must be a UUID" });
+  }
+  const job = await dispatcherService.getJob(req.params.id);
+  if (!job) return res.status(404).json({ ok: false, error: "Not found" });
+  res.json({ ok: true, data: await listJobExecutionEvents(req.params.id) });
 });
 
 router.post("/jobs", async (req, res) => {
