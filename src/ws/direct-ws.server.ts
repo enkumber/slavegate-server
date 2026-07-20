@@ -1126,6 +1126,8 @@ export class DirectWsServer {
 
       // ── Route by type ─────────────────────────────────────────────────
       switch (type) {
+        case "JOB_ACK":         await this._handleJobProgress(deviceConn, msg, "agent_job_received"); break;
+        case "JOB_STARTED":     await this._handleJobProgress(deviceConn, msg, "agent_job_started"); break;
         case "JOB_RESULT":      await this._handleJobResult(deviceConn, msg);   break;
         case "BATCH_RESULT":    await this._handleBatchResult(deviceConn, msg); break;
         case "HEARTBEAT":       await this._handleHeartbeat(deviceConn, msg); break;
@@ -1431,6 +1433,33 @@ export class DirectWsServer {
   }
 
   // ─── Message handlers ─────────────────────────────────────────────────────
+
+  private async _handleJobProgress(
+    conn: ConnectedDevice,
+    msg: Record<string, unknown>,
+    eventType: "agent_job_received" | "agent_job_started",
+  ): Promise<void> {
+    const jobId = typeof msg.jobId === "string" ? msg.jobId : "";
+    if (!jobId) return;
+    if (eventType === "agent_job_started") {
+      await getDb().query(
+        `UPDATE jobs
+         SET status = 'running', started_at = COALESCE(started_at, NOW())
+         WHERE id = $1 AND device_id = $2 AND status IN ('pending', 'queued')`,
+        [jobId, conn.deviceId],
+      ).catch((err) => console.warn(`[direct-ws] JOB_STARTED persistence failed: ${(err as Error).message}`));
+    }
+    recordJobExecutionEventDetached({
+      jobId,
+      deviceId: conn.deviceId,
+      source: "direct_ws",
+      eventType,
+      details: {
+        jobType: typeof msg.jobType === "string" ? msg.jobType : null,
+        connectionEpoch: conn.pnqV2ConnectionEpoch,
+      },
+    });
+  }
 
   private async _handleJobResult(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {
     const jobId = msg.jobId as string;
