@@ -6,6 +6,22 @@
 
 import { modelConfigFetch, modelConfigService, sanitizeProviderError } from "../modules/model-config/model-config.service";
 
+export interface LlmResponseMetadata {
+  role: "decision_llm";
+  provider: string;
+  model: string;
+  endpoint: string;
+}
+
+export interface LlmCompletionOptions {
+  max_tokens?: number;
+  system?: string;
+  timeoutMs?: number;
+  temperature?: number;
+  disableThinking?: boolean;
+  onRawResponse?: (response: string, metadata: LlmResponseMetadata) => void;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CORE LLM FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -17,7 +33,7 @@ import { modelConfigFetch, modelConfigService, sanitizeProviderError } from "../
 export async function llmComplete(
   prompt: string,
   model?: string,
-  options?: { max_tokens?: number; system?: string; timeoutMs?: number; temperature?: number; disableThinking?: boolean }
+  options?: LlmCompletionOptions
 ): Promise<string> {
   const config = await modelConfigService.resolve("decision_llm");
   const maxTokens = options?.max_tokens ?? 2048;
@@ -76,11 +92,18 @@ export async function llmComplete(
     content?: Array<{ text?: string }>;
   };
 
-  return (
+  const content = (
     data.choices?.[0]?.message?.content ||
     data.content?.[0]?.text ||
     ""
   );
+  options?.onRawResponse?.(content, {
+    role: "decision_llm",
+    provider: config.provider,
+    model: selectedModel,
+    endpoint: endpointBase(config.endpoint, provider),
+  });
+  return content;
 }
 
 function endpointBase(endpoint: string | null, provider: string): string {
@@ -103,7 +126,7 @@ function normalizeOpenAIProvider(provider: string): string {
 export async function llmJson<T = unknown>(
   prompt: string,
   model?: string,
-  options?: { max_tokens?: number; system?: string; timeoutMs?: number; temperature?: number; disableThinking?: boolean }
+  options?: LlmCompletionOptions
 ): Promise<T> {
   const response = await llmComplete(prompt, model, { ...options, disableThinking: options?.disableThinking ?? true });
 

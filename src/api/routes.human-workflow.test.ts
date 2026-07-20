@@ -1175,6 +1175,16 @@ describe("dashboard human workflow routes", () => {
       dataRetentionDays: 7,
       steps: [],
     });
+    mocks.llmJson.mockResolvedValueOnce({
+      id: "workflow_android_gmail_account_still_empty",
+      name: "Create Gmail account",
+      platform: "android",
+      description: "Create a Gmail account from the Android device.",
+      version: "1.0.0",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [],
+    });
 
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
@@ -1189,6 +1199,82 @@ describe("dashboard human workflow routes", () => {
       nextAction: "retry_compile",
     });
     expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
+  });
+
+  it("repairs an undercompiled Gmail account workflow once before accepting it", async () => {
+    const intent = "deschide gmail si fa un cont nou pentru vlad popescu si alege o parola";
+    const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{ device_id: DEVICE_ID, device_model: "ONEPLUS A5010", device_name: "Test Phone" }],
+    });
+    mocks.compileJobService.createOrGet.mockResolvedValueOnce(compileJobRecord({
+      requestKey: key,
+      accountId: null,
+      intent,
+      platform: "android",
+    }));
+    mocks.llmJson.mockReset();
+    mocks.llmJson
+      .mockResolvedValueOnce({
+        id: "gmail_vlad_undercompiled",
+        name: "Create Gmail account",
+        platform: "android",
+        description: "Prepare the device.",
+        version: "1.0.0",
+        defaultVerificationStrategy: "local_only",
+        dataRetentionDays: 7,
+        steps: [
+          { id: "wake", type: "action", action: "screen_wake", params: {} },
+          { id: "unlock", type: "action", action: "unlock", params: {} },
+          { id: "observe", type: "action", action: "ui_tree_dump", params: { outputVariable: "_ui" } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "gmail_vlad_complete",
+        name: "Create Gmail account",
+        platform: "android",
+        description: "Create the requested Gmail account.",
+        version: "1.0.0",
+        defaultVerificationStrategy: "local_only",
+        dataRetentionDays: 7,
+        steps: [
+          { id: "wake", type: "action", action: "screen_wake", params: {} },
+          { id: "unlock", type: "action", action: "unlock", params: {} },
+          { id: "open_gmail", type: "action", action: "open_app", params: { packageName: "com.google.android.gm" } },
+          { id: "add_account", type: "action", action: "a11y_find_tap", params: { text: "Add another account" } },
+          { id: "type_name", type: "action", action: "type_text", params: { text: "Vlad Popescu" } },
+          { id: "done", type: "checkpoint", reason: "Account-creation form completed" },
+        ],
+      });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      intent,
+    });
+
+    expect(response.status).toBe(202);
+    const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
+    await runner();
+
+    expect(mocks.llmJson).toHaveBeenCalledTimes(2);
+    expect(mocks.llmJson.mock.calls[0][2]).toMatchObject({ max_tokens: 4096 });
+    expect(mocks.llmJson.mock.calls[1][0]).toContain("CORRECTIVE COMPILATION REQUIRED");
+    expect(mocks.llmJson.mock.calls[1][0]).toContain("workflow only wakes/unlocks/observes the device");
+    expect(mocks.llmJson.mock.calls[1][2]).toMatchObject({ max_tokens: 6144 });
+    expect(mocks.workflowService.saveExecutableGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({
+        steps: expect.arrayContaining([
+          expect.objectContaining({ id: "open_gmail", action: "open_app" }),
+          expect.objectContaining({ id: "add_account", action: "a11y_find_tap" }),
+          expect.objectContaining({ id: "type_name", action: "type_text" }),
+        ]),
+      }),
+      expect.anything(),
+      key,
+      expect.objectContaining({ source: "dashboard_human", intent }),
+    );
   });
 
   it("rejects cached dashboard human workflows that only wake and unlock for a real task", async () => {
@@ -1593,7 +1679,6 @@ describe("dashboard human workflow routes", () => {
   });
 
   it("returns compile job support metadata for running polling", async () => {
-    process.env.AGENT_PLANNER_MODEL = "anthropic/claude-sonnet-4-6";
     mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
       status: "running",
       intent: "open reddit with token: abcdef123456 and admin@example.com +40722123456",
@@ -1621,15 +1706,48 @@ describe("dashboard human workflow routes", () => {
       platform: "reddit",
       errorClass: null,
       providerErrorCode: null,
-      modelRole: "planner",
-      provider: "anthropic",
-      model: "claude-sonnet-4-6",
+      modelRole: "decision_llm",
+      provider: "unknown",
+      model: "unknown",
       retryAfterMs: 2000,
     });
     expect(response.body.data.intentPreview).toContain("[redacted-token]");
     expect(response.body.data.intentPreview).toContain("[redacted-email]");
     expect(response.body.data.intentPreview).toContain("[redacted-phone]");
-    delete process.env.AGENT_PLANNER_MODEL;
+  });
+
+  it("returns the actual decision LLM and raw output captured for failed compilation", async () => {
+    const llmDebug = {
+      sensitive: true,
+      compilerCacheVersion: "2026-07-20-credentials-v3",
+      failure: "human workflow undercompiled",
+      attempts: [{
+        attempt: 1,
+        provider: "openai_compatible",
+        model: "qwen3.6-35b-a3b",
+        endpoint: "http://gx10.example/v1",
+        maxTokens: 4096,
+        rawResponse: "{\"steps\":[{\"action\":\"screen_wake\"}]}",
+        responseTruncated: false,
+        capturedAt: "2026-07-20T08:00:00.000Z",
+      }],
+    };
+    mocks.compileJobService.getById.mockResolvedValueOnce(compileJobRecord({
+      status: "failed",
+      error: "human workflow undercompiled",
+      result: { llmDebug, llmDebugHistory: [llmDebug] },
+    }));
+
+    const response = await getJson(`/api/workflows/human/compile-jobs/${COMPILE_JOB_ID}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      modelRole: "decision_llm",
+      provider: "openai_compatible",
+      model: "qwen3.6-35b-a3b",
+      debug: llmDebug,
+      debugHistory: [llmDebug],
+    });
   });
 
   it("returns ready compile job payload with duration and shortcut key for polling", async () => {

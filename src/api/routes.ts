@@ -83,24 +83,12 @@ import {
   type HumanWorkflowTarget,
 } from "../modules/human-workflow/human-workflow-compiler.service";
 import type { HumanWorkflowCompileJobRecord } from "../modules/human-workflow/compile-job.service";
-import { agentConfig } from "../config/agents.config";
 
 const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
-
-function plannerModelMetadata(): { modelRole: "planner"; provider: string; model: string } {
-  const configured = process.env.AGENT_PLANNER_MODEL || agentConfig.planner.model;
-  const separator = configured.indexOf("/");
-  if (separator === -1) return { modelRole: "planner", provider: "unknown", model: configured };
-  return {
-    modelRole: "planner",
-    provider: configured.slice(0, separator),
-    model: configured.slice(separator + 1),
-  };
-}
 
 function intentPreview(intent: string): string {
   return intent
@@ -142,6 +130,8 @@ async function compileJobResponse(job: HumanWorkflowCompileJobRecord): Promise<R
     : job.status === "queued" || job.status === "running"
       ? "poll_compile_job"
       : undefined;
+  const llmDebug = job.result?.llmDebug as { attempts?: Array<{ provider?: string; model?: string }> } | undefined;
+  const lastAttempt = llmDebug?.attempts?.at(-1);
   const metadata = {
     compileJobId: job.id,
     status: job.status,
@@ -161,8 +151,12 @@ async function compileJobResponse(job: HumanWorkflowCompileJobRecord): Promise<R
     error: job.error,
     errorClass: job.errorClass,
     providerErrorCode: job.providerErrorCode,
-    ...plannerModelMetadata(),
+    modelRole: "decision_llm",
+    provider: lastAttempt?.provider ?? "unknown",
+    model: lastAttempt?.model ?? "unknown",
     intentPreview: intentPreview(job.intent),
+    debug: job.result?.llmDebug ?? null,
+    debugHistory: job.result?.llmDebugHistory ?? [],
     retryAfterMs: job.status === "queued" || job.status === "running" ? ASYNC_COMPILE_RETRY_AFTER_MS : undefined,
   };
   if (job.status === "ready" && job.result) return { ...job.result, ...metadata };

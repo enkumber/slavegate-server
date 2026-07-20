@@ -142,6 +142,7 @@ export class HumanWorkflowCompileJobService {
            retry_count = COALESCE(retry_count, 0) + 1,
            last_retried_at = NOW(),
            error = NULL,
+           provider_error_code = NULL,
            llm_completed_at = NULL,
            completed_at = NULL,
            updated_at = NOW()
@@ -199,7 +200,13 @@ export class HumanWorkflowCompileJobService {
                source = 'llm',
                shortcut_id = $3,
                error = NULL,
-               result = $4,
+               result = (COALESCE(result, '{}'::jsonb) - 'llmDebug')
+                 || ($4::jsonb - 'llmDebug')
+                 || jsonb_build_object(
+                      'llmDebug', $4::jsonb -> 'llmDebug',
+                      'llmDebugHistory', COALESCE(result -> 'llmDebugHistory', '[]'::jsonb)
+                        || jsonb_build_array($4::jsonb -> 'llmDebug')
+                    ),
                llm_completed_at = NOW(),
                completed_at = NOW(),
                updated_at = NOW()
@@ -207,7 +214,7 @@ export class HumanWorkflowCompileJobService {
           [jobId, result.cacheKey ?? null, result.shortcutId ?? null, JSON.stringify(result)],
         );
       } catch (err) {
-        const typed = err as Error & { validationErrors?: string[] };
+        const typed = err as Error & { validationErrors?: string[]; debugPayload?: Record<string, unknown> };
         const validationDetail = Array.isArray(typed.validationErrors) && typed.validationErrors.length > 0
           ? `: ${typed.validationErrors.slice(0, 6).join("; ")}`
           : "";
@@ -215,11 +222,16 @@ export class HumanWorkflowCompileJobService {
           `UPDATE human_workflow_compile_jobs
            SET status = 'failed',
                error = $2,
+               result = jsonb_build_object(
+                 'llmDebug', $3::jsonb -> 'llmDebug',
+                 'llmDebugHistory', COALESCE(result -> 'llmDebugHistory', '[]'::jsonb)
+                   || jsonb_build_array($3::jsonb -> 'llmDebug')
+               ),
                llm_completed_at = NOW(),
                completed_at = NOW(),
                updated_at = NOW()
            WHERE id = $1`,
-          [jobId, `${typed.message}${validationDetail}`],
+          [jobId, `${typed.message}${validationDetail}`, typed.debugPayload ? JSON.stringify(typed.debugPayload) : null],
         ).catch(() => {});
       } finally {
         this.running.delete(jobId);

@@ -15,7 +15,7 @@ import {
 } from "../workflows/workflow-validator";
 import { workflowService, type GeneratedWorkflowPlanCacheRecord } from "../workflows/workflow.service";
 import type { WorkflowTemplate } from "../workflows/types";
-import { llmJson } from "../../utils/llm";
+import { llmJson, type LlmResponseMetadata } from "../../utils/llm";
 import { shortcutRegistryService } from "../workflow-shortcuts/shortcut-registry.service";
 import { humanWorkflowCompileJobService, type HumanWorkflowCompileJobRecord } from "./compile-job.service";
 import {
@@ -26,6 +26,9 @@ import {
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
 const MAX_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 120_000;
+const HUMAN_WORKFLOW_INITIAL_MAX_TOKENS = 4_096;
+const HUMAN_WORKFLOW_REPAIR_MAX_TOKENS = 6_144;
+const HUMAN_WORKFLOW_DEBUG_RESPONSE_MAX_CHARS = 100_000;
 const HUMAN_WORKFLOW_COMPILER_CACHE_VERSION = "2026-07-20-credentials-v3";
 const PLATFORM_APP_IDS: Record<string, string> = {
   browser: "com.android.chrome",
@@ -63,7 +66,27 @@ export type HumanWorkflowCompileReady = {
   target: HumanWorkflowTarget;
   llmBudget?: Record<string, unknown>;
   shortcutId?: string | null;
+  llmDebug?: HumanWorkflowLlmDebug;
 };
+
+export interface HumanWorkflowLlmDebugAttempt {
+  attempt: number;
+  provider: string;
+  model: string;
+  endpoint: string;
+  maxTokens: number;
+  rawResponse: string;
+  responseTruncated: boolean;
+  capturedAt: string;
+}
+
+export interface HumanWorkflowLlmDebug {
+  sensitive: true;
+  compilerCacheVersion: string;
+  attempts: HumanWorkflowLlmDebugAttempt[];
+  failure?: string;
+  validationErrors?: string[];
+}
 
 export type HumanWorkflowCompileAccepted = {
   status: "compiling";
@@ -385,6 +408,25 @@ function buildHumanWorkflowCompilePrompt(input: {
     "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
     screens ? `Known screens: ${screens}.` : "Use UNKNOWN if screen is uncertain.",
     "No intent or outputSchema fields.",
+  ].join("\n");
+}
+
+function buildHumanWorkflowRepairPrompt(input: {
+  compilePrompt: string;
+  rejectedWorkflow: unknown;
+  reason: string;
+}): string {
+  return [
+    input.compilePrompt,
+    "",
+    "CORRECTIVE COMPILATION REQUIRED.",
+    `The previous candidate was rejected as undercompiled: ${input.reason}.`,
+    "Return a complete replacement workflow that performs the user's actual goal end to end.",
+    "Wake, unlock, waits, screen detection, UI dumps, and checkpoints are preparation/evidence only; they do not satisfy the goal.",
+    "Include the concrete app-opening, navigation, tapping, and text-entry actions needed by the goal.",
+    "For account-creation goals, include the account-creation path and all requested user-authorized form values, including a generated username/password when requested.",
+    "Do not return or repeat a readiness-only workflow.",
+    `Rejected candidate: ${JSON.stringify(input.rejectedWorkflow)}`,
   ].join("\n");
 }
 
@@ -1020,48 +1062,102 @@ export class HumanWorkflowCompilerService {
       appMap,
     });
 
-    const rawWorkflow = await llmJson<WorkflowTemplate>(prompt, undefined, {
-      max_tokens: 1536,
-      system: "You are a Phone Network workflow compiler. Return only valid WorkflowTemplate JSON. No reasoning.",
-      timeoutMs: humanWorkflowAsyncCompileTimeoutMs(),
-      temperature: 0,
-      disableThinking: true,
-    });
-    const normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, { platform, packageName, goal: input.intent });
-    const validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
-    if (!validation.template) {
-      throw Object.assign(new Error("workflow failed validation"), {
-        status: 400,
-        code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
-        validationErrors: validation.errors,
-      });
-    }
-    const template = validation.template;
-    assertHumanWorkflowMeaningful(template, input.intent);
-    const safetyClass = inferHumanWorkflowSafetyClass(input.intent);
-    let compiledPlan = compileGeneratedWorkflowTemplate(template);
-    compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
-    await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, input.requestKey, {
-      source: "dashboard_human",
+    const llmDebug: HumanWorkflowLlmDebug = {
+      sensitive: true,
       compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
-      intent: input.intent,
-      deviceId: input.target.device_id,
-      accountId: input.target.account_id,
-      platform,
-      compiledAt: new Date().toISOString(),
-    });
-    return {
-      status: "ready",
-      requestKey: input.requestKey,
-      cacheHit: false,
-      cacheKey: compiledPlan.cacheKey,
-      source: "llm",
-      plan: humanWorkflowPlanPreview(template, compiledPlan),
-      safetyClass,
-      platform,
-      target: input.target,
-      llmBudget: compiledPlan.llmBudget,
+      attempts: [],
     };
+    const captureAttempt = (attempt: number, maxTokens: number) =>
+      (response: string, metadata: LlmResponseMetadata): void => {
+        llmDebug.attempts.push({
+          attempt,
+          provider: metadata.provider,
+          model: metadata.model,
+          endpoint: metadata.endpoint,
+          maxTokens,
+          rawResponse: response.slice(0, HUMAN_WORKFLOW_DEBUG_RESPONSE_MAX_CHARS),
+          responseTruncated: response.length > HUMAN_WORKFLOW_DEBUG_RESPONSE_MAX_CHARS,
+          capturedAt: new Date().toISOString(),
+        });
+      };
+
+    try {
+      let rawWorkflow = await llmJson<WorkflowTemplate>(prompt, undefined, {
+        max_tokens: HUMAN_WORKFLOW_INITIAL_MAX_TOKENS,
+        system: "You are a Phone Network workflow compiler. Return only valid WorkflowTemplate JSON. No reasoning.",
+        timeoutMs: humanWorkflowAsyncCompileTimeoutMs(),
+        temperature: 0,
+        disableThinking: true,
+        onRawResponse: captureAttempt(1, HUMAN_WORKFLOW_INITIAL_MAX_TOKENS),
+      });
+      let normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, { platform, packageName, goal: input.intent });
+      let validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
+      if (!validation.template) {
+        throw Object.assign(new Error("workflow failed validation"), {
+          status: 400,
+          code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
+          validationErrors: validation.errors,
+        });
+      }
+      let template = validation.template;
+      const undercompiledReason = humanWorkflowUndercompiledReason(template, input.intent);
+      if (undercompiledReason) {
+        rawWorkflow = await llmJson<WorkflowTemplate>(buildHumanWorkflowRepairPrompt({
+          compilePrompt: prompt,
+          rejectedWorkflow: rawWorkflow,
+          reason: undercompiledReason,
+        }), undefined, {
+          max_tokens: HUMAN_WORKFLOW_REPAIR_MAX_TOKENS,
+          system: "You are a Phone Network workflow compiler repairing an undercompiled plan. Return only complete valid WorkflowTemplate JSON. No reasoning.",
+          timeoutMs: humanWorkflowAsyncCompileTimeoutMs(),
+          temperature: 0,
+          disableThinking: true,
+          onRawResponse: captureAttempt(2, HUMAN_WORKFLOW_REPAIR_MAX_TOKENS),
+        });
+        normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, { platform, packageName, goal: input.intent });
+        validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
+        if (!validation.template) {
+          throw Object.assign(new Error("corrective workflow failed validation"), {
+            status: 400,
+            code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
+            validationErrors: validation.errors,
+          });
+        }
+        template = validation.template;
+      }
+      assertHumanWorkflowMeaningful(template, input.intent);
+      const safetyClass = inferHumanWorkflowSafetyClass(input.intent);
+      let compiledPlan = compileGeneratedWorkflowTemplate(template);
+      compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
+      await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, input.requestKey, {
+        source: "dashboard_human",
+        compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
+        intent: input.intent,
+        deviceId: input.target.device_id,
+        accountId: input.target.account_id,
+        platform,
+        compiledAt: new Date().toISOString(),
+      });
+      return {
+        status: "ready",
+        requestKey: input.requestKey,
+        cacheHit: false,
+        cacheKey: compiledPlan.cacheKey,
+        source: "llm",
+        plan: humanWorkflowPlanPreview(template, compiledPlan),
+        safetyClass,
+        platform,
+        target: input.target,
+        llmBudget: compiledPlan.llmBudget,
+        llmDebug,
+      };
+    } catch (err) {
+      const typed = err as Error & { debugPayload?: Record<string, unknown>; validationErrors?: string[] };
+      llmDebug.failure = typed.message;
+      if (typed.validationErrors?.length) llmDebug.validationErrors = typed.validationErrors;
+      typed.debugPayload = { llmDebug };
+      throw typed;
+    }
   }
 }
 

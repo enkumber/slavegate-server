@@ -111,5 +111,41 @@ describe("humanWorkflowCompileJobService", () => {
     expect(job?.retryCount).toBe(2);
     expect(job?.lastRetriedAt).toBe("2026-06-18T10:01:00.000Z");
     expect(mocks.db.query.mock.calls[0][0]).toContain("retry_count = COALESCE(retry_count, 0) + 1");
+    expect(mocks.db.query.mock.calls[0][0]).not.toContain("result = NULL");
+  });
+
+  it("persists raw LLM debug output and appends it to job history on failure", async () => {
+    const llmDebug = {
+      sensitive: true,
+      compilerCacheVersion: "test-v1",
+      failure: "human workflow undercompiled",
+      attempts: [{
+        attempt: 1,
+        provider: "openai_compatible",
+        model: "qwen-test",
+        endpoint: "http://gx10.example/v1",
+        maxTokens: 4096,
+        rawResponse: "{\"steps\":[{\"action\":\"screen_wake\"}]}",
+        responseTruncated: false,
+        capturedAt: "2026-07-20T08:00:00.000Z",
+      }],
+    };
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [jobRow()] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    humanWorkflowCompileJobService.runInProcess(
+      "66666666-6666-4666-8666-666666666666",
+      async () => {
+        throw Object.assign(new Error("human workflow undercompiled"), {
+          debugPayload: { llmDebug },
+        });
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(mocks.db.query).toHaveBeenCalledTimes(2);
+    expect(mocks.db.query.mock.calls[1][0]).toContain("llmDebugHistory");
+    expect(JSON.parse(mocks.db.query.mock.calls[1][1][2])).toEqual({ llmDebug });
   });
 });
