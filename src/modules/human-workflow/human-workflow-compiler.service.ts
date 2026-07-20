@@ -705,7 +705,7 @@ function normalizeHumanWorkflowWaitStep(step: Record<string, unknown>): void {
     numberFromUnknown(params.timeoutMs) ??
     numberFromUnknown(params.waitMs) ??
     numberFromUnknown(params.ms);
-  if (typeof step.condition !== "string") {
+  if (explicitDuration !== null || typeof step.condition !== "string") {
     const durationMs = explicitDuration ?? 1_000;
     step.duration = { min: durationMs, max: durationMs, distribution: "uniform" };
   }
