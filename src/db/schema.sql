@@ -202,6 +202,25 @@ CREATE TABLE IF NOT EXISTS workflows (
 CREATE INDEX IF NOT EXISTS idx_workflows_status ON workflows(status);
 CREATE INDEX IF NOT EXISTS idx_workflows_device ON workflows(device_id);
 
+-- Append-only audit trail for explicit administrative reconciliation of
+-- agency workflow runs. run_id intentionally has no FK so audit survives purge.
+CREATE TABLE IF NOT EXISTS agency_workflow_run_admin_events (
+  id              BIGSERIAL PRIMARY KEY,
+  run_id          UUID NOT NULL,
+  task_id         UUID,
+  workflow_ids    UUID[] NOT NULL DEFAULT '{}',
+  action          TEXT NOT NULL CHECK (action IN ('admin_close')),
+  actor_type      TEXT NOT NULL,
+  actor_id        TEXT,
+  reason          TEXT NOT NULL,
+  previous_state  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  resulting_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agency_workflow_run_admin_events_run
+  ON agency_workflow_run_admin_events(run_id, created_at DESC, id DESC);
+
 -- ─── Accounts — Phase 3 ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS accounts (
   id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),

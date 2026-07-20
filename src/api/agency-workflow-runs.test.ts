@@ -497,6 +497,95 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.query.mock.calls[0][0]).toContain("r.request_key = $3");
   });
 
+  it("requires explicit confirmation before administratively closing a workflow run", async () => {
+    const response = await postAgency(
+      "/api/agency/workflow-runs/33333333-3333-4333-8333-333333333333/admin-close",
+      { reason: "stuck after app update" },
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("ADMIN_CLOSE_CONFIRMATION_REQUIRED");
+    expect(mocks.db.connect).not.toHaveBeenCalled();
+  });
+
+  it("requires admin authentication for administrative workflow-run closure", async () => {
+    const response = await postAgency(
+      "/api/agency/workflow-runs/33333333-3333-4333-8333-333333333333/admin-close",
+      { confirm: true, reason: "stuck after app update" },
+      {},
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.body).toEqual({ ok: false, error: "Unauthorized" });
+    expect(mocks.db.connect).not.toHaveBeenCalled();
+  });
+
+  it("atomically closes a stuck run, task and associated workflow with an audit event", async () => {
+    const run = hydratedRun({ status: "running", workflow_id: null });
+    const task = { id: run.task_id, status: "running", error: null };
+    const workflow = {
+      id: "44444444-4444-4444-8444-444444444444",
+      status: "running",
+      current_step: 3,
+      total_steps: 36,
+      error: null,
+    };
+    const createdAt = new Date("2026-07-20T12:00:00.000Z");
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [run] })
+      .mockResolvedValueOnce({ rows: [task] })
+      .mockResolvedValueOnce({ rows: [workflow] })
+      .mockResolvedValueOnce({ rows: [{ id: "55555555-5555-4555-8555-555555555555", status: "running" }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // workflow update
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // task update
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // run update
+      .mockResolvedValueOnce({ rows: [{ id: "17", created_at: createdAt }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [] }); // COMMIT
+
+    const response = await postAgency(
+      `/api/agency/workflow-runs/${run.id}/admin-close`,
+      { confirm: true, reason: "stuck after app update" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({
+      runId: run.id,
+      taskId: run.task_id,
+      workflowIds: [workflow.id],
+      status: "failed",
+      taskClosed: true,
+      closedWorkflowCount: 1,
+      inFlightJobs: [{ id: "55555555-5555-4555-8555-555555555555", status: "running" }],
+      executionMayStillFinish: true,
+      auditEvent: { id: "17", createdAt: createdAt.toISOString() },
+    });
+    expect(mocks.client.query.mock.calls[5][0]).toContain("UPDATE workflows");
+    expect(mocks.client.query.mock.calls[6][0]).toContain("UPDATE tasks");
+    expect(mocks.client.query.mock.calls[7][0]).toContain("UPDATE agency_workflow_runs");
+    expect(mocks.client.query.mock.calls[8][0]).toContain("INSERT INTO agency_workflow_run_admin_events");
+    expect(mocks.client.query.mock.calls[9][0]).toBe("COMMIT");
+    expect(mocks.client.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to rewrite an already terminal workflow run", async () => {
+    const run = hydratedRun({ status: "failed" });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [run] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await postAgency(
+      `/api/agency/workflow-runs/${run.id}/admin-close`,
+      { confirm: true, reason: "operator reconciliation" },
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("WORKFLOW_RUN_ALREADY_TERMINAL");
+    expect(mocks.client.query.mock.calls[2][0]).toBe("ROLLBACK");
+    expect(mocks.client.query.mock.calls.some(([sql]) => String(sql).includes("UPDATE agency_workflow_runs"))).toBe(false);
+  });
+
   it("previews failed workflow cleanup without deleting rows", async () => {
     mocks.db.query
       .mockResolvedValueOnce({ rows: [{ count: 2 }] })

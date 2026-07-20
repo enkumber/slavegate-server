@@ -92,6 +92,26 @@ function parsePagination(query: Record<string, unknown>): { page: number; pageSi
   return { page, pageSize, offset: (page - 1) * pageSize };
 }
 
+function adminAuditActor(req: Request): { actorType: string; actorId: string | null } {
+  const principal = (req as Request & { authPrincipal?: Record<string, unknown> }).authPrincipal;
+  if (!principal || typeof principal.kind !== "string") {
+    return { actorType: "unknown_admin", actorId: null };
+  }
+  if (principal.kind === "dashboard_jwt") {
+    return {
+      actorType: principal.kind,
+      actorId: typeof principal.userId === "string" ? principal.userId : "dashboard",
+    };
+  }
+  if (principal.kind === "api_token") {
+    return {
+      actorType: principal.kind,
+      actorId: typeof principal.tokenId === "string" ? principal.tokenId : null,
+    };
+  }
+  return { actorType: principal.kind, actorId: null };
+}
+
 function rowToAgencyWorkflowRun(row: Record<string, unknown>): Record<string, unknown> {
   const deviceId = row.device_id as string;
   const feedbackRating = typeof row.feedback_rating === "string" ? row.feedback_rating : null;
@@ -4538,6 +4558,195 @@ router.patch("/workflow-step-candidates/:id/validate", requireAdminAuth, async (
   );
 
   return res.json({ ok: true, data: rowToStepCandidate(updated.rows[0]) });
+});
+
+router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Request, res: Response) => {
+  const runId = req.params.id;
+  const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+  if (!UUID_RE.test(runId)) {
+    return res.status(400).json({ ok: false, code: "INVALID_WORKFLOW_RUN_ID", error: "workflow run id must be a UUID" });
+  }
+  if (req.body?.confirm !== true) {
+    return res.status(400).json({
+      ok: false,
+      code: "ADMIN_CLOSE_CONFIRMATION_REQUIRED",
+      error: "confirm=true is required to close a workflow run",
+    });
+  }
+  if (reason.length < 3 || reason.length > 500) {
+    return res.status(400).json({
+      ok: false,
+      code: "ADMIN_CLOSE_REASON_REQUIRED",
+      error: "reason must contain between 3 and 500 characters",
+    });
+  }
+
+  const db = getDb();
+  const client = await db.connect();
+  const actor = adminAuditActor(req);
+  const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
+  try {
+    await client.query("BEGIN");
+    const runResult = await client.query<Record<string, unknown>>(
+      `SELECT * FROM agency_workflow_runs WHERE id = $1 FOR UPDATE`,
+      [runId],
+    );
+    const run = runResult.rows[0];
+    if (!run) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ ok: false, code: "WORKFLOW_RUN_NOT_FOUND", error: "Workflow run not found" });
+    }
+    if (terminalStatuses.has(String(run.status))) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        ok: false,
+        code: "WORKFLOW_RUN_ALREADY_TERMINAL",
+        error: `Workflow run is already ${String(run.status)}`,
+      });
+    }
+
+    const taskId = typeof run.task_id === "string" ? run.task_id : null;
+    const taskResult = taskId
+      ? await client.query<Record<string, unknown>>(`SELECT * FROM tasks WHERE id = $1 FOR UPDATE`, [taskId])
+      : { rows: [] as Record<string, unknown>[] };
+    const task = taskResult.rows[0] ?? null;
+    const workflowResult = await client.query<Record<string, unknown>>(
+      `SELECT id, status, current_step, total_steps, error
+       FROM workflows
+       WHERE id = $1::uuid
+          OR checkpoint #>> '{variables,taskId}' = $2
+          OR checkpoint #>> '{variables,controlPlaneContext,taskId}' = $2
+          OR checkpoint #>> '{variables,controlPlaneContext,agencyWorkflowRunId}' = $3
+       FOR UPDATE`,
+      [typeof run.workflow_id === "string" ? run.workflow_id : null, taskId, runId],
+    );
+    const workflowIds = workflowResult.rows
+      .map((row) => row.id)
+      .filter((id): id is string => typeof id === "string");
+    const activeWorkflowIds = workflowResult.rows
+      .filter((row) => !terminalStatuses.has(String(row.status)))
+      .map((row) => row.id)
+      .filter((id): id is string => typeof id === "string");
+
+    const inFlightJobs = workflowIds.length > 0
+      ? await client.query<Record<string, unknown>>(
+        `SELECT DISTINCT j.id, j.status, j.created_at, j.started_at
+         FROM jobs j
+         JOIN job_execution_events e ON e.job_id = j.id
+         WHERE e.workflow_id = ANY($1::uuid[])
+           AND j.status IN ('pending', 'running')
+         ORDER BY j.created_at ASC`,
+        [workflowIds],
+      )
+      : { rows: [] as Record<string, unknown>[] };
+
+    const failure = `Administratively closed: ${reason}`;
+    let closedWorkflowCount = 0;
+    if (activeWorkflowIds.length > 0) {
+      const update = await client.query(
+        `UPDATE workflows
+         SET status = 'failed', completed_at = NOW(), error = $2
+         WHERE id = ANY($1::uuid[])
+           AND status IN ('queued', 'running', 'paused')`,
+        [activeWorkflowIds, failure],
+      );
+      closedWorkflowCount = update.rowCount ?? 0;
+    }
+
+    let taskClosed = false;
+    if (taskId && task && !terminalStatuses.has(String(task.status))) {
+      const update = await client.query(
+        `UPDATE tasks
+         SET status = 'failed', completed_at = NOW(), updated_at = NOW(), error = $2
+         WHERE id = $1 AND status IN ('queued', 'running', 'paused')`,
+        [taskId, failure],
+      );
+      taskClosed = (update.rowCount ?? 0) === 1;
+    }
+
+    const runUpdate = await client.query(
+      `UPDATE agency_workflow_runs
+       SET status = 'failed',
+           workflow_id = COALESCE(workflow_id, $3::uuid),
+           completed_at = NOW(),
+           updated_at = NOW(),
+           error = $2
+       WHERE id = $1
+         AND status NOT IN ('completed', 'failed', 'cancelled')`,
+      [runId, failure, workflowIds[0] ?? null],
+    );
+    if ((runUpdate.rowCount ?? 0) !== 1) {
+      throw new Error("workflow run changed state during administrative close");
+    }
+
+    const previousState = {
+      run: { status: run.status, error: run.error ?? null },
+      task: task ? { id: task.id, status: task.status, error: task.error ?? null } : null,
+      workflows: workflowResult.rows.map((row) => ({
+        id: row.id,
+        status: row.status,
+        currentStep: row.current_step,
+        totalSteps: row.total_steps,
+        error: row.error ?? null,
+      })),
+      inFlightJobs: inFlightJobs.rows.map((row) => ({ id: row.id, status: row.status })),
+    };
+    const resultingState = {
+      runStatus: "failed",
+      taskStatus: taskClosed ? "failed" : task?.status ?? null,
+      closedWorkflowCount,
+      workflowStatus: "failed",
+      inFlightJobCount: inFlightJobs.rows.length,
+    };
+    const audit = await client.query<{ id: string; created_at: Date | string }>(
+      `INSERT INTO agency_workflow_run_admin_events
+         (run_id, task_id, workflow_ids, action, actor_type, actor_id, reason, previous_state, resulting_state)
+       VALUES ($1, $2, $3::uuid[], 'admin_close', $4, $5, $6, $7, $8)
+       RETURNING id, created_at`,
+      [runId, taskId, workflowIds, actor.actorType, actor.actorId, reason, previousState, resultingState],
+    );
+    await client.query("COMMIT");
+
+    const auditRow = audit.rows[0];
+    return res.json({
+      ok: true,
+      data: {
+        runId,
+        taskId,
+        workflowIds,
+        status: "failed",
+        taskClosed,
+        closedWorkflowCount,
+        inFlightJobs: inFlightJobs.rows.map((row) => ({ id: row.id, status: row.status })),
+        executionMayStillFinish: inFlightJobs.rows.length > 0,
+        auditEvent: {
+          id: auditRow?.id ?? null,
+          createdAt: auditRow?.created_at instanceof Date ? auditRow.created_at.toISOString() : auditRow?.created_at ?? null,
+        },
+      },
+    });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ ok: false, error: (err as Error).message });
+  } finally {
+    client.release();
+  }
+});
+
+router.get("/workflow-runs/:id/admin-events", requireAdminAuth, async (req: Request, res: Response) => {
+  if (!UUID_RE.test(req.params.id)) {
+    return res.status(400).json({ ok: false, code: "INVALID_WORKFLOW_RUN_ID", error: "workflow run id must be a UUID" });
+  }
+  const db = getDb();
+  const events = await db.query(
+    `SELECT id, run_id, task_id, workflow_ids, action, actor_type, actor_id, reason,
+            previous_state, resulting_state, created_at
+     FROM agency_workflow_run_admin_events
+     WHERE run_id = $1
+     ORDER BY created_at DESC, id DESC`,
+    [req.params.id],
+  );
+  return res.json({ ok: true, data: events.rows });
 });
 
 router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request, res: Response) => {
