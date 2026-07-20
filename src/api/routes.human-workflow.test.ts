@@ -2260,6 +2260,22 @@ describe("dashboard human workflow routes", () => {
     expect(runInserts).toBe(1);
     expect(taskInserts).toBe(1);
     expect(mocks.client.query.mock.calls.filter(([sql]) => String(sql).includes("pg_advisory_xact_lock"))).toHaveLength(2);
+    const activeRunLookup = mocks.client.query.mock.calls.find(([sql]) => String(sql).includes("FROM agency_workflow_runs r"));
+    expect(String(activeRunLookup?.[0])).toContain("JOIN tasks t ON t.id = r.task_id");
+    expect(String(activeRunLookup?.[0])).toContain("t.status IN ('queued', 'running')");
+  });
+
+  it("ships startup cleanup for stale server-mode dashboard human runs without recent job events", () => {
+    const migration = fs.readFileSync(
+      path.resolve(process.cwd(), "src/db/migrations/085_fail_inactive_dashboard_human_server_runs.sql"),
+      "utf8",
+    );
+    expect(migration).toContain("w.checkpoint #>> '{executionStats,mode}' = 'server'");
+    expect(migration).toContain("JOIN job_execution_events e ON e.workflow_id = w.id");
+    expect(migration).toContain("e.created_at > NOW() - INTERVAL '2 minutes'");
+    expect(migration).toContain("UPDATE workflows w");
+    expect(migration).toContain("UPDATE tasks t");
+    expect(migration).toContain("UPDATE agency_workflow_runs r");
   });
 
   it("accepts cached requestKey runs even when the requestKey differs from the freshly computed preview key", async () => {

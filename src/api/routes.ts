@@ -212,17 +212,19 @@ async function queueHumanAgencyWorkflowRun(input: {
     assertHumanWorkflowMeaningful(cached.workflow as WorkflowTemplate, input.intent);
 
     const existingRunResult = await client.query<{ id: string; task_id: string | null; status: string }>(
-      `SELECT id, task_id, status
-       FROM agency_workflow_runs
-       WHERE cache_key = $1
-         AND device_id = $2
-         AND account_id IS NOT DISTINCT FROM $3
-         AND context ->> 'source' = 'dashboard_human'
-         AND context ->> 'requestKey' = $4
-         AND status IN ('queued', 'running')
-       ORDER BY created_at ASC
+      `SELECT r.id, r.task_id, r.status
+       FROM agency_workflow_runs r
+       JOIN tasks t ON t.id = r.task_id
+       WHERE r.cache_key = $1
+         AND r.device_id = $2
+         AND r.account_id IS NOT DISTINCT FROM $3
+         AND r.context ->> 'source' = 'dashboard_human'
+         AND r.context ->> 'requestKey' = $4
+         AND r.status IN ('queued', 'running')
+         AND t.status IN ('queued', 'running')
+       ORDER BY r.created_at ASC
        LIMIT 1
-       FOR UPDATE`,
+       FOR UPDATE OF r`,
       [cached.cache_key, input.target.device_id, input.target.account_id, input.requestKey],
     );
     const existingRun = existingRunResult.rows[0];
