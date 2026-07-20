@@ -1199,7 +1199,7 @@ describe("dashboard human workflow routes", () => {
       requestKey: key,
       sourceMetadata: {
         source: "dashboard_human",
-        compilerCacheVersion: "2026-07-13-gmail-app-v2",
+        compilerCacheVersion: "2026-07-20-credentials-v3",
         intent,
         platform: "android",
       },
@@ -1355,6 +1355,8 @@ describe("dashboard human workflow routes", () => {
     const prompt = mocks.llmJson.mock.calls[0][0] as string;
     expect(prompt).toContain("package com.google.android.gm");
     expect(prompt).toContain("For Gmail app goals, use open_app with params.packageName=com.google.android.gm");
+    expect(prompt).toContain("No intent or outputSchema fields.");
+    expect(prompt).not.toContain("No intent, outputSchema, credentials, passwords, or private tokens.");
   });
 
   it("normalizes AI AskReddit hot workflows away from invented sort targets", async () => {

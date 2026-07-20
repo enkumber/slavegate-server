@@ -107,6 +107,23 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
     }
   };
 
+  const retryCompile = async () => {
+    if (!compileFailure?.compileJobId) return;
+    setCompiling(true);
+    setError(null);
+    try {
+      const data = await agencyApi.humanWorkflow.retryCompileJob(compileFailure.compileJobId);
+      setCompileResult(null);
+      setCompileFailure(null);
+      setReadyCompileJobId(data.compileJobId);
+      setCompileJob(data);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setCompiling(false);
+    }
+  };
+
   useEffect(() => {
     if (!compileJob?.compileJobId) return;
     let cancelled = false;
@@ -289,7 +306,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
                     {compileFailure.error}
                   </div>
                   <button
-                    onClick={compile}
+                    onClick={retryCompile}
                     disabled={compiling}
                     style={{ ...primaryButtonStyle(compiling ? "#334155" : "#2563eb"), marginTop: "12px" }}
                   >

@@ -26,7 +26,7 @@ import {
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
 const MAX_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 120_000;
-const HUMAN_WORKFLOW_COMPILER_CACHE_VERSION = "2026-07-13-gmail-app-v2";
+const HUMAN_WORKFLOW_COMPILER_CACHE_VERSION = "2026-07-20-credentials-v3";
 const PLATFORM_APP_IDS: Record<string, string> = {
   browser: "com.android.chrome",
   chrome: "com.android.chrome",
@@ -384,7 +384,7 @@ function buildHumanWorkflowCompilePrompt(input: {
     "checkpoint is type checkpoint, never an action.",
     "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
     screens ? `Known screens: ${screens}.` : "Use UNKNOWN if screen is uncertain.",
-    "No intent, outputSchema, credentials, passwords, or private tokens.",
+    "No intent or outputSchema fields.",
   ].join("\n");
 }
 

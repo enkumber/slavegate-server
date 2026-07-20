@@ -1005,6 +1005,8 @@ export const agencyApi = {
       api.post<HumanWorkflowCompileResult>("/workflows/human/compile", data),
     getCompileJob: (id: string) =>
       api.get<HumanWorkflowCompileJobResult>(`/workflows/human/compile-jobs/${id}`),
+    retryCompileJob: (id: string) =>
+      api.post<HumanWorkflowCompileJobPendingResult>(`/workflows/human/compile-jobs/${id}/retry`, {}),
     run: (data: HumanWorkflowRunRequest) => {
       const { device_id, account_id, intent, requestKey, cacheKey, compileJobId } = data;
       return api.post<HumanWorkflowRunResult>("/workflows/human/run", {
