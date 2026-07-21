@@ -49,7 +49,10 @@ vi.mock("../../observability/metrics", () => ({
 }));
 
 vi.mock("../../ui-graph/learning-loop", () => ({
-  uiGraphLearningLoop: { observe: vi.fn().mockResolvedValue("candidate-1") },
+  uiGraphLearningLoop: {
+    observe: vi.fn().mockResolvedValue("candidate-1"),
+    validate: vi.fn().mockResolvedValue({ ready: false, autoPromotable: false, blockers: ["insufficient_successes"] }),
+  },
 }));
 
 import {
@@ -318,6 +321,12 @@ describe("runCompiledWorkflow recovery budget", () => {
     expect(result.ok).toBe(true);
     expect(uiGraphLearningLoop.observe).toHaveBeenCalledWith(expect.objectContaining({
       payload: { target: { text: "Stable label" } },
+      evidence: expect.objectContaining({ actionExecuted: true, postActionVerified: true }),
+    }));
+    expect(uiGraphLearningLoop.validate).toHaveBeenCalledWith(expect.objectContaining({
+      candidateId: "candidate-1",
+      success: true,
+      stateVerified: true,
       evidence: expect.objectContaining({ actionExecuted: true, postActionVerified: true }),
     }));
   });

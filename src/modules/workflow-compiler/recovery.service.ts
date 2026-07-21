@@ -348,6 +348,84 @@ function learningPayload(action: RecoveryAction, failedStep: CompiledStep, reaso
   return base;
 }
 
+function learnedElementKey(step: CompiledStep, target: NonNullable<CompiledStep["target"]>): string {
+  const explicit = step.target?.elementId?.trim();
+  if (explicit) return explicit;
+  const descriptor = target.resourceId || target.contentDescription || target.text || "recovered_target";
+  return descriptor
+    .split("/").pop()!
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 96) || "recovered_target";
+}
+
+export async function recoveryLearningCandidate(input: {
+  workflow: RunnerContext["workflow"];
+  failedStep: CompiledStep;
+  recoveryAction: RecoveryAction;
+  reason: string;
+  graphContext: CandidateObservation["context"];
+  currentFingerprint?: string;
+  screenshotAvailable: boolean;
+  usedVision: boolean;
+}): Promise<CandidateObservation> {
+  const { workflow, failedStep, recoveryAction } = input;
+  if (recoveryAction.type === "retry_with_adaptation" && recoveryAction.adaptedStep.target) {
+    const target = recoveryAction.adaptedStep.target;
+    const semantic = target.resourceId?.trim()
+      ? { strategy: "resource_id" as const, value: target.resourceId.trim(), priority: 10 }
+      : target.contentDescription?.trim()
+        ? { strategy: "content_description" as const, value: target.contentDescription.trim(), priority: 20 }
+        : target.text?.trim()
+          ? { strategy: "text" as const, value: target.text.trim(), priority: 40 }
+          : null;
+    const sourceState = (await uiGraphRepository.loadStates(workflow.appId))
+      .find((state) => state.key === failedStep.expectedPage);
+    if (semantic && sourceState) {
+      return {
+        appId: workflow.appId,
+        type: "selector",
+        sourceStateId: sourceState.id,
+        payload: {
+          elementKey: learnedElementKey(failedStep, target),
+          strategy: semantic.strategy,
+          selector: { value: semantic.value },
+          priority: semantic.priority,
+          dynamic: false,
+        },
+        evidence: {
+          currentFingerprint: input.currentFingerprint,
+          screenshotAvailable: input.screenshotAvailable,
+          usedVision: input.usedVision,
+          recoveryType: recoveryAction.type,
+          expectedPage: failedStep.expectedPage,
+        },
+        context: { ...input.graphContext, currentStateId: sourceState.id },
+        discoveryMethod: input.usedVision ? "vlm" : "llm_recovery",
+        confidence: input.usedVision ? 0.7 : 0.75,
+        safetyClass: recoverySafety(failedStep),
+      };
+    }
+  }
+
+  return {
+    appId: workflow.appId,
+    type: "recovery_rule",
+    payload: learningPayload(recoveryAction, failedStep, input.reason),
+    evidence: {
+      currentFingerprint: input.currentFingerprint,
+      screenshotAvailable: input.screenshotAvailable,
+      usedVision: input.usedVision,
+    },
+    context: input.graphContext,
+    discoveryMethod: input.usedVision ? "vlm" : "llm_recovery",
+    confidence: input.usedVision ? 0.7 : 0.75,
+    safetyClass: recoverySafety(failedStep),
+  };
+}
+
 function normalizeAdaptedTarget(target: CompiledStep["target"]): CompiledStep["target"] {
   if (!target) return target;
 
@@ -666,16 +744,16 @@ export async function attemptRecovery(
   await logRecoveryHistory(historyEntry);
 
   if (execResult.success && recoveryAction.type !== "retry_step" && graphFlags.mode !== "disabled" && graphFlags.candidateLearning) {
-    ctx.pendingRecoveryLearning = {
-      appId: workflow.appId,
-      type: "recovery_rule",
-      payload: learningPayload(recoveryAction, failedStep, reason),
-      evidence: { currentFingerprint, screenshotAvailable: Boolean(screenshotBase64), usedVision },
-      context: graphContext,
-      discoveryMethod: usedVision ? "vlm" : "llm_recovery",
-      confidence: usedVision ? 0.7 : 0.75,
-      safetyClass: recoverySafety(failedStep),
-    } satisfies CandidateObservation;
+    ctx.pendingRecoveryLearning = await recoveryLearningCandidate({
+      workflow,
+      failedStep,
+      recoveryAction,
+      reason,
+      graphContext,
+      currentFingerprint,
+      screenshotAvailable: Boolean(screenshotBase64),
+      usedVision,
+    });
   }
 
   console.log(

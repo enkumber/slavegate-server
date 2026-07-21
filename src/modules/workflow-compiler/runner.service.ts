@@ -1468,7 +1468,22 @@ export async function runCompiledWorkflow(
       await uiGraphLearningLoop.observe({
         ...candidate,
         evidence: { ...(candidate.evidence ?? {}), actionExecuted: true, postActionVerified: true },
-      }).then(() => observeLearningCandidate(candidate.appId, candidate.type, "observed"))
+      }).then(async (candidateId) => {
+        observeLearningCandidate(candidate.appId, candidate.type, "observed");
+        await uiGraphLearningLoop.validate({
+          candidateId,
+          context: candidate.context,
+          success: true,
+          stateVerified: true,
+          evidence: {
+            workflowId: workflow.id,
+            stepId: step.id,
+            actionExecuted: true,
+            postActionVerified: true,
+          },
+        });
+        observeLearningCandidate(candidate.appId, candidate.type, "validated");
+      })
         .catch((error) => console.warn(`[ui-graph] verified recovery learning candidate failed: ${(error as Error).message}`));
     }
 
