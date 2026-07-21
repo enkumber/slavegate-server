@@ -313,6 +313,7 @@ async function executeStepAction(
   step: CompiledStep,
   workflowRootExternalId: string,
   graphTarget?: RunnerResolvedTarget | null,
+  recoveryReplay = false,
 ): Promise<{ success: boolean; jobId?: string; error?: string }> {
   if (!isDeviceOnline(deviceId)) {
     return { success: false, error: `Device ${deviceId} offline` };
@@ -393,6 +394,17 @@ async function executeStepAction(
         }
       };
 
+      const addResourceIdSelectors = (resourceId: string | undefined) => {
+        const normalized = resourceId?.trim();
+        if (!normalized) return;
+        const qualifiedSeparator = normalized.indexOf(":id/");
+        if (qualifiedSeparator >= 0) {
+          const shortId = normalized.slice(qualifiedSeparator + 4);
+          if (shortId) addSelector({ resourceId: shortId });
+        }
+        addSelector({ resourceId: normalized });
+      };
+
       if (graphTarget?.resolution.found) {
         addSelector(graphTarget.a11yParams);
         if (graphTarget.coords) {
@@ -402,7 +414,7 @@ async function executeStepAction(
 
       // Accessibility descriptors are separate ordered attempts, never one
       // OR/AND query whose semantics depend on the Android agent version.
-      if (target?.resourceId) addSelector({ resourceId: target.resourceId });
+      if (target?.resourceId) addResourceIdSelectors(target.resourceId);
       if (target?.contentDescription) addSelector({ contentDescription: target.contentDescription });
       if (target?.text) addSelector({ text: target.text, partialMatch: true });
       if (target?.elementId && !target.resourceId && !target.contentDescription && !target.text) {
@@ -410,7 +422,17 @@ async function executeStepAction(
       }
 
       let lastSelectorError: string | undefined;
-      for (const selector of selectorAttempts) {
+      for (let selectorIndex = 0; selectorIndex < selectorAttempts.length; selectorIndex++) {
+        if (recoveryReplay && selectorIndex > 0) {
+          const readiness = await ensureDeviceReadyForRecoveryReplay(deviceId, workflowRootExternalId);
+          if (!readiness.success) {
+            return {
+              success: false,
+              error: readiness.error ?? "Recovery selector fallback readiness failed",
+            };
+          }
+        }
+        const selector = selectorAttempts[selectorIndex];
         const attempt = await tryA11ySelector(selector);
         if (attempt.success) return attempt;
         lastSelectorError = attempt.error;
@@ -1247,7 +1269,7 @@ export async function runCompiledWorkflow(
           counters.retriedSteps++;
           const replayResult = rejectUnguardedCoordinate
             ? { success: false, error: "UI_GRAPH_UNGUARDED_COORDINATE_REJECTED" }
-            : await executeStepAction(deviceId, step, workflowRootExternalId, uiGraph?.enforced ? graphTarget : null);
+            : await executeStepAction(deviceId, step, workflowRootExternalId, uiGraph?.enforced ? graphTarget : null, true);
           actionSucceeded = replayResult.success;
           if (actionSucceeded) break;
 
@@ -1365,7 +1387,7 @@ export async function runCompiledWorkflow(
           counters.retriedSteps++;
           const replayResult = rejectRecoveryCoordinate
             ? { success: false, error: "UI_GRAPH_UNGUARDED_COORDINATE_REJECTED" }
-            : await executeStepAction(deviceId, step, workflowRootExternalId, uiGraph?.enforced ? replayGraphTarget : null);
+            : await executeStepAction(deviceId, step, workflowRootExternalId, uiGraph?.enforced ? replayGraphTarget : null, true);
           if (!replayResult.success) {
             recovery = await attemptBoundedRecovery(
               ctx,

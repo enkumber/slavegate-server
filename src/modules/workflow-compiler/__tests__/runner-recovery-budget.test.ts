@@ -58,7 +58,7 @@ import {
   reconcileFingerprintWithResolvedState,
 } from "../runner.service";
 import type { CompiledWorkflow } from "../types";
-import { sendJobToDevice, waitForResult } from "../../../transport/transport";
+import { sendDeviceExecutionJobToDevice, sendJobToDevice, waitForResult } from "../../../transport/transport";
 import {
   generatedWorkflowRecoveryAttempts,
   generatedWorkflowRecoveryBudgetExhausted,
@@ -345,6 +345,79 @@ describe("runCompiledWorkflow recovery budget", () => {
 
     expect(result.ok).toBe(true);
     expect(waitForResult).toHaveBeenCalledTimes(2);
+  });
+
+  it("tries the short Android resource ID before its fully-qualified fallback", async () => {
+    const workflow = makeWorkflow({
+      maxRecoveryAttempts: 0,
+      maxTotalRecoveryAttempts: 0,
+      steps: [{
+        id: "qualified-selector",
+        action: "tap",
+        target: { resourceId: "com.example.app:id/search_field" },
+        expectedPage: "page",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Resolve a Compose-style short resource ID",
+      }],
+    });
+    vi.mocked(waitForResult).mockResolvedValueOnce({ status: "completed", output: { found: true } });
+
+    const result = await runCompiledWorkflow({ deviceId: "device-1", workflow }, vi.fn());
+
+    expect(result.ok).toBe(true);
+    expect(sendDeviceExecutionJobToDevice).toHaveBeenCalledWith(
+      "device-1",
+      expect.objectContaining({ type: "a11y_find_tap", params: { resourceId: "search_field" } }),
+      expect.any(Object),
+    );
+    expect(waitForResult).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes wake and unlock between slow recovery selector fallbacks", async () => {
+    const workflow = makeWorkflow({
+      steps: [{
+        id: "stale-selector",
+        action: "tap",
+        target: { resourceId: "stale_selector" },
+        expectedPage: "page",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Recover through a bounded semantic fallback cascade",
+      }],
+    });
+    vi.mocked(waitForResult)
+      .mockResolvedValueOnce({ status: "completed", output: { found: false } })
+      .mockResolvedValueOnce({ status: "completed", output: { screenOn: true } })
+      .mockResolvedValueOnce({ status: "completed", output: { unlocked: true } })
+      .mockResolvedValueOnce({ status: "completed", output: { found: false } })
+      .mockResolvedValueOnce({ status: "completed", output: { screenOn: true } })
+      .mockResolvedValueOnce({ status: "completed", output: { unlocked: true } })
+      .mockResolvedValueOnce({ status: "completed", output: { found: true } });
+    const onRecoveryNeeded = vi.fn().mockImplementation(async (ctx) => {
+      ctx.workflow.steps[0] = {
+        ...ctx.workflow.steps[0],
+        target: { resourceId: "current_selector", contentDescription: "Stable search label" },
+      };
+      return true;
+    });
+
+    const result = await runCompiledWorkflow({ deviceId: "device-1", workflow }, onRecoveryNeeded);
+
+    expect(result.ok).toBe(true);
+    expect(waitForResult).toHaveBeenCalledTimes(7);
+    const dispatchedTypes = vi.mocked(sendDeviceExecutionJobToDevice).mock.calls.map(([, payload]) => payload.type);
+    expect(dispatchedTypes).toEqual([
+      "a11y_find_tap",
+      "screen_wake",
+      "unlock",
+      "a11y_find_tap",
+      "screen_wake",
+      "unlock",
+      "a11y_find_tap",
+    ]);
   });
 
   it("fails closed when the recovery replay still misses and the budget is exhausted", async () => {
