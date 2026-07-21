@@ -13,6 +13,7 @@
 
 import { Router, Request, Response, NextFunction } from "express";
 import crypto from "crypto";
+import { getDb } from "../../db/client";
 import { isDeviceOnline } from "../../transport/transport";
 import {
   compileInstruction,
@@ -22,18 +23,33 @@ import type {
   CompiledWorkflow as PlannerWorkflow,
   CompileResult,
 } from "./types";
-import {
-  runCompiledWorkflow,
-} from "./runner.service";
-import type {
-  RunCompiledResult,
-} from "./runner.service";
-import {
-  attemptRecovery,
-  resetRecoveryCounts,
-} from "./recovery.service";
 
 const router = Router();
+const COMPILED_WORKFLOW_ROUTINE = "compiled_workflow";
+
+async function enqueueCompiledWorkflow(input: {
+  deviceId: string;
+  workflow: PlannerWorkflow;
+  compileLlmCalls: number;
+  source: "compile_and_run" | "run_compiled";
+}): Promise<string> {
+  const result = await getDb().query<{ id: string }>(
+    `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
+     VALUES (NULL, $1, $2, $3, NOW(), 'queued')
+     RETURNING id`,
+    [
+      input.deviceId,
+      COMPILED_WORKFLOW_ROUTINE,
+      JSON.stringify({
+        compiledWorkflow: input.workflow,
+        compileLlmCalls: input.compileLlmCalls,
+        disableTaskRetry: true,
+        source: input.source,
+      }),
+    ],
+  );
+  return result.rows[0].id;
+}
 
 // ─── Auth middleware (same pattern as routes.ts / device-tokens.routes.ts) ────
 
@@ -143,33 +159,34 @@ router.post("/compile-and-run", async (req: Request, res: Response) => {
     });
   }
 
-  // ── Execute ───────────────────────────────────────────────────────────────
-  resetRecoveryCounts(workflow.id);
-
-  const runResult: RunCompiledResult = await runCompiledWorkflow(
-    {
+  // Device execution always enters the canonical task queue. This serializes
+  // compile-and-run with cron and agency work on the same device.
+  try {
+    const taskId = await enqueueCompiledWorkflow({
       deviceId,
       workflow,
       compileLlmCalls: compileResult.fromCache ? 0 : 1,
-    },
-    // Recovery callback — delegates to recovery.service
-    async (ctx, stepIndex, reason) => {
-      return attemptRecovery(ctx, stepIndex, reason, workflow.recoveryModel);
-    },
-  );
+      source: "compile_and_run",
+    });
 
-  res.json({
-    ok: runResult.ok,
-    workflowId: runResult.workflowId,
-    compiledWorkflow: workflow,
-    status: runResult.status,
-    stepsCompleted: runResult.stepsCompleted,
-    stepsTotal: runResult.stepsTotal,
-    recoveryCount: runResult.recoveryCount,
-    counters: runResult.counters,
-    totalLatencyMs: runResult.totalLatencyMs,
-    error: runResult.error,
-  });
+    return res.status(202).json({
+      ok: true,
+      taskId,
+      jobId: taskId,
+      workflowId: workflow.id,
+      compiledWorkflow: workflow,
+      status: "queued",
+    });
+  } catch (err) {
+    const error = err instanceof Error ? err.message : "Compiled workflow enqueue failed";
+    console.error(`[workflow-compiler] compile-and-run enqueue failed for workflow=${workflow.id}: ${error}`);
+    return res.status(500).json({
+      ok: false,
+      code: "COMPILE_AND_RUN_ENQUEUE_FAILED",
+      status: "failed",
+      error,
+    });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -278,41 +295,30 @@ router.post("/run-compiled", async (req: Request, res: Response) => {
     });
   }
 
-  // ── Execute ───────────────────────────────────────────────────────────────
-  // Express 4 does not forward rejected async handlers to its error middleware.
-  // Keep a runner failure bounded to this request instead of letting an
-  // unhandled rejection restart the whole API container.
+  // Compiled workflows use the same task queue and per-device lock as cron and
+  // agency runs. The HTTP request only persists admission and never dispatches
+  // a child job directly to the phone.
   try {
-    resetRecoveryCounts(workflow.id);
+    const taskId = await enqueueCompiledWorkflow({
+      deviceId,
+      workflow,
+      compileLlmCalls: 0,
+      source: "run_compiled",
+    });
 
-    const runResult: RunCompiledResult = await runCompiledWorkflow(
-      {
-        deviceId,
-        workflow,
-        compileLlmCalls: 0,
-      },
-      async (ctx, stepIndex, reason) => {
-        return attemptRecovery(ctx, stepIndex, reason, workflow.recoveryModel);
-      },
-    );
-
-    return res.json({
-      ok: runResult.ok,
-      jobId: runResult.workflowId,
-      status: runResult.status,
-      stepsCompleted: runResult.stepsCompleted,
-      stepsTotal: runResult.stepsTotal,
-      recoveryCount: runResult.recoveryCount,
-      counters: runResult.counters,
-      totalLatencyMs: runResult.totalLatencyMs,
-      error: runResult.error,
+    return res.status(202).json({
+      ok: true,
+      taskId,
+      jobId: taskId,
+      workflowId: workflow.id,
+      status: "queued",
     });
   } catch (err) {
-    const error = err instanceof Error ? err.message : "Compiled workflow runner failed";
-    console.error(`[workflow-compiler] run-compiled failed for workflow=${workflow.id}: ${error}`);
+    const error = err instanceof Error ? err.message : "Compiled workflow enqueue failed";
+    console.error(`[workflow-compiler] run-compiled enqueue failed for workflow=${workflow.id}: ${error}`);
     return res.status(500).json({
       ok: false,
-      code: "RUN_COMPILED_FAILED",
+      code: "RUN_COMPILED_ENQUEUE_FAILED",
       status: "failed",
       error,
     });

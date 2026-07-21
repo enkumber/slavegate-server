@@ -24,6 +24,9 @@ const mocks = vi.hoisted(() => ({
   getWorkflow: vi.fn(),
   cancelPersistedWorkflowSafely: vi.fn(),
   llmJson: vi.fn(),
+  runCompiledWorkflow: vi.fn(),
+  attemptRecovery: vi.fn(),
+  resetRecoveryCounts: vi.fn(),
 }));
 
 vi.mock("../../db/client", () => ({
@@ -67,6 +70,15 @@ vi.mock("../workflows/workflow-cancellation.service", () => ({
 
 vi.mock("../../utils/llm", () => ({
   llmJson: mocks.llmJson,
+}));
+
+vi.mock("../workflow-compiler/runner.service", () => ({
+  runCompiledWorkflow: mocks.runCompiledWorkflow,
+}));
+
+vi.mock("../workflow-compiler/recovery.service", () => ({
+  attemptRecovery: mocks.attemptRecovery,
+  resetRecoveryCounts: mocks.resetRecoveryCounts,
 }));
 
 vi.mock("../workflow-events", () => ({
@@ -1178,5 +1190,73 @@ describe("task-runner generated_workflow routine", () => {
     });
     expect(mocks.getGeneratedPlanCacheByRequestKey).not.toHaveBeenCalled();
     expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
+  });
+});
+
+describe("task-runner compiled_workflow routine", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getDb).mockReturnValue({ query: mocks.dbQuery } as any);
+    mocks.isDeviceOnline.mockReturnValue(true);
+  });
+
+  it("executes a compiled workflow only after the task runner owns the device lock", async () => {
+    const compiledWorkflow = {
+      id: "77777777-7777-4777-8777-777777777777",
+      name: "Queued recovery canary",
+      source: "read-only canary",
+      appId: "com.example.app",
+      compiledAt: "2026-07-21T00:00:00.000Z",
+      steps: [{
+        id: "observe",
+        action: "screenshot",
+        expectedPage: "home",
+        expectedPageHash: "abc123",
+        retries: 0,
+        retryDelay: 0,
+        description: "Read-only observation",
+      }],
+      appMapVersion: "1",
+      startPage: "home",
+      maxRecoveryAttempts: 1,
+      maxTotalRecoveryAttempts: 1,
+    };
+    const row = task(
+      { compiledWorkflow, compileLlmCalls: 0, disableTaskRetry: true },
+      { account_id: null, routine: "compiled_workflow" },
+    );
+    mocks.dbQuery
+      .mockResolvedValueOnce({ rows: [row] })
+      .mockResolvedValue({ rows: [] });
+    mocks.runCompiledWorkflow.mockResolvedValueOnce({
+      ok: true,
+      workflowId: compiledWorkflow.id,
+      status: "completed",
+      stepsCompleted: 1,
+      stepsTotal: 1,
+      recoveryCount: 1,
+      counters: { recoveryLlmCalls: 1, vlmCalls: 0 },
+      results: [{ stepIndex: 0, stepId: "observe", success: true, fingerprintMatch: true, postActionVerified: true, latencyMs: 12 }],
+      totalLatencyMs: 12,
+    });
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: true,
+      stepsCompleted: 1,
+      totalSteps: 1,
+      output: {
+        workflowId: compiledWorkflow.id,
+        status: "completed",
+        recoveryCount: 1,
+      },
+    });
+    expect(mocks.resetRecoveryCounts).toHaveBeenCalledWith(compiledWorkflow.id);
+    expect(mocks.runCompiledWorkflow).toHaveBeenCalledWith(
+      expect.objectContaining({ deviceId: DEVICE_ID, workflow: compiledWorkflow, compileLlmCalls: 0 }),
+      expect.any(Function),
+    );
+    expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
   });
 });

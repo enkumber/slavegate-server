@@ -36,6 +36,9 @@ import { workflowEvents } from "../workflow-events";
 import { assertHumanWorkflowMeaningful } from "../human-workflow/human-workflow-compiler.service";
 import { normalizeCachedHumanWorkflowTemplate } from "../human-workflow/human-workflow-normalization";
 import { cancelPersistedWorkflowSafely } from "../workflows/workflow-cancellation.service";
+import type { CompiledWorkflow } from "../workflow-compiler/types";
+import { runCompiledWorkflow } from "../workflow-compiler/runner.service";
+import { attemptRecovery, resetRecoveryCounts } from "../workflow-compiler/recovery.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -102,12 +105,14 @@ const DEFAULT_CONFIG: TaskRunnerConfig = {
   retryBackoffMs: 5_000,            // Base backoff: 5 * 3^retry_count seconds
 };
 
+const COMPILED_WORKFLOW_ROUTINE = "compiled_workflow";
+
 function publishGeneratedWorkflowTaskEvent(
   task: TaskRow,
   event: "task_running" | "task_completed" | "task_failed",
   details: Record<string, unknown> = {},
 ): void {
-  if (task.routine !== GENERATED_WORKFLOW_ROUTINE) return;
+  if (task.routine !== GENERATED_WORKFLOW_ROUTINE && task.routine !== COMPILED_WORKFLOW_ROUTINE) return;
   const clientId = typeof task.params?.clientId === "string" ? task.params.clientId : undefined;
   const agencyWorkflowRunId = agencyWorkflowRunIdFromTask(task) ?? undefined;
   workflowEvents.publish({
@@ -141,6 +146,67 @@ function zeroTokenUsage(): TaskResult["tokenUsage"] {
     executor: { input: 0, output: 0, calls: 0 },
     verifier: { input: 0, output: 0, calls: 0 },
     total: 0,
+  };
+}
+
+function isCompiledWorkflow(value: unknown): value is CompiledWorkflow {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const workflow = value as Partial<CompiledWorkflow>;
+  return typeof workflow.id === "string"
+    && typeof workflow.appId === "string"
+    && Array.isArray(workflow.steps)
+    && workflow.steps.length > 0
+    && workflow.steps.every((step) => Boolean(step)
+      && typeof step === "object"
+      && typeof step.id === "string"
+      && typeof step.action === "string"
+      && typeof step.expectedPageHash === "string");
+}
+
+async function executeCompiledWorkflowTask(task: TaskRow): Promise<TaskRunnerResult> {
+  const startedAt = Date.now();
+  const workflow = task.params?.compiledWorkflow;
+  if (!isCompiledWorkflow(workflow)) {
+    return {
+      success: false,
+      stepsCompleted: 0,
+      totalSteps: 0,
+      failReason: "INVALID_COMPILED_WORKFLOW: queued task has no valid compiledWorkflow",
+      tokenUsage: zeroTokenUsage(),
+      durationMs: Date.now() - startedAt,
+    };
+  }
+
+  const compileLlmCalls = typeof task.params?.compileLlmCalls === "number"
+    ? Math.max(0, Math.floor(task.params.compileLlmCalls))
+    : 0;
+  resetRecoveryCounts(workflow.id);
+  const run = await runCompiledWorkflow(
+    { deviceId: task.device_id, workflow, compileLlmCalls },
+    async (ctx, stepIndex, reason) => attemptRecovery(
+      ctx,
+      stepIndex,
+      reason,
+      workflow.recoveryModel,
+    ),
+  );
+
+  const failedStep = run.results.find((result) => !result.success);
+  return {
+    success: run.ok,
+    stepsCompleted: run.stepsCompleted,
+    totalSteps: run.stepsTotal,
+    failedStep: failedStep?.stepIndex,
+    failReason: run.ok ? undefined : run.error ?? `Compiled workflow ended with status ${run.status}`,
+    tokenUsage: zeroTokenUsage(),
+    durationMs: run.totalLatencyMs,
+    output: {
+      workflowId: run.workflowId,
+      status: run.status,
+      recoveryCount: run.recoveryCount,
+      counters: run.counters,
+      results: run.results,
+    },
   };
 }
 
@@ -953,6 +1019,9 @@ async function executeTask(task: TaskRow): Promise<void> {
       case "generated_workflow":
         result = await executeGeneratedWorkflowTaskWithSelfHealing(task, platform, accountClientId);
         break;
+      case "compiled_workflow":
+        result = await executeCompiledWorkflowTask(task);
+        break;
       case "engage_session":
         result = await executeEngageSession(task, platform);
         break;
@@ -1004,7 +1073,9 @@ async function executeTask(task: TaskRow): Promise<void> {
       console.log(`[task-runner] Task ${taskId.slice(0, 8)} completed ✓ (${result.stepsCompleted}/${result.totalSteps} steps)`);
     } else {
       const currentRetryCount = task.retry_count ?? 0;
-      const newRetryCount = currentRetryCount + 1;
+      const newRetryCount = task.params?.disableTaskRetry === true
+        ? config.maxRetries
+        : currentRetryCount + 1;
       
       await db.query(`
         UPDATE tasks 
@@ -1054,7 +1125,9 @@ async function executeTask(task: TaskRow): Promise<void> {
   } catch (err) {
     // Mark as failed on exception, increment retry_count
     const currentRetryCount = task.retry_count ?? 0;
-    const newRetryCount = currentRetryCount + 1;
+    const newRetryCount = task.params?.disableTaskRetry === true
+      ? config.maxRetries
+      : currentRetryCount + 1;
     const error = err as Error;
     
     await db.query(`
@@ -1483,6 +1556,9 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
     switch (task.routine) {
       case "generated_workflow":
         taskResult = await executeGeneratedWorkflowTaskWithSelfHealing(task, platform, accountClientId);
+        break;
+      case "compiled_workflow":
+        taskResult = await executeCompiledWorkflowTask(task);
         break;
       case "engage_session":
         taskResult = await executeEngageSession(task, platform);

@@ -2,17 +2,12 @@ import express from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  runCompiledWorkflow: vi.fn(),
-  resetRecoveryCounts: vi.fn(),
+  dbQuery: vi.fn(),
 }));
 
+vi.mock("../../db/client", () => ({ getDb: () => ({ query: mocks.dbQuery }) }));
 vi.mock("../../transport/transport", () => ({ isDeviceOnline: vi.fn(() => true) }));
 vi.mock("./planner.service", () => ({ compileInstruction: vi.fn(), getCompiledWorkflow: vi.fn() }));
-vi.mock("./runner.service", () => ({ runCompiledWorkflow: mocks.runCompiledWorkflow }));
-vi.mock("./recovery.service", () => ({
-  attemptRecovery: vi.fn(),
-  resetRecoveryCounts: mocks.resetRecoveryCounts,
-}));
 
 async function postRunCompiled(body: Record<string, unknown>) {
   const app = express();
@@ -46,8 +41,8 @@ describe("workflow compiler routes", () => {
     process.env.JWT_SECRET = "test-jwt-secret";
   });
 
-  it("returns bounded JSON instead of leaking a rejected runner promise", async () => {
-    mocks.runCompiledWorkflow.mockRejectedValueOnce(new Error("device execution admission failed"));
+  it("queues compiled execution instead of dispatching directly to the device", async () => {
+    mocks.dbQuery.mockResolvedValueOnce({ rows: [{ id: "22222222-2222-4222-8222-222222222222" }] });
 
     const response = await postRunCompiled({
       deviceId: "device-1",
@@ -57,7 +52,51 @@ describe("workflow compiler routes", () => {
         source: "read-only canary",
         appId: "com.example.app",
         compiledAt: "2026-07-21T00:00:00.000Z",
-        steps: [],
+        steps: [{
+          id: "observe",
+          action: "screenshot",
+          expectedPage: "home",
+          expectedPageHash: "abc123",
+          retries: 0,
+          retryDelay: 0,
+          description: "Read-only observation"
+        }],
+        appMapVersion: "1",
+        startPage: "home",
+        maxRecoveryAttempts: 1,
+        maxTotalRecoveryAttempts: 1
+      }
+    });
+
+    expect(response.status).toBe(202);
+    expect(response.body).toEqual({
+      ok: true,
+      taskId: "22222222-2222-4222-8222-222222222222",
+      jobId: "22222222-2222-4222-8222-222222222222",
+      workflowId: "11111111-1111-4111-8111-111111111111",
+      status: "queued"
+    });
+    expect(mocks.dbQuery).toHaveBeenCalledWith(
+      expect.stringContaining("INSERT INTO tasks"),
+      expect.arrayContaining([
+        "device-1",
+        "compiled_workflow",
+        expect.stringContaining('"disableTaskRetry":true'),
+      ]),
+    );
+  });
+
+  it("returns bounded JSON when queue admission fails", async () => {
+    mocks.dbQuery.mockRejectedValueOnce(new Error("queue unavailable"));
+    const response = await postRunCompiled({
+      deviceId: "device-1",
+      compiledWorkflow: {
+        id: "11111111-1111-4111-8111-111111111111",
+        name: "Controlled canary",
+        source: "read-only canary",
+        appId: "com.example.app",
+        compiledAt: "2026-07-21T00:00:00.000Z",
+        steps: [{ id: "observe", action: "screenshot", expectedPage: "home", expectedPageHash: "abc123", retries: 0, retryDelay: 0, description: "Observe" }],
         appMapVersion: "1",
         startPage: "home",
         maxRecoveryAttempts: 1,
@@ -68,10 +107,9 @@ describe("workflow compiler routes", () => {
     expect(response.status).toBe(500);
     expect(response.body).toEqual({
       ok: false,
-      code: "RUN_COMPILED_FAILED",
+      code: "RUN_COMPILED_ENQUEUE_FAILED",
       status: "failed",
-      error: "device execution admission failed"
+      error: "queue unavailable"
     });
-    expect(mocks.resetRecoveryCounts).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111");
   });
 });
