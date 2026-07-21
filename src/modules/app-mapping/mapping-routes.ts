@@ -361,7 +361,11 @@ router.post("/refresh/:appId", async (req: Request, res: Response) => {
     async function ensureProfileAppForeground(context: string): Promise<void> {
       const foreground = await dispatchAndAwaitRefresh(deviceId, "get_foreground_app", {}, 10000).catch(() => null);
       const observedPackage = foregroundPackageFromResult(foreground);
-      if (observedPackage !== profile.packageName) {
+      // Accessibility can briefly report no active window immediately after an
+      // app launch/deep-link. Treat an explicit foreign package as a hard
+      // mismatch, but let the following UI-tree capture provide authoritative
+      // package proof when the foreground probe is inconclusive.
+      if (observedPackage && observedPackage !== profile.packageName) {
         throw new Error(`${context}: foreground package ${observedPackage ?? "unknown"} does not match ${profile.packageName}`);
       }
     }

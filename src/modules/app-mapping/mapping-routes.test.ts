@@ -417,4 +417,67 @@ describe("reddit app-map refresh helpers", () => {
       recordedOn: "11111111-1111-4111-8111-111111111111",
     }));
   });
+
+  it("uses the UI tree as package proof when the foreground probe has no active window", async () => {
+    mocks.loadRuntimeProfile.mockResolvedValue({
+      appId: "com.example.app",
+      appName: "Example",
+      packageName: "com.example.app",
+      profileVersion: 8,
+      resetRecipe: [
+        { id: "open", type: "open_app", params: { packageName: "{{packageName}}" } },
+      ],
+      mappingRecipe: [
+        { id: "home", type: "capture", stateKey: "home", name: "Home" },
+      ],
+      safetyPolicy: {
+        mode: "read_only_navigation",
+        allowedActions: ["open_app"],
+        blocked: ["mutations"],
+      },
+      defaultDeviceId: "11111111-1111-4111-8111-111111111111",
+      metadata: {},
+    });
+    let job = 0;
+    const jobTypes = new Map<string, string>();
+    mocks.dispatch.mockImplementation(async ({ type }: { type: string }) => {
+      const jobId = `job-${++job}`;
+      jobTypes.set(jobId, type);
+      return { jobId };
+    });
+    mocks.waitForResult.mockImplementation(async (jobId: string) => {
+      const type = jobTypes.get(jobId);
+      if (type === "get_foreground_app") {
+        return { status: "completed", output: { packageName: null, error: "No active window available" } };
+      }
+      if (type === "ui_tree_dump") return {
+        status: "completed",
+        output: {
+          packageName: "com.example.app",
+          screenWidth: 1000,
+          screenHeight: 2000,
+          nodes: [{
+            packageName: "com.example.app",
+            className: "android.widget.FrameLayout",
+            bounds: { left: 0, top: 0, right: 1000, bottom: 2000 },
+            children: [{
+              packageName: "com.example.app",
+              resourceId: "com.example.app:id/home",
+              text: "Home",
+              clickable: true,
+              bounds: { left: 50, top: 50, right: 300, bottom: 150 },
+            }],
+          }],
+        },
+      };
+      return { status: "completed", output: {} };
+    });
+
+    const server = await app();
+    const response = await postJson(server, "/mapping/refresh/com.example.app", {});
+
+    expect(response.status).toBe(200);
+    expect(response.body.ok).toBe(true);
+    expect(mocks.saveMap).toHaveBeenCalledWith(expect.objectContaining({ appId: "com.example.app" }));
+  });
 });
