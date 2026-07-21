@@ -40,6 +40,9 @@ import { describePnqV2RuntimeConfig, isPnqV2ShadowRuntimeEnabled } from "./modul
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
 import configRoutes, { seedSystemPrompts } from "./api/config-routes";
+import uiGraphRoutes from "./modules/ui-graph/routes";
+import { describeUiGraphRuntimeFlags } from "./modules/ui-graph/config";
+import { materializeAllLegacyAppMaps } from "./modules/ui-graph/materializer";
 
 const PORT = parseInt(process.env.PORT ?? "21211", 10);
 
@@ -62,6 +65,15 @@ async function bootstrap(): Promise<void> {
   // ─── Auto-migrate: ensure all schema + migrations are applied ─────────────
   await runMigrations();
   console.log("[server] Migrations applied.");
+  const uiGraphFlags = describeUiGraphRuntimeFlags();
+  console.log(`[server] UI graph runtime mode=${uiGraphFlags.mode} selectorFirst=${uiGraphFlags.selectorFirst} graphRuntime=${uiGraphFlags.graphRuntime} aiRecovery=${uiGraphFlags.aiRecovery} candidateLearning=${uiGraphFlags.candidateLearning} autoPromotion=${uiGraphFlags.autoPromotion}.`);
+  if (uiGraphFlags.mode !== "disabled") {
+    const graphImport = await materializeAllLegacyAppMaps();
+    console.log(`[server] UI graph materialized apps=${graphImport.apps} states=${graphImport.states} variants=${graphImport.variants} selectors=${graphImport.selectors} transitions=${graphImport.transitions} errors=${graphImport.errors.length}.`);
+    if (graphImport.errors.length > 0 && uiGraphFlags.mode === "enforced") {
+      throw new Error(`UI graph materialization failed in enforced mode: ${graphImport.errors.join("; ")}`);
+    }
+  }
 
   // PNQ-001 observe mode still requires authoritative queue schema.
   await deviceExecutionArbiter.validateSchema();
@@ -189,6 +201,7 @@ async function bootstrap(): Promise<void> {
   // Workflow compiler — compile-and-run, compile, run-compiled, compiled/:id
   app.use("/api/hydra/workflow", compilerRoutes);
   app.use("/api/mapping", mappingRoutes);
+  app.use("/api/ui-graph", uiGraphRoutes);
   app.use("/api/config", configRoutes);
   app.use("/api/hydra", hydraRouter);
   app.use("/api/vlm", vlmRouter);

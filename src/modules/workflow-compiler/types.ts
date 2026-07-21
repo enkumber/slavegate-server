@@ -85,6 +85,8 @@ export interface StepTarget {
   resourceId?: string;
   /** Visible text on the element */
   text?: string;
+  /** Android accessibility content description */
+  contentDescription?: string;
   /** Normalized coordinates (0.0 – 1.0) */
   coords?: { x: number; y: number };
 }

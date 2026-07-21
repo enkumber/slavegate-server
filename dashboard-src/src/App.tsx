@@ -22,6 +22,7 @@ import { WorkflowValidationPipelinePage } from "./pages/WorkflowValidationPipeli
 import { ReportsPage } from "./pages/ReportsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { TokenManagement } from "./pages/TokenManagement";
+import { UiGraphPage } from "./pages/UiGraphPage";
 // ModelConfigPage merged into TokenManagement
 // import { ModelConfigPage } from "./pages/ModelConfigPage";
 import { TopNav } from "./components/TopNav";
@@ -84,6 +85,8 @@ export function App() {
     page = <ReportsPage />;
   } else if (route === "#/tokens") {
     page = <TokenManagement />;
+  } else if (route === "#/ui-graph") {
+    page = <UiGraphPage />;
   } else if (route === "#/models") {
     // models tab removed — now inside #/tokens
     window.location.hash = "#/tokens";

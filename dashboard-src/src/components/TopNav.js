@@ -12,6 +12,9 @@ export function TopNav() {
             if (hash.startsWith("#/agency")) {
                 setActive("agency");
             }
+            else if (hash === "#/ui-graph") {
+                setActive("graph");
+            }
             else if (hash === "#/tokens") {
                 setActive("tokens");
             }
@@ -29,6 +32,9 @@ export function TopNav() {
         }
         else if (section === "tokens") {
             window.location.hash = "#/tokens";
+        }
+        else if (section === "graph") {
+            window.location.hash = "#/ui-graph";
         }
         else {
             window.location.hash = "#/agency/clients";
@@ -54,7 +60,7 @@ export function TopNav() {
                     alignItems: "center",
                     gap: "8px",
                     fontFamily: "monospace",
-                }, children: [_jsx("span", { style: { fontSize: "20px" }, children: "\uD83D\uDCF1" }), "Phone Network"] }), _jsxs("div", { style: { display: "flex", gap: "0", height: "100%" }, children: [_jsx(TabButton, { label: "\uD83D\uDCE1 Phone Fleet", active: active === "fleet", onClick: () => navigate("fleet") }), _jsx(TabButton, { label: "\uD83C\uDFAF Agency", active: active === "agency", onClick: () => navigate("agency") }), _jsx(TabButton, { label: "\uD83D\uDD11 Tokens", active: active === "tokens", onClick: () => navigate("tokens") })] }), _jsx("div", { style: { flex: 1 } }), _jsx("div", { style: {
+                }, children: [_jsx("span", { style: { fontSize: "20px" }, children: "\uD83D\uDCF1" }), "Phone Network"] }), _jsxs("div", { style: { display: "flex", gap: "0", height: "100%" }, children: [_jsx(TabButton, { label: "\uD83D\uDCE1 Phone Fleet", active: active === "fleet", onClick: () => navigate("fleet") }), _jsx(TabButton, { label: "\uD83C\uDFAF Agency", active: active === "agency", onClick: () => navigate("agency") }), _jsx(TabButton, { label: "\uD83E\uDDED UI Graph", active: active === "graph", onClick: () => navigate("graph") }), _jsx(TabButton, { label: "\uD83D\uDD11 Tokens", active: active === "tokens", onClick: () => navigate("tokens") })] }), _jsx("div", { style: { flex: 1 } }), _jsx("div", { style: {
                     color: "#888",
                     fontSize: "13px",
                 }, children: "admin" })] }));

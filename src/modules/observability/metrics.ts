@@ -64,6 +64,15 @@ export const generatedWorkflowTaskRunnerDispatches = makeCounter({ name: "phone_
 export const generatedWorkflowRecoveryAttempts = makeCounter({ name: "phone_network_generated_workflow_recovery_attempt_total", help: "Generated workflow recovery attempts after deterministic failures", labelNames: ["platform", "reason"] });
 export const generatedWorkflowRecoveryBudgetExhausted = makeCounter({ name: "phone_network_generated_workflow_recovery_budget_exhausted_total", help: "Generated workflow executions that exhausted recovery budget", labelNames: ["platform"] });
 
+// ─── Canonical UI graph runtime ──────────────────────────────────────────────
+
+export const uiGraphStateResolutions = makeCounter({ name: "phone_network_ui_graph_state_resolution_total", help: "UI state resolutions by app, method, and outcome", labelNames: ["app", "method", "outcome"] });
+export const uiGraphTargetResolutions = makeCounter({ name: "phone_network_ui_graph_target_resolution_total", help: "UI target resolutions by app, method, and outcome", labelNames: ["app", "method", "outcome"] });
+export const uiGraphActions = makeCounter({ name: "phone_network_ui_graph_action_total", help: "Canonical UI graph actions by app, path, and outcome", labelNames: ["app", "path", "outcome"] });
+export const uiGraphActionLatency = makeHistogram({ name: "phone_network_ui_graph_action_latency_seconds", help: "Canonical UI graph action latency", labelNames: ["app", "path"], buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30] });
+export const uiGraphRecovery = makeCounter({ name: "phone_network_ui_graph_recovery_total", help: "UI graph recovery attempts by level and outcome", labelNames: ["app", "level", "outcome"] });
+export const uiGraphLearningCandidates = makeCounter({ name: "phone_network_ui_graph_learning_candidate_total", help: "UI graph learning candidate lifecycle events", labelNames: ["app", "type", "event"] });
+
 // ─── Jobs ─────────────────────────────────────────────────────────────────────
 
 export const jobDispatched = makeCounter({ name: "phone_network_job_dispatched_total", help: "Jobs dispatched to devices",      labelNames: ["action", "device_id", "platform"] });

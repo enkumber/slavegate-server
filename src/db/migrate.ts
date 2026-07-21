@@ -5,8 +5,8 @@
  *
  * Each migration is wrapped in its own transaction with ROLLBACK on failure.
  * Most historical migration failures are LOGGED but DO NOT block server startup.
- * PNQ queue authority migrations fail closed because the arbiter must never
- * start with partial or missing queue authority.
+ * PNQ queue authority and UI graph runtime migrations fail closed because
+ * neither executor may start against a partial contract.
  */
 
 import fs from "fs";
@@ -39,14 +39,15 @@ function isFailClosedMigration(fileName: string): boolean {
   return fileName.includes("device_execution_queue") ||
     fileName.includes("queue_v2_contract") ||
     fileName.includes("queue_v2_runtime") ||
-    fileName.includes("pnq_v2_runtime");
+    fileName.includes("pnq_v2_runtime") ||
+    fileName.includes("ui_graph_runtime");
 }
 
 /**
  * Run all migrations. Called from bootstrap at server startup.
  * Searches for schema.sql and migrations/ in multiple locations.
  * Throws only for fail-closed migrations that protect the device execution
- * arbiter; legacy migration behavior remains non-fatal.
+ * arbiter or UI graph runtime; legacy migration behavior remains non-fatal.
  */
 export async function runMigrations(): Promise<void> {
   let db;

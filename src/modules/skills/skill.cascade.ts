@@ -41,6 +41,9 @@ import type { DeviceInfo } from "./skill-db.service";
 import type { NormalizedCoords, TapMethod } from "./types";
 import { MIN_CONFIDENCE_FOR_COORDS } from "./types";
 import { CD_MAP } from "./constants";
+import { uiGraphRepository } from "../ui-graph/repository";
+import { uiGraphLearningLoop } from "../ui-graph/learning-loop";
+import { observeLearningCandidate } from "../ui-graph/telemetry";
 import {
   shouldUseCoordsFromElement,
   getElementCoords,
@@ -77,6 +80,7 @@ function normalizeCoord(x: number, y: number, resolution: string): { x: number; 
 // ─── Device info helper ───────────────────────────────────────────────────────
 
 const PLATFORM_TO_PKG: Record<string, string> = {
+  reddit:     "com.reddit.frontpage",
   instagram: "com.instagram.android",
   tiktok:    "com.zhiliaoapp.musically",
   facebook:  "com.facebook.katana",
@@ -370,14 +374,11 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
       console.log(`[cascade] L2 a11y success for ${req.elementName} → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
 
       if (isElementFixed(req.platform, req.elementName)) {
-        await updateSkillCoords(req.platform, req.elementName, newCoords);
-        if (devInfo0) {
-          coordCacheService.learnCoord({
-            deviceInfo: devInfo0, screenType: screenType0,
-            elementName: req.elementName, x: newCoords.x, y: newCoords.y,
-            learnMethod: "ui_tree", confidence: 0.95,
-          }).catch(() => {});
-        }
+        await persistCascadeLearning({
+          platform: req.platform, elementName: req.elementName, coords: newCoords, method: "ui_tree",
+          deviceId: req.deviceId, workflowId: req.workflowId, screenType: screenType0,
+          deviceInfo: devInfo0, element,
+        }).catch((error) => console.warn(`[ui-graph] cascade learning failed: ${(error as Error).message}`));
       } else {
         console.log(`[cascade] Skipping DB persistence for non-fixed element: ${req.elementName}`);
       }
@@ -414,14 +415,11 @@ export async function executeCascadeTap(req: CascadeTapRequest): Promise<Cascade
 
         console.log(`[cascade] L2.5 OCR success: "${searchText}" → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
         if (isElementFixed(req.platform, req.elementName)) {
-          await updateSkillCoords(req.platform, req.elementName, newCoords);
-          if (devInfo0) {
-            coordCacheService.learnCoord({
-              deviceInfo: devInfo0, screenType: screenType0,
-              elementName: req.elementName, x: newCoords.x, y: newCoords.y,
-              learnMethod: "ocr", confidence: 0.90,
-            }).catch(() => {});
-          }
+          await persistCascadeLearning({
+            platform: req.platform, elementName: req.elementName, coords: newCoords, method: "ocr",
+            deviceId: req.deviceId, workflowId: req.workflowId, screenType: screenType0,
+            deviceInfo: devInfo0, element,
+          }).catch((error) => console.warn(`[ui-graph] cascade learning failed: ${(error as Error).message}`));
         } else {
           console.log(`[cascade] Skipping DB persistence for non-fixed element: ${req.elementName}`);
         }
@@ -753,6 +751,98 @@ async function updateSkillCoords(
   }
 }
 
+async function persistCascadeLearning(input: {
+  platform: string;
+  elementName: string;
+  coords: NormalizedCoords;
+  method: "ui_tree" | "ocr" | "vlm";
+  deviceId: string;
+  workflowId?: string;
+  screenType: string;
+  deviceInfo: DeviceInfo | null;
+  element: import("./types").SkillElement | null;
+}): Promise<void> {
+  if (!isElementFixed(input.platform, input.elementName) || isContextualElement(input.element)) return;
+  const appId = PLATFORM_TO_PKG[input.platform] || input.platform;
+  const context = {
+    appId,
+    deviceId: input.deviceId,
+    workflowId: input.workflowId || null,
+    appVersion: input.deviceInfo?.appVersion ?? null,
+    deviceClass: input.deviceInfo?.deviceClass ?? "phone",
+  };
+  const flags = await uiGraphRepository.resolveFlags(context);
+  if (flags.mode === "disabled" || !flags.candidateLearning) {
+    await updateSkillCoords(input.platform, input.elementName, input.coords);
+    if (input.deviceInfo) {
+      await coordCacheService.learnCoord({
+        deviceInfo: input.deviceInfo,
+        screenType: input.screenType,
+        elementName: input.elementName,
+        x: input.coords.x,
+        y: input.coords.y,
+        learnMethod: input.method,
+        confidence: input.method === "ui_tree" ? 0.95 : input.method === "ocr" ? 0.9 : 0.85,
+      });
+    }
+    return;
+  }
+
+  const state = (await uiGraphRepository.loadStates(appId)).find((candidate) => candidate.key === input.screenType);
+  if (!state || state.id.startsWith("legacy:")) {
+    console.warn(`[ui-graph] cascade candidate skipped: canonical state unavailable for ${appId}:${input.screenType}`);
+    return;
+  }
+
+  const rawSelector = input.element && typeof input.element.selector === "object" && input.element.selector !== null
+    ? input.element.selector as Record<string, unknown>
+    : {};
+  let strategy = "normalized_coords";
+  let selector: Record<string, unknown> = { x: input.coords.x, y: input.coords.y };
+  let priority = 1000;
+  if (input.method === "ui_tree") {
+    if (typeof rawSelector.resourceId === "string") { strategy = "resource_id"; selector = { value: rawSelector.resourceId }; priority = 10; }
+    else if (typeof rawSelector.contentDescription === "string") { strategy = "content_description"; selector = { value: rawSelector.contentDescription }; priority = 20; }
+    else if (typeof rawSelector.text === "string") { strategy = "text"; selector = { value: rawSelector.text }; priority = 40; }
+  }
+
+  const candidateId = await uiGraphLearningLoop.observe({
+    appId,
+    type: "selector",
+    sourceStateId: state.id,
+    payload: {
+      elementKey: input.elementName,
+      strategy,
+      selector,
+      priority,
+      dynamic: false,
+      appVersionPattern: input.deviceInfo?.appVersion ? `^${input.deviceInfo.appVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$` : null,
+      deviceClass: input.deviceInfo?.deviceClass ?? "phone",
+    },
+    evidence: { resolvedCoords: input.coords, resolutionMethod: input.method },
+    context,
+    discoveryMethod: input.method,
+    confidence: input.method === "ui_tree" ? 0.95 : input.method === "ocr" ? 0.9 : 0.85,
+    safetyClass: "navigation",
+  });
+  observeLearningCandidate(appId, "selector", "observed");
+
+  if (input.method === "ui_tree") {
+    const decision = await uiGraphLearningLoop.validate({
+      candidateId,
+      context,
+      success: true,
+      stateVerified: true,
+      evidence: { accessibilityNodeResolved: true },
+    });
+    observeLearningCandidate(appId, "selector", "validated");
+    if (flags.autoPromotion && decision.autoPromotable) {
+      await uiGraphLearningLoop.promote(candidateId, "ui_graph_auto_promotion", "Cross-context A11y selector validation threshold met", true);
+      observeLearningCandidate(appId, "selector", "promoted");
+    }
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // NAVIGATION LOGGING
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -949,14 +1039,11 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
       console.log(`[cascade] L2 a11y success: "${parsed.value}" → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
 
       if (shouldLearn && parsed.type === "ref" && req.platform && isElementFixed(uniPlatform, parsed.value)) {
-        await updateSkillCoords(req.platform, parsed.value, newCoords);
-        if (uniDevInfo) {
-          coordCacheService.learnCoord({
-            deviceInfo: uniDevInfo, screenType: uniScreenType,
-            elementName: parsed.value, x: newCoords.x, y: newCoords.y,
-            learnMethod: "ui_tree", confidence: 0.95,
-          }).catch(() => {});
-        }
+        await persistCascadeLearning({
+          platform: req.platform, elementName: parsed.value, coords: newCoords, method: "ui_tree",
+          deviceId: req.deviceId, workflowId: req.workflowId, screenType: uniScreenType,
+          deviceInfo: uniDevInfo, element,
+        }).catch((error) => console.warn(`[ui-graph] cascade learning failed: ${(error as Error).message}`));
       } else if (!isElementFixed(uniPlatform, parsed.value)) {
         console.log(`[cascade] Skipping DB persistence for non-fixed element: ${parsed.value}`);
       }
@@ -996,14 +1083,11 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
       console.log(`[cascade] L2.5 OCR success: "${searchText}" → (${newCoords.x.toFixed(3)}, ${newCoords.y.toFixed(3)})`);
 
       if (shouldLearn && parsed.type === "ref" && req.platform && isElementFixed(uniPlatform, parsed.value)) {
-        await updateSkillCoords(req.platform, parsed.value, newCoords);
-        if (uniDevInfo) {
-          coordCacheService.learnCoord({
-            deviceInfo: uniDevInfo, screenType: uniScreenType,
-            elementName: parsed.value, x: newCoords.x, y: newCoords.y,
-            learnMethod: "ocr", confidence: 0.90,
-          }).catch(() => {});
-        }
+        await persistCascadeLearning({
+          platform: req.platform, elementName: parsed.value, coords: newCoords, method: "ocr",
+          deviceId: req.deviceId, workflowId: req.workflowId, screenType: uniScreenType,
+          deviceInfo: uniDevInfo, element,
+        }).catch((error) => console.warn(`[ui-graph] cascade learning failed: ${(error as Error).message}`));
       } else if (!isElementFixed(uniPlatform, parsed.value)) {
         console.log(`[cascade] Skipping DB persistence for non-fixed element: ${parsed.value}`);
       }
@@ -1031,14 +1115,11 @@ export async function executeUnifiedCascadeTap(req: UnifiedCascadeRequest): Prom
       console.log(`[cascade] L3 VLM success: "${parsed.value}" → (${vlmCoords.x.toFixed(3)}, ${vlmCoords.y.toFixed(3)})`);
 
       if (shouldLearn && parsed.type === "ref" && req.platform && isElementFixed(uniPlatform, parsed.value)) {
-        await updateSkillCoords(req.platform, parsed.value, vlmCoords);
-        if (uniDevInfo) {
-          coordCacheService.learnCoord({
-            deviceInfo: uniDevInfo, screenType: uniScreenType,
-            elementName: parsed.value, x: vlmCoords.x, y: vlmCoords.y,
-            learnMethod: "vlm", confidence: 0.85,
-          }).catch(() => {});
-        }
+        await persistCascadeLearning({
+          platform: req.platform, elementName: parsed.value, coords: vlmCoords, method: "vlm",
+          deviceId: req.deviceId, workflowId: req.workflowId, screenType: uniScreenType,
+          deviceInfo: uniDevInfo, element,
+        }).catch((error) => console.warn(`[ui-graph] cascade learning failed: ${(error as Error).message}`));
       } else if (!isElementFixed(uniPlatform, parsed.value)) {
         console.log(`[cascade] Skipping DB persistence for non-fixed element: ${parsed.value}`);
       }

@@ -17,6 +17,15 @@ services:
       DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD}
       DATA_DIR: /data
+      # Graph-first runtime rollout. Shadow mode records/resolves decisions but
+      # leaves execution authority with the proven legacy runner until a scope
+      # is explicitly promoted to enforced from the dashboard.
+      UI_GRAPH_RUNTIME_MODE: ${UI_GRAPH_RUNTIME_MODE:-shadow}
+      UI_GRAPH_SELECTOR_FIRST: ${UI_GRAPH_SELECTOR_FIRST:-true}
+      UI_GRAPH_GRAPH_RUNTIME: ${UI_GRAPH_GRAPH_RUNTIME:-true}
+      UI_GRAPH_AI_RECOVERY: ${UI_GRAPH_AI_RECOVERY:-true}
+      UI_GRAPH_CANDIDATE_LEARNING: ${UI_GRAPH_CANDIDATE_LEARNING:-true}
+      UI_GRAPH_AUTO_PROMOTION: ${UI_GRAPH_AUTO_PROMOTION:-false}
     volumes:
       - ${APP_DATA_DIR:-./data}/phone-network:/data
     healthcheck:

@@ -21,6 +21,12 @@ import type { CompiledStep } from "./types";
 import { canonicalModelOverride } from "./model-routing";
 import type { RunnerContext } from "./runner.service";
 import { validateStepSchema } from "./workflow-validator";
+import { visionService } from "../vision/vision.service";
+import { uiGraphRepository } from "../ui-graph/repository";
+import { uiGraphLearningLoop } from "../ui-graph/learning-loop";
+import { observeLearningCandidate, observeRecovery } from "../ui-graph/telemetry";
+import { validateRecoveryProposal } from "../ui-graph/recovery-orchestrator";
+import type { RecoveryProposal, UiSafetyClass } from "../ui-graph/types";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -236,6 +242,104 @@ function summarizeUiTree(uiTree: UiTreeNode[], maxNodes = 30): string {
   return lines.join("\n");
 }
 
+function hasActionableUiTreeSignals(uiTree: UiTreeNode[]): boolean {
+  let signals = 0;
+  const walk = (nodes: UiTreeNode[]) => {
+    for (const node of nodes) {
+      if (node.resourceId?.trim() || node.contentDescription?.trim() || node.text?.trim()) signals++;
+      if (node.children && signals < 3) walk(node.children);
+      if (signals >= 3) return;
+    }
+  };
+  walk(uiTree);
+  return signals >= 2;
+}
+
+function parseRecoveryAction(raw: string): RecoveryAction | null {
+  const candidates = [raw.trim(), raw.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1], raw.match(/\{[\s\S]*\}/)?.[0]].filter((value): value is string => Boolean(value));
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as RecoveryAction;
+      if (parsed && typeof parsed === "object" && typeof parsed.type === "string") return parsed;
+    } catch { /* try next representation */ }
+  }
+  return null;
+}
+
+function recoverySafety(step: CompiledStep): UiSafetyClass {
+  if (["screenshot", "wait"].includes(step.action)) return "read_only";
+  if (["open_app", "intent_send", "press_key", "swipe", "tap"].includes(step.action)) return "navigation";
+  if (step.action === "type") return "mutating";
+  return "sensitive";
+}
+
+function asRecoveryProposal(action: RecoveryAction, failedStep: CompiledStep): RecoveryProposal {
+  const encodedStep = (step: CompiledStep): Record<string, unknown> => ({
+    type: step.action,
+    safetyClass: recoverySafety(step),
+    target: step.target,
+    params: step.params,
+  });
+  if (action.type === "abort") {
+    return { type: "abort", actions: [], confidence: 1, reason: action.reason, learningEligible: false };
+  }
+  if (action.type === "retry_step") {
+    return { type: "retry", actions: [encodedStep(failedStep)], confidence: 0.6, reason: "retry failed step", learningEligible: false };
+  }
+  if (action.type === "retry_with_adaptation") {
+    return { type: "adapt", actions: [encodedStep(action.adaptedStep)], confidence: 0.7, reason: "adapt failed step", learningEligible: true };
+  }
+  if (action.type === "dismiss_and_retry") {
+    return { type: "dismiss_overlay", actions: action.dismissActions.map(encodedStep), confidence: 0.7, reason: "dismiss overlay", learningEligible: true };
+  }
+  return {
+    type: "navigate",
+    actions: Array.from({ length: Math.max(0, action.backSteps) }, () => ({ type: "press_key", safetyClass: "navigation", params: { key: "BACK" } })),
+    confidence: 0.7,
+    reason: "navigate back",
+    learningEligible: true,
+  };
+}
+
+function learningPayload(action: RecoveryAction, failedStep: CompiledStep, reason: string): Record<string, unknown> {
+  const base = {
+    failureClass: reason.split(":", 1)[0],
+    expectedPage: failedStep.expectedPage,
+    failedAction: failedStep.action,
+    recoveryType: action.type,
+  };
+  if (action.type === "navigate_back_and_retry") return { ...base, backSteps: action.backSteps };
+  if (action.type === "dismiss_and_retry") {
+    return {
+      ...base,
+      dismissActions: action.dismissActions.map((step) => ({
+        action: step.action,
+        target: step.target ? {
+          elementId: step.target.elementId,
+          resourceId: step.target.resourceId,
+          contentDescription: step.target.contentDescription,
+          text: step.target.text,
+          coords: step.target.coords,
+        } : undefined,
+      })),
+    };
+  }
+  if (action.type === "retry_with_adaptation") {
+    return {
+      ...base,
+      adaptedAction: action.adaptedStep.action,
+      target: action.adaptedStep.target ? {
+        elementId: action.adaptedStep.target.elementId,
+        resourceId: action.adaptedStep.target.resourceId,
+        contentDescription: action.adaptedStep.target.contentDescription,
+        text: action.adaptedStep.target.text,
+        coords: action.adaptedStep.target.coords,
+      } : undefined,
+    };
+  }
+  return base;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // EXECUTE RECOVERY ACTION ON DEVICE
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -390,11 +494,12 @@ export async function attemptRecovery(
     `${ctx.recoveryCount + 1}/${MAX_RECOVERY_PER_WORKFLOW} for workflow.`
   );
 
-  // 1. Capture current state
-  const [screenshotBase64, uiTree] = await Promise.all([
-    captureScreenshot(deviceId, ctx.workflowRootExternalId),
-    captureUiTreeForRecovery(deviceId, ctx.workflowRootExternalId),
-  ]);
+  const graphContext = { appId: workflow.appId, deviceId, workflowId: workflow.id, stepId: failedStep.id };
+  const graphFlags = await uiGraphRepository.resolveFlags(graphContext);
+
+  // 1. Capture the cheap semantic state first. Screenshot/VLM stays lazy.
+  const uiTree = await captureUiTreeForRecovery(deviceId, ctx.workflowRootExternalId);
+  let screenshotBase64: string | undefined;
 
   const currentFingerprint = uiTree.length > 0 ? computePageSignature(uiTree) : undefined;
   const uiTreeSummary = summarizeUiTree(uiTree);
@@ -414,27 +519,54 @@ export async function attemptRecovery(
   // 3. Call LLM for recovery decision
   let recoveryAction: RecoveryAction;
   let llmLatencyMs: number;
+  let usedVision = false;
   const modelOverride = canonicalModelOverride(model);
 
   try {
     const llmStart = Date.now();
     const prompt = buildRecoveryPrompt(recoveryCtx, uiTreeSummary);
 
-    recoveryAction = await llmJson<RecoveryAction>(
-      prompt,
-      modelOverride,
-      {
-        max_tokens: 2048,
-        system: "You are an Android workflow recovery agent. Respond ONLY with valid JSON recovery action.",
-      }
-    );
+    if (graphFlags.mode !== "disabled" && graphFlags.aiRecovery && !hasActionableUiTreeSignals(uiTree)) {
+      screenshotBase64 = await captureScreenshot(deviceId, ctx.workflowRootExternalId);
+      if (!screenshotBase64) throw new Error("VLM recovery required but screenshot unavailable");
+      const raw = await visionService.analyzeCustomPrompt(screenshotBase64, `${prompt}\nThe accessibility tree was insufficient. Analyze the screenshot and return only the recovery JSON.`);
+      const parsed = parseRecoveryAction(raw);
+      if (!parsed) throw new Error("VLM returned invalid recovery JSON");
+      recoveryAction = parsed;
+      usedVision = true;
+    } else {
+      recoveryAction = await llmJson<RecoveryAction>(
+        prompt,
+        modelOverride,
+        {
+          max_tokens: 2048,
+          system: "You are an Android workflow recovery agent. Respond ONLY with valid JSON recovery action.",
+        }
+      );
+    }
 
     llmLatencyMs = Date.now() - llmStart;
-    console.log(`[recovery] LLM decided: ${recoveryAction.type} (${llmLatencyMs}ms)`);
+    console.log(`[recovery] ${usedVision ? "VLM" : "UI-tree LLM"} decided: ${recoveryAction.type} (${llmLatencyMs}ms)`);
   } catch (err) {
-    console.error(`[recovery] LLM call failed: ${(err as Error).message}`);
-    // Default: simple retry
-    recoveryAction = { type: "retry_step" };
+    console.error(`[recovery] AI recovery decision failed: ${(err as Error).message}`);
+    if (graphFlags.mode !== "disabled" && graphFlags.aiRecovery && !usedVision) {
+      try {
+        screenshotBase64 = screenshotBase64 ?? await captureScreenshot(deviceId, ctx.workflowRootExternalId);
+        if (!screenshotBase64) throw new Error("screenshot unavailable");
+        const prompt = buildRecoveryPrompt(recoveryCtx, uiTreeSummary);
+        const raw = await visionService.analyzeCustomPrompt(screenshotBase64, `${prompt}\nThe UI-tree recovery failed. Analyze the screenshot and return only the recovery JSON.`);
+        const parsed = parseRecoveryAction(raw);
+        if (!parsed) throw new Error("invalid VLM recovery JSON");
+        recoveryAction = parsed;
+        usedVision = true;
+      } catch (visionError) {
+        console.error(`[recovery] VLM fallback failed: ${(visionError as Error).message}`);
+        recoveryAction = { type: "retry_step" };
+      }
+    } else {
+      // Fail-safe deterministic retry does not escalate privileges.
+      recoveryAction = { type: "retry_step" };
+    }
     llmLatencyMs = Date.now() - startTime;
   }
 
@@ -445,8 +577,21 @@ export async function attemptRecovery(
     recoveryAction = { type: "retry_step" };
   }
 
+  const safetyErrors = validateRecoveryProposal(asRecoveryProposal(recoveryAction, failedStep), recoverySafety(failedStep), {
+    maxActions: 6,
+    maxAttempts: MAX_RECOVERY_PER_STEP,
+    maxDurationMs: 120_000,
+  });
+  if (safetyErrors.length > 0) {
+    console.warn(`[recovery] Recovery proposal rejected by canonical safety policy: ${safetyErrors.join(",")}`);
+    recoveryAction = { type: "abort", reason: `Recovery proposal rejected: ${safetyErrors.join(",")}` };
+  }
+
   // 4. Execute recovery action
   const execResult = await executeRecoveryAction(deviceId, recoveryAction, ctx.workflowRootExternalId);
+  if (graphFlags.mode !== "disabled") {
+    observeRecovery(workflow.appId, usedVision ? "vlm" : "ui_tree_llm", execResult.success ? "completed" : recoveryAction.type === "abort" ? "aborted" : "failed");
+  }
 
   // If retry_with_adaptation, validate & replace the step in the workflow
   if (recoveryAction.type === "retry_with_adaptation" && recoveryAction.adaptedStep) {
@@ -477,13 +622,27 @@ export async function attemptRecovery(
     success: execResult.success,
     screenshotAvailable: !!screenshotBase64,
     uiTreeHash: currentFingerprint,
-    llmModel: modelOverride || "decision_llm",
+    llmModel: usedVision ? "vision_vlm" : modelOverride || "decision_llm",
     llmLatencyMs,
     totalLatencyMs,
     createdAt: new Date().toISOString(),
   };
 
   await logRecoveryHistory(historyEntry);
+
+  if (execResult.success && recoveryAction.type !== "retry_step" && graphFlags.mode !== "disabled" && graphFlags.candidateLearning) {
+    await uiGraphLearningLoop.observe({
+      appId: workflow.appId,
+      type: "recovery_rule",
+      payload: learningPayload(recoveryAction, failedStep, reason),
+      evidence: { currentFingerprint, screenshotAvailable: Boolean(screenshotBase64), usedVision },
+      context: graphContext,
+      discoveryMethod: usedVision ? "vlm" : "llm_recovery",
+      confidence: usedVision ? 0.7 : 0.75,
+      safetyClass: recoverySafety(failedStep),
+    }).then(() => observeLearningCandidate(workflow.appId, "recovery_rule", "observed"))
+      .catch((error) => console.warn(`[ui-graph] recovery learning candidate failed: ${(error as Error).message}`));
+  }
 
   console.log(
     `[recovery] Recovery ${execResult.success ? "succeeded" : "failed"}: ` +
