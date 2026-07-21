@@ -217,6 +217,40 @@ describe("attemptRecovery", () => {
       );
     });
 
+    it("prioritizes deep actionable selectors over empty structural wrappers", async () => {
+      const deepTree = Array.from({ length: 40 }).reduceRight<any>(
+        (child, _, index) => ({
+          className: "android.widget.FrameLayout",
+          children: [child],
+          ...(index === 39 ? {
+            className: "android.widget.EditText",
+            resourceId: "current_search_field",
+            contentDescription: "Search",
+            clickable: true,
+            editable: true,
+          } : {}),
+        }),
+        { className: "android.view.View" },
+      );
+      vi.mocked(waitForResult).mockResolvedValue({
+        status: "completed",
+        output: { uiTree: JSON.stringify(deepTree) },
+      });
+
+      await attemptRecovery(makeRunnerContext(), 0, "action_failed:Accessibility selector was not found");
+
+      expect(llmJson).toHaveBeenCalledWith(
+        expect.stringContaining("id=current_search_field"),
+        undefined,
+        expect.any(Object),
+      );
+      expect(llmJson).toHaveBeenCalledWith(
+        expect.stringContaining("Do NOT use retry_step with the same selector"),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
     it("should handle retry_step action correctly", async () => {
       const ctx = makeRunnerContext();
       vi.mocked(llmJson).mockResolvedValue({ type: "retry_step" });
@@ -243,6 +277,29 @@ describe("attemptRecovery", () => {
       // The step should have been replaced in the workflow
       expect(ctx.workflow.steps[0].action).toBe("swipe");
       expect(ctx.workflow.steps[0].description).toBe("Swipe up then retry");
+    });
+
+    it("merges a partial adapted target with the failed compiled step", async () => {
+      const ctx = makeRunnerContext();
+      vi.mocked(llmJson).mockResolvedValue({
+        type: "retry_with_adaptation",
+        adaptedStep: {
+          action: "tap",
+          target: { resourceId: "current_search_field" },
+        } as CompiledStep,
+      });
+
+      const result = await attemptRecovery(ctx, 0, "action_failed:Accessibility selector was not found");
+
+      expect(result).toBe(true);
+      expect(ctx.workflow.steps[0]).toMatchObject({
+        id: "s1",
+        action: "tap",
+        target: { resourceId: "current_search_field" },
+        expectedPage: "page_home",
+        expectedPageHash: "hash123",
+        retries: 1,
+      });
     });
 
     it("should handle dismiss_and_retry action", async () => {

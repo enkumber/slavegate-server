@@ -955,6 +955,9 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
 });
 
 router.get("/workflows/:id", requireAuth, async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) {
+    return res.status(400).json({ ok: false, error: "workflow id must be a UUID" });
+  }
   const wf = await workflowService.get(req.params.id);
   if (!wf) return res.status(404).json({ ok: false, error: "Not found" });
   res.json({ ok: true, data: wf });

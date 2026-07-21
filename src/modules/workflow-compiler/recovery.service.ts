@@ -194,6 +194,7 @@ FAILED STEP:
 - Description: ${ctx.failedStep.description}
 - Expected page: ${ctx.failedStep.expectedPage} (hash: ${ctx.failedStep.expectedPageHash})
 - Failure reason: ${ctx.failureReason}
+- Failed step JSON: ${JSON.stringify(ctx.failedStep)}
 
 CURRENT STATE:
 - Current fingerprint: ${ctx.currentFingerprint || "unknown"}
@@ -202,7 +203,7 @@ ${uiTreeSummary || "Not available"}
 
 AVAILABLE RECOVERY ACTIONS (respond with JSON):
 1. { "type": "retry_step" } — Just retry the same step
-2. { "type": "retry_with_adaptation", "adaptedStep": { ...CompiledStep } } — Retry with modified step
+2. { "type": "retry_with_adaptation", "adaptedStep": { ...CompiledStep } } — Retry with modified step. Copy every field from the failed step and change only what is required.
 3. { "type": "dismiss_and_retry", "dismissActions": [ { ...CompiledStep }, ... ] } — Dismiss popup then retry
 4. { "type": "navigate_back_and_retry", "backSteps": 1 } — Press back N times then retry
 5. { "type": "abort", "reason": "..." } — Cannot recover, abort workflow
@@ -211,7 +212,9 @@ DECISION GUIDELINES:
 - If a popup/dialog appeared -> dismiss_and_retry (tap OK/Close button)
 - If element is scrolled out -> retry_with_adaptation (add swipe up before tap)
 - If wrong page -> navigate_back_and_retry
-- If element not found but page is correct -> retry_step (element may load async)
+- If the failure says an Accessibility selector was not found, the stored selector is stale. Do NOT use retry_step with the same selector. If the current UI tree contains the intended element, use retry_with_adaptation, keep action="tap", and replace target with a current resourceId/contentDescription/text selector from the tree.
+- Use retry_step for a missing element only when the failure is plausibly transient (loading/animation) and the stored selector is still present in the current UI tree.
+- adaptedStep must remain a CompiledStep (tap/type/swipe/press_key/wait/open_app/intent_send/screenshot), not a device job type such as a11y_find_tap.
 - If fatal error (app crashed, permission denied) -> abort
 - Be CONSERVATIVE: prefer retry over dismiss. Prefer dismiss over abort.
 
@@ -225,15 +228,20 @@ function summarizeUiTree(uiTree: UiTreeNode[], maxNodes = 30): string {
   function walk(nodes: UiTreeNode[], depth: number) {
     for (const node of nodes) {
       if (count >= maxNodes) return;
-      const indent = "  ".repeat(depth);
       const parts: string[] = [];
       if (node.resourceId) parts.push(`id=${node.resourceId}`);
       if (node.text) parts.push(`text="${node.text.slice(0, 50)}"`);
       if (node.contentDescription) parts.push(`cd="${node.contentDescription.slice(0, 50)}"`);
-      if (node.className) parts.push(`class=${node.className.split(".").pop()}`);
-      if (node.clickable) parts.push("clickable");
-      lines.push(`${indent}- ${parts.join(" | ")}`);
-      count++;
+      const editable = (node as UiTreeNode & { editable?: boolean }).editable === true;
+      const semanticallyUseful = parts.length > 0 || node.clickable || editable;
+      if (semanticallyUseful) {
+        const indent = "  ".repeat(Math.min(depth, 6));
+        if (node.className) parts.push(`class=${node.className.split(".").pop()}`);
+        if (node.clickable) parts.push("clickable");
+        if (editable) parts.push("editable");
+        lines.push(`${indent}- ${parts.join(" | ")}`);
+        count++;
+      }
       if (node.children) walk(node.children, depth + 1);
     }
   }
@@ -595,11 +603,16 @@ export async function attemptRecovery(
 
   // If retry_with_adaptation, validate & replace the step in the workflow
   if (recoveryAction.type === "retry_with_adaptation" && recoveryAction.adaptedStep) {
-    const adaptedStep = recoveryAction.adaptedStep as unknown as Record<string, unknown>;
-    const validation = validateStepSchema(adaptedStep);
+    const adaptedStep: CompiledStep = {
+      ...failedStep,
+      ...recoveryAction.adaptedStep,
+      target: recoveryAction.adaptedStep.target ?? failedStep.target,
+      params: recoveryAction.adaptedStep.params ?? failedStep.params,
+    };
+    const validation = validateStepSchema(adaptedStep as unknown as Record<string, unknown>);
     if (validation.valid) {
-      workflow.steps[stepIndex] = recoveryAction.adaptedStep;
-      console.log(`[recovery] Adapted step ${stepIndex}: ${recoveryAction.adaptedStep.description}`);
+      workflow.steps[stepIndex] = adaptedStep;
+      console.log(`[recovery] Adapted step ${stepIndex}: ${adaptedStep.description}`);
     } else {
       console.warn(
         `[recovery] Adapted step validation failed (${validation.errors.join(", ")}). ` +
