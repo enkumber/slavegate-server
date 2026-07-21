@@ -46,6 +46,10 @@ export interface PageDetection {
   method: "ui_tree_signature";
   /** Anchor nodes used for matching (resourceId:xxx, text:yyy, etc.) */
   anchors: string[];
+  /** Additional non-mandatory anchors used to improve matching confidence. */
+  optionalAnchors?: string[];
+  /** Anchors whose presence proves this is a different state. */
+  forbiddenAnchors?: string[];
   /** Hash of the page's signature for quick comparison */
   signatureHash: string;
 }

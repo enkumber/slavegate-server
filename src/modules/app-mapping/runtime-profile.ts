@@ -47,6 +47,41 @@ export interface AppRuntimeProfile {
   metadata: Record<string, unknown>;
 }
 
+export interface RuntimeStateDetectionOverride {
+  requiredAnchors?: string[];
+  optionalAnchors?: string[];
+  forbiddenAnchors?: string[];
+}
+
+function stringArray(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    throw new Error(`${field} must be an array of non-empty strings`);
+  }
+  return [...new Set(value.map((item) => item.trim()))];
+}
+
+export function runtimeStateDetectionOverrides(
+  metadata: Record<string, unknown>,
+): Record<string, RuntimeStateDetectionOverride> {
+  const raw = metadata.stateDetectionOverrides;
+  if (raw === undefined) return {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("metadata.stateDetectionOverrides must be an object");
+  }
+  return Object.fromEntries(Object.entries(raw as Record<string, unknown>).map(([stateKey, value]) => {
+    if (!stateKey.trim() || !value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("each state detection override must be a keyed object");
+    }
+    const entry = value as Record<string, unknown>;
+    return [stateKey, {
+      requiredAnchors: stringArray(entry.requiredAnchors, `${stateKey}.requiredAnchors`),
+      optionalAnchors: stringArray(entry.optionalAnchors, `${stateKey}.optionalAnchors`),
+      forbiddenAnchors: stringArray(entry.forbiddenAnchors, `${stateKey}.forbiddenAnchors`),
+    }];
+  }));
+}
+
 function asArray(value: unknown): unknown[] {
   if (Array.isArray(value)) return value;
   if (typeof value === "string") {
@@ -91,6 +126,7 @@ export function validateRuntimeProfile(profile: AppRuntimeProfile): AppRuntimePr
     if (ids.has(step.id)) throw new Error(`duplicate runtime profile step id: ${step.id}`);
     ids.add(step.id);
   }
+  runtimeStateDetectionOverrides(profile.metadata ?? {});
   return profile;
 }
 

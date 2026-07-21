@@ -3,6 +3,7 @@ import {
   assertRuntimeActionSafe,
   renderRuntimeParams,
   runtimeProfileFromRow,
+  runtimeStateDetectionOverrides,
   validateRuntimeProfile,
   type AppRuntimeProfile,
 } from "./runtime-profile";
@@ -62,6 +63,26 @@ describe("app runtime profiles", () => {
     const invalid = profile();
     invalid.mappingRecipe.push({ id: "tap", type: "a11y_find_tap", params: { text: "Delete" } });
     expect(() => validateRuntimeProfile(invalid)).toThrow("is not allowed by its safety policy");
+  });
+
+  it("loads DB-owned state detection overrides without application constants", () => {
+    expect(runtimeStateDetectionOverrides({
+      stateDetectionOverrides: {
+        search_entry: {
+          forbiddenAnchors: ["resourceId:search_surface", "resourceId:search_surface"],
+          optionalAnchors: ["contentDescription:Search"],
+        },
+      },
+    })).toEqual({
+      search_entry: {
+        requiredAnchors: undefined,
+        optionalAnchors: ["contentDescription:Search"],
+        forbiddenAnchors: ["resourceId:search_surface"],
+      },
+    });
+    expect(() => runtimeStateDetectionOverrides({
+      stateDetectionOverrides: { search_entry: { forbiddenAnchors: "bad" } },
+    })).toThrow("must be an array");
   });
 
   it("permits only HTTPS VIEW intents to allowlisted hosts and the configured package", () => {

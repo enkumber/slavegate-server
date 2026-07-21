@@ -25,6 +25,7 @@ import {
   listRuntimeProfiles,
   loadRuntimeProfile,
   renderRuntimeParams,
+  runtimeStateDetectionOverrides,
   saveRuntimeProfile,
   type AppRuntimeProfile,
   type RuntimeRecipeStep,
@@ -451,6 +452,17 @@ router.post("/refresh/:appId", async (req: Request, res: Response) => {
         index,
       );
     });
+    const detectionOverrides = runtimeStateDetectionOverrides(profile.metadata);
+    for (const [stateKey, override] of Object.entries(detectionOverrides)) {
+      const page = pages[stateKey];
+      if (!page) {
+        failures.push(`state detection override skipped: state ${stateKey} was not captured`);
+        continue;
+      }
+      if (override.requiredAnchors) page.detection.anchors = override.requiredAnchors;
+      if (override.optionalAnchors) page.detection.optionalAnchors = override.optionalAnchors;
+      if (override.forbiddenAnchors) page.detection.forbiddenAnchors = override.forbiddenAnchors;
+    }
     for (const transition of transitions) {
       const source = pages[transition.sourceStateKey];
       const target = pages[transition.targetStateKey];
