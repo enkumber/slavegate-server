@@ -127,6 +127,10 @@ describe("runCompiledWorkflow recovery budget", () => {
   });
 
   it("preserves DB-profile package and action constraints for intent_send", async () => {
+    vi.mocked(waitForResult).mockResolvedValueOnce({
+      status: "completed",
+      output: { resolvedActivity: "com.reddit.frontpage/com.reddit.frontpage.RedditDeepLinkActivity" },
+    });
     const workflow = makeWorkflow({
       steps: [{
         id: "canonical-search",
@@ -164,6 +168,37 @@ describe("runCompiledWorkflow recovery budget", () => {
     );
   });
 
+  it("fails closed when a constrained intent resolves outside the requested package", async () => {
+    vi.mocked(waitForResult).mockResolvedValueOnce({
+      status: "completed",
+      output: { resolvedActivity: "com.android.chrome/com.google.android.apps.chrome.Main" },
+    });
+    const workflow = makeWorkflow({
+      steps: [{
+        id: "canonical-search",
+        action: "intent_send",
+        expectedPage: "reddit_search_surface",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Open canonical search in Reddit",
+        params: {
+          uri: "https://www.reddit.com/search/?q=AskReddit",
+          packageName: "com.reddit.frontpage",
+          action: "android.intent.action.VIEW",
+        },
+      }],
+    });
+
+    const result = await runCompiledWorkflow(
+      { deviceId: "device-1", workflow },
+      vi.fn().mockResolvedValue(false),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.results[0]?.error).toContain("Intent package verification failed");
+  });
+
   it("allows one recovery after deterministic failure then fails explicitly when the step budget is exhausted", async () => {
     const workflow = makeWorkflow({
       steps: [
@@ -195,6 +230,11 @@ describe("runCompiledWorkflow recovery budget", () => {
     expect(result.counters.runtimeLlmCalls).toBe(1);
     expect(result.counters.recoveryBudgetExhausted).toBe(1);
     expect(result.results[0]?.error).toBe(RECOVERY_BUDGET_EXCEEDED);
+    expect(result.results[0]?.stateEvidence).toMatchObject({
+      expectedPage: "reddit_home",
+      expectedHash: "expected_hash",
+      actualHash: "actual_hash",
+    });
     expect(generatedWorkflowRecoveryAttempts?.labels).toHaveBeenCalledWith("reddit", "fingerprint_mismatch");
     expect(generatedWorkflowRecoveryBudgetExhausted?.labels).toHaveBeenCalledWith("reddit");
   });

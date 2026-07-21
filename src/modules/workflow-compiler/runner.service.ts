@@ -64,6 +64,13 @@ export interface StepExecutionResult {
   fingerprintMatch: boolean;
   postActionVerified: boolean;
   error?: string;
+  /** Bounded state evidence for fail-closed diagnosis without bypassing PNQ. */
+  stateEvidence?: {
+    expectedPage: string;
+    expectedHash: string;
+    actualHash: string;
+    resolution: StateResolution | null;
+  };
   latencyMs: number;
 }
 
@@ -542,6 +549,21 @@ async function executeStepAction(
     const result = await waitForResult(jobId, STEP_TIMEOUT_MS + 5_000);
     if (!result || result.status !== "completed") {
       return { success: false, jobId, error: result?.error || "Action timed out or failed" };
+    }
+    if (step.action === "intent_send") {
+      const requestedPackage = typeof step.params?.packageName === "string"
+        ? step.params.packageName.trim()
+        : "";
+      const resolvedActivity = typeof result.output?.resolvedActivity === "string"
+        ? result.output.resolvedActivity.trim()
+        : "";
+      if (requestedPackage && (!resolvedActivity || !resolvedActivity.startsWith(`${requestedPackage}/`))) {
+        return {
+          success: false,
+          jobId,
+          error: `Intent package verification failed: requested=${requestedPackage},resolved=${resolvedActivity || "unknown"}`,
+        };
+      }
     }
     return { success: true, jobId };
   } catch (err) {
@@ -1101,6 +1123,12 @@ export async function runCompiledWorkflow(
                 fingerprintMatch: false,
                 postActionVerified: false,
                 error: recovery.error ?? "Fingerprint mismatch, recovery failed",
+                stateEvidence: {
+                  expectedPage: step.expectedPage,
+                  expectedHash: step.expectedPageHash,
+                  actualHash: fp.actualHash,
+                  resolution: preActionState,
+                },
                 latencyMs: Date.now() - stepStart,
               });
               workflowEvents.publish({
