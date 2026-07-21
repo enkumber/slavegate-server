@@ -279,30 +279,44 @@ router.post("/run-compiled", async (req: Request, res: Response) => {
   }
 
   // ── Execute ───────────────────────────────────────────────────────────────
-  resetRecoveryCounts(workflow.id);
+  // Express 4 does not forward rejected async handlers to its error middleware.
+  // Keep a runner failure bounded to this request instead of letting an
+  // unhandled rejection restart the whole API container.
+  try {
+    resetRecoveryCounts(workflow.id);
 
-  const runResult: RunCompiledResult = await runCompiledWorkflow(
-    {
-      deviceId,
-      workflow,
-      compileLlmCalls: 0,
-    },
-    async (ctx, stepIndex, reason) => {
-      return attemptRecovery(ctx, stepIndex, reason, workflow.recoveryModel);
-    },
-  );
+    const runResult: RunCompiledResult = await runCompiledWorkflow(
+      {
+        deviceId,
+        workflow,
+        compileLlmCalls: 0,
+      },
+      async (ctx, stepIndex, reason) => {
+        return attemptRecovery(ctx, stepIndex, reason, workflow.recoveryModel);
+      },
+    );
 
-  res.json({
-    ok: runResult.ok,
-    jobId: runResult.workflowId,
-    status: runResult.status,
-    stepsCompleted: runResult.stepsCompleted,
-    stepsTotal: runResult.stepsTotal,
-    recoveryCount: runResult.recoveryCount,
-    counters: runResult.counters,
-    totalLatencyMs: runResult.totalLatencyMs,
-    error: runResult.error,
-  });
+    return res.json({
+      ok: runResult.ok,
+      jobId: runResult.workflowId,
+      status: runResult.status,
+      stepsCompleted: runResult.stepsCompleted,
+      stepsTotal: runResult.stepsTotal,
+      recoveryCount: runResult.recoveryCount,
+      counters: runResult.counters,
+      totalLatencyMs: runResult.totalLatencyMs,
+      error: runResult.error,
+    });
+  } catch (err) {
+    const error = err instanceof Error ? err.message : "Compiled workflow runner failed";
+    console.error(`[workflow-compiler] run-compiled failed for workflow=${workflow.id}: ${error}`);
+    return res.status(500).json({
+      ok: false,
+      code: "RUN_COMPILED_FAILED",
+      status: "failed",
+      error,
+    });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
