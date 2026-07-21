@@ -868,7 +868,7 @@ export async function runCompiledWorkflow(
       }
     }
 
-    const step = workflow.steps[i];
+    let step = workflow.steps[i];
     const stepStart = Date.now();
     counters.deterministicSteps++;
 
@@ -937,7 +937,7 @@ export async function runCompiledWorkflow(
           }
 
           // Escalate only after the promoted graph cannot recover deterministically.
-          const recovery = graphRecovered
+          let recovery = graphRecovered
             ? { recovered: true as const }
             : await attemptBoundedRecovery(
               ctx,
@@ -945,9 +945,37 @@ export async function runCompiledWorkflow(
               i,
               `fingerprint_mismatch:expected=${step.expectedPageHash},actual=${fp.actualHash}`
             );
-          if (!recovery.recovered) {
-              counters.failedSteps++;
-              results.push({
+          while (recovery.recovered && !graphRecovered && !fingerprintMatch) {
+            step = workflow.steps[i];
+            try {
+              const replayCheck = await verifyFingerprint(deviceId, step.expectedPageHash, workflowRootExternalId);
+              preActionUiTree = replayCheck.uiTree;
+              preActionState = uiGraph?.enabled ? await uiGraph.observeState(replayCheck.uiTree, step) : null;
+              fingerprintMatch = reconcileFingerprintWithResolvedState({
+                rawFingerprintMatch: replayCheck.match,
+                enforced: Boolean(uiGraph?.enforced),
+                expectedPage: step.expectedPage,
+                resolution: preActionState,
+              });
+              if (fingerprintMatch) break;
+              recovery = await attemptBoundedRecovery(
+                ctx,
+                counters,
+                i,
+                `fingerprint_mismatch_after_recovery:expected=${step.expectedPageHash},actual=${replayCheck.actualHash}`,
+              );
+            } catch (error) {
+              recovery = await attemptBoundedRecovery(
+                ctx,
+                counters,
+                i,
+                `fingerprint_verification_failed_after_recovery:${(error as Error).message}`,
+              );
+            }
+          }
+          if (!recovery.recovered || !fingerprintMatch) {
+            counters.failedSteps++;
+            results.push({
                 stepIndex: i,
                 stepId: step.id,
                 success: false,
@@ -999,7 +1027,7 @@ export async function runCompiledWorkflow(
       }
     }
 
-    const targetMethod: TargetResolutionMethod = step.action !== "tap"
+    let targetMethod: TargetResolutionMethod = step.action !== "tap"
       ? "direct"
       : graphTarget?.resolution.found
         ? graphTarget.resolution.method
@@ -1010,7 +1038,7 @@ export async function runCompiledWorkflow(
                 : "unknown";
 
     // ─── Execute action ─────────────────────────────────────────────────────
-    const rejectUnguardedCoordinate = Boolean(
+    let rejectUnguardedCoordinate = Boolean(
       uiGraph?.enforced
       && uiGraph.flags.selectorFirst
       && step.action === "tap"
@@ -1083,38 +1111,91 @@ export async function runCompiledWorkflow(
           })
         );
         // Escalate to AI only when the promoted graph cannot reach the goal.
-        const recovery = graphRecovered
+        let recovery = graphRecovered
           ? { recovered: true as const }
           : await attemptBoundedRecovery(ctx, counters, i, `action_failed:${actionResult.error}`);
         actionRecovered = recovery.recovered;
-        actionSucceeded = recovery.recovered;
-        if (!recovery.recovered) {
-            await recordUiGraphOutcome(false, recovery.error ?? actionResult.error);
-            counters.failedSteps++;
-            results.push({
-              stepIndex: i,
-              stepId: step.id,
-              success: false,
-              fingerprintMatch,
-              postActionVerified: false,
-              error: recovery.error ?? actionResult.error,
-              latencyMs: Date.now() - stepStart,
-            });
-            workflowEvents.publish({
-              source: "workflow_compiler",
-              event: "step_failed",
-              workflowId: workflow.id,
-              deviceId,
-              status: "failed",
-              currentStep: ctx.stepsCompleted,
-              stepIndex: i,
-              stepId: step.id,
-              totalSteps: workflow.steps.length,
-              error: recovery.error ?? actionResult.error,
-              details: { error: recovery.error ?? actionResult.error },
-            });
-            aborted = true;
-            break;
+
+        // AI recovery prepares the retry (and may replace workflow.steps[i]); it does
+        // not itself execute retry_step/retry_with_adaptation. Replay the effective
+        // step and only declare recovery successful after a real device result.
+        while (recovery.recovered && !graphRecovered) {
+          step = workflow.steps[i];
+          graphTarget = null;
+
+          if (uiGraph?.enabled && step.action === "tap") {
+            try {
+              const recoveryTree = await captureUiTree(deviceId, workflowRootExternalId);
+              const recoveryState = await uiGraph.observeState(recoveryTree, step);
+              graphTarget = await uiGraph.resolveTarget(recoveryTree, step, recoveryState);
+            } catch (error) {
+              console.warn(`[ui-graph] recovery replay target resolution failed: ${(error as Error).message}`);
+            }
+          }
+
+          targetMethod = step.action !== "tap"
+            ? "direct"
+            : graphTarget?.resolution.found
+              ? graphTarget.resolution.method
+              : step.target?.resourceId ? "resource_id"
+                : step.target?.contentDescription ? "content_description"
+                  : step.target?.text ? "text"
+                    : step.target?.coords ? "coord_cache"
+                      : "unknown";
+          rejectUnguardedCoordinate = Boolean(
+            uiGraph?.enforced
+            && uiGraph.flags.selectorFirst
+            && step.action === "tap"
+            && step.target?.coords
+            && (!graphTarget || !graphTarget.resolution.found)
+          );
+
+          actionRetryCount++;
+          counters.retriedSteps++;
+          const replayResult = rejectUnguardedCoordinate
+            ? { success: false, error: "UI_GRAPH_UNGUARDED_COORDINATE_REJECTED" }
+            : await executeStepAction(deviceId, step, workflowRootExternalId, uiGraph?.enforced ? graphTarget : null);
+          actionSucceeded = replayResult.success;
+          if (actionSucceeded) break;
+
+          recovery = await attemptBoundedRecovery(
+            ctx,
+            counters,
+            i,
+            `action_failed_after_recovery:${replayResult.error}`,
+          );
+          actionRecovered = actionRecovered || recovery.recovered;
+        }
+
+        if (graphRecovered) actionSucceeded = true;
+        if (!actionSucceeded) {
+          const failure = recovery.error ?? actionResult.error;
+          await recordUiGraphOutcome(false, failure);
+          counters.failedSteps++;
+          results.push({
+            stepIndex: i,
+            stepId: step.id,
+            success: false,
+            fingerprintMatch,
+            postActionVerified: false,
+            error: failure,
+            latencyMs: Date.now() - stepStart,
+          });
+          workflowEvents.publish({
+            source: "workflow_compiler",
+            event: "step_failed",
+            workflowId: workflow.id,
+            deviceId,
+            status: "failed",
+            currentStep: ctx.stepsCompleted,
+            stepIndex: i,
+            stepId: step.id,
+            totalSteps: workflow.steps.length,
+            error: failure,
+            details: { error: failure },
+          });
+          aborted = true;
+          break;
         }
       }
     }
@@ -1152,7 +1233,7 @@ export async function runCompiledWorkflow(
             return false;
           })
         );
-        const recovery = graphRecovered
+        let recovery = graphRecovered
           ? { recovered: true as const }
           : await attemptBoundedRecovery(
             ctx,
@@ -1160,8 +1241,67 @@ export async function runCompiledWorkflow(
             i,
             `post_action_mismatch:expected=${step.expectedPageHash},actual=${postCheck.actualHash}`
           );
-        if (recovery.recovered) {
-          postActionVerified = true; // Recovery fixed it
+        while (recovery.recovered && !graphRecovered && !postActionVerified) {
+          step = workflow.steps[i];
+
+          let replayGraphTarget: RunnerResolvedTarget | null = null;
+          if (uiGraph?.enabled && step.action === "tap") {
+            try {
+              const recoveryTree = await captureUiTree(deviceId, workflowRootExternalId);
+              const recoveryState = await uiGraph.observeState(recoveryTree, step);
+              replayGraphTarget = await uiGraph.resolveTarget(recoveryTree, step, recoveryState);
+            } catch (error) {
+              console.warn(`[ui-graph] post-action recovery target resolution failed: ${(error as Error).message}`);
+            }
+          }
+          const rejectRecoveryCoordinate = Boolean(
+            uiGraph?.enforced
+            && uiGraph.flags.selectorFirst
+            && step.action === "tap"
+            && step.target?.coords
+            && (!replayGraphTarget || !replayGraphTarget.resolution.found)
+          );
+          actionRetryCount++;
+          counters.retriedSteps++;
+          const replayResult = rejectRecoveryCoordinate
+            ? { success: false, error: "UI_GRAPH_UNGUARDED_COORDINATE_REJECTED" }
+            : await executeStepAction(deviceId, step, workflowRootExternalId, uiGraph?.enforced ? replayGraphTarget : null);
+          if (!replayResult.success) {
+            recovery = await attemptBoundedRecovery(
+              ctx,
+              counters,
+              i,
+              `post_action_replay_failed:${replayResult.error}`,
+            );
+            continue;
+          }
+
+          await new Promise((r) => setTimeout(r, DEFAULT_WAIT_AFTER_ACTION_MS));
+          try {
+            const replayCheck = await verifyFingerprint(deviceId, step.expectedPageHash, workflowRootExternalId);
+            postActionVerified = replayCheck.match;
+            if (uiGraph?.enabled) {
+              const replayState = await uiGraph.observeState(replayCheck.uiTree, step);
+              if (!postActionVerified && uiGraph.acceptsExpectedState(step, replayState)) postActionVerified = true;
+            }
+            if (postActionVerified) break;
+            recovery = await attemptBoundedRecovery(
+              ctx,
+              counters,
+              i,
+              `post_action_mismatch_after_recovery:expected=${step.expectedPageHash},actual=${replayCheck.actualHash}`,
+            );
+          } catch (error) {
+            recovery = await attemptBoundedRecovery(
+              ctx,
+              counters,
+              i,
+              `post_action_verification_failed_after_recovery:${(error as Error).message}`,
+            );
+          }
+        }
+        if (graphRecovered) postActionVerified = true;
+        if (postActionVerified) {
           actionRecovered = true;
         } else {
           await recordUiGraphOutcome(false, recovery.error ?? "Post-action mismatch, recovery failed");

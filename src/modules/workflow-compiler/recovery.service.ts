@@ -18,6 +18,7 @@ import { computePageSignature } from "../app-mapping/page-fingerprint";
 import type { UiTreeNode } from "../app-mapping/schema";
 import { llmJson } from "../../utils/llm";
 import type { CompiledStep } from "./types";
+import { normalizeUiTreeOutput } from "./ui-tree-output";
 import { canonicalModelOverride } from "./model-routing";
 import type { RunnerContext } from "./runner.service";
 import { validateStepSchema } from "./workflow-validator";
@@ -172,8 +173,7 @@ async function captureUiTreeForRecovery(deviceId: string, workflowRootExternalId
     if (!dispatch.sent) return [];
 
     const result = await waitForResult(jobId, 10_000);
-    const tree = result?.output?.tree || result?.output;
-    return Array.isArray(tree) ? tree : [];
+    return normalizeUiTreeOutput(result?.output);
   } catch {
     return [];
   }

@@ -209,6 +209,96 @@ describe("runCompiledWorkflow recovery budget", () => {
     expect(result.counters.failedSteps).toBe(1);
   });
 
+  it("replays the step on-device after retry_step recovery before declaring success", async () => {
+    const workflow = makeWorkflow({
+      steps: [{
+        id: "stale-selector",
+        action: "tap",
+        target: { resourceId: "stale_selector" },
+        expectedPage: "reddit_search_entry",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Retry a temporarily missing selector",
+      }],
+    });
+    vi.mocked(waitForResult)
+      .mockResolvedValueOnce({ status: "completed", output: { found: false, error: "Element not found" } })
+      .mockResolvedValueOnce({ status: "completed", output: { found: true } });
+    const onRecoveryNeeded = vi.fn().mockResolvedValue(true);
+
+    const result = await runCompiledWorkflow({ deviceId: "device-1", workflow }, onRecoveryNeeded);
+
+    expect(result.ok).toBe(true);
+    expect(onRecoveryNeeded).toHaveBeenCalledTimes(1);
+    expect(waitForResult).toHaveBeenCalledTimes(2);
+    expect(result.counters.retriedSteps).toBe(1);
+    expect(result.stepsCompleted).toBe(1);
+  });
+
+  it("replays an adapted recovery step instead of treating adaptation as execution", async () => {
+    const workflow = makeWorkflow({
+      steps: [{
+        id: "stale-selector",
+        action: "tap",
+        target: { resourceId: "stale_selector" },
+        expectedPage: "reddit_search_entry",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Recover a changed selector",
+      }],
+    });
+    vi.mocked(waitForResult)
+      .mockResolvedValueOnce({ status: "completed", output: { found: false, error: "Element not found" } })
+      .mockResolvedValueOnce({ status: "completed", output: { found: true } });
+    const onRecoveryNeeded = vi.fn().mockImplementation(async (ctx) => {
+      ctx.workflow.steps[0] = {
+        ...ctx.workflow.steps[0],
+        target: { resourceId: "current_selector" },
+        description: "Use the current selector",
+      };
+      return true;
+    });
+
+    const result = await runCompiledWorkflow({ deviceId: "device-1", workflow }, onRecoveryNeeded);
+
+    expect(result.ok).toBe(true);
+    expect(waitForResult).toHaveBeenCalledTimes(2);
+    expect(workflow.steps[0].target?.resourceId).toBe("current_selector");
+    expect(result.counters.retriedSteps).toBe(1);
+  });
+
+  it("fails closed when the recovery replay still misses and the budget is exhausted", async () => {
+    const workflow = makeWorkflow({
+      maxRecoveryAttempts: 1,
+      maxTotalRecoveryAttempts: 1,
+      steps: [{
+        id: "stale-selector",
+        action: "tap",
+        target: { resourceId: "stale_selector" },
+        expectedPage: "reddit_search_entry",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Fail after a bounded recovery replay",
+      }],
+    });
+    vi.mocked(waitForResult).mockResolvedValue({
+      status: "completed",
+      output: { found: false, error: "Element not found" },
+    });
+    const onRecoveryNeeded = vi.fn().mockResolvedValue(true);
+
+    const result = await runCompiledWorkflow({ deviceId: "device-1", workflow }, onRecoveryNeeded);
+
+    expect(result.ok).toBe(false);
+    expect(onRecoveryNeeded).toHaveBeenCalledTimes(1);
+    expect(waitForResult).toHaveBeenCalledTimes(2);
+    expect(result.counters.recoveryBudgetExhausted).toBe(1);
+    expect(result.results[0]?.error).toBe(RECOVERY_BUDGET_EXCEEDED);
+  });
+
   it("rejects a colliding raw fingerprint when enforced state anchors resolve another page", () => {
     expect(reconcileFingerprintWithResolvedState({
       rawFingerprintMatch: true,

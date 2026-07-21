@@ -190,6 +190,33 @@ describe("attemptRecovery", () => {
   // ── Recovery action types ────────────────────────────────────────────────
 
   describe("recovery action types", () => {
+    it("passes the current Android output.uiTree envelope to the recovery model", async () => {
+      vi.mocked(waitForResult).mockResolvedValue({
+        status: "completed",
+        output: {
+          uiTree: JSON.stringify({
+            className: "android.widget.FrameLayout",
+            resourceId: "root",
+            children: [{
+              className: "android.widget.EditText",
+              resourceId: "search_bar_field",
+              text: "AskReddit",
+              clickable: true,
+            }],
+          }),
+        },
+      });
+
+      const result = await attemptRecovery(makeRunnerContext(), 0, "element not found");
+
+      expect(result).toBe(true);
+      expect(llmJson).toHaveBeenCalledWith(
+        expect.stringContaining("id=search_bar_field"),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
     it("should handle retry_step action correctly", async () => {
       const ctx = makeRunnerContext();
       vi.mocked(llmJson).mockResolvedValue({ type: "retry_step" });
