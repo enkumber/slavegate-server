@@ -51,6 +51,20 @@ describe("resolveUiState", () => {
     expect(result.confidence).toBeGreaterThan(0.9);
   });
 
+  it("does not let a colliding fingerprint override missing required anchors", () => {
+    const colliding = state({ id: "search-state", key: "search" });
+    colliding.variants = colliding.variants.map((variant) => ({
+      ...variant,
+      id: "search-default",
+      requiredAnchors: ["resourceId:com.reddit.frontpage:id/search_surface"],
+      optionalAnchors: [],
+    }));
+
+    const result = resolveUiState(tree, [state(), colliding], { appId: "com.reddit.frontpage" });
+    expect(result).toMatchObject({ stateId: "home-state", method: "exact_hash", confidence: 1 });
+    expect(result.ambiguousWith).toHaveLength(0);
+  });
+
   it("fails closed when a forbidden login-wall anchor is present", () => {
     const loginWall = structuredClone(tree);
     loginWall[0].children!.push({ text: "Log in", className: "android.widget.Button" });

@@ -111,7 +111,15 @@ function scoreVariant(
   const matchedRequired = required.filter((a) => observed.has(a));
   const missing = required.filter((a) => !observed.has(a));
   const matchedOptional = optional.filter((a) => observed.has(a));
-  const exact = Boolean(variant.signatureHash && variant.signatureHash === fingerprint && forbidden.length === 0);
+  // The short structural fingerprint is an index, not sufficient proof by
+  // itself: multiple screens can share the same top-level container hash.
+  // Exact resolution therefore still requires every mandatory anchor.
+  const exact = Boolean(
+    variant.signatureHash
+    && variant.signatureHash === fingerprint
+    && missing.length === 0
+    && forbidden.length === 0
+  );
 
   if (forbidden.length > 0) {
     return { state, variant, confidence: 0, exact: false, matched: [...matchedRequired, ...matchedOptional], missing, forbidden };
