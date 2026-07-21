@@ -302,6 +302,29 @@ describe("attemptRecovery", () => {
       });
     });
 
+    it("keeps only the strongest selector when an adapted target mixes resource ID with contextual text", async () => {
+      const ctx = makeRunnerContext();
+      vi.mocked(llmJson).mockResolvedValue({
+        type: "retry_with_adaptation",
+        adaptedStep: {
+          action: "tap",
+          target: {
+            resourceId: "com.reddit.frontpage:id/search_bar_field",
+            text: "AskReddit",
+            contentDescription: "Search this community",
+            coords: { x: 0.5, y: 0.1 },
+          },
+        } as CompiledStep,
+      });
+
+      const result = await attemptRecovery(ctx, 0, "action_failed:Accessibility selector was not found");
+
+      expect(result).toBe(true);
+      expect(ctx.workflow.steps[0].target).toEqual({
+        resourceId: "com.reddit.frontpage:id/search_bar_field",
+      });
+    });
+
     it("should handle dismiss_and_retry action", async () => {
       const ctx = makeRunnerContext();
       vi.mocked(llmJson).mockResolvedValue({

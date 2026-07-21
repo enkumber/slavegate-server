@@ -212,7 +212,7 @@ DECISION GUIDELINES:
 - If a popup/dialog appeared -> dismiss_and_retry (tap OK/Close button)
 - If element is scrolled out -> retry_with_adaptation (add swipe up before tap)
 - If wrong page -> navigate_back_and_retry
-- If the failure says an Accessibility selector was not found, the stored selector is stale. Do NOT use retry_step with the same selector. If the current UI tree contains the intended element, use retry_with_adaptation, keep action="tap", and replace target with a current resourceId/contentDescription/text selector from the tree.
+- If the failure says an Accessibility selector was not found, the stored selector is stale. Do NOT use retry_step with the same selector. If the current UI tree contains the intended element, use retry_with_adaptation, keep action="tap", and replace target with exactly one strongest current selector from the tree: resourceId first, otherwise contentDescription, otherwise text. Do not combine a stable resourceId with contextual text.
 - Use retry_step for a missing element only when the failure is plausibly transient (loading/animation) and the stored selector is still present in the current UI tree.
 - adaptedStep must remain a CompiledStep (tap/type/swipe/press_key/wait/open_app/intent_send/screenshot), not a device job type such as a11y_find_tap.
 - If fatal error (app crashed, permission denied) -> abort
@@ -346,6 +346,22 @@ function learningPayload(action: RecoveryAction, failedStep: CompiledStep, reaso
     };
   }
   return base;
+}
+
+function normalizeAdaptedTarget(target: CompiledStep["target"]): CompiledStep["target"] {
+  if (!target) return target;
+
+  // Android's Accessibility matcher treats multiple supplied fields as an AND
+  // query. Recovery models often copy both a stable resource ID and contextual
+  // text from the same node; the text can change while the resource ID remains
+  // valid, making an otherwise correct adaptation impossible to replay. Keep
+  // the strongest selector only. Coordinates never override a semantic target.
+  if (target.resourceId?.trim()) return { resourceId: target.resourceId.trim() };
+  if (target.contentDescription?.trim()) return { contentDescription: target.contentDescription.trim() };
+  if (target.text?.trim()) return { text: target.text.trim() };
+  if (target.elementId?.trim()) return { elementId: target.elementId.trim() };
+  if (target.coords) return { coords: target.coords };
+  return {};
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -606,12 +622,15 @@ export async function attemptRecovery(
     const adaptedStep: CompiledStep = {
       ...failedStep,
       ...recoveryAction.adaptedStep,
-      target: recoveryAction.adaptedStep.target ?? failedStep.target,
+      target: recoveryAction.adaptedStep.target
+        ? normalizeAdaptedTarget(recoveryAction.adaptedStep.target)
+        : failedStep.target,
       params: recoveryAction.adaptedStep.params ?? failedStep.params,
     };
     const validation = validateStepSchema(adaptedStep as unknown as Record<string, unknown>);
     if (validation.valid) {
       workflow.steps[stepIndex] = adaptedStep;
+      recoveryAction.adaptedStep = adaptedStep;
       console.log(`[recovery] Adapted step ${stepIndex}: ${adaptedStep.description}`);
     } else {
       console.warn(
