@@ -120,8 +120,49 @@ const DEFAULT_WAIT_AFTER_ACTION_MS = 800;
 const MIN_COMPILED_BATCH_SIZE = 2;
 const DEFAULT_RECOVERY_ATTEMPTS_PER_STEP = 1;
 const MAX_TOTAL_RECOVERY_ATTEMPTS = 10;
+const RECOVERY_READINESS_TIMEOUT_MS = 10_000;
 export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED";
 export const AI_RECOVERY_DISABLED = "AI_RECOVERY_DISABLED";
+
+/**
+ * Recovery reasoning may outlast a device's screen-off timeout. Restore only
+ * generic readiness before replay so a valid adapted selector is not executed
+ * against System UI instead of the foreground application.
+ */
+async function ensureDeviceReadyForRecoveryReplay(
+  deviceId: string,
+  workflowRootExternalId: string,
+): Promise<{ success: boolean; error?: string }> {
+  for (const type of ["screen_wake", "unlock"] as const) {
+    const jobId = uuidv4();
+    const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
+      jobId,
+      type,
+      params: {},
+      timeoutMs: RECOVERY_READINESS_TIMEOUT_MS,
+    }, {
+      boundary: "generated_child",
+      rootExternalId: workflowRootExternalId,
+      actor: "workflow_runner",
+      metadata: { observeSource: "runner.recoveryReplayReadiness", readinessAction: type },
+    });
+    if (!dispatch.sent) {
+      return {
+        success: false,
+        error: `Recovery readiness ${type} dispatch ${dispatch.decision}${dispatch.reason ? `: ${dispatch.reason}` : ""}`,
+      };
+    }
+    try {
+      const result = await waitForResult(jobId, RECOVERY_READINESS_TIMEOUT_MS + 5_000);
+      if (!result || result.status !== "completed") {
+        return { success: false, error: result?.error || `Recovery readiness ${type} failed` };
+      }
+    } catch (error) {
+      return { success: false, error: (error as Error).message };
+    }
+  }
+  return { success: true };
+}
 
 export function reconcileFingerprintWithResolvedState(input: {
   rawFingerprintMatch: boolean;
@@ -1169,6 +1210,12 @@ export async function runCompiledWorkflow(
           step = workflow.steps[i];
           graphTarget = null;
 
+          const readiness = await ensureDeviceReadyForRecoveryReplay(deviceId, workflowRootExternalId);
+          if (!readiness.success) {
+            recovery = { recovered: false, error: readiness.error ?? "Recovery replay readiness failed" };
+            break;
+          }
+
           if (uiGraph?.enabled && step.action === "tap") {
             try {
               const recoveryTree = await captureUiTree(deviceId, workflowRootExternalId);
@@ -1290,6 +1337,12 @@ export async function runCompiledWorkflow(
           );
         while (recovery.recovered && !graphRecovered && !postActionVerified) {
           step = workflow.steps[i];
+
+          const readiness = await ensureDeviceReadyForRecoveryReplay(deviceId, workflowRootExternalId);
+          if (!readiness.success) {
+            recovery = { recovered: false, error: readiness.error ?? "Recovery replay readiness failed" };
+            break;
+          }
 
           let replayGraphTarget: RunnerResolvedTarget | null = null;
           if (uiGraph?.enabled && step.action === "tap") {

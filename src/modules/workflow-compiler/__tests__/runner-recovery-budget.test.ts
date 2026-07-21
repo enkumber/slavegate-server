@@ -232,6 +232,8 @@ describe("runCompiledWorkflow recovery budget", () => {
     });
     vi.mocked(waitForResult)
       .mockResolvedValueOnce({ status: "completed", output: { found: false, error: "Element not found" } })
+      .mockResolvedValueOnce({ status: "completed", output: { screenOn: true } })
+      .mockResolvedValueOnce({ status: "completed", output: { unlocked: true } })
       .mockResolvedValueOnce({ status: "completed", output: { found: true } });
     const onRecoveryNeeded = vi.fn().mockResolvedValue(true);
 
@@ -239,7 +241,7 @@ describe("runCompiledWorkflow recovery budget", () => {
 
     expect(result.ok).toBe(true);
     expect(onRecoveryNeeded).toHaveBeenCalledTimes(1);
-    expect(waitForResult).toHaveBeenCalledTimes(2);
+    expect(waitForResult).toHaveBeenCalledTimes(4);
     expect(result.counters.retriedSteps).toBe(1);
     expect(result.stepsCompleted).toBe(1);
   });
@@ -259,6 +261,8 @@ describe("runCompiledWorkflow recovery budget", () => {
     });
     vi.mocked(waitForResult)
       .mockResolvedValueOnce({ status: "completed", output: { found: false, error: "Element not found" } })
+      .mockResolvedValueOnce({ status: "completed", output: { screenOn: true } })
+      .mockResolvedValueOnce({ status: "completed", output: { unlocked: true } })
       .mockResolvedValueOnce({ status: "completed", output: { found: true } });
     const onRecoveryNeeded = vi.fn().mockImplementation(async (ctx) => {
       ctx.workflow.steps[0] = {
@@ -272,7 +276,7 @@ describe("runCompiledWorkflow recovery budget", () => {
     const result = await runCompiledWorkflow({ deviceId: "device-1", workflow }, onRecoveryNeeded);
 
     expect(result.ok).toBe(true);
-    expect(waitForResult).toHaveBeenCalledTimes(2);
+    expect(waitForResult).toHaveBeenCalledTimes(4);
     expect(workflow.steps[0].target?.resourceId).toBe("current_selector");
     expect(result.counters.retriedSteps).toBe(1);
   });
@@ -292,6 +296,8 @@ describe("runCompiledWorkflow recovery budget", () => {
     });
     vi.mocked(waitForResult)
       .mockResolvedValueOnce({ status: "completed", output: { found: false } })
+      .mockResolvedValueOnce({ status: "completed", output: { screenOn: true } })
+      .mockResolvedValueOnce({ status: "completed", output: { unlocked: true } })
       .mockResolvedValueOnce({ status: "completed", output: { found: true } });
     const onRecoveryNeeded = vi.fn().mockImplementation(async (ctx) => {
       ctx.workflow.steps[0] = { ...ctx.workflow.steps[0], target: { text: "Stable label" } };
@@ -366,7 +372,7 @@ describe("runCompiledWorkflow recovery budget", () => {
 
     expect(result.ok).toBe(false);
     expect(onRecoveryNeeded).toHaveBeenCalledTimes(1);
-    expect(waitForResult).toHaveBeenCalledTimes(2);
+    expect(waitForResult).toHaveBeenCalledTimes(4);
     expect(result.counters.recoveryBudgetExhausted).toBe(1);
     expect(result.results[0]?.error).toBe(RECOVERY_BUDGET_EXCEEDED);
   });
