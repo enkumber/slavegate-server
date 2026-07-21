@@ -208,6 +208,12 @@ async function seedRows(): Promise<void> {
     [ACCOUNT_ID, DEVICE_ID],
   );
   await pool.query(
+    `INSERT INTO workflow_templates
+       (id, platform, definition, data_retention_days, default_verification_strategy)
+     VALUES ($1, 'reddit', $2, 1, 'local_with_screenshot')`,
+    [template.id, JSON.stringify(template)],
+  );
+  await pool.query(
     `INSERT INTO generated_workflow_plan_cache
        (cache_key, request_key, template_id, platform, template_version, workflow, compiled_plan,
         canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, source_metadata, artifact_state)
@@ -242,6 +248,7 @@ async function cleanupRows(): Promise<void> {
   await pool.query(`DELETE FROM tasks WHERE id = $1 OR device_id = $2`, [TASK_ID, DEVICE_ID]);
   await pool.query(`DELETE FROM workflows WHERE device_id = $1`, [DEVICE_ID]);
   await pool.query(`DELETE FROM generated_workflow_plan_cache WHERE cache_key = $1 OR request_key = $2`, [CACHE_KEY, REQUEST_KEY]);
+  await pool.query(`DELETE FROM workflow_templates WHERE id = $1`, [workflow().id]);
   await pool.query(`DELETE FROM accounts WHERE id = $1`, [ACCOUNT_ID]);
   await pool.query(`DELETE FROM devices WHERE id = $1`, [DEVICE_ID]);
 }

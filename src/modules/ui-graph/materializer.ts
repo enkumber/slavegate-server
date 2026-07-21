@@ -30,6 +30,15 @@ export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<Materia
     const stateIds = new Map<string, string>();
     const variantIds = new Map<string, string>();
 
+    // App Maps are authoritative for legacy-projected transitions. Reconcile
+    // removed links as well as additions so stale/incorrect promoted edges can
+    // never survive a safe map refresh.
+    await client.query(
+      `DELETE FROM ui_graph_transitions
+       WHERE app_id = $1 AND metadata->>'source' = 'legacy_app_map'`,
+      [map.appId],
+    );
+
     for (const state of projection.states) {
       const inserted = await client.query(
         `INSERT INTO ui_graph_states (app_id, state_key, name, kind, safety_class, metadata)

@@ -344,6 +344,17 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
       ?? foreground?.output?.packageVersion;
     await capture("reddit_home_feed", "Reddit home/feed");
 
+    // Capture a real selector-driven transition instead of inferring one from
+    // a deep link. The edge is materialized only when both source and observed
+    // destination were captured successfully.
+    try {
+      await dispatchAndAwaitRefresh(deviceId, "a11y_find_tap", { resourceId: "main_top_app_bar_search" }, 15000);
+      await settle();
+      await capture("reddit_search_entry", "Reddit search entry");
+    } catch (err) {
+      failures.push(`search_entry transition skipped: ${(err as Error).message}`);
+    }
+
     await dispatchAndAwaitRefresh(deviceId, "intent_send", {
       action: "android.intent.action.VIEW",
       uri: "https://www.reddit.com/r/AskReddit/",
@@ -393,6 +404,9 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
         index,
       );
     });
+    if (pages.reddit_home_feed?.elements?.main_top_app_bar_search && pages.reddit_search_entry) {
+      pages.reddit_home_feed.elements.main_top_app_bar_search.leadsTo = "reddit_search_entry";
+    }
 
     const map: AppMap = {
       appId: REDDIT_APP_ID,
@@ -569,6 +583,10 @@ router.post("/upload", async (req: Request, res: Response) => {
       appId?: string;
       appName?: string;
       version?: string;
+      appVersion?: string;
+      deviceProfile?: { width?: number; height?: number };
+      recordedOn?: string;
+      createdAt?: string;
       pages?: Record<string, any>;
     };
 
@@ -592,8 +610,11 @@ router.post("/upload", async (req: Request, res: Response) => {
       appId: map.appId,
       appName: map.appName || map.appId,
       version: map.version || "1.0.0",
+      appVersion: map.appVersion,
+      deviceProfile: map.deviceProfile,
+      recordedOn: map.recordedOn,
       pages: map.pages,
-      createdAt: new Date().toISOString(),
+      createdAt: map.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       pageCount: Object.keys(map.pages).length,
       transitionCount: countTransitions(map.pages),

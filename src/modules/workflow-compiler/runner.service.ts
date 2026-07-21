@@ -99,6 +99,9 @@ export interface RunnerContext {
   stepsCompleted: number;
   recoveryCount: number;
   recoveryAttemptsByStep?: Record<number, number>;
+  maxRecoveryAttemptsPerStep?: number;
+  maxTotalRecoveryAttempts?: number;
+  aiRecoveryEnabled?: boolean;
   results: StepExecutionResult[];
   /** Callback for recovery — injected to avoid circular deps */
   onRecoveryNeeded: (ctx: RunnerContext, stepIndex: number, reason: string) => Promise<boolean>;
@@ -114,6 +117,18 @@ const MIN_COMPILED_BATCH_SIZE = 2;
 const DEFAULT_RECOVERY_ATTEMPTS_PER_STEP = 1;
 const MAX_TOTAL_RECOVERY_ATTEMPTS = 10;
 export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED";
+export const AI_RECOVERY_DISABLED = "AI_RECOVERY_DISABLED";
+
+export function reconcileFingerprintWithResolvedState(input: {
+  rawFingerprintMatch: boolean;
+  enforced: boolean;
+  expectedPage: string;
+  resolution: StateResolution | null;
+}): boolean {
+  if (!input.enforced) return input.rawFingerprintMatch;
+  if (!input.resolution) return false;
+  return input.resolution.stateKey === input.expectedPage && input.resolution.confidence >= 0.85;
+}
 
 function recoveryPlatform(workflow: CompiledWorkflow): string {
   const source = `${workflow.appId ?? ""} ${workflow.source ?? ""}`.toLowerCase();
@@ -142,7 +157,13 @@ async function attemptBoundedRecovery(
   const platform = recoveryPlatform(ctx.workflow);
   const stepAttempts = ctx.recoveryAttemptsByStep?.[stepIndex] ?? 0;
 
-  if (stepAttempts >= DEFAULT_RECOVERY_ATTEMPTS_PER_STEP || ctx.recoveryCount >= MAX_TOTAL_RECOVERY_ATTEMPTS) {
+  if (ctx.aiRecoveryEnabled === false) {
+    return { recovered: false, error: AI_RECOVERY_DISABLED };
+  }
+
+  const perStepBudget = ctx.maxRecoveryAttemptsPerStep ?? DEFAULT_RECOVERY_ATTEMPTS_PER_STEP;
+  const totalBudget = ctx.maxTotalRecoveryAttempts ?? MAX_TOTAL_RECOVERY_ATTEMPTS;
+  if (stepAttempts >= perStepBudget || ctx.recoveryCount >= totalBudget) {
     counters.recoveryBudgetExhausted++;
     generatedWorkflowRecoveryBudgetExhausted?.labels(platform).inc();
     return { recovered: false, error: RECOVERY_BUDGET_EXCEEDED };
@@ -708,6 +729,9 @@ export async function runCompiledWorkflow(
     stepsCompleted: 0,
     recoveryCount: 0,
     recoveryAttemptsByStep: {},
+    maxRecoveryAttemptsPerStep: Math.max(0, Number(workflow.maxRecoveryAttempts ?? DEFAULT_RECOVERY_ATTEMPTS_PER_STEP)),
+    maxTotalRecoveryAttempts: Math.max(0, Number(workflow.maxTotalRecoveryAttempts ?? MAX_TOTAL_RECOVERY_ATTEMPTS)),
+    aiRecoveryEnabled: uiGraph?.enabled ? uiGraph.flags.aiRecovery : true,
     results,
     onRecoveryNeeded,
   };
@@ -867,9 +891,13 @@ export async function runCompiledWorkflow(
         if (uiGraph?.enabled) {
           preActionState = await uiGraph.observeState(fp.uiTree, step);
         }
-        fingerprintMatch = fp.match;
-        if (!fingerprintMatch && preActionState && uiGraph?.acceptsExpectedState(step, preActionState)) {
-          fingerprintMatch = true;
+        fingerprintMatch = reconcileFingerprintWithResolvedState({
+          rawFingerprintMatch: fp.match,
+          enforced: Boolean(uiGraph?.enforced),
+          expectedPage: step.expectedPage,
+          resolution: preActionState,
+        });
+        if (fingerprintMatch && preActionState && uiGraph?.acceptsExpectedState(step, preActionState)) {
           console.log(`[ui-graph] State Resolver v2 accepted expected state ${step.expectedPage} at confidence=${preActionState.confidence.toFixed(3)}`);
         }
         if (!fingerprintMatch) {

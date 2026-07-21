@@ -45,7 +45,11 @@ vi.mock("../../observability/metrics", () => ({
   },
 }));
 
-import { runCompiledWorkflow, RECOVERY_BUDGET_EXCEEDED } from "../runner.service";
+import {
+  runCompiledWorkflow,
+  RECOVERY_BUDGET_EXCEEDED,
+  reconcileFingerprintWithResolvedState,
+} from "../runner.service";
 import type { CompiledWorkflow } from "../types";
 import { sendJobToDevice, waitForResult } from "../../../transport/transport";
 import {
@@ -144,6 +148,64 @@ describe("runCompiledWorkflow recovery budget", () => {
     expect(result.results[0]?.error).toBe(RECOVERY_BUDGET_EXCEEDED);
     expect(generatedWorkflowRecoveryAttempts?.labels).toHaveBeenCalledWith("reddit", "fingerprint_mismatch");
     expect(generatedWorkflowRecoveryBudgetExhausted?.labels).toHaveBeenCalledWith("reddit");
+  });
+
+  it("honors an explicit zero recovery budget without calling the recovery model", async () => {
+    const workflow = makeWorkflow({
+      maxRecoveryAttempts: 0,
+      maxTotalRecoveryAttempts: 0,
+      steps: [{
+        id: "step-1",
+        action: "tap",
+        target: { coords: { x: 0.5, y: 0.5 } },
+        expectedPage: "reddit_home",
+        expectedPageHash: "expected_hash",
+        retries: 0,
+        retryDelay: 0,
+        description: "Fail closed without recovery",
+      }],
+    });
+    const onRecoveryNeeded = vi.fn().mockResolvedValue(true);
+
+    const result = await runCompiledWorkflow({ deviceId: "device-1", workflow }, onRecoveryNeeded);
+
+    expect(result.ok).toBe(false);
+    expect(onRecoveryNeeded).not.toHaveBeenCalled();
+    expect(result.recoveryCount).toBe(0);
+    expect(result.counters.recoveryLlmCalls).toBe(0);
+    expect(result.counters.runtimeLlmCalls).toBe(0);
+    expect(result.counters.recoveryBudgetExhausted).toBe(1);
+    expect(result.results[0]?.error).toBe(RECOVERY_BUDGET_EXCEEDED);
+  });
+
+  it("rejects a colliding raw fingerprint when enforced state anchors resolve another page", () => {
+    expect(reconcileFingerprintWithResolvedState({
+      rawFingerprintMatch: true,
+      enforced: true,
+      expectedPage: "reddit_search_surface",
+      resolution: {
+        stateId: "home-state",
+        stateKey: "reddit_home_feed",
+        variantId: "home-default",
+        variantKey: "default",
+        method: "exact_hash",
+        confidence: 1,
+        fingerprint: "shared-short-hash",
+        matchedAnchors: ["resourceid:home_screen_surface"],
+        missingAnchors: [],
+        unexpectedAnchors: [],
+        ambiguousWith: [],
+      },
+    })).toBe(false);
+  });
+
+  it("fails closed in enforced mode when the shared hash has no anchored state resolution", () => {
+    expect(reconcileFingerprintWithResolvedState({
+      rawFingerprintMatch: true,
+      enforced: true,
+      expectedPage: "reddit_search_surface",
+      resolution: null,
+    })).toBe(false);
   });
 
   it("terminalizes the canonical root when an unexpected error occurs after admission", async () => {
