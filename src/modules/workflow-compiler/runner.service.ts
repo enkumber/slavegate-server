@@ -34,6 +34,7 @@ import { uiGraphRepository } from "../ui-graph/repository";
 import type { StateResolution, TargetResolutionMethod } from "../ui-graph/types";
 import { GraphRuntimeEngine } from "../ui-graph/graph-runtime";
 import type { UiTransitionDefinition } from "../ui-graph/types";
+import { normalizeUiTreeOutput } from "./ui-tree-output";
 
 // Import types from canonical types.ts (re-exported via planner for backward compat)
 import type { CompiledWorkflow, CompiledStep } from "./types";
@@ -218,9 +219,7 @@ async function captureUiTree(deviceId: string, workflowRootExternalId: string, t
     throw new Error(`UI tree dump failed: ${result?.error || "timeout"}`);
   }
 
-  // UI tree is in result.output.tree or result.output
-  const tree = result.output?.tree || result.output;
-  return Array.isArray(tree) ? tree : [];
+  return normalizeUiTreeOutput(result.output);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
