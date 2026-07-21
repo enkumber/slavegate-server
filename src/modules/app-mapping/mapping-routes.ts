@@ -65,6 +65,12 @@ async function dispatchAndAwaitRefresh(
   return resultPromise;
 }
 
+export function a11yTapSucceeded(result: any): boolean {
+  return result?.status === "completed"
+    && result?.output?.found === true
+    && result?.output?.error == null;
+}
+
 function normalizeBounds(rawBounds: any): UiTreeNode["bounds"] {
   if (!rawBounds || typeof rawBounds !== "object") return undefined;
 
@@ -337,6 +343,16 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
 
     await dispatchAndAwaitRefresh(deviceId, "open_app", { packageName: REDDIT_APP_ID }, 25000);
     await settle(1500);
+    // open_app resumes whatever Reddit surface was last active. A canonical,
+    // read-only home deep link is required before we label the first capture
+    // as reddit_home_feed; otherwise a retained search surface can poison the
+    // state graph with duplicate anchors and a fabricated transition.
+    await dispatchAndAwaitRefresh(deviceId, "intent_send", {
+      action: "android.intent.action.VIEW",
+      uri: "https://www.reddit.com/",
+      packageName: REDDIT_APP_ID,
+    }, 25000);
+    await settle(1500);
     const foreground = await dispatchAndAwaitRefresh(deviceId, "get_foreground_app", {}, 10000).catch(() => null);
     observedAppVersion =
       foreground?.output?.appVersion
@@ -348,7 +364,15 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
     // a deep link. The edge is materialized only when both source and observed
     // destination were captured successfully.
     try {
-      await dispatchAndAwaitRefresh(deviceId, "a11y_find_tap", { resourceId: "main_top_app_bar_search" }, 15000);
+      const searchTap = await dispatchAndAwaitRefresh(
+        deviceId,
+        "a11y_find_tap",
+        { resourceId: "main_top_app_bar_search" },
+        15000,
+      );
+      if (!a11yTapSucceeded(searchTap)) {
+        throw new Error(String(searchTap?.output?.error ?? "selector was not found"));
+      }
       await settle();
       await capture("reddit_search_entry", "Reddit search entry");
     } catch (err) {

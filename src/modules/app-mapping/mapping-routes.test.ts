@@ -1,6 +1,6 @@
 import express from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { isUsableRedditUiTree, parseUiTreeResult } from "./mapping-routes";
+import { a11yTapSucceeded, isUsableRedditUiTree, parseUiTreeResult } from "./mapping-routes";
 import { filterRelevantElements } from "./element-filter";
 import { buildPageDetection } from "./page-fingerprint";
 import { validateAppMapQuality, type AppMap } from "./schema";
@@ -50,6 +50,12 @@ async function postJson(server: express.Express, path: string, body: Record<stri
 describe("reddit app-map refresh helpers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("accepts a selector transition only when the agent actually found the element", () => {
+    expect(a11yTapSucceeded({ status: "completed", output: { found: true } })).toBe(true);
+    expect(a11yTapSucceeded({ status: "completed", output: { found: false, error: "Element not found" } })).toBe(false);
+    expect(a11yTapSucceeded({ status: "failed", output: { found: true } })).toBe(false);
   });
 
   it("normalizes x/y/width/height UI-tree bounds into usable app-map bounds", () => {
