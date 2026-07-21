@@ -1,12 +1,17 @@
 import express from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { a11yTapSucceeded, isUsableRedditUiTree, parseUiTreeResult } from "./mapping-routes";
+import { a11yTapSucceeded, isUsableAppUiTree, parseUiTreeResult } from "./mapping-routes";
 import { filterRelevantElements } from "./element-filter";
 import { buildPageDetection } from "./page-fingerprint";
 import { validateAppMapQuality, type AppMap } from "./schema";
 
 const mocks = vi.hoisted(() => ({
   saveMap: vi.fn(),
+  loadRuntimeProfile: vi.fn(),
+  listRuntimeProfiles: vi.fn(),
+  saveRuntimeProfile: vi.fn(),
+  dispatch: vi.fn(),
+  waitForResult: vi.fn(),
 }));
 
 vi.mock("./recorder.service", () => ({
@@ -17,6 +22,23 @@ vi.mock("./recorder.service", () => ({
   deleteMap: vi.fn(),
   listMaps: vi.fn(() => []),
   saveMap: mocks.saveMap,
+}));
+
+vi.mock("./runtime-profile", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./runtime-profile")>()),
+  loadRuntimeProfile: mocks.loadRuntimeProfile,
+  listRuntimeProfiles: mocks.listRuntimeProfiles,
+  saveRuntimeProfile: mocks.saveRuntimeProfile,
+}));
+
+vi.mock("../dispatcher/dispatcher.service", () => ({
+  dispatcherService: { dispatch: mocks.dispatch },
+}));
+
+vi.mock("../../transport/transport", () => ({
+  isDeviceOnline: vi.fn(() => true),
+  sendStandaloneJobToDevice: vi.fn(async () => ({ sent: true, decision: "direct" })),
+  waitForResult: mocks.waitForResult,
 }));
 
 async function app() {
@@ -35,7 +57,7 @@ async function postJson(server: express.Express, path: string, body: Record<stri
         if (!address || typeof address === "string") throw new Error("no address");
         const res = await fetch(`http://127.0.0.1:${address.port}${path}`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", "x-api-key": process.env.API_KEY ?? "" },
           body: JSON.stringify(body),
         });
         const json = await res.json();
@@ -50,6 +72,7 @@ async function postJson(server: express.Express, path: string, body: Record<stri
 describe("reddit app-map refresh helpers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.env.API_KEY = "test-api-key";
   });
 
   it("accepts a selector transition only when the agent actually found the element", () => {
@@ -139,7 +162,7 @@ describe("reddit app-map refresh helpers", () => {
 
     expect(tree.packageName).toBe("com.android.systemui");
     expect(tree.nodeCount).toBe(1);
-    expect(isUsableRedditUiTree(tree)).toBe(false);
+    expect(isUsableAppUiTree(tree, "com.reddit.frontpage")).toBe(false);
   });
 
   it("rejects multi-node dumps without positive Reddit package proof", () => {
@@ -165,7 +188,7 @@ describe("reddit app-map refresh helpers", () => {
 
     expect(tree.packageName).toBeUndefined();
     expect(tree.nodeCount).toBe(2);
-    expect(isUsableRedditUiTree(tree)).toBe(false);
+    expect(isUsableAppUiTree(tree, "com.reddit.frontpage")).toBe(false);
   });
 
   it("rejects multi-node dumps from unknown non-Reddit packages", () => {
@@ -193,7 +216,7 @@ describe("reddit app-map refresh helpers", () => {
 
     expect(tree.packageName).toBe("com.example.unknown");
     expect(tree.nodeCount).toBe(2);
-    expect(isUsableRedditUiTree(tree)).toBe(false);
+    expect(isUsableAppUiTree(tree, "com.reddit.frontpage")).toBe(false);
   });
 
   it("accepts Reddit dumps with anchors and non-empty signatures", () => {
@@ -219,7 +242,7 @@ describe("reddit app-map refresh helpers", () => {
       },
     });
 
-    expect(isUsableRedditUiTree(tree)).toBe(true);
+    expect(isUsableAppUiTree(tree, "com.reddit.frontpage")).toBe(true);
   });
 
   it("falls back to selector-rich bounded nodes when Reddit exposes no clickable elements", () => {
@@ -324,5 +347,74 @@ describe("reddit app-map refresh helpers", () => {
       },
     });
     expect(mocks.saveMap).not.toHaveBeenCalled();
+  });
+
+  it("executes a generic DB-owned runtime profile without app constants in the route", async () => {
+    mocks.loadRuntimeProfile.mockResolvedValue({
+      appId: "com.example.app",
+      appName: "Example",
+      packageName: "com.example.app",
+      profileVersion: 7,
+      resetRecipe: [
+        { id: "open", type: "open_app", params: { packageName: "{{packageName}}" } },
+      ],
+      mappingRecipe: [
+        { id: "home", type: "capture", stateKey: "home", name: "Home" },
+      ],
+      safetyPolicy: {
+        mode: "read_only_navigation",
+        allowedActions: ["open_app"],
+        allowedUriHosts: ["example.com"],
+        blocked: ["mutations"],
+      },
+      defaultDeviceId: "11111111-1111-4111-8111-111111111111",
+      metadata: {},
+    });
+    let job = 0;
+    const jobTypes = new Map<string, string>();
+    mocks.dispatch.mockImplementation(async ({ type }: { type: string }) => {
+      const jobId = `job-${++job}`;
+      jobTypes.set(jobId, type);
+      return { jobId };
+    });
+    mocks.waitForResult.mockImplementation(async (jobId: string) => {
+      const type = jobTypes.get(jobId);
+      if (type === "get_foreground_app") return { status: "completed", output: { packageName: "com.example.app" } };
+      if (type === "ui_tree_dump") return {
+        status: "completed",
+        output: {
+          packageName: "com.example.app",
+          screenWidth: 1000,
+          screenHeight: 2000,
+          nodes: [{
+            packageName: "com.example.app",
+            className: "android.widget.FrameLayout",
+            bounds: { left: 0, top: 0, right: 1000, bottom: 2000 },
+            children: [{
+              packageName: "com.example.app",
+              resourceId: "com.example.app:id/home",
+              text: "Home",
+              clickable: true,
+              bounds: { left: 50, top: 50, right: 300, bottom: 150 },
+            }],
+          }],
+        },
+      };
+      return { status: "completed", output: {} };
+    });
+
+    const server = await app();
+    const response = await postJson(server, "/mapping/refresh/com.example.app", {});
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      runtimeProfile: { appId: "com.example.app", version: 7, source: "postgresql" },
+    });
+    expect(mocks.saveMap).toHaveBeenCalledWith(expect.objectContaining({
+      appId: "com.example.app",
+      appName: "Example",
+      recordedOn: "11111111-1111-4111-8111-111111111111",
+    }));
   });
 });

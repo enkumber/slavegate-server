@@ -20,12 +20,19 @@ import {
   saveMap,
 } from "./recorder.service";
 import { validateAppMapQuality, type AppMap, type UiTreeNode } from "./schema";
+import {
+  assertRuntimeActionSafe,
+  listRuntimeProfiles,
+  loadRuntimeProfile,
+  renderRuntimeParams,
+  saveRuntimeProfile,
+  type AppRuntimeProfile,
+  type RuntimeRecipeStep,
+} from "./runtime-profile";
 
 const router = Router();
 
-const REDDIT_APP_ID = "com.reddit.frontpage";
-const DEFAULT_REDDIT_REFRESH_DEVICE = "d35b34cb-b2ee-4f6e-a8c6-a72cca14a0dd";
-const REDDIT_REFRESH_ARTIFACT_DIR = "/data/.openclaw/workspace/reports/phone-network/app-map-refresh";
+const MAPPING_REFRESH_ARTIFACT_DIR = "/data/.openclaw/workspace/reports/phone-network/app-map-refresh";
 
 function requireMappingRefreshAuth(req: Request, res: Response): boolean {
   const expected = process.env.API_KEY;
@@ -228,9 +235,12 @@ function buildCapturedPage(
   };
 }
 
-export function isUsableRedditUiTree(tree: { nodes: UiTreeNode[]; packageName?: string; nodeCount?: number }): boolean {
+export function isUsableAppUiTree(
+  tree: { nodes: UiTreeNode[]; packageName?: string; nodeCount?: number },
+  expectedPackageName: string,
+): boolean {
   const observedPackage = tree.packageName ?? findPackageName(tree.nodes);
-  if (observedPackage !== REDDIT_APP_ID) return false;
+  if (observedPackage !== expectedPackageName) return false;
   if ((tree.nodeCount ?? countUiNodes(tree.nodes)) <= 1) return false;
   const detection = buildPageDetection(tree.nodes);
   if (detection.signatureHash.startsWith("e3b0c44298fc1c14")) return false;
@@ -263,19 +273,52 @@ function summarizeRefresh(map: AppMap, failures: string[], screenshotPaths: stri
   };
 }
 
-function assertSafeRedditPostUri(uri: string): void {
-  const parsed = new URL(uri);
-  if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname.endsWith("reddit.com")) {
-    throw new Error("postUri must be an http(s) reddit.com URL");
-  }
-  if (!/^\/r\/[^/]+\/comments\//.test(parsed.pathname)) {
-    throw new Error("postUri must point to a Reddit post detail comments URL");
-  }
-}
+// ─── POST /refresh/:appId — DB-profile-driven safe app-map refresh ──────────
 
-// ─── POST /refresh/reddit — Safe real-device Reddit app-map refresh ─────────
+router.get("/runtime-profiles", async (req: Request, res: Response) => {
+  if (!requireMappingRefreshAuth(req, res)) return;
+  try {
+    res.json({ ok: true, profiles: await listRuntimeProfiles() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
 
-router.post("/refresh/reddit", async (req: Request, res: Response) => {
+router.get("/runtime-profiles/:appId", async (req: Request, res: Response) => {
+  if (!requireMappingRefreshAuth(req, res)) return;
+  try {
+    const profile = await loadRuntimeProfile(req.params.appId);
+    if (!profile) return res.status(404).json({ ok: false, error: `No active runtime profile for ${req.params.appId}` });
+    res.json({ ok: true, profile, source: "postgresql" });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.put("/runtime-profiles/:appId", async (req: Request, res: Response) => {
+  if (!requireMappingRefreshAuth(req, res)) return;
+  if (req.body?.appId && req.body.appId !== req.params.appId) {
+    return res.status(400).json({ ok: false, error: "appId path/body mismatch" });
+  }
+  try {
+    const saved = await saveRuntimeProfile({ ...req.body, appId: req.params.appId });
+    res.json({
+      ok: true,
+      profile: {
+        appId: saved.appId,
+        appName: saved.appName,
+        packageName: saved.packageName,
+        profileVersion: saved.profileVersion,
+        defaultDeviceId: saved.defaultDeviceId ?? null,
+        source: "postgresql",
+      },
+    });
+  } catch (err) {
+    res.status(422).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.post("/refresh/:appId", async (req: Request, res: Response) => {
   if (!requireMappingRefreshAuth(req, res)) return;
 
   const startedAt = new Date();
@@ -284,9 +327,26 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
   const body = req.body as {
     deviceId?: string;
     captureScreenshots?: boolean;
-    postUri?: string;
+    [key: string]: unknown;
   };
-  const deviceId = body.deviceId || DEFAULT_REDDIT_REFRESH_DEVICE;
+  const appId = req.params.appId;
+  if (!/^[a-z][a-z0-9_.]+(\.[a-z][a-z0-9_.]+)+$/.test(appId)) {
+    return res.status(400).json({ ok: false, error: "Invalid appId format" });
+  }
+
+  let profile: AppRuntimeProfile;
+  try {
+    const loaded = await loadRuntimeProfile(appId);
+    if (!loaded) return res.status(404).json({ ok: false, error: `No active runtime profile for ${appId}` });
+    profile = loaded;
+  } catch (err) {
+    return res.status(422).json({ ok: false, error: `Invalid runtime profile: ${(err as Error).message}` });
+  }
+
+  const deviceId = String(body.deviceId || profile.defaultDeviceId || "");
+  if (!deviceId) {
+    return res.status(400).json({ ok: false, error: "deviceId is required when the runtime profile has no default device" });
+  }
 
   if (!isDeviceOnline(deviceId)) {
     return res.status(503).json({ ok: false, error: `Device not connected: ${deviceId}` });
@@ -294,37 +354,37 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
 
   try {
     const captures: Array<{ id: string; name: string; nodes: UiTreeNode[]; width: number; height: number }> = [];
+    const successfulSteps = new Set<string>();
+    const transitions: NonNullable<RuntimeRecipeStep["transition"]>[] = [];
     let observedAppVersion: string | undefined;
 
-    async function settle(delayMs = 750): Promise<void> {
-      await dispatchAndAwaitRefresh(deviceId, "wait_for_idle", { timeoutMs: 2500 }, 5000).catch(() => undefined);
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
-    }
-
-    async function ensureRedditForeground(context: string): Promise<void> {
+    async function ensureProfileAppForeground(context: string): Promise<void> {
       const foreground = await dispatchAndAwaitRefresh(deviceId, "get_foreground_app", {}, 10000).catch(() => null);
       const observedPackage = foregroundPackageFromResult(foreground);
-      if (observedPackage !== REDDIT_APP_ID) {
-        failures.push(`${context}: foreground was ${observedPackage ?? "unknown"}; reopening Reddit`);
-        await dispatchAndAwaitRefresh(deviceId, "open_app", { packageName: REDDIT_APP_ID }, 25000);
-        await settle(1500);
+      if (observedPackage !== profile.packageName) {
+        throw new Error(`${context}: foreground package ${observedPackage ?? "unknown"} does not match ${profile.packageName}`);
       }
     }
 
     async function capture(id: string, name: string): Promise<void> {
       let lastReject = "";
       for (let attempt = 1; attempt <= 3; attempt += 1) {
-        await ensureRedditForeground(`${id} attempt ${attempt}`);
-        const tree = parseUiTreeResult(await dispatchAndAwaitRefresh(deviceId, "ui_tree_dump", { packageName: REDDIT_APP_ID }, 12000));
-        if (isUsableRedditUiTree(tree)) {
+        await ensureProfileAppForeground(`${id} attempt ${attempt}`);
+        const tree = parseUiTreeResult(await dispatchAndAwaitRefresh(
+          deviceId,
+          "ui_tree_dump",
+          { packageName: profile.packageName },
+          12000,
+        ));
+        if (isUsableAppUiTree(tree, profile.packageName)) {
           observedAppVersion ??= tree.appVersion;
           captures.push({ id, name, ...tree });
           if (body.captureScreenshots) {
             const shot = await dispatchAndAwaitRefresh(deviceId, "screenshot_for_vlm", { quality: 80 }, 20000);
             const imageBase64 = shot?.output?.image_base64 ?? shot?.output?.screenshotBase64;
             if (imageBase64) {
-              await fs.mkdir(REDDIT_REFRESH_ARTIFACT_DIR, { recursive: true });
-              const imagePath = path.join(REDDIT_REFRESH_ARTIFACT_DIR, `${startedAt.toISOString().replace(/[:.]/g, "-")}-${id}.jpg`);
+              await fs.mkdir(MAPPING_REFRESH_ARTIFACT_DIR, { recursive: true });
+              const imagePath = path.join(MAPPING_REFRESH_ARTIFACT_DIR, `${startedAt.toISOString().replace(/[:.]/g, "-")}-${id}.jpg`);
               await fs.writeFile(imagePath, Buffer.from(imageBase64, "base64"));
               screenshotPaths.push(imagePath);
             }
@@ -333,88 +393,47 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
         }
 
         lastReject = `package=${tree.packageName ?? "unknown"} nodeCount=${tree.nodeCount}`;
-        failures.push(`${id} attempt ${attempt}: rejected non-Reddit/empty UI tree (${lastReject})`);
-        await dispatchAndAwaitRefresh(deviceId, "open_app", { packageName: REDDIT_APP_ID }, 25000);
-        await settle(1500);
+        failures.push(`${id} attempt ${attempt}: rejected mismatched/empty UI tree (${lastReject})`);
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
-      throw new Error(`${id}: unable to capture usable Reddit UI tree after retries (${lastReject || "no tree"})`);
+      throw new Error(`${id}: unable to capture usable app UI tree after retries (${lastReject || "no tree"})`);
     }
 
-    await dispatchAndAwaitRefresh(deviceId, "open_app", { packageName: REDDIT_APP_ID }, 25000);
-    await settle(1500);
-    // open_app resumes whatever Reddit surface was last active. A canonical,
-    // read-only home deep link is required before we label the first capture
-    // as reddit_home_feed; otherwise a retained search surface can poison the
-    // state graph with duplicate anchors and a fabricated transition.
-    await dispatchAndAwaitRefresh(deviceId, "intent_send", {
-      action: "android.intent.action.VIEW",
-      uri: "https://www.reddit.com/",
-      packageName: REDDIT_APP_ID,
-    }, 25000);
-    await settle(1500);
-    const foreground = await dispatchAndAwaitRefresh(deviceId, "get_foreground_app", {}, 10000).catch(() => null);
-    observedAppVersion =
-      foreground?.output?.appVersion
-      ?? foreground?.output?.versionName
-      ?? foreground?.output?.packageVersion;
-    await capture("reddit_home_feed", "Reddit home/feed");
-
-    // Capture a real selector-driven transition instead of inferring one from
-    // a deep link. The edge is materialized only when both source and observed
-    // destination were captured successfully.
-    try {
-      const searchTap = await dispatchAndAwaitRefresh(
-        deviceId,
-        "a11y_find_tap",
-        { resourceId: "main_top_app_bar_search" },
-        15000,
-      );
-      if (!a11yTapSucceeded(searchTap)) {
-        throw new Error(String(searchTap?.output?.error ?? "selector was not found"));
+    async function executeStep(step: RuntimeRecipeStep): Promise<void> {
+      if (step.whenInput && body[step.whenInput] == null) {
+        failures.push(`${step.id} skipped: input ${step.whenInput} not provided`);
+        return;
       }
-      await settle();
-      await capture("reddit_search_entry", "Reddit search entry");
-    } catch (err) {
-      failures.push(`search_entry transition skipped: ${(err as Error).message}`);
-    }
-
-    await dispatchAndAwaitRefresh(deviceId, "intent_send", {
-      action: "android.intent.action.VIEW",
-      uri: "https://www.reddit.com/r/AskReddit/",
-      packageName: REDDIT_APP_ID,
-    }, 25000);
-    await settle();
-    await capture("askreddit_header", "r/AskReddit header/community page");
-
-    await dispatchAndAwaitRefresh(deviceId, "scroll", { direction: "down", distancePx: 900, durationMs: 450 }, 10000);
-    await settle();
-    await capture("askreddit_feed_after_scroll", "r/AskReddit feed after scroll");
-
-    await dispatchAndAwaitRefresh(deviceId, "intent_send", {
-      action: "android.intent.action.VIEW",
-      uri: "https://www.reddit.com/search/?q=AskReddit",
-      packageName: REDDIT_APP_ID,
-    }, 25000);
-    await settle();
-    await capture("reddit_search_surface", "Reddit search surface");
-
-    if (body.postUri) {
+      if (step.dependsOn && !successfulSteps.has(step.dependsOn)) {
+        failures.push(`${step.id} skipped: dependency ${step.dependsOn} did not succeed`);
+        return;
+      }
       try {
-        assertSafeRedditPostUri(body.postUri);
-        await dispatchAndAwaitRefresh(deviceId, "intent_send", {
-          action: "android.intent.action.VIEW",
-          uri: body.postUri,
-          packageName: REDDIT_APP_ID,
-        }, 25000);
-        await settle();
-        await capture("reddit_post_detail", "Reddit post detail");
+        if (step.type === "capture") {
+          await capture(step.stateKey!, step.name!);
+        } else {
+          const params = renderRuntimeParams(step.params ?? {}, profile, body) as Record<string, unknown>;
+          assertRuntimeActionSafe(profile, step, params);
+          const timeoutMs = step.type === "open_app" || step.type === "intent_send" ? 25000 : 15000;
+          const result = await dispatchAndAwaitRefresh(deviceId, step.type, params, timeoutMs);
+          if (step.type === "a11y_find_tap" && !a11yTapSucceeded(result)) {
+            throw new Error(String(result?.output?.error ?? "selector was not found"));
+          }
+        }
+        if (step.delayAfterMs) {
+          await new Promise((resolve) => setTimeout(resolve, Math.min(5000, Math.max(0, step.delayAfterMs!))));
+        }
+        successfulSteps.add(step.id);
+        if (step.transition) transitions.push(step.transition);
       } catch (err) {
-        failures.push(`post_detail skipped: ${(err as Error).message}`);
+        if (!step.optional) throw err;
+        failures.push(`${step.id} skipped: ${(err as Error).message}`);
       }
-    } else {
-      failures.push("post_detail skipped: no validated read-only postUri provided");
     }
+
+    for (const step of profile.resetRecipe) await executeStep(step);
+    for (const step of profile.mappingRecipe) await executeStep(step);
 
     const now = new Date().toISOString();
     const pages: AppMap["pages"] = {};
@@ -428,14 +447,21 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
         index,
       );
     });
-    if (pages.reddit_home_feed?.elements?.main_top_app_bar_search && pages.reddit_search_entry) {
-      pages.reddit_home_feed.elements.main_top_app_bar_search.leadsTo = "reddit_search_entry";
+    for (const transition of transitions) {
+      const source = pages[transition.sourceStateKey];
+      const target = pages[transition.targetStateKey];
+      const element = source?.elements?.[transition.elementKey];
+      if (source && target && element) {
+        element.leadsTo = transition.targetStateKey;
+      } else {
+        failures.push(`transition ${transition.sourceStateKey} -> ${transition.targetStateKey} not materialized: state/element missing`);
+      }
     }
 
     const map: AppMap = {
-      appId: REDDIT_APP_ID,
-      appName: "Reddit",
-      version: `real-device-refresh-${startedAt.toISOString()}`,
+      appId: profile.appId,
+      appName: profile.appName,
+      version: `runtime-profile-${profile.profileVersion}-${startedAt.toISOString()}`,
       appVersion: observedAppVersion ?? "observed-live",
       deviceProfile: captures[0] ? { width: captures[0].width, height: captures[0].height } : undefined,
       pages,
@@ -449,16 +475,16 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
     const quality = validateAppMapQuality(map);
     const summary = summarizeRefresh(map, failures, screenshotPaths);
     const summaryPath = path.join(
-      REDDIT_REFRESH_ARTIFACT_DIR,
+      MAPPING_REFRESH_ARTIFACT_DIR,
       `${startedAt.toISOString().replace(/[:.]/g, "-")}-summary.json`,
     );
-    await fs.mkdir(REDDIT_REFRESH_ARTIFACT_DIR, { recursive: true });
+    await fs.mkdir(MAPPING_REFRESH_ARTIFACT_DIR, { recursive: true });
     await fs.writeFile(summaryPath, `${JSON.stringify({ summary, quality }, null, 2)}\n`, "utf8");
 
     if (!quality.usable) {
       return res.status(422).json({
         ok: false,
-        error: "Reddit app-map refresh produced an unusable map; refusing to save",
+        error: "App-map refresh produced an unusable map; refusing to save",
         quality,
         summary: { ...summary, summaryPath },
       });
@@ -471,9 +497,10 @@ router.post("/refresh/reddit", async (req: Request, res: Response) => {
       quality,
       summary: { ...summary, summaryPath },
       safety: {
-        mode: "read_only_navigation",
-        blocked: ["vote", "comment", "join", "login", "settings", "profile_mutation"],
+        mode: profile.safetyPolicy.mode,
+        blocked: profile.safetyPolicy.blocked ?? [],
       },
+      runtimeProfile: { appId: profile.appId, version: profile.profileVersion, source: "postgresql" },
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message, failures });

@@ -40,7 +40,8 @@ function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("queue_v2_contract") ||
     fileName.includes("queue_v2_runtime") ||
     fileName.includes("pnq_v2_runtime") ||
-    fileName.includes("ui_graph_runtime");
+    fileName.includes("ui_graph_runtime") ||
+    fileName.includes("app_runtime_profiles");
 }
 
 /**

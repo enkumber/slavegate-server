@@ -19,7 +19,7 @@ const path = require("path");
 const CREDENTIAL_PATH = "/data/.openclaw/credentials/phone-network-api-token.json";
 const DEFAULT_DEVICE_ID = "d35b34cb-b2ee-4f6e-a8c6-a72cca14a0dd";
 const DEFAULT_OUT_DIR = "/data/.openclaw/workspace/reports/phone-network/app-map-refresh";
-const REFRESH_ROUTE = "/api/mapping/refresh/reddit";
+const REFRESH_ROUTE = "/api/mapping/refresh/com.reddit.frontpage";
 
 function parseArgs(argv) {
   const args = {
