@@ -401,6 +401,49 @@ describe("validateCompiledWorkflow", () => {
       );
     });
 
+    it("should accept constrained intent_send parameters from an app runtime profile", () => {
+      const appMap = validAppMap();
+      const workflow = makeWorkflow({
+        steps: [
+          makeStep({
+            action: "intent_send",
+            params: {
+              uri: "https://www.reddit.com/search/?q=AskReddit",
+              packageName: "com.reddit.frontpage",
+              action: "android.intent.action.VIEW",
+            },
+            expectedPage: "page_home",
+            expectedPageHash: "abc123hash",
+          }),
+        ],
+      });
+
+      const result = validateCompiledWorkflow(workflow, appMap);
+      expect(result.valid).toBe(true);
+    });
+
+    it("should reject intent_send without a URI or with malformed optional constraints", () => {
+      const appMap = validAppMap();
+      const workflow = makeWorkflow({
+        steps: [
+          makeStep({
+            action: "intent_send",
+            params: { uri: "", packageName: 42, action: false },
+            expectedPage: "page_home",
+            expectedPageHash: "abc123hash",
+          }),
+        ],
+      });
+
+      const result = validateCompiledWorkflow(workflow, appMap);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toEqual(expect.arrayContaining([
+        expect.stringContaining(`"intent_send" action requires params.uri`),
+        expect.stringContaining("intent_send params.packageName must be a string"),
+        expect.stringContaining("intent_send params.action must be a string"),
+      ]));
+    });
+
     it("should error when target elementId does not exist in any page", () => {
       const appMap = validAppMap();
       const workflow = makeWorkflow({

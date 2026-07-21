@@ -126,6 +126,44 @@ describe("runCompiledWorkflow recovery budget", () => {
     expect(generatedWorkflowRecoveryBudgetExhausted?.labels).not.toHaveBeenCalled();
   });
 
+  it("preserves DB-profile package and action constraints for intent_send", async () => {
+    const workflow = makeWorkflow({
+      steps: [{
+        id: "canonical-search",
+        action: "intent_send",
+        expectedPage: "reddit_search_surface",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Open canonical search in the intended package",
+        params: {
+          uri: "https://www.reddit.com/search/?q=AskReddit",
+          packageName: "com.reddit.frontpage",
+          action: "android.intent.action.VIEW",
+        },
+      }],
+    });
+
+    const result = await runCompiledWorkflow(
+      { deviceId: "device-1", workflow },
+      vi.fn().mockResolvedValue(false),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(sendDeviceExecutionJobToDevice).toHaveBeenCalledWith(
+      "device-1",
+      expect.objectContaining({
+        type: "intent_send",
+        params: {
+          uri: "https://www.reddit.com/search/?q=AskReddit",
+          packageName: "com.reddit.frontpage",
+          action: "android.intent.action.VIEW",
+        },
+      }),
+      expect.any(Object),
+    );
+  });
+
   it("allows one recovery after deterministic failure then fails explicitly when the step budget is exhausted", async () => {
     const workflow = makeWorkflow({
       steps: [

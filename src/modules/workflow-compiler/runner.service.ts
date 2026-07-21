@@ -513,7 +513,17 @@ async function executeStepAction(
 
     case "intent_send": {
       const uri = (step.params?.uri as string) || "";
-      const sent = await dispatchStepJob("intent_send", { uri }, STEP_TIMEOUT_MS);
+      const packageName = typeof step.params?.packageName === "string"
+        ? step.params.packageName.trim()
+        : "";
+      const action = typeof step.params?.action === "string"
+        ? step.params.action.trim()
+        : "";
+      const sent = await dispatchStepJob("intent_send", {
+        uri,
+        ...(packageName ? { packageName } : {}),
+        ...(action ? { action } : {}),
+      }, STEP_TIMEOUT_MS);
       if (!sent) return { success: false, error: "Device unreachable" };
       break;
     }

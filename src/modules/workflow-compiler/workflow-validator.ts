@@ -138,7 +138,7 @@ export function validateCompiledWorkflow(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const VALID_ACTIONS: CompiledAction[] = [
-  "tap", "type", "swipe", "press_key", "wait", "open_app", "screenshot",
+  "tap", "type", "swipe", "press_key", "wait", "open_app", "intent_send", "screenshot",
 ];
 
 function validateStepAction(
@@ -255,6 +255,18 @@ function validateStepParams(
     case "open_app":
       if (typeof step.params.packageName !== "string") {
         errors.push(`${prefix}: "open_app" action requires params.packageName (string).`);
+      }
+      break;
+
+    case "intent_send":
+      if (typeof step.params.uri !== "string" || !step.params.uri.trim()) {
+        errors.push(`${prefix}: "intent_send" action requires params.uri (non-empty string).`);
+      }
+      if (step.params.packageName !== undefined && typeof step.params.packageName !== "string") {
+        errors.push(`${prefix}: intent_send params.packageName must be a string when provided.`);
+      }
+      if (step.params.action !== undefined && typeof step.params.action !== "string") {
+        errors.push(`${prefix}: intent_send params.action must be a string when provided.`);
       }
       break;
 
