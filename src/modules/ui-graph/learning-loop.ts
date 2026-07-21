@@ -35,7 +35,17 @@ function stable(value: unknown): string {
 }
 
 export function candidateKey(input: Pick<CandidateObservation, "appId" | "type" | "sourceStateId" | "targetStateId" | "payload">): string {
-  return crypto.createHash("sha256").update(stable(input)).digest("hex");
+  // `Pick` only constrains TypeScript. Runtime callers pass the full
+  // observation, so hashing `input` directly also included volatile evidence,
+  // context and confidence and created one candidate per execution.
+  const canonical = {
+    appId: input.appId,
+    type: input.type,
+    sourceStateId: input.sourceStateId ?? null,
+    targetStateId: input.targetStateId ?? null,
+    payload: input.payload,
+  };
+  return crypto.createHash("sha256").update(stable(canonical)).digest("hex");
 }
 
 export function promotionDecision(input: {

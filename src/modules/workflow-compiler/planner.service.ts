@@ -78,7 +78,7 @@ function validateCompiledWorkflow(
     pageHashIndex.set(pageId, page.detection.signatureHash);
   }
 
-  const validActions = new Set(["tap", "type", "swipe", "press_key", "wait", "open_app", "screenshot"]);
+  const validActions = new Set(["screen_wake", "unlock", "tap", "type", "swipe", "press_key", "wait", "open_app", "intent_send", "screenshot"]);
 
   for (let i = 0; i < raw.steps.length; i++) {
     const step = raw.steps[i] as Record<string, unknown>;

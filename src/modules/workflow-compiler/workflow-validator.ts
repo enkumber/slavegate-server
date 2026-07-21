@@ -20,7 +20,7 @@ import type { CompiledWorkflow, CompiledStep, ValidationResult, CompiledAction }
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const VALID_STEP_ACTIONS: Set<string> = new Set([
-  "tap", "type", "swipe", "press_key", "wait", "open_app", "screenshot",
+  "screen_wake", "unlock", "tap", "type", "swipe", "press_key", "wait", "open_app", "intent_send", "screenshot",
 ]);
 
 /** Validate a single step object (from LLM recovery) against the CompiledStep schema. */
@@ -35,10 +35,11 @@ export function validateStepSchema(
   if (typeof step.id !== "string" || step.id.length === 0) {
     errors.push("Missing or invalid step id");
   }
-  if (typeof step.expectedPage !== "string" || step.expectedPage.length === 0) {
+  const readinessAction = step.action === "screen_wake" || step.action === "unlock";
+  if (!readinessAction && (typeof step.expectedPage !== "string" || step.expectedPage.length === 0)) {
     errors.push("Missing or invalid expectedPage");
   }
-  if (typeof step.expectedPageHash !== "string" || step.expectedPageHash.length === 0) {
+  if (!readinessAction && (typeof step.expectedPageHash !== "string" || step.expectedPageHash.length === 0)) {
     errors.push("Missing or invalid expectedPageHash");
   }
   if (typeof step.description !== "string") {
@@ -138,7 +139,7 @@ export function validateCompiledWorkflow(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const VALID_ACTIONS: CompiledAction[] = [
-  "tap", "type", "swipe", "press_key", "wait", "open_app", "intent_send", "screenshot",
+  "screen_wake", "unlock", "tap", "type", "swipe", "press_key", "wait", "open_app", "intent_send", "screenshot",
 ];
 
 function validateStepAction(
@@ -216,6 +217,7 @@ function validateExpectedPage(
   errors: string[],
   warnings: string[],
 ): void {
+  if (step.action === "screen_wake" || step.action === "unlock") return;
   if (!step.expectedPage) {
     errors.push(`${prefix}: Missing expectedPage.`);
     return;
@@ -296,6 +298,8 @@ function validateStepParams(
       }
       break;
 
+    case "screen_wake":
+    case "unlock":
     case "screenshot":
       // No params needed
       if (Object.keys(step.params).length > 0) {

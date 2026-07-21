@@ -388,6 +388,13 @@ async function executeStepAction(
   };
 
   switch (step.action) {
+    case "screen_wake":
+    case "unlock": {
+      const sent = await dispatchStepJob(step.action, {}, RECOVERY_READINESS_TIMEOUT_MS);
+      if (!sent) return { success: false, error: "Device unreachable" };
+      break;
+    }
+
     case "tap": {
       const target = step.target;
       const selectorAttempts: Record<string, unknown>[] = [];

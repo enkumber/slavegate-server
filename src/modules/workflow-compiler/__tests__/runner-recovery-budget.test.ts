@@ -126,6 +126,26 @@ describe("runCompiledWorkflow recovery budget", () => {
     expect(generatedWorkflowRecoveryBudgetExhausted?.labels).not.toHaveBeenCalled();
   });
 
+  it("executes screen readiness actions as normal queued compiled steps", async () => {
+    const workflow = makeWorkflow({
+      steps: [
+        { id: "wake", action: "screen_wake", expectedPage: "", expectedPageHash: "", retries: 0, retryDelay: 0, description: "Wake" },
+        { id: "unlock", action: "unlock", expectedPage: "", expectedPageHash: "", retries: 0, retryDelay: 0, description: "Unlock" },
+      ],
+    });
+
+    const result = await runCompiledWorkflow(
+      { deviceId: "device-1", workflow },
+      vi.fn().mockResolvedValue(false),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(vi.mocked(sendDeviceExecutionJobToDevice).mock.calls.map((call) => call[1].type)).toEqual([
+      "screen_wake",
+      "unlock",
+    ]);
+  });
+
   it("preserves DB-profile package and action constraints for intent_send", async () => {
     vi.mocked(waitForResult).mockResolvedValueOnce({
       status: "completed",

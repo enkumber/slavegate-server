@@ -69,6 +69,8 @@ export interface CompiledStep {
 }
 
 export type CompiledAction =
+  | "screen_wake"
+  | "unlock"
   | "tap"
   | "type"
   | "swipe"

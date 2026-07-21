@@ -87,7 +87,7 @@ const OUTPUT_FORMAT_SPEC = `Return a JSON object with a single key "steps" — a
   "steps": [
     {
       "id": "s1",
-      "action": "tap" | "type" | "swipe" | "press_key" | "wait" | "open_app" | "intent_send" | "screenshot",
+      "action": "screen_wake" | "unlock" | "tap" | "type" | "swipe" | "press_key" | "wait" | "open_app" | "intent_send" | "screenshot",
       "target": {
         "elementId": "<element-id-from-app-map>",
         "resourceId": "<android-resource-id>",
@@ -138,6 +138,8 @@ const INSTRUCTION_HEADER = "## INSTRUCTION";
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const AVAILABLE_ACTIONS: CompiledAction[] = [
+  "screen_wake",
+  "unlock",
   "tap",
   "type",
   "swipe",
@@ -150,6 +152,8 @@ const AVAILABLE_ACTIONS: CompiledAction[] = [
 
 function describeAction(action: CompiledAction): string {
   const descriptions: Record<CompiledAction, string> = {
+    screen_wake: "- screen_wake: Wake the device display. No target or params needed.",
+    unlock:     "- unlock: Unlock the device before app interaction. No target or params needed.",
     tap:        "- tap: Click on a UI element. Requires target (elementId, resourceId, text, or coords).",
     type:       "- type: Type text into a focused input field. Requires params.text. Tap the input first to focus it.",
     swipe:      "- swipe: Swipe gesture. Requires params.direction (up/down/left/right). Optionally params.distance (0.0–1.0).",

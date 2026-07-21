@@ -248,6 +248,19 @@ describe("validateCompiledWorkflow", () => {
   // ── Invalid actions → errors ────────────────────────────────────────────
 
   describe("invalid actions", () => {
+    it("accepts readiness actions without targets or params", () => {
+      const appMap = validAppMap();
+      const workflow = makeWorkflow({
+        steps: [
+          makeStep({ action: "screen_wake", target: undefined, params: {}, expectedPage: "", expectedPageHash: "" }),
+          makeStep({ action: "unlock", target: undefined, params: {}, expectedPage: "", expectedPageHash: "" }),
+        ],
+      });
+
+      const result = validateCompiledWorkflow(workflow, appMap);
+      expect(result.errors.filter((error) => error.includes("Invalid action"))).toEqual([]);
+    });
+
     it("should error for unrecognized action type", () => {
       const appMap = validAppMap();
       const workflow = makeWorkflow({

@@ -214,7 +214,7 @@ DECISION GUIDELINES:
 - If wrong page -> navigate_back_and_retry
 - If the failure says an Accessibility selector was not found, the stored selector is stale. Do NOT use retry_step with the same selector. If the current UI tree contains the intended element, use retry_with_adaptation, keep action="tap", and copy its robust descriptors from the tree: resourceId, contentDescription, and text when present. Runtime tries them separately in that priority order, so a transient resourceId change can fall back without turning the fields into one broad query.
 - Use retry_step for a missing element only when the failure is plausibly transient (loading/animation) and the stored selector is still present in the current UI tree.
-- adaptedStep must remain a CompiledStep (tap/type/swipe/press_key/wait/open_app/intent_send/screenshot), not a device job type such as a11y_find_tap.
+- adaptedStep must remain a CompiledStep (screen_wake/unlock/tap/type/swipe/press_key/wait/open_app/intent_send/screenshot), not a device job type such as a11y_find_tap.
 - If fatal error (app crashed, permission denied) -> abort
 - Be CONSERVATIVE: prefer retry over dismiss. Prefer dismiss over abort.
 
@@ -275,7 +275,7 @@ function parseRecoveryAction(raw: string): RecoveryAction | null {
 }
 
 function recoverySafety(step: CompiledStep): UiSafetyClass {
-  if (["screenshot", "wait"].includes(step.action)) return "read_only";
+  if (["screen_wake", "unlock", "screenshot", "wait"].includes(step.action)) return "read_only";
   if (["open_app", "intent_send", "press_key", "swipe", "tap"].includes(step.action)) return "navigation";
   if (step.action === "type") return "mutating";
   return "sensitive";

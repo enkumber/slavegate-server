@@ -242,7 +242,7 @@ describe("buildCompilePrompt", () => {
       const appMap = makeAppMap();
       const prompt = buildCompilePrompt(appMap, "Test");
 
-      for (const action of ["tap", "type", "swipe", "press_key", "wait", "open_app", "screenshot"]) {
+      for (const action of ["screen_wake", "unlock", "tap", "type", "swipe", "press_key", "wait", "open_app", "intent_send", "screenshot"]) {
         expect(prompt).toContain(`- ${action}:`);
       }
     });
