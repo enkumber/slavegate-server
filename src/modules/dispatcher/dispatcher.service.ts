@@ -419,17 +419,18 @@ export class DispatcherService {
   ): Promise<{ items: Job[]; total: number; page: number; pageSize: number }> {
     const db = getDb();
     const offset = (page - 1) * pageSize;
-    const where = deviceId ? "WHERE device_id = $3" : "";
+    const rowsWhere = deviceId ? "WHERE device_id = $3" : "";
+    const countWhere = deviceId ? "WHERE device_id = $1" : "";
     const values = deviceId
       ? [pageSize, offset, deviceId]
       : [pageSize, offset];
 
     const [rows, countRow] = await Promise.all([
       db.query(
-        `SELECT * FROM jobs ${where} ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+        `SELECT * FROM jobs ${rowsWhere} ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
         values
       ),
-      db.query(`SELECT COUNT(*) FROM jobs ${where}`, deviceId ? [deviceId] : []),
+      db.query(`SELECT COUNT(*) FROM jobs ${countWhere}`, deviceId ? [deviceId] : []),
     ]);
 
     return {

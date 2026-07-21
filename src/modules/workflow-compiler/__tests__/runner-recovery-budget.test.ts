@@ -43,6 +43,13 @@ vi.mock("../../observability/metrics", () => ({
   generatedWorkflowRecoveryBudgetExhausted: {
     labels: vi.fn(() => ({ inc: vi.fn() })),
   },
+  uiGraphLearningCandidates: {
+    labels: vi.fn(() => ({ inc: vi.fn() })),
+  },
+}));
+
+vi.mock("../../ui-graph/learning-loop", () => ({
+  uiGraphLearningLoop: { observe: vi.fn().mockResolvedValue("candidate-1") },
 }));
 
 import {
@@ -58,6 +65,7 @@ import {
 } from "../../observability/metrics";
 import { deviceExecutionArbiter } from "../../device-execution";
 import { updateWorkflowStatus } from "../planner.service";
+import { uiGraphLearningLoop } from "../../ui-graph/learning-loop";
 
 function makeWorkflow(overrides: Partial<CompiledWorkflow> = {}): CompiledWorkflow {
   return {
@@ -267,6 +275,70 @@ describe("runCompiledWorkflow recovery budget", () => {
     expect(waitForResult).toHaveBeenCalledTimes(2);
     expect(workflow.steps[0].target?.resourceId).toBe("current_selector");
     expect(result.counters.retriedSteps).toBe(1);
+  });
+
+  it("persists recovery learning only after the replay succeeds", async () => {
+    const workflow = makeWorkflow({
+      steps: [{
+        id: "stale-selector",
+        action: "tap",
+        target: { resourceId: "stale_selector" },
+        expectedPage: "page",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Recover and learn",
+      }],
+    });
+    vi.mocked(waitForResult)
+      .mockResolvedValueOnce({ status: "completed", output: { found: false } })
+      .mockResolvedValueOnce({ status: "completed", output: { found: true } });
+    const onRecoveryNeeded = vi.fn().mockImplementation(async (ctx) => {
+      ctx.workflow.steps[0] = { ...ctx.workflow.steps[0], target: { text: "Stable label" } };
+      ctx.pendingRecoveryLearning = {
+        appId: workflow.appId,
+        type: "recovery_rule",
+        payload: { target: { text: "Stable label" } },
+        context: { appId: workflow.appId, deviceId: "device-1", workflowId: workflow.id },
+        discoveryMethod: "llm_recovery",
+        confidence: 0.75,
+        safetyClass: "navigation",
+      };
+      return true;
+    });
+
+    const result = await runCompiledWorkflow({ deviceId: "device-1", workflow }, onRecoveryNeeded);
+
+    expect(result.ok).toBe(true);
+    expect(uiGraphLearningLoop.observe).toHaveBeenCalledWith(expect.objectContaining({
+      payload: { target: { text: "Stable label" } },
+      evidence: expect.objectContaining({ actionExecuted: true, postActionVerified: true }),
+    }));
+  });
+
+  it("tries Accessibility selectors separately in priority order", async () => {
+    const workflow = makeWorkflow({
+      maxRecoveryAttempts: 0,
+      maxTotalRecoveryAttempts: 0,
+      steps: [{
+        id: "selector-cascade",
+        action: "tap",
+        target: { resourceId: "transient_resource_id", text: "Stable label" },
+        expectedPage: "page",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Use text only when the preferred resource ID disappeared",
+      }],
+    });
+    vi.mocked(waitForResult)
+      .mockResolvedValueOnce({ status: "completed", output: { found: false, error: "Element not found" } })
+      .mockResolvedValueOnce({ status: "completed", output: { found: true } });
+
+    const result = await runCompiledWorkflow({ deviceId: "device-1", workflow }, vi.fn());
+
+    expect(result.ok).toBe(true);
+    expect(waitForResult).toHaveBeenCalledTimes(2);
   });
 
   it("fails closed when the recovery replay still misses and the budget is exhausted", async () => {

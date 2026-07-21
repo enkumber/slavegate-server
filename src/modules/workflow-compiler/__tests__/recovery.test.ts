@@ -302,7 +302,7 @@ describe("attemptRecovery", () => {
       });
     });
 
-    it("keeps only the strongest selector when an adapted target mixes resource ID with contextual text", async () => {
+    it("keeps ordered semantic fallbacks while dropping unguarded coordinates", async () => {
       const ctx = makeRunnerContext();
       vi.mocked(llmJson).mockResolvedValue({
         type: "retry_with_adaptation",
@@ -322,6 +322,8 @@ describe("attemptRecovery", () => {
       expect(result).toBe(true);
       expect(ctx.workflow.steps[0].target).toEqual({
         resourceId: "com.reddit.frontpage:id/search_bar_field",
+        contentDescription: "Search this community",
+        text: "AskReddit",
       });
     });
 

@@ -30,7 +30,9 @@ import { workflowEvents } from "../workflow-events";
 import { deviceExecutionArbiter } from "../device-execution";
 import { createRunnerUiGraphSession, type RunnerResolvedTarget } from "../ui-graph/runner-bridge";
 import { observeUiGraphAction } from "../ui-graph/telemetry";
+import { observeLearningCandidate } from "../ui-graph/telemetry";
 import { uiGraphRepository } from "../ui-graph/repository";
+import { uiGraphLearningLoop, type CandidateObservation } from "../ui-graph/learning-loop";
 import type { StateResolution, TargetResolutionMethod } from "../ui-graph/types";
 import { GraphRuntimeEngine } from "../ui-graph/graph-runtime";
 import type { UiTransitionDefinition } from "../ui-graph/types";
@@ -102,6 +104,8 @@ export interface RunnerContext {
   maxRecoveryAttemptsPerStep?: number;
   maxTotalRecoveryAttempts?: number;
   aiRecoveryEnabled?: boolean;
+  /** Recovery evidence staged until the adapted action and postcondition pass. */
+  pendingRecoveryLearning?: CandidateObservation;
   results: StepExecutionResult[];
   /** Callback for recovery — injected to avoid circular deps */
   onRecoveryNeeded: (ctx: RunnerContext, stepIndex: number, reason: string) => Promise<boolean>;
@@ -274,14 +278,12 @@ async function executeStepAction(
   }
 
   const jobId = uuidv4();
-  let dispatchedJobType: string | null = null;
 
   const dispatchStepJob = async (
     type: Parameters<typeof sendDeviceExecutionJobToDevice>[1]["type"],
     params: Parameters<typeof sendDeviceExecutionJobToDevice>[1]["params"],
     timeoutMs: number,
   ): Promise<boolean> => {
-    dispatchedJobType = String(type);
     const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
       jobId,
       type,
@@ -296,38 +298,89 @@ async function executeStepAction(
     return dispatch.sent;
   };
 
+  const tryA11ySelector = async (
+    params: Record<string, unknown>,
+  ): Promise<{ success: boolean; jobId: string; error?: string }> => {
+    const attemptJobId = uuidv4();
+    const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
+      jobId: attemptJobId,
+      type: "a11y_find_tap",
+      params,
+      timeoutMs: STEP_TIMEOUT_MS,
+    }, {
+      boundary: "generated_child",
+      rootExternalId: workflowRootExternalId,
+      actor: "workflow_runner",
+      metadata: { observeSource: "runner.executeStepAction.a11yCascade", stepAction: step.action },
+    });
+    if (!dispatch.sent) {
+      return {
+        success: false,
+        jobId: attemptJobId,
+        error: `Accessibility dispatch ${dispatch.decision}${dispatch.reason ? `: ${dispatch.reason}` : ""}`,
+      };
+    }
+    try {
+      const result = await waitForResult(attemptJobId, STEP_TIMEOUT_MS + 5_000);
+      if (!result || result.status !== "completed") {
+        return { success: false, jobId: attemptJobId, error: result?.error || "Action timed out or failed" };
+      }
+      if (result.output?.found !== true) {
+        return {
+          success: false,
+          jobId: attemptJobId,
+          error: String(result.output?.error ?? "Accessibility selector was not found"),
+        };
+      }
+      return { success: true, jobId: attemptJobId };
+    } catch (error) {
+      return { success: false, jobId: attemptJobId, error: (error as Error).message };
+    }
+  };
+
   switch (step.action) {
     case "tap": {
       const target = step.target;
+      const selectorAttempts: Record<string, unknown>[] = [];
+      const selectorKeys = new Set<string>();
+      const addSelector = (params: Record<string, unknown> | undefined) => {
+        if (!params || Object.keys(params).length === 0) return;
+        const key = JSON.stringify(params);
+        if (!selectorKeys.has(key)) {
+          selectorKeys.add(key);
+          selectorAttempts.push(params);
+        }
+      };
+
       if (graphTarget?.resolution.found) {
-        if (graphTarget.a11yParams && Object.keys(graphTarget.a11yParams).length > 0) {
-          const sent = await dispatchStepJob("a11y_find_tap", graphTarget.a11yParams, STEP_TIMEOUT_MS);
-          if (!sent) return { success: false, error: "Device unreachable" };
-          break;
-        }
+        addSelector(graphTarget.a11yParams);
         if (graphTarget.coords) {
-          const sent = await dispatchStepJob("tap", { x: graphTarget.coords.x, y: graphTarget.coords.y }, STEP_TIMEOUT_MS);
-          if (!sent) return { success: false, error: "Device unreachable" };
-          break;
+          // Coordinates remain a guarded fallback after semantic selectors.
         }
       }
-      // If element has identifying info, use a11y targeting cascade
-      if (target?.elementId || target?.resourceId || target?.contentDescription || target?.text) {
-        const a11yParams: Record<string, unknown> = {};
-        if (target.resourceId) a11yParams.resourceId = target.resourceId;
-        if (target.contentDescription) a11yParams.contentDescription = target.contentDescription;
-        if (target.text) { a11yParams.text = target.text; a11yParams.partialMatch = true; }
-        // elementId is app-map internal — pass as text fallback for a11y search
-        if (target.elementId && !target.resourceId && !target.text) {
-          a11yParams.text = target.elementId;
-          a11yParams.partialMatch = true;
-        }
-        const sent = await dispatchStepJob("a11y_find_tap", a11yParams, STEP_TIMEOUT_MS);
-        if (!sent) return { success: false, error: "Device unreachable" };
-        break;
+
+      // Accessibility descriptors are separate ordered attempts, never one
+      // OR/AND query whose semantics depend on the Android agent version.
+      if (target?.resourceId) addSelector({ resourceId: target.resourceId });
+      if (target?.contentDescription) addSelector({ contentDescription: target.contentDescription });
+      if (target?.text) addSelector({ text: target.text, partialMatch: true });
+      if (target?.elementId && !target.resourceId && !target.contentDescription && !target.text) {
+        addSelector({ text: target.elementId, partialMatch: true });
       }
-      // Fallback to coords
-      const coords = target?.coords;
+
+      let lastSelectorError: string | undefined;
+      for (const selector of selectorAttempts) {
+        const attempt = await tryA11ySelector(selector);
+        if (attempt.success) return attempt;
+        lastSelectorError = attempt.error;
+      }
+
+      if (selectorAttempts.length > 0 && !graphTarget?.coords && !target?.coords) {
+        return { success: false, error: lastSelectorError ?? "Accessibility selector was not found" };
+      }
+
+      // Fallback to coordinates only when they are explicitly guarded/resolved.
+      const coords = graphTarget?.coords ?? target?.coords;
       const sent = await dispatchStepJob("tap", coords ? { x: coords.x, y: coords.y } : { x: 0.5, y: 0.5 }, STEP_TIMEOUT_MS);
       if (!sent) return { success: false, error: "Device unreachable" };
       break;
@@ -416,13 +469,6 @@ async function executeStepAction(
     const result = await waitForResult(jobId, STEP_TIMEOUT_MS + 5_000);
     if (!result || result.status !== "completed") {
       return { success: false, jobId, error: result?.error || "Action timed out or failed" };
-    }
-    if (dispatchedJobType === "a11y_find_tap" && result.output?.found !== true) {
-      return {
-        success: false,
-        jobId,
-        error: String(result.output?.error ?? "Accessibility selector was not found"),
-      };
     }
     return { success: true, jobId };
   } catch (err) {
@@ -1169,6 +1215,7 @@ export async function runCompiledWorkflow(
 
         if (graphRecovered) actionSucceeded = true;
         if (!actionSucceeded) {
+          ctx.pendingRecoveryLearning = undefined;
           const failure = recovery.error ?? actionResult.error;
           await recordUiGraphOutcome(false, failure);
           counters.failedSteps++;
@@ -1304,6 +1351,7 @@ export async function runCompiledWorkflow(
         if (postActionVerified) {
           actionRecovered = true;
         } else {
+          ctx.pendingRecoveryLearning = undefined;
           await recordUiGraphOutcome(false, recovery.error ?? "Post-action mismatch, recovery failed");
           counters.failedSteps++;
           results.push({
@@ -1335,6 +1383,19 @@ export async function runCompiledWorkflow(
     }
 
     await recordUiGraphOutcome(actionSucceeded && postActionVerified, actionSucceeded && postActionVerified ? undefined : actionResult.error);
+
+    // A recovery proposal is only a learning candidate after the adapted
+    // action really ran and its postcondition passed. Staging it in the
+    // recovery service prevents no-op retry proposals from polluting fast path.
+    if (ctx.pendingRecoveryLearning && actionSucceeded && postActionVerified) {
+      const candidate = ctx.pendingRecoveryLearning;
+      ctx.pendingRecoveryLearning = undefined;
+      await uiGraphLearningLoop.observe({
+        ...candidate,
+        evidence: { ...(candidate.evidence ?? {}), actionExecuted: true, postActionVerified: true },
+      }).then(() => observeLearningCandidate(candidate.appId, candidate.type, "observed"))
+        .catch((error) => console.warn(`[ui-graph] verified recovery learning candidate failed: ${(error as Error).message}`));
+    }
 
     // ─── Record result ──────────────────────────────────────────────────────
     results.push({

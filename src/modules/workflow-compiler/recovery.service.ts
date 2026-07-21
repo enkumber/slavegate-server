@@ -24,8 +24,8 @@ import type { RunnerContext } from "./runner.service";
 import { validateStepSchema } from "./workflow-validator";
 import { visionService } from "../vision/vision.service";
 import { uiGraphRepository } from "../ui-graph/repository";
-import { uiGraphLearningLoop } from "../ui-graph/learning-loop";
-import { observeLearningCandidate, observeRecovery } from "../ui-graph/telemetry";
+import type { CandidateObservation } from "../ui-graph/learning-loop";
+import { observeRecovery } from "../ui-graph/telemetry";
 import { validateRecoveryProposal } from "../ui-graph/recovery-orchestrator";
 import type { RecoveryProposal, UiSafetyClass } from "../ui-graph/types";
 
@@ -212,7 +212,7 @@ DECISION GUIDELINES:
 - If a popup/dialog appeared -> dismiss_and_retry (tap OK/Close button)
 - If element is scrolled out -> retry_with_adaptation (add swipe up before tap)
 - If wrong page -> navigate_back_and_retry
-- If the failure says an Accessibility selector was not found, the stored selector is stale. Do NOT use retry_step with the same selector. If the current UI tree contains the intended element, use retry_with_adaptation, keep action="tap", and replace target with exactly one strongest current selector from the tree: resourceId first, otherwise contentDescription, otherwise text. Do not combine a stable resourceId with contextual text.
+- If the failure says an Accessibility selector was not found, the stored selector is stale. Do NOT use retry_step with the same selector. If the current UI tree contains the intended element, use retry_with_adaptation, keep action="tap", and copy its robust descriptors from the tree: resourceId, contentDescription, and text when present. Runtime tries them separately in that priority order, so a transient resourceId change can fall back without turning the fields into one broad query.
 - Use retry_step for a missing element only when the failure is plausibly transient (loading/animation) and the stored selector is still present in the current UI tree.
 - adaptedStep must remain a CompiledStep (tap/type/swipe/press_key/wait/open_app/intent_send/screenshot), not a device job type such as a11y_find_tap.
 - If fatal error (app crashed, permission denied) -> abort
@@ -351,14 +351,16 @@ function learningPayload(action: RecoveryAction, failedStep: CompiledStep, reaso
 function normalizeAdaptedTarget(target: CompiledStep["target"]): CompiledStep["target"] {
   if (!target) return target;
 
-  // Android's Accessibility matcher treats multiple supplied fields as an AND
-  // query. Recovery models often copy both a stable resource ID and contextual
-  // text from the same node; the text can change while the resource ID remains
-  // valid, making an otherwise correct adaptation impossible to replay. Keep
-  // the strongest selector only. Coordinates never override a semantic target.
-  if (target.resourceId?.trim()) return { resourceId: target.resourceId.trim() };
-  if (target.contentDescription?.trim()) return { contentDescription: target.contentDescription.trim() };
-  if (target.text?.trim()) return { text: target.text.trim() };
+  // Keep semantic fallbacks, but never send them as one ambiguous Accessibility
+  // query. The runner executes these descriptors separately in priority order.
+  // This matters for apps whose view ID changes after focus/animation while the
+  // label remains stable. Coordinates never override semantic descriptors.
+  const semantic = {
+    ...(target.resourceId?.trim() ? { resourceId: target.resourceId.trim() } : {}),
+    ...(target.contentDescription?.trim() ? { contentDescription: target.contentDescription.trim() } : {}),
+    ...(target.text?.trim() ? { text: target.text.trim() } : {}),
+  };
+  if (Object.keys(semantic).length > 0) return semantic;
   if (target.elementId?.trim()) return { elementId: target.elementId.trim() };
   if (target.coords) return { coords: target.coords };
   return {};
@@ -498,6 +500,7 @@ export async function attemptRecovery(
   const startTime = Date.now();
   const { deviceId, workflow } = ctx;
   const failedStep = workflow.steps[stepIndex];
+  ctx.pendingRecoveryLearning = undefined;
 
   // Check per-step limit
   const stepRecoveryCount = getStepRecoveryCount(workflow.id, stepIndex);
@@ -663,7 +666,7 @@ export async function attemptRecovery(
   await logRecoveryHistory(historyEntry);
 
   if (execResult.success && recoveryAction.type !== "retry_step" && graphFlags.mode !== "disabled" && graphFlags.candidateLearning) {
-    await uiGraphLearningLoop.observe({
+    ctx.pendingRecoveryLearning = {
       appId: workflow.appId,
       type: "recovery_rule",
       payload: learningPayload(recoveryAction, failedStep, reason),
@@ -672,8 +675,7 @@ export async function attemptRecovery(
       discoveryMethod: usedVision ? "vlm" : "llm_recovery",
       confidence: usedVision ? 0.7 : 0.75,
       safetyClass: recoverySafety(failedStep),
-    }).then(() => observeLearningCandidate(workflow.appId, "recovery_rule", "observed"))
-      .catch((error) => console.warn(`[ui-graph] recovery learning candidate failed: ${(error as Error).message}`));
+    } satisfies CandidateObservation;
   }
 
   console.log(
