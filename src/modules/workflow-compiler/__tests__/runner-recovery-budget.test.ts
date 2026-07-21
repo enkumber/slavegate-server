@@ -178,6 +178,37 @@ describe("runCompiledWorkflow recovery budget", () => {
     expect(result.results[0]?.error).toBe(RECOVERY_BUDGET_EXCEEDED);
   });
 
+  it("does not treat a completed Accessibility transport result with found=false as action success", async () => {
+    const workflow = makeWorkflow({
+      maxRecoveryAttempts: 0,
+      maxTotalRecoveryAttempts: 0,
+      steps: [{
+        id: "stale-selector",
+        action: "tap",
+        target: { resourceId: "stale_selector_canary_does_not_exist" },
+        expectedPage: "reddit_search_entry",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Exercise a stale selector",
+      }],
+    });
+    vi.mocked(waitForResult).mockResolvedValue({
+      status: "completed",
+      output: { found: false, error: "Element not found" },
+    });
+
+    const result = await runCompiledWorkflow(
+      { deviceId: "device-1", workflow },
+      vi.fn().mockResolvedValue(false),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("failed");
+    expect(result.stepsCompleted).toBe(0);
+    expect(result.counters.failedSteps).toBe(1);
+  });
+
   it("rejects a colliding raw fingerprint when enforced state anchors resolve another page", () => {
     expect(reconcileFingerprintWithResolvedState({
       rawFingerprintMatch: true,

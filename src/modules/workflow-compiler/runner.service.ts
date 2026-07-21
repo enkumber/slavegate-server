@@ -274,12 +274,14 @@ async function executeStepAction(
   }
 
   const jobId = uuidv4();
+  let dispatchedJobType: string | null = null;
 
   const dispatchStepJob = async (
     type: Parameters<typeof sendDeviceExecutionJobToDevice>[1]["type"],
     params: Parameters<typeof sendDeviceExecutionJobToDevice>[1]["params"],
     timeoutMs: number,
   ): Promise<boolean> => {
+    dispatchedJobType = String(type);
     const dispatch = await sendDeviceExecutionJobToDevice(deviceId, {
       jobId,
       type,
@@ -414,6 +416,13 @@ async function executeStepAction(
     const result = await waitForResult(jobId, STEP_TIMEOUT_MS + 5_000);
     if (!result || result.status !== "completed") {
       return { success: false, jobId, error: result?.error || "Action timed out or failed" };
+    }
+    if (dispatchedJobType === "a11y_find_tap" && result.output?.found !== true) {
+      return {
+        success: false,
+        jobId,
+        error: String(result.output?.error ?? "Accessibility selector was not found"),
+      };
     }
     return { success: true, jobId };
   } catch (err) {
