@@ -168,7 +168,7 @@ export function UiGraphPage() {
             <div key={candidate.id} style={{ background: "#0b0b12", border: "1px solid #242438", borderRadius: 6, padding: 12, display: "grid", gridTemplateColumns: "1.5fr 1fr 1fr auto", gap: 12, alignItems: "center" }}>
               <div><div style={{ fontWeight: 600 }}>{candidate.app_id} · {candidate.candidate_type}</div><div style={{ color: "#77778f", fontSize: 11, marginTop: 4 }}>{String(candidate.payload?.elementKey ?? candidate.payload?.transitionKey ?? candidate.discovery_method)}</div></div>
               <div style={{ fontSize: 12 }}>{candidate.status} · {(Number(candidate.confidence) * 100).toFixed(0)}%</div>
-              <div style={{ fontSize: 12, color: "#9ca3af" }}>{candidate.success_count} ok / {candidate.failure_count} fail / {candidate.distinct_context_count} contexts</div>
+              <div style={{ fontSize: 12, color: "#9ca3af" }}>{candidate.success_count} ok / {candidate.failure_count} fail / {candidate.distinct_context_count} portable envs</div>
               <div style={{ display: "flex", gap: 6 }}>
                 <button style={button} disabled={busy || candidate.status === "promoted"} onClick={() => void candidateAction(candidate.id, "promote")}>Promote</button>
                 <button style={{ ...button, borderColor: "#7f1d1d", color: "#fca5a5" }} disabled={busy || candidate.status === "quarantined"} onClick={() => void candidateAction(candidate.id, "quarantine")}>Quarantine</button>

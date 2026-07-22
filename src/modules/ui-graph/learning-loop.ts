@@ -22,7 +22,6 @@ export interface PromotionDecision {
   ready: boolean;
   autoPromotable: boolean;
   requiredSuccesses: number;
-  requiredContexts: number;
   blockers: string[];
 }
 
@@ -48,21 +47,34 @@ export function candidateKey(input: Pick<CandidateObservation, "appId" | "type" 
   return crypto.createHash("sha256").update(stable(canonical)).digest("hex");
 }
 
+/**
+ * Groups observations by portable UI environment without coupling shared
+ * knowledge to a physical phone. deviceId is intentionally excluded: it is
+ * recorded on observations/validations for telemetry only.
+ */
+export function candidateEnvironmentKey(context: UiGraphContext): string {
+  return [
+    context.appId,
+    context.appVersion ?? "unknown",
+    context.locale ?? "unknown",
+    context.deviceClass ?? "unknown",
+  ].join("|");
+}
+
 export function promotionDecision(input: {
   type: CandidateType;
   discoveryMethod: CandidateDiscoveryMethod;
   safetyClass: UiSafetyClass;
   successCount: number;
   failureCount: number;
-  distinctContextCount: number;
   stateVerified: boolean;
 }): PromotionDecision {
   const expensive = ["ocr", "vlm", "llm_recovery"].includes(input.discoveryMethod);
   const requiredSuccesses = expensive ? 5 : 3;
-  const requiredContexts = 2;
+  // Repeated state-verified executions are the safety gate. Portable
+  // environment diversity is telemetry, never a cross-device prerequisite.
   const blockers: string[] = [];
   if (input.successCount < requiredSuccesses) blockers.push("insufficient_successes");
-  if (input.distinctContextCount < requiredContexts) blockers.push("insufficient_distinct_contexts");
   if (!input.stateVerified) blockers.push("destination_state_not_verified");
   if (input.failureCount > Math.max(1, Math.floor(input.successCount * 0.2))) blockers.push("failure_rate_too_high");
   if (["mutating", "sensitive"].includes(input.safetyClass)) blockers.push("manual_review_required_for_safety_class");
@@ -72,7 +84,6 @@ export function promotionDecision(input: {
     ready: blockers.filter((item) => !item.startsWith("manual_review") && !item.endsWith("require_manual_review") && item !== "recovery_rules_require_manual_materialization").length === 0,
     autoPromotable: blockers.length === 0,
     requiredSuccesses,
-    requiredContexts,
     blockers,
   };
 }
@@ -80,7 +91,7 @@ export function promotionDecision(input: {
 export class UiGraphLearningLoop {
   async observe(input: CandidateObservation): Promise<string> {
     const key = candidateKey(input);
-    const contextKey = [input.context.deviceId ?? "unknown", input.context.appVersion ?? "unknown", input.context.locale ?? "unknown", input.context.deviceClass ?? "unknown"].join("|");
+    const contextKey = candidateEnvironmentKey(input.context);
     const result = await getDb().query(
       `INSERT INTO ui_graph_learning_candidates
          (candidate_key, app_id, candidate_type, status, source_state_id, target_state_id,
@@ -146,7 +157,7 @@ export class UiGraphLearningLoop {
            SELECT candidate_id,
                   COUNT(*) FILTER (WHERE success AND state_verified)::int AS success_count,
                   COUNT(*) FILTER (WHERE NOT success OR NOT state_verified)::int AS failure_count,
-                  COUNT(DISTINCT COALESCE(device_id::text,'unknown') || '|' || COALESCE(app_version,'unknown') || '|' || COALESCE(locale,'unknown') || '|' || COALESCE(device_class,'unknown'))::int AS distinct_context_count,
+                  COUNT(DISTINCT COALESCE(app_version,'unknown') || '|' || COALESCE(locale,'unknown') || '|' || COALESCE(device_class,'unknown'))::int AS distinct_context_count,
                   BOOL_OR(success AND state_verified) AS state_verified
            FROM ui_graph_candidate_validations WHERE candidate_id = $1 GROUP BY candidate_id
          ) stats
@@ -162,7 +173,6 @@ export class UiGraphLearningLoop {
         safetyClass: row.safety_class,
         successCount: Number(row.success_count),
         failureCount: Number(row.failure_count),
-        distinctContextCount: Number(row.distinct_context_count),
         stateVerified: input.stateVerified,
       });
     } catch (error) {
@@ -190,7 +200,6 @@ export class UiGraphLearningLoop {
         safetyClass: candidate.safety_class,
         successCount: Number(candidate.success_count),
         failureCount: Number(candidate.failure_count),
-        distinctContextCount: Number(candidate.distinct_context_count),
         stateVerified: Boolean(validationStats.rows[0]?.state_verified),
       });
       if (!decision.ready) throw new Error(`UI_GRAPH_CANDIDATE_NOT_READY:${decision.blockers.join(",")}`);
