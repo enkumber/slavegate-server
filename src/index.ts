@@ -25,6 +25,7 @@ import { closeRedis } from "./redis/client";
 import { dispatcherService } from "./modules/dispatcher/dispatcher.service";
 import { authService } from "./modules/auth/auth.service";
 import { startWorkflowWorker } from "./modules/workflows/workflow.executor";
+import { startEdgeWorkflowProgressWatchdog } from "./modules/workflows/edge-workflow-lifecycle.service";
 import { bootstrapParsers } from "./modules/data-pipeline/parser-registry";
 import { lifecycleManager } from "./modules/accounts/lifecycle";
 import { canaryService } from "./modules/canary/canary.service";
@@ -147,6 +148,8 @@ async function bootstrap(): Promise<void> {
   // ─── Start workflow execution worker ─────────────────────────────────────
   startWorkflowWorker();
   console.log("[server] Workflow worker started.");
+  startEdgeWorkflowProgressWatchdog();
+  console.log("[server] Edge workflow progress watchdog started.");
 
   // ─── Bootstrap data pipeline parsers ─────────────────────────────────────
   await bootstrapParsers();

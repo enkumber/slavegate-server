@@ -38,4 +38,25 @@ describe("workflow edge lifecycle transitions", () => {
       "ack timeout",
     )).resolves.toBe(false);
   });
+
+  it("fails stale edge progress only through an exact checkpoint CAS", async () => {
+    query.mockResolvedValue({ rowCount: 1, rows: [{ id: "workflow-1" }] });
+
+    await expect(workflowService.markFailedIfEdgeProgressStale(
+      "workflow-1",
+      "2026-07-22T12:00:00.000Z",
+      "progress timeout",
+    )).resolves.toBe(true);
+
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain("status = 'running'");
+    expect(sql).toContain("(checkpoint->>'source') = 'edge'");
+    expect(sql).toContain("(checkpoint->>'checkpointAt') = $3");
+    expect(sql).toContain("RETURNING id");
+    expect(params).toEqual([
+      "progress timeout",
+      "workflow-1",
+      "2026-07-22T12:00:00.000Z",
+    ]);
+  });
 });

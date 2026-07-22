@@ -297,6 +297,30 @@ export class WorkflowService {
     return (result.rowCount ?? 0) > 0;
   }
 
+  /**
+   * Fail an edge workflow only if it is still running at the exact checkpoint
+   * observed by the watchdog. The checkpoint CAS prevents a delayed sweep from
+   * terminalizing a workflow that progressed or completed meanwhile.
+   */
+  async markFailedIfEdgeProgressStale(
+    id: string,
+    observedCheckpointAt: string,
+    error: string,
+  ): Promise<boolean> {
+    const db = getDb();
+    const result = await db.query(
+      `UPDATE workflows
+       SET status = 'failed', completed_at = NOW(), error = $1
+       WHERE id = $2
+         AND status = 'running'
+         AND (checkpoint->>'source') = 'edge'
+         AND (checkpoint->>'checkpointAt') = $3
+       RETURNING id`,
+      [error, id, observedCheckpointAt],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async markPaused(id: string): Promise<void> {
     const db = getDb();
     await db.query(
