@@ -11,8 +11,8 @@ android {
         applicationId = "com.phonenetwork"
         minSdk = 29          // Android 10 (OP5T fleet minimum)
         targetSdk = 34       // Android 14
-        versionCode = 115
-        versionName = "4.0.59"
+        versionCode = 116
+        versionName = "4.0.60"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -773,16 +773,18 @@ class DirectWsClient(
      * Send a raw JSON payload to the server via the current WebSocket connection.
      * Used by WorkflowEngine to send WORKFLOW_STATUS updates.
      */
-    fun sendRaw(payload: JSONObject) {
+    fun sendRaw(payload: JSONObject): Boolean {
         val ws = this.ws
         if (ws != null) {
-            try {
+            return try {
                 ws.send(payload.toString())
             } catch (e: Exception) {
                 Log.w(TAG, "Send raw failed: ${e.message}")
+                false
             }
         } else {
             Log.w(TAG, "Cannot send raw payload — WebSocket not connected")
+            return false
         }
     }
 

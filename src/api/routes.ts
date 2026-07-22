@@ -84,12 +84,21 @@ import {
 } from "../modules/human-workflow/human-workflow-compiler.service";
 import type { HumanWorkflowCompileJobRecord } from "../modules/human-workflow/compile-job.service";
 import { listJobExecutionEvents } from "../modules/observability/job-execution-events";
+import multer from "multer";
+import nodeFs from "fs/promises";
+import nodePath from "path";
+import {
+  activeOtaApkPath,
+  publishOtaApk,
+  readActiveOtaRelease,
+} from "../modules/ota/apk-release";
 
 const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
+const APK_DIR = nodePath.join(process.cwd(), "apk");
 
 function intentPreview(intent: string): string {
   return intent
@@ -479,38 +488,20 @@ router.post("/auth/refresh", (req, res) => {
 // ─── APK download (public, no auth) ──────────────────────────────────────────
 
 async function readOtaManifest() {
-  const fs = await import("fs/promises");
-  const path = await import("path");
-  const apkPath = path.join(process.cwd(), "apk", "phone-network.apk");
-  const manifestPath = path.join(process.cwd(), "apk", "phone-network.json");
-  const apkBuffer = await fs.readFile(apkPath);
-  const apkSha256 = crypto.createHash("sha256").update(apkBuffer).digest("hex");
-  const stat = await fs.stat(apkPath);
-  let manifest: Record<string, unknown> = {};
-  try {
-    manifest = JSON.parse(await fs.readFile(manifestPath, "utf8")) as Record<string, unknown>;
-  } catch {
-    // Older images may not include a manifest; fall back to conservative values.
-  }
+  const release = await readActiveOtaRelease(APK_DIR);
   return {
-    version: typeof manifest.version === "string" ? manifest.version : "1.0.0",
-    versionCode: typeof manifest.versionCode === "number" ? manifest.versionCode : 1,
-    sha256: apkSha256,
-    size: stat.size,
-    filename: "phone-network.apk",
+    ...release,
   };
 }
 
 router.get("/apk/download", async (_req, res) => {
-  const fs = await import("fs/promises");
-  const path = await import("path");
-  const apkPath = path.join(process.cwd(), "apk", "phone-network.apk");
   try {
-    const stat = await fs.stat(apkPath);
+    const release = await readOtaManifest();
+    const apkPath = activeOtaApkPath(APK_DIR, release);
     res.setHeader("Content-Type", "application/vnd.android.package-archive");
-    res.setHeader("Content-Length", String(stat.size));
+    res.setHeader("Content-Length", String(release.size));
     res.setHeader("Cache-Control", "no-store");
-    res.setHeader("Content-Disposition", 'attachment; filename="phone-network.apk"');
+    res.setHeader("Content-Disposition", `attachment; filename="${release.filename}"`);
     const { createReadStream } = await import("fs");
     createReadStream(apkPath, { highWaterMark: 1024 * 1024 }).pipe(res);
   } catch {
@@ -1954,20 +1945,16 @@ router.patch("/canary/device/:id", requireAuth, async (req, res) => {
 });
 
 // ─── OTA Upload ────────────────────────────────────────────────────────────────
-import multer from "multer";
-import nodeFs from "fs/promises";
-import nodePath from "path";
-
-const APK_DIR = nodePath.join(process.cwd(), "apk");
 
 const apkStorage = multer.diskStorage({
   destination: (_req: any, _file: any, cb: any) => {
     const fsSync = require("fs");
-    fsSync.mkdirSync(APK_DIR, { recursive: true });
-    cb(null, APK_DIR);
+    const uploadDir = nodePath.join(APK_DIR, ".uploads");
+    fsSync.mkdirSync(uploadDir, { recursive: true });
+    cb(null, uploadDir);
   },
-  filename: (_req: any, file: any, cb: any) => {
-    cb(null, file.originalname || "phone-network.apk");
+  filename: (_req: any, _file: any, cb: any) => {
+    cb(null, `ota-${Date.now()}-${crypto.randomUUID()}.apk`);
   },
 });
 
@@ -2002,28 +1989,19 @@ router.post("/ota/upload", requireAuth, (req, res, next) => {
     return res.status(400).json({ ok: false, error: "No APK file provided. Use 'apk' field." });
   }
 
-  const uploaded = file.path;
-  const apkBuffer = await nodeFs.readFile(uploaded);
-  const apkSha256 = crypto.createHash("sha256").update(apkBuffer).digest("hex");
-  const apkSize = apkBuffer.length;
+  try {
+    const release = await publishOtaApk(APK_DIR, file.path);
+    console.log(
+      `[ota] APK published atomically: ${release.version} (${release.versionCode}) ` +
+      `${(release.size / 1024 / 1024).toFixed(1)}MB sha256=${release.sha256.slice(0, 12)}…`,
+    );
 
-  // Also set as the default APK (phone-network.apk) for OTA push
-  const defaultPath = nodePath.join(APK_DIR, "phone-network.apk");
-  if (uploaded !== defaultPath) {
-    await nodeFs.copyFile(uploaded, defaultPath);
+    res.json({ ok: true, data: { ...release, setAsDefault: true } });
+  } catch (err) {
+    await nodeFs.rm(file.path, { force: true });
+    console.error("[ota/upload] APK validation failed:", err);
+    res.status(400).json({ ok: false, error: (err as Error).message });
   }
-
-  console.log(`[ota] APK uploaded: ${file.originalname} (${(apkSize / 1024 / 1024).toFixed(1)}MB) sha256=${apkSha256.slice(0, 12)}…`);
-
-  res.json({
-    ok: true,
-    data: {
-      filename: file.originalname,
-      size: apkSize,
-      sha256: apkSha256,
-      setAsDefault: true,
-    },
-  });
 });
 
 // ─── OTA Push ─────────────────────────────────────────────────────────────────

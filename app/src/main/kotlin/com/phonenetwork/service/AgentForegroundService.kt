@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.IBinder
 import android.provider.Settings
 import android.util.Log
+import com.phonenetwork.BuildConfig
 import com.phonenetwork.accessibility.AgentAccessibilityService
 import com.phonenetwork.anti_detection.DnsBackgroundService
 import com.phonenetwork.automation.AutomationController
@@ -47,6 +48,10 @@ class AgentForegroundService : Service() {
         const val CHANNEL_ID      = "phone_network_agent"
         const val CHANNEL_NAME    = "Phone Network Agent"
         private const val TAG     = "PhoneNet/FgService"
+        private const val OTA_STATUS_PREFS = "phone_network_ota_status"
+        private const val PENDING_OTA_ATTEMPT = "pending_ota_attempt"
+        private const val PENDING_OTA_RESULT = "pending_ota_result"
+        private const val OTA_ATTEMPT_STALE_MS = 15 * 60 * 1_000L
 
         @Volatile var instance: AgentForegroundService? = null
 
@@ -168,6 +173,8 @@ class AgentForegroundService : Service() {
                     onConnected = { deviceId ->
                         Log.i(TAG, "DirectWs connected: deviceId=$deviceId")
                         updateNotification("Connected (DirectWs)")
+                        flushPendingOtaResult()
+                        reconcileInterruptedOtaAttempt()
                     },
                     onDisconnected = {
                         Log.i(TAG, "DirectWs disconnected")
@@ -183,6 +190,7 @@ class AgentForegroundService : Service() {
                     onOtaUpdate = { version, versionCode, apkUrl, apkSha256, mandatory ->
                         Log.i(TAG, "OTA update available: $version (code=$versionCode)")
                         updateNotification("Downloading update $version…")
+                        beginOtaAttempt(version, versionCode, apkSha256)
                         sendOtaResult("started", version, versionCode, apkSha256, null)
                         serviceScope.launch {
                             try {
@@ -319,14 +327,79 @@ class AgentForegroundService : Service() {
         apkSha256: String,
         error: String?
     ) {
-        directWsClient?.sendRaw(JSONObject().apply {
+        val payload = JSONObject().apply {
             put("type", "OTA_RESULT")
             put("status", status)
             put("version", version)
             put("versionCode", versionCode)
             put("apkSha256", apkSha256)
             if (error != null) put("error", error)
-        })
+        }
+        val terminal = status == "success" || status == "failed"
+        val prefs = getSharedPreferences(OTA_STATUS_PREFS, Context.MODE_PRIVATE)
+        if (terminal) {
+            prefs.edit()
+                .putString(PENDING_OTA_RESULT, payload.toString())
+                .remove(PENDING_OTA_ATTEMPT)
+                .commit()
+        }
+        if (directWsClient?.sendRaw(payload) == true && terminal) {
+            prefs.edit().remove(PENDING_OTA_RESULT).apply()
+        }
+    }
+
+    private fun beginOtaAttempt(version: String, versionCode: Int, apkSha256: String) {
+        val attempt = JSONObject().apply {
+            put("version", version)
+            put("versionCode", versionCode)
+            put("apkSha256", apkSha256)
+            put("startedAt", System.currentTimeMillis())
+        }
+        getSharedPreferences(OTA_STATUS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(PENDING_OTA_RESULT)
+            .putString(PENDING_OTA_ATTEMPT, attempt.toString())
+            .commit()
+    }
+
+    private fun flushPendingOtaResult() {
+        val prefs = getSharedPreferences(OTA_STATUS_PREFS, Context.MODE_PRIVATE)
+        val raw = prefs.getString(PENDING_OTA_RESULT, null) ?: return
+        val payload = runCatching { JSONObject(raw) }.getOrNull() ?: run {
+            prefs.edit().remove(PENDING_OTA_RESULT).apply()
+            return
+        }
+        if (directWsClient?.sendRaw(payload) == true) {
+            prefs.edit().remove(PENDING_OTA_RESULT).apply()
+        }
+    }
+
+    private fun reconcileInterruptedOtaAttempt() {
+        val prefs = getSharedPreferences(OTA_STATUS_PREFS, Context.MODE_PRIVATE)
+        val raw = prefs.getString(PENDING_OTA_ATTEMPT, null) ?: return
+        val attempt = runCatching { JSONObject(raw) }.getOrNull() ?: run {
+            prefs.edit().remove(PENDING_OTA_ATTEMPT).apply()
+            return
+        }
+        val version = attempt.optString("version")
+        val versionCode = attempt.optInt("versionCode", 0)
+        val apkSha256 = attempt.optString("apkSha256")
+        val startedAt = attempt.optLong("startedAt", 0L)
+
+        when {
+            versionCode > 0 && BuildConfig.VERSION_CODE == versionCode -> {
+                sendOtaResult("success", version, versionCode, apkSha256, null)
+            }
+            startedAt > 0L && System.currentTimeMillis() - startedAt >= OTA_ATTEMPT_STALE_MS -> {
+                sendOtaResult(
+                    "failed",
+                    version,
+                    versionCode,
+                    apkSha256,
+                    "OTA process ended without installing the requested version",
+                )
+            }
+        }
     }
 
     private fun initComponents() {

@@ -1,7 +1,8 @@
 {
-  "version": "4.0.59",
-  "versionCode": 115,
-  "sha256": "b467372a2dba904632f66a80a0c120c92ee24d4e951ba9ead70aa341f16737b2",
-  "size": 25156110,
+  "packageName": "com.phonenetwork",
+  "version": "4.0.60",
+  "versionCode": 116,
+  "sha256": "1a65adfcf4e2ab0ad05eccf10ac683bbe70db587fefc3f40017345a865da1fa6",
+  "size": 25172494,
   "filename": "phone-network.apk"
 }

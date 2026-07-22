@@ -31,7 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   1. Download APK to private cache dir (phone_network_ota/)
  *   2. Verify SHA256 checksum against server-provided hash
  *   3. Verify RSA signature with embedded public key (prevents MitM)
- *   4. Check versionCode >= current (prevents downgrade unless forceDowngrade=true)
+ *   4. Verify declared versionCode matches the APK, then compare APK vs installed app
  *   5. Install via root (pm install) or PackageInstaller API
  *
  * uninstall() — removes package via root `pm uninstall [--keep-data] <pkg>`
@@ -129,9 +129,9 @@ class OtaInstaller(private val context: Context) {
     ) = withContext(Dispatchers.IO) {
         // Guard: prevent multiple simultaneous OTA updates
         if (!isOtaInProgress.compareAndSet(false, true)) {
-            Log.w(TAG, "OTA already in progress — skipping duplicate request")
+            Log.w(TAG, "OTA already in progress — rejecting duplicate request")
             notify("OTA Skipped", "Another OTA update is already running")
-            return@withContext
+            throw IllegalStateException("Another OTA update is already running")
         }
 
         // Validate URL scheme — allow HTTP for local/trusted networks
@@ -165,23 +165,24 @@ class OtaInstaller(private val context: Context) {
             notify("OTA Step 3/6", "RSA signature OK")
 
             // ── 4. Version check ──────────────────────────────────────────────
-            notify("OTA Step 4/6", "Checking version (target=$versionCode)...")
-            if (!forceDowngrade) {
-                val current = currentVersionCode(apkFile)
-                if (versionCode < current) {
-                    throw IllegalStateException(
-                        "Downgrade prevented: current=$current, new=$versionCode"
-                    )
-                }
-                notify("OTA Step 4/6", "Version OK (current=$current, new=$versionCode)")
-            } else {
-                notify("OTA Step 4/6", "Version check skipped (forceDowngrade)")
-            }
+            notify("OTA Step 4/6", "Checking version (declared=$versionCode)...")
+            val apkVersionCode = apkVersionCode(apkFile)
+            val installedVersionCode = installedVersionCode()
+            OtaVersionPolicy.validate(
+                declaredVersionCode = versionCode.toLong(),
+                apkVersionCode = apkVersionCode,
+                installedVersionCode = installedVersionCode,
+                forceDowngrade = forceDowngrade,
+            )
+            notify(
+                "OTA Step 4/6",
+                "Version OK (installed=$installedVersionCode, target=$apkVersionCode)"
+            )
 
             // ── 5. Install via root ────────────────────────────────────────────
             // Note: App restart is handled by OtaRestartReceiver (MY_PACKAGE_REPLACED)
             notify("OTA Step 5/5", "Installing APK via pm install...")
-            installApk(apkFile)
+            installApk(apkFile, forceDowngrade)
             notify("OTA SUCCESS", "Install complete — app will restart via broadcast receiver")
 
         } catch (e: Exception) {
@@ -282,14 +283,41 @@ class OtaInstaller(private val context: Context) {
 
     // ─── Private: Version check ───────────────────────────────────────────────
 
-    private fun currentVersionCode(apkFile: File): Int {
+    private fun apkVersionCode(apkFile: File): Long {
         return try {
             val info = context.packageManager.getPackageArchiveInfo(apkFile.absolutePath, 0)
-            @Suppress("DEPRECATION")
-            info?.versionCode ?: 0
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                info?.longVersionCode ?: 0L
+            } else {
+                @Suppress("DEPRECATION")
+                (info?.versionCode ?: 0).toLong()
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "Could not read versionCode from APK: ${e.message}")
-            0
+            Log.w(TAG, "Could not read downloaded APK versionCode: ${e.message}")
+            0L
+        }
+    }
+
+    private fun installedVersionCode(): Long {
+        return try {
+            val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.getPackageInfo(
+                    context.packageName,
+                    android.content.pm.PackageManager.PackageInfoFlags.of(0L),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(context.packageName, 0)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                info.longVersionCode
+            } else {
+                @Suppress("DEPRECATION")
+                info.versionCode.toLong()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read installed versionCode: ${e.message}")
+            0L
         }
     }
 
@@ -297,7 +325,7 @@ class OtaInstaller(private val context: Context) {
     // ─── Private: Install via root ────────────────────────────────────────────
     // Note: App restart after install is handled by OtaRestartReceiver (MY_PACKAGE_REPLACED broadcast)
 
-    private suspend fun installApk(apkFile: File) {
+    private suspend fun installApk(apkFile: File, forceDowngrade: Boolean) {
         // Root install via `pm install` — works on Magisk-rooted devices
         // -r = replace existing, -d = allow downgrade (when forceDowngrade)
         //
@@ -312,7 +340,8 @@ class OtaInstaller(private val context: Context) {
         }
 
         Log.i(TAG, "APK copied to ${tmpApk.absolutePath}, starting pm install...")
-        val result = runRootCommand("pm install -r ${tmpApk.absolutePath}")
+        val downgradeFlag = if (forceDowngrade) " -d" else ""
+        val result = runRootCommand("pm install -r$downgradeFlag ${tmpApk.absolutePath}")
 
         // Cleanup tmp file
         runRootCommand("rm -f ${tmpApk.absolutePath}")
