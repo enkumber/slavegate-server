@@ -43,6 +43,7 @@ function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("ui_graph_runtime") ||
     fileName.includes("app_runtime_profiles") ||
     fileName.includes("edge_workflow_runtime_contract") ||
+    fileName.includes("edge_workflow_learning_receipts") ||
     fileName.includes("human_workflow_compiler_policy");
 }
 

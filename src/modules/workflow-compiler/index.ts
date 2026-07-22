@@ -43,29 +43,6 @@ export {
   updateWorkflowStatus,
 } from "./planner.service";
 
-// ─── Runner Service (VOLT — T5) ────────────────────────────────────────────
-
-export type {
-  RunCompiledRequest as RunnerRequest,
-  StepExecutionResult,
-  RunCompiledResult as RunnerResult,
-  RunnerContext,
-} from "./runner.service";
-
-// ─── Recovery Service (VOLT — T6) ──────────────────────────────────────────
-
-export {
-  attemptRecovery,
-  resetRecoveryCounts,
-  getRecoveryHistory,
-  getRecoveryStats,
-} from "./recovery.service";
-export type {
-  RecoveryAction as RecoveryActionType,
-  RecoveryResult,
-  RecoveryHistoryEntry,
-} from "./recovery.service";
-
 // ─── Compiler Routes (SPARK — T7) ──────────────────────────────────────────
 
 export { default as compilerRoutes } from "./compiler-routes";

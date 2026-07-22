@@ -9,9 +9,6 @@ const mocks = vi.hoisted(() => ({
   loadMap: vi.fn(),
   startRecording: vi.fn(),
   compileInstruction: vi.fn(),
-  runCompiledWorkflow: vi.fn(),
-  resetRecoveryCounts: vi.fn(),
-  attemptRecovery: vi.fn(),
   workflowEvents: {
     publish: vi.fn(),
   },
@@ -28,15 +25,6 @@ vi.mock("../app-mapping/recorder.service", () => ({
 
 vi.mock("../workflow-compiler/planner.service", () => ({
   compileInstruction: mocks.compileInstruction,
-}));
-
-vi.mock("../workflow-compiler/runner.service", () => ({
-  runCompiledWorkflow: mocks.runCompiledWorkflow,
-}));
-
-vi.mock("../workflow-compiler/recovery.service", () => ({
-  resetRecoveryCounts: mocks.resetRecoveryCounts,
-  attemptRecovery: mocks.attemptRecovery,
 }));
 
 vi.mock("../workflow-events", () => ({
@@ -164,29 +152,6 @@ function setupHappyPath() {
     compiledWorkflow,
     fromCache: false,
   });
-  mocks.runCompiledWorkflow.mockResolvedValue({
-    ok: true,
-    workflowId: compiledWorkflow.id,
-    status: "completed",
-    stepsCompleted: 1,
-    stepsTotal: 1,
-    recoveryCount: 0,
-    counters: {
-      compileLlmCalls: 1,
-      recoveryLlmCalls: 0,
-      creativeLlmCalls: 0,
-      runtimeLlmCalls: 0,
-      vlmCalls: 0,
-      deterministicSteps: 1,
-      batchedSteps: 0,
-      failedSteps: 0,
-      retriedSteps: 0,
-      recoveryAttempts: 0,
-      recoveryBudgetExhausted: 0,
-    },
-    results: [],
-    totalLatencyMs: 12,
-  });
 }
 
 describe("workflow-run service", () => {
@@ -226,7 +191,6 @@ describe("workflow-run service", () => {
     expect(result.data?.result).toEqual(expect.objectContaining({
       taskId: "99999999-9999-4999-8999-999999999999",
     }));
-    expect(mocks.runCompiledWorkflow).not.toHaveBeenCalled();
   });
 
   it("runs discovery and reloads the persisted app-map when the map is missing", async () => {
@@ -274,7 +238,6 @@ describe("workflow-run service", () => {
 
     expect(result.httpStatus).toBe(422);
     expect(result.code).toBe("WORKFLOW_COMPILE_FAILED");
-    expect(mocks.runCompiledWorkflow).not.toHaveBeenCalled();
   });
 
   it("rejects non-persisted compiled workflow IDs before execution", async () => {
@@ -300,7 +263,6 @@ describe("workflow-run service", () => {
     expect(result.ok).toBe(false);
     expect(result.code).toBe("WORKFLOW_NOT_PERSISTED");
     expect(result.error).toBe("Compiled workflow was not persisted");
-    expect(mocks.runCompiledWorkflow).not.toHaveBeenCalled();
   });
 
   it("publishes workflow-run lifecycle events with persisted IDs", async () => {

@@ -1888,6 +1888,18 @@ export class DirectWsServer {
     );
     const mergedVariables = mergeWorkflowStatusVariables(existing.rows[0]?.checkpoint, variables);
 
+    const { reconcileEdgeLearningStatus } = require("../modules/ui-graph/edge-learning.service");
+    await reconcileEdgeLearningStatus({
+      workflowId,
+      deviceId,
+      status,
+      currentStep: typeof step === "number" ? step : 0,
+      error,
+      variables: mergedVariables,
+    }).catch((learningError: Error) => {
+      console.error(`[ui-graph] edge learning reconciliation failed for ${workflowId}: ${learningError.message}`);
+    });
+
     const checkpoint = {
       stepIndex: step,
       loopStack: [],

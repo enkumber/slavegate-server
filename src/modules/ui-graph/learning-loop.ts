@@ -167,8 +167,28 @@ export class UiGraphLearningLoop {
          RETURNING c.*`,
         [input.candidateId],
       );
+      const updatedCandidate = updated.rows[0];
+      if (updatedCandidate?.status === "degraded" && updatedCandidate.promoted_entity_id) {
+        const entityTable = updatedCandidate.candidate_type === "selector"
+          ? "ui_graph_selectors"
+          : updatedCandidate.candidate_type === "transition"
+            ? "ui_graph_transitions"
+            : null;
+        if (entityTable) {
+          await client.query(
+            `UPDATE ${entityTable} SET status='degraded', updated_at=NOW() WHERE id=$1 AND status='promoted'`,
+            [updatedCandidate.promoted_entity_id],
+          );
+          await client.query(
+            `INSERT INTO ui_graph_promotion_events
+               (candidate_id, action, previous_status, next_status, actor, reason, evidence)
+             VALUES ($1,'degrade','promoted','degraded','edge_workflow_validation','First failed validation after promotion',$2)`,
+            [input.candidateId, JSON.stringify(input.evidence ?? {})],
+          );
+        }
+      }
       await client.query("COMMIT");
-      const row = updated.rows[0];
+      const row = updatedCandidate;
       return promotionDecision({
         type: row.candidate_type,
         discoveryMethod: row.discovery_method,

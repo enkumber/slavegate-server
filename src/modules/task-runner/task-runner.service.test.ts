@@ -24,9 +24,6 @@ const mocks = vi.hoisted(() => ({
   getWorkflow: vi.fn(),
   cancelPersistedWorkflowSafely: vi.fn(),
   llmJson: vi.fn(),
-  runCompiledWorkflow: vi.fn(),
-  attemptRecovery: vi.fn(),
-  resetRecoveryCounts: vi.fn(),
   compiledWorkflowToEdgeTemplate: vi.fn(),
 }));
 
@@ -71,15 +68,6 @@ vi.mock("../workflows/workflow-cancellation.service", () => ({
 
 vi.mock("../../utils/llm", () => ({
   llmJson: mocks.llmJson,
-}));
-
-vi.mock("../workflow-compiler/runner.service", () => ({
-  runCompiledWorkflow: mocks.runCompiledWorkflow,
-}));
-
-vi.mock("../workflow-compiler/recovery.service", () => ({
-  attemptRecovery: mocks.attemptRecovery,
-  resetRecoveryCounts: mocks.resetRecoveryCounts,
 }));
 
 vi.mock("../workflow-compiler/edge-template.adapter", () => ({
@@ -1257,7 +1245,6 @@ describe("task-runner compiled_workflow routine", () => {
       templateId: compiledWorkflow.id,
       template: expect.objectContaining({ runtimeContract: "edge-workflow/v2" }),
     }));
-    expect(mocks.runCompiledWorkflow).not.toHaveBeenCalled();
     expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
   });
 });
