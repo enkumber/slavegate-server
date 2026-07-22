@@ -4,12 +4,7 @@
  */
 
 import { Router, Request, Response } from "express";
-import fs from "fs/promises";
-import path from "path";
-import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { isDeviceOnline, sendStandaloneJobToDevice, waitForResult } from "../../transport/transport";
 import { buildPageDetection } from "./page-fingerprint";
-import { filterRelevantElements, generateElementId } from "./element-filter";
 import {
   startRecording,
   stopRecording,
@@ -21,19 +16,14 @@ import {
 } from "./recorder.service";
 import { validateAppMapQuality, type AppMap, type UiTreeNode } from "./schema";
 import {
-  assertRuntimeActionSafe,
   listRuntimeProfiles,
   loadRuntimeProfile,
-  renderRuntimeParams,
-  runtimeStateDetectionOverrides,
   saveRuntimeProfile,
   type AppRuntimeProfile,
-  type RuntimeRecipeStep,
 } from "./runtime-profile";
+import { materializeAppMapForMappingResponse } from "../ui-graph/materializer";
 
 const router = Router();
-
-const MAPPING_REFRESH_ARTIFACT_DIR = "/data/.openclaw/workspace/reports/phone-network/app-map-refresh";
 
 function requireMappingRefreshAuth(req: Request, res: Response): boolean {
   const expected = process.env.API_KEY;
@@ -46,31 +36,6 @@ function requireMappingRefreshAuth(req: Request, res: Response): boolean {
   if (apiKey === expected || bearer === expected) return true;
   res.status(401).json({ ok: false, error: "Unauthorized" });
   return false;
-}
-
-async function dispatchAndAwaitRefresh(
-  deviceId: string,
-  type: string,
-  params: Record<string, unknown>,
-  timeoutMs: number,
-): Promise<any> {
-  const job = await dispatcherService.dispatch({
-    deviceId,
-    type: type as any,
-    params,
-    timeoutMs,
-  });
-  const resultPromise = waitForResult(job.jobId, timeoutMs);
-  const sendResult = await sendStandaloneJobToDevice(deviceId, {
-    jobId: job.jobId,
-    type: type as any,
-    params,
-    timeoutMs,
-  });
-  if (!sendResult.sent) {
-    throw new Error(`Job ${job.jobId} was not dispatched (${sendResult.decision}${sendResult.reason ? `: ${sendResult.reason}` : ""})`);
-  }
-  return resultPromise;
 }
 
 export function a11yTapSucceeded(result: any): boolean {
@@ -147,19 +112,6 @@ function findPackageName(nodes: UiTreeNode[]): string | undefined {
   return undefined;
 }
 
-function foregroundPackageFromResult(result: any): string | undefined {
-  return result?.output?.packageName
-    ?? result?.output?.appId
-    ?? result?.output?.applicationId
-    ?? result?.output?.package
-    ?? result?.output?.currentPackage
-    ?? result?.output?.currentPackageName
-    ?? result?.packageName
-    ?? result?.appId
-    ?? result?.applicationId
-    ?? result?.package;
-}
-
 export function parseUiTreeResult(result: any): {
   nodes: UiTreeNode[];
   width: number;
@@ -206,36 +158,6 @@ export function parseUiTreeResult(result: any): {
   return { nodes, width, height, appVersion, packageName, nodeCount: countUiNodes(nodes) };
 }
 
-function buildCapturedPage(
-  pageId: string,
-  name: string,
-  nodes: UiTreeNode[],
-  width: number,
-  height: number,
-  discoveryOrder: number,
-) {
-  const detection = buildPageDetection(nodes);
-  const elements = filterRelevantElements(nodes, width, height);
-  const elementsWithIds: Record<string, any> = {};
-  elements.forEach((element, index) => {
-    const generated = generateElementId(element, discoveryOrder);
-    const base = generated || `element_${index}`;
-    const elementId = elementsWithIds[base] ? `${base}_${index}` : base;
-    elementsWithIds[elementId] = {
-      ...element,
-      leadsTo: "self",
-      semanticId: element.semanticId || `${pageId}.${elementId}`,
-    };
-  });
-
-  return {
-    name,
-    detection,
-    elements: elementsWithIds,
-    discoveryOrder,
-  };
-}
-
 export function isUsableAppUiTree(
   tree: { nodes: UiTreeNode[]; packageName?: string; nodeCount?: number },
   expectedPackageName: string,
@@ -247,31 +169,6 @@ export function isUsableAppUiTree(
   if (detection.signatureHash.startsWith("e3b0c44298fc1c14")) return false;
   if (detection.anchors.length === 0) return false;
   return true;
-}
-
-function summarizeRefresh(map: AppMap, failures: string[], screenshotPaths: string[]) {
-  const pages = Object.values(map.pages);
-  const elementCount = pages.reduce((sum, page) => sum + Object.keys(page.elements ?? {}).length, 0);
-  const elements = pages.flatMap((page) => Object.values(page.elements ?? {}));
-  const boundsCount = elements.filter((element: any) => element.bounds).length;
-  const selectorCount = elements.filter((element: any) =>
-    element.resourceId || element.text || element.contentDescription
-  ).length;
-  const signatureHashes = Object.fromEntries(
-    Object.entries(map.pages).map(([id, page]) => [id, page.detection.signatureHash]),
-  );
-
-  return {
-    appId: map.appId,
-    version: map.version,
-    pagesCaptured: Object.keys(map.pages),
-    signatureHashes,
-    elementCount,
-    boundsCoverage: elementCount ? boundsCount / elementCount : 0,
-    selectorCoverage: elementCount ? selectorCount / elementCount : 0,
-    screenshotPaths,
-    failures,
-  };
 }
 
 // ─── POST /refresh/:appId — DB-profile-driven safe app-map refresh ──────────
@@ -322,205 +219,14 @@ router.put("/runtime-profiles/:appId", async (req: Request, res: Response) => {
 router.post("/refresh/:appId", async (req: Request, res: Response) => {
   if (!requireMappingRefreshAuth(req, res)) return;
 
-  const startedAt = new Date();
-  const failures: string[] = [];
-  const screenshotPaths: string[] = [];
-  const body = req.body as {
-    deviceId?: string;
-    captureScreenshots?: boolean;
-    [key: string]: unknown;
-  };
   const appId = req.params.appId;
   if (!/^[a-z][a-z0-9_.]+(\.[a-z][a-z0-9_.]+)+$/.test(appId)) {
     return res.status(400).json({ ok: false, error: "Invalid appId format" });
   }
-
-  let profile: AppRuntimeProfile;
-  try {
-    const loaded = await loadRuntimeProfile(appId);
-    if (!loaded) return res.status(404).json({ ok: false, error: `No active runtime profile for ${appId}` });
-    profile = loaded;
-  } catch (err) {
-    return res.status(422).json({ ok: false, error: `Invalid runtime profile: ${(err as Error).message}` });
-  }
-
-  const deviceId = String(body.deviceId || profile.defaultDeviceId || "");
-  if (!deviceId) {
-    return res.status(400).json({ ok: false, error: "deviceId is required when the runtime profile has no default device" });
-  }
-
-  if (!isDeviceOnline(deviceId)) {
-    return res.status(503).json({ ok: false, error: `Device not connected: ${deviceId}` });
-  }
-
-  try {
-    const captures: Array<{ id: string; name: string; nodes: UiTreeNode[]; width: number; height: number }> = [];
-    const successfulSteps = new Set<string>();
-    const transitions: NonNullable<RuntimeRecipeStep["transition"]>[] = [];
-    let observedAppVersion: string | undefined;
-
-    async function ensureProfileAppForeground(context: string): Promise<void> {
-      const foreground = await dispatchAndAwaitRefresh(deviceId, "get_foreground_app", {}, 10000).catch(() => null);
-      const observedPackage = foregroundPackageFromResult(foreground);
-      // Accessibility can briefly report no active window immediately after an
-      // app launch/deep-link. Treat an explicit foreign package as a hard
-      // mismatch, but let the following UI-tree capture provide authoritative
-      // package proof when the foreground probe is inconclusive.
-      if (observedPackage && observedPackage !== profile.packageName) {
-        throw new Error(`${context}: foreground package ${observedPackage ?? "unknown"} does not match ${profile.packageName}`);
-      }
-    }
-
-    async function capture(id: string, name: string): Promise<void> {
-      let lastReject = "";
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
-        await ensureProfileAppForeground(`${id} attempt ${attempt}`);
-        const tree = parseUiTreeResult(await dispatchAndAwaitRefresh(
-          deviceId,
-          "ui_tree_dump",
-          { packageName: profile.packageName },
-          12000,
-        ));
-        if (isUsableAppUiTree(tree, profile.packageName)) {
-          observedAppVersion ??= tree.appVersion;
-          captures.push({ id, name, ...tree });
-          if (body.captureScreenshots) {
-            const shot = await dispatchAndAwaitRefresh(deviceId, "screenshot_for_vlm", { quality: 80 }, 20000);
-            const imageBase64 = shot?.output?.image_base64 ?? shot?.output?.screenshotBase64;
-            if (imageBase64) {
-              await fs.mkdir(MAPPING_REFRESH_ARTIFACT_DIR, { recursive: true });
-              const imagePath = path.join(MAPPING_REFRESH_ARTIFACT_DIR, `${startedAt.toISOString().replace(/[:.]/g, "-")}-${id}.jpg`);
-              await fs.writeFile(imagePath, Buffer.from(imageBase64, "base64"));
-              screenshotPaths.push(imagePath);
-            }
-          }
-          return;
-        }
-
-        lastReject = `package=${tree.packageName ?? "unknown"} nodeCount=${tree.nodeCount}`;
-        failures.push(`${id} attempt ${attempt}: rejected mismatched/empty UI tree (${lastReject})`);
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-
-      throw new Error(`${id}: unable to capture usable app UI tree after retries (${lastReject || "no tree"})`);
-    }
-
-    async function executeStep(step: RuntimeRecipeStep): Promise<void> {
-      if (step.whenInput && body[step.whenInput] == null) {
-        failures.push(`${step.id} skipped: input ${step.whenInput} not provided`);
-        return;
-      }
-      if (step.dependsOn && !successfulSteps.has(step.dependsOn)) {
-        failures.push(`${step.id} skipped: dependency ${step.dependsOn} did not succeed`);
-        return;
-      }
-      try {
-        if (step.type === "capture") {
-          await capture(step.stateKey!, step.name!);
-        } else {
-          const params = renderRuntimeParams(step.params ?? {}, profile, body) as Record<string, unknown>;
-          assertRuntimeActionSafe(profile, step, params);
-          const timeoutMs = step.type === "open_app" || step.type === "intent_send" ? 25000 : 15000;
-          const result = await dispatchAndAwaitRefresh(deviceId, step.type, params, timeoutMs);
-          if (step.type === "a11y_find_tap" && !a11yTapSucceeded(result)) {
-            throw new Error(String(result?.output?.error ?? "selector was not found"));
-          }
-        }
-        if (step.delayAfterMs) {
-          await new Promise((resolve) => setTimeout(resolve, Math.min(5000, Math.max(0, step.delayAfterMs!))));
-        }
-        successfulSteps.add(step.id);
-        if (step.transition) transitions.push(step.transition);
-      } catch (err) {
-        if (!step.optional) throw err;
-        failures.push(`${step.id} skipped: ${(err as Error).message}`);
-      }
-    }
-
-    for (const step of profile.resetRecipe) await executeStep(step);
-    for (const step of profile.mappingRecipe) await executeStep(step);
-
-    const now = new Date().toISOString();
-    const pages: AppMap["pages"] = {};
-    captures.forEach((captureEntry, index) => {
-      pages[captureEntry.id] = buildCapturedPage(
-        captureEntry.id,
-        captureEntry.name,
-        captureEntry.nodes,
-        captureEntry.width,
-        captureEntry.height,
-        index,
-      );
-    });
-    const detectionOverrides = runtimeStateDetectionOverrides(profile.metadata);
-    for (const [stateKey, override] of Object.entries(detectionOverrides)) {
-      const page = pages[stateKey];
-      if (!page) {
-        failures.push(`state detection override skipped: state ${stateKey} was not captured`);
-        continue;
-      }
-      if (override.requiredAnchors) page.detection.anchors = override.requiredAnchors;
-      if (override.optionalAnchors) page.detection.optionalAnchors = override.optionalAnchors;
-      if (override.forbiddenAnchors) page.detection.forbiddenAnchors = override.forbiddenAnchors;
-    }
-    for (const transition of transitions) {
-      const source = pages[transition.sourceStateKey];
-      const target = pages[transition.targetStateKey];
-      const element = source?.elements?.[transition.elementKey];
-      if (source && target && element) {
-        element.leadsTo = transition.targetStateKey;
-      } else {
-        failures.push(`transition ${transition.sourceStateKey} -> ${transition.targetStateKey} not materialized: state/element missing`);
-      }
-    }
-
-    const map: AppMap = {
-      appId: profile.appId,
-      appName: profile.appName,
-      version: `runtime-profile-${profile.profileVersion}-${startedAt.toISOString()}`,
-      appVersion: observedAppVersion ?? "observed-live",
-      deviceProfile: captures[0] ? { width: captures[0].width, height: captures[0].height } : undefined,
-      pages,
-      createdAt: now,
-      updatedAt: now,
-      recordedOn: deviceId,
-      pageCount: Object.keys(pages).length,
-      transitionCount: countTransitions(pages),
-    };
-
-    const quality = validateAppMapQuality(map);
-    const summary = summarizeRefresh(map, failures, screenshotPaths);
-    const summaryPath = path.join(
-      MAPPING_REFRESH_ARTIFACT_DIR,
-      `${startedAt.toISOString().replace(/[:.]/g, "-")}-summary.json`,
-    );
-    await fs.mkdir(MAPPING_REFRESH_ARTIFACT_DIR, { recursive: true });
-    await fs.writeFile(summaryPath, `${JSON.stringify({ summary, quality }, null, 2)}\n`, "utf8");
-
-    if (!quality.usable) {
-      return res.status(422).json({
-        ok: false,
-        error: "App-map refresh produced an unusable map; refusing to save",
-        quality,
-        summary: { ...summary, summaryPath },
-      });
-    }
-
-    await saveMap(map);
-
-    res.json({
-      ok: quality.usable,
-      quality,
-      summary: { ...summary, summaryPath },
-      safety: {
-        mode: profile.safetyPolicy.mode,
-        blocked: profile.safetyPolicy.blocked ?? [],
-      },
-      runtimeProfile: { appId: profile.appId, version: profile.profileVersion, source: "postgresql" },
-    });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: (err as Error).message, failures });
-  }
+  return res.status(409).json({
+    ok: false,
+    error: "Device-backed app-map refresh is disabled; materialization is server-side only",
+  });
 });
 
 // ─── POST /start — Start mapping an app on a device ──────────────────────────
@@ -617,12 +323,19 @@ router.get("/:appId", async (req: Request, res: Response) => {
     return res.status(400).json({ ok: false, error: "Invalid appId" });
   }
 
-  const map = await loadMap(appId);
-  if (!map) {
+  const rawMap = await loadMap(appId);
+  if (!rawMap) {
     return res.status(404).json({ ok: false, error: `Map not found: ${appId}` });
   }
 
-  res.json({ ok: true, map });
+  let profile: AppRuntimeProfile | null = null;
+  try {
+    profile = await loadRuntimeProfile(appId);
+  } catch (err) {
+    return res.status(422).json({ ok: false, error: `Invalid runtime profile: ${(err as Error).message}` });
+  }
+  const { map, provenance } = materializeAppMapForMappingResponse(rawMap, profile);
+  res.json({ ok: true, map, provenance });
 });
 
 // ─── DELETE /:appId — Delete an app map ───────────────────────────────────────

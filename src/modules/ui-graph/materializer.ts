@@ -1,6 +1,16 @@
 import { getDb } from "../../db/client";
 import type { AppMap } from "../app-mapping/schema";
+import {
+  runtimeProfileFromRow,
+  runtimeStateDetectionOverrides,
+  type AppRuntimeProfile,
+  type RuntimeStateDetectionOverride,
+} from "../app-mapping/runtime-profile";
 import { projectLegacyAppMap } from "./legacy-adapter";
+import type { LegacyGraphProjection } from "./legacy-adapter";
+import type { UiStateVariantDefinition } from "./types";
+import { createHash } from "crypto";
+import type { PoolClient } from "pg";
 
 function parseMap(value: unknown): AppMap | null {
   if (value && typeof value === "object") return value as AppMap;
@@ -19,14 +29,141 @@ export interface MaterializationSummary {
   errors: string[];
 }
 
-export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<MaterializationSummary, "apps" | "errors">> {
+export interface RuntimeProfileProjectionProvenance {
+  appMapVersion: string;
+  runtimeProfile?: {
+    version: number;
+    source: string;
+    digest: string;
+  };
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function runtimeProfileDigest(profile: AppRuntimeProfile): string {
+  return createHash("sha256")
+    .update(stableStringify({
+      appId: profile.appId,
+      profileVersion: profile.profileVersion,
+      metadata: profile.metadata ?? {},
+    }))
+    .digest("hex");
+}
+
+function mergeAnchors(base: string[], override: string[] | undefined): string[] {
+  const values = [...(base ?? []), ...(override ?? [])]
+    .map((anchor) => anchor.trim())
+    .filter(Boolean);
+  return [...new Set(values)].sort((a, b) => a.localeCompare(b));
+}
+
+function mergeVariantOverride(
+  variant: UiStateVariantDefinition,
+  override: RuntimeStateDetectionOverride,
+): UiStateVariantDefinition {
+  return {
+    ...variant,
+    requiredAnchors: mergeAnchors(variant.requiredAnchors, override.requiredAnchors),
+    optionalAnchors: mergeAnchors(variant.optionalAnchors, override.optionalAnchors),
+    forbiddenAnchors: mergeAnchors(variant.forbiddenAnchors, override.forbiddenAnchors),
+  };
+}
+
+export function materializeAppMapForRuntimeProfile(
+  map: AppMap,
+  profile: AppRuntimeProfile | null,
+): { projection: LegacyGraphProjection; provenance: RuntimeProfileProjectionProvenance } {
   const projection = projectLegacyAppMap(map);
+  const provenance: RuntimeProfileProjectionProvenance = { appMapVersion: map.version };
+  if (!profile) return { projection, provenance };
+
+  const overrides = runtimeStateDetectionOverrides(profile.metadata ?? {});
+  provenance.runtimeProfile = {
+    version: profile.profileVersion,
+    source: "postgresql",
+    digest: runtimeProfileDigest(profile),
+  };
+  if (Object.keys(overrides).length === 0) return { projection, provenance };
+
+  return {
+    projection: {
+      ...projection,
+      states: projection.states.map((state) => {
+        const override = overrides[state.key];
+        if (!override) return state;
+        return {
+          ...state,
+          variants: state.variants.map((variant) => mergeVariantOverride(variant, override)),
+        };
+      }),
+    },
+    provenance,
+  };
+}
+
+export function materializeAppMapForMappingResponse(
+  map: AppMap,
+  profile: AppRuntimeProfile | null,
+): { map: AppMap; provenance: RuntimeProfileProjectionProvenance } {
+  const provenance: RuntimeProfileProjectionProvenance = { appMapVersion: map.version };
+  if (!profile) return { map, provenance };
+
+  const overrides = runtimeStateDetectionOverrides(profile.metadata ?? {});
+  provenance.runtimeProfile = {
+    version: profile.profileVersion,
+    source: "postgresql",
+    digest: runtimeProfileDigest(profile),
+  };
+  if (Object.keys(overrides).length === 0) return { map, provenance };
+
+  const pages = Object.fromEntries(Object.entries(map.pages).map(([pageId, page]) => {
+    const override = overrides[pageId];
+    if (!override) return [pageId, page];
+    return [pageId, {
+      ...page,
+      detection: {
+        ...page.detection,
+        anchors: mergeAnchors(page.detection.anchors, override.requiredAnchors),
+        optionalAnchors: mergeAnchors(page.detection.optionalAnchors ?? [], override.optionalAnchors),
+        forbiddenAnchors: mergeAnchors(page.detection.forbiddenAnchors ?? [], override.forbiddenAnchors),
+      },
+    }];
+  }));
+
+  return { map: { ...map, pages }, provenance };
+}
+
+async function loadActiveRuntimeProfileForApp(client: PoolClient, appId: string): Promise<AppRuntimeProfile | null> {
+  const { rows } = await client.query(
+    `SELECT app_id, app_name, package_name, profile_version, reset_recipe,
+            mapping_recipe, safety_policy, default_device_id, metadata
+       FROM app_runtime_profiles
+      WHERE app_id = $1 AND active = TRUE
+      ORDER BY profile_version DESC, updated_at DESC
+      LIMIT 1`,
+    [appId],
+  );
+  return rows[0] ? runtimeProfileFromRow(rows[0]) : null;
+}
+
+export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<MaterializationSummary, "apps" | "errors">> {
   const client = await getDb().connect();
   let variantCount = 0;
   let selectorCount = 0;
   let transitionCount = 0;
   try {
     await client.query("BEGIN");
+    const profile = await loadActiveRuntimeProfileForApp(client, map.appId);
+    const { projection, provenance } = materializeAppMapForRuntimeProfile(map, profile);
     const stateIds = new Map<string, string>();
     const variantIds = new Map<string, string>();
 
@@ -46,7 +183,7 @@ export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<Materia
          ON CONFLICT (app_id, state_key) DO UPDATE SET
            name=EXCLUDED.name, metadata=ui_graph_states.metadata || EXCLUDED.metadata, active=TRUE, updated_at=NOW()
          RETURNING id`,
-        [map.appId, state.key, state.name, state.kind, state.safetyClass, JSON.stringify({ source: "legacy_app_map", appMapVersion: map.version })],
+        [map.appId, state.key, state.name, state.kind, state.safetyClass, JSON.stringify({ source: "legacy_app_map", ...provenance })],
       );
       const canonicalStateId = inserted.rows[0].id as string;
       stateIds.set(state.id, canonicalStateId);
@@ -59,13 +196,13 @@ export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<Materia
            ON CONFLICT (state_id, variant_key) DO UPDATE SET
              signature_hash=EXCLUDED.signature_hash, required_anchors=EXCLUDED.required_anchors,
              optional_anchors=EXCLUDED.optional_anchors, forbidden_anchors=EXCLUDED.forbidden_anchors,
-             app_version_pattern=EXCLUDED.app_version_pattern, device_class=EXCLUDED.device_class,
-             confidence_threshold=EXCLUDED.confidence_threshold, active=TRUE, updated_at=NOW()
+             app_version_pattern=EXCLUDED.app_version_pattern, locale_pattern=EXCLUDED.locale_pattern, device_class=EXCLUDED.device_class,
+             confidence_threshold=EXCLUDED.confidence_threshold, metadata=EXCLUDED.metadata, active=TRUE, updated_at=NOW()
            RETURNING id`,
           [canonicalStateId, variant.key, variant.signatureHash ?? null, JSON.stringify(variant.requiredAnchors),
             JSON.stringify(variant.optionalAnchors), JSON.stringify(variant.forbiddenAnchors), variant.appVersionPattern ?? null,
             variant.localePattern ?? null, variant.deviceClass ?? null, variant.confidenceThreshold ?? 0.72,
-            JSON.stringify({ source: "legacy_app_map", legacyVariantId: variant.id })],
+            JSON.stringify({ source: "legacy_app_map", legacyVariantId: variant.id, ...provenance })],
         );
         variantIds.set(variant.id, saved.rows[0].id as string);
         variantCount++;
@@ -109,10 +246,10 @@ export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<Materia
          ON CONFLICT (app_id, transition_key) DO UPDATE SET
            source_state_id=EXCLUDED.source_state_id, target_state_id=EXCLUDED.target_state_id,
            element_key=EXCLUDED.element_key, action=EXCLUDED.action, confidence=EXCLUDED.confidence,
-           metadata=ui_graph_transitions.metadata || EXCLUDED.metadata, updated_at=NOW()`,
+          metadata=ui_graph_transitions.metadata || EXCLUDED.metadata, updated_at=NOW()`,
         [map.appId, transition.key, sourceStateId, targetStateId, transition.elementKey ?? null,
           JSON.stringify(transition.action), JSON.stringify(transition.preconditions ?? {}), JSON.stringify(transition.postconditions ?? {}),
-          transition.cost, transition.safetyClass, transition.confidence, JSON.stringify({ source: "legacy_app_map", appMapVersion: map.version })],
+          transition.cost, transition.safetyClass, transition.confidence, JSON.stringify({ source: "legacy_app_map", ...provenance })],
       );
       transitionCount++;
     }

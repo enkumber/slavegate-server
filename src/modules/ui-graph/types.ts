@@ -32,6 +32,7 @@ export interface UiStateVariantDefinition {
   localePattern?: string | null;
   deviceClass?: string | null;
   confidenceThreshold?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface UiStateDefinition {

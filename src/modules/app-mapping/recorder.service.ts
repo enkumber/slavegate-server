@@ -442,6 +442,12 @@ export async function saveMap(map: AppMap): Promise<void> {
   } catch (err) {
     console.warn(`[app-mapping] Could not mirror map to seeds/app-maps: ${(err as Error).message}`);
   }
+  try {
+    const { materializeLegacyAppMap } = await import("../ui-graph/materializer");
+    await materializeLegacyAppMap(persistedMap);
+  } catch (err) {
+    console.warn(`[app-mapping] Could not materialize UI graph for ${map.appId}: ${(err as Error).message}`);
+  }
   console.log(`[app-mapping] Saved map for ${map.appId} to database and seeds/app-maps`);
 }
 

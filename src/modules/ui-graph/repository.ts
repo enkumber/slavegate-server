@@ -36,7 +36,8 @@ export class UiGraphRepository {
       `SELECT s.id, s.app_id, s.state_key, s.name, s.kind, s.safety_class,
               v.id AS variant_id, v.variant_key, v.signature_hash,
               v.required_anchors, v.optional_anchors, v.forbidden_anchors,
-              v.app_version_pattern, v.locale_pattern, v.device_class, v.confidence_threshold
+              v.app_version_pattern, v.locale_pattern, v.device_class, v.confidence_threshold,
+              v.metadata AS variant_metadata
        FROM ui_graph_states s
        LEFT JOIN ui_graph_state_variants v ON v.state_id = s.id AND v.active = TRUE
        WHERE s.app_id = $1 AND s.active = TRUE
@@ -76,6 +77,7 @@ export class UiGraphRepository {
           localePattern: row.locale_pattern,
           deviceClass: row.device_class,
           confidenceThreshold: Number(row.confidence_threshold ?? 0.72),
+          metadata: jsonObject(row.variant_metadata),
         });
       }
     }

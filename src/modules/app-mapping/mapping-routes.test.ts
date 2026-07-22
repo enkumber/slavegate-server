@@ -349,7 +349,7 @@ describe("reddit app-map refresh helpers", () => {
     expect(mocks.saveMap).not.toHaveBeenCalled();
   });
 
-  it("executes a generic DB-owned runtime profile without app constants in the route", async () => {
+  it("fails closed before device execution on the device-backed refresh route", async () => {
     mocks.loadRuntimeProfile.mockResolvedValue({
       appId: "com.example.app",
       appName: "Example",
@@ -406,19 +406,16 @@ describe("reddit app-map refresh helpers", () => {
     const server = await app();
     const response = await postJson(server, "/mapping/refresh/com.example.app", {});
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(409);
     expect(response.body).toMatchObject({
-      ok: true,
-      runtimeProfile: { appId: "com.example.app", version: 7, source: "postgresql" },
+      ok: false,
+      error: "Device-backed app-map refresh is disabled; materialization is server-side only",
     });
-    expect(mocks.saveMap).toHaveBeenCalledWith(expect.objectContaining({
-      appId: "com.example.app",
-      appName: "Example",
-      recordedOn: "11111111-1111-4111-8111-111111111111",
-    }));
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.saveMap).not.toHaveBeenCalled();
   });
 
-  it("uses the UI tree as package proof when the foreground probe has no active window", async () => {
+  it("does not capture UI trees when refresh is disabled", async () => {
     mocks.loadRuntimeProfile.mockResolvedValue({
       appId: "com.example.app",
       appName: "Example",
@@ -476,8 +473,9 @@ describe("reddit app-map refresh helpers", () => {
     const server = await app();
     const response = await postJson(server, "/mapping/refresh/com.example.app", {});
 
-    expect(response.status).toBe(200);
-    expect(response.body.ok).toBe(true);
-    expect(mocks.saveMap).toHaveBeenCalledWith(expect.objectContaining({ appId: "com.example.app" }));
+    expect(response.status).toBe(409);
+    expect(response.body.ok).toBe(false);
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.saveMap).not.toHaveBeenCalled();
   });
 });
