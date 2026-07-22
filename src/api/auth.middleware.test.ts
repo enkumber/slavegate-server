@@ -24,6 +24,9 @@ function app() {
   app.get("/api/devices", (req, res) => res.json({ ok: true, principal: (req as any).authPrincipal }));
   app.get("/api/debug/connections", (_req, res) => res.json({ ok: true }));
   app.get("/api/scalability/status", (_req, res) => res.json({ ok: true }));
+  app.get("/api/incidents", (_req, res) => res.json({ ok: true }));
+  app.get("/api/incidents/11111111-1111-4111-8111-111111111111", (_req, res) => res.json({ ok: true }));
+  app.get("/api/audits/daily", (_req, res) => res.json({ ok: true }));
   app.post("/api/agency/workflow-runs", (_req, res) => res.status(201).json({ ok: true }));
   app.post("/api/device-tokens/generate", (_req, res) => res.status(201).json({ ok: true }));
   app.post("/api/kill-switch", (_req, res) => res.status(200).json({ ok: true }));
@@ -143,6 +146,22 @@ describe("API auth middleware", () => {
 
     const response = await request("GET", "/api/debug/connections", { authorization: "Bearer agent-token" });
 
+    expect(response.status).toBe(200);
+  });
+
+  it.each([
+    "/api/incidents",
+    "/api/incidents/11111111-1111-4111-8111-111111111111",
+    "/api/audits/daily",
+  ])("allows openclaw_agent tokens on Kraken read route %s", async (path) => {
+    mockTokenRow("agent-token", {
+      id: "token-kraken",
+      purpose: "openclaw_agent",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      revoked_at: null,
+    });
+
+    const response = await request("GET", path, { authorization: "Bearer agent-token" });
     expect(response.status).toBe(200);
   });
 

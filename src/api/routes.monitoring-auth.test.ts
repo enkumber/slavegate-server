@@ -98,6 +98,19 @@ describe("real API router monitoring auth", () => {
     });
   });
 
+  it("allows Kraken read-only access to the incident registry", async () => {
+    mockOpenClawTokenLookup("agent-token");
+    mocks.db.query.mockResolvedValueOnce({ rows: [{ id: "incident-1", status: "open", assigned_agent: "kraken" }] });
+
+    const response = await getJson("/api/incidents", { authorization: "Bearer agent-token" });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      data: [{ id: "incident-1", status: "open", assigned_agent: "kraken" }],
+    });
+  });
+
   it("keeps dashboard JWT compatibility on real monitoring routes", async () => {
     const token = signJwt({ sub: "dashboard-user", role: "admin" }, 60_000);
 

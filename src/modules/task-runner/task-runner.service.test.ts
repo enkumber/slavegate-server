@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   cancelPersistedWorkflowSafely: vi.fn(),
   llmJson: vi.fn(),
   compiledWorkflowToEdgeTemplate: vi.fn(),
+  recordExhaustedTaskIncident: vi.fn(),
 }));
 
 vi.mock("../../db/client", () => ({
@@ -76,6 +77,10 @@ vi.mock("../workflow-compiler/edge-template.adapter", () => ({
 
 vi.mock("../workflow-events", () => ({
   workflowEvents: { publish: mocks.workflowEventsPublish },
+}));
+
+vi.mock("../incidents/incident.service", () => ({
+  recordExhaustedTaskIncident: mocks.recordExhaustedTaskIncident,
 }));
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";

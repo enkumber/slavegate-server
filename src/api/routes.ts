@@ -92,6 +92,7 @@ import {
   publishOtaApk,
   readActiveOtaRelease,
 } from "../modules/ota/apk-release";
+import { incidentService, type IncidentStatus } from "../modules/incidents/incident.service";
 
 const router = Router();
 
@@ -533,6 +534,80 @@ router.get("/devices/me/model-config", requireDeviceModelConfigAuth, getDeviceMo
 // ─── All routes below require auth ───────────────────────────────────────────
 
 router.use(requireApiGateAuth);
+
+// ─── Incidents & independent audit surface ──────────────────────────────────
+
+router.get("/incidents", async (req, res) => {
+  try {
+    const data = await incidentService.listIncidents({
+      status: typeof req.query.status === "string" ? req.query.status : undefined,
+      severity: typeof req.query.severity === "string" ? req.query.severity : undefined,
+      since: typeof req.query.since === "string" ? req.query.since : undefined,
+      limit: typeof req.query.limit === "string" ? Number(req.query.limit) : undefined,
+    });
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.get("/incidents/:id", async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) return res.status(400).json({ ok: false, error: "Invalid incident id" });
+  const data = await incidentService.getIncident(req.params.id);
+  if (!data) return res.status(404).json({ ok: false, error: "Incident not found" });
+  res.json({ ok: true, data });
+});
+
+router.post("/incidents/:id/status", async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) return res.status(400).json({ ok: false, error: "Invalid incident id" });
+  try {
+    const data = await incidentService.updateIncidentStatus({
+      id: req.params.id,
+      status: req.body?.status as IncidentStatus,
+      actor: typeof req.body?.actor === "string" ? req.body.actor : "kraken",
+      note: typeof req.body?.note === "string" ? req.body.note : undefined,
+    });
+    if (!data) return res.status(404).json({ ok: false, error: "Incident not found" });
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.post("/incidents/:id/events", async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) return res.status(400).json({ ok: false, error: "Invalid incident id" });
+  const eventType = req.body?.eventType;
+  if (!["shadow_check", "quarantined", "routed", "note"].includes(eventType)) {
+    return res.status(400).json({ ok: false, error: "Invalid incident event type" });
+  }
+  await incidentService.addIncidentEvent({
+    id: req.params.id,
+    eventType,
+    actor: typeof req.body?.actor === "string" ? req.body.actor : "kraken",
+    details: req.body?.details && typeof req.body.details === "object" ? req.body.details : {},
+  });
+  res.status(201).json({ ok: true });
+});
+
+router.get("/audits/daily", async (req, res) => {
+  try {
+    const date = typeof req.query.date === "string" ? req.query.date : new Date().toISOString().slice(0, 10);
+    const timezone = typeof req.query.timezone === "string" ? req.query.timezone : "Europe/Bucharest";
+    const data = await incidentService.getDailyAuditSnapshot(date, timezone);
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.post("/audits/runs", async (req, res) => {
+  try {
+    const data = await incidentService.saveAuditRun(req.body);
+    res.status(201).json({ ok: true, data });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
 
 // ─── Devices ──────────────────────────────────────────────────────────────────
 

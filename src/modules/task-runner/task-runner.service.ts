@@ -37,6 +37,7 @@ import { normalizeCachedHumanWorkflowTemplate } from "../human-workflow/human-wo
 import { cancelPersistedWorkflowSafely } from "../workflows/workflow-cancellation.service";
 import type { CompiledWorkflow } from "../workflow-compiler/types";
 import { compiledWorkflowToEdgeTemplate } from "../workflow-compiler/edge-template.adapter";
+import { recordExhaustedTaskIncident } from "../incidents/incident.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1022,6 +1023,7 @@ async function executeTask(task: TaskRow): Promise<void> {
         console.error(`[task-runner] Task ${taskId.slice(0, 8)} failed (retry ${newRetryCount}/${config.maxRetries}, next in ${nextRetryDelay}s): ${result.failReason}`);
       } else {
         console.error(`[task-runner] Task ${taskId.slice(0, 8)} failed permanently (${newRetryCount} retries exhausted): ${result.failReason}`);
+        await recordExhaustedTaskIncident(task, result, newRetryCount);
       }
     }
     
@@ -1059,6 +1061,7 @@ async function executeTask(task: TaskRow): Promise<void> {
       console.error(`[task-runner] Task ${taskId.slice(0, 8)} exception (retry ${newRetryCount}/${config.maxRetries}, next in ${nextRetryDelay}s):`, err);
     } else {
       console.error(`[task-runner] Task ${taskId.slice(0, 8)} exception (${newRetryCount} retries exhausted):`, err);
+      await recordExhaustedTaskIncident(task, { failReason: error.message }, newRetryCount);
     }
     
   } finally {
@@ -1390,10 +1393,15 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
       failureCode: taskResult.generatedWorkflow?.failureCode,
     });
 
+    if (!taskResult.success) {
+      await recordExhaustedTaskIncident(task, taskResult, config.maxRetries);
+    }
+
     return taskResult;
   } catch (err) {
     await failAgencyWorkflowRunWithError(task, err as Error);
     publishGeneratedWorkflowTaskEvent(task, "task_failed", { error: (err as Error).message });
+    await recordExhaustedTaskIncident(task, { failReason: (err as Error).message }, config.maxRetries);
     throw err;
   } finally {
     deviceLocks.set(task.device_id, false);

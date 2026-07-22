@@ -47,7 +47,11 @@ function hasMonitoringAccess(principal: AuthPrincipal): boolean {
 }
 
 function isMonitoringReadRoute(req: Request): boolean {
-  return MONITORING_READ_ROUTES.has(`${req.method.toUpperCase()} ${req.path}`);
+  if (MONITORING_READ_ROUTES.has(`${req.method.toUpperCase()} ${req.path}`)) return true;
+  if (req.method.toUpperCase() !== "GET") return false;
+  return req.path === "/incidents"
+    || /^\/incidents\/[0-9a-f-]{36}$/i.test(req.path)
+    || req.path === "/audits/daily";
 }
 
 function unauthorized(res: Response): void {
