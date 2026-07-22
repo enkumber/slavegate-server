@@ -27,6 +27,20 @@ const HUMAN_WORKFLOW_INITIAL_MAX_TOKENS = 4_096;
 const HUMAN_WORKFLOW_REPAIR_MAX_TOKENS = 6_144;
 const HUMAN_WORKFLOW_DEBUG_RESPONSE_MAX_CHARS = 100_000;
 const HUMAN_WORKFLOW_COMPILER_CACHE_VERSION = "2026-07-22-data-driven-edge-v1";
+const HUMAN_WORKFLOW_COMPILER_POLICY_KEY = "human_workflow_compiler_policy";
+
+async function loadHumanWorkflowCompilerPolicy(): Promise<string> {
+  try {
+    const result = await getDb().query<{ content: string }>(
+      "SELECT content FROM system_prompts WHERE key = $1 LIMIT 1",
+      [HUMAN_WORKFLOW_COMPILER_POLICY_KEY],
+    );
+    const content = result.rows[0]?.content;
+    return typeof content === "string" ? content.trim() : "";
+  } catch {
+    return "";
+  }
+}
 
 async function availableRuntimeProfiles() {
   try {
@@ -299,6 +313,7 @@ function buildHumanWorkflowCompilePrompt(input: {
   goal: string;
   target: HumanWorkflowTarget;
   appMap: AppMap | null;
+  compilerPolicy: string;
 }): string {
   const safetyClass = inferHumanWorkflowSafetyClass(input.goal);
   return [
@@ -315,14 +330,14 @@ function buildHumanWorkflowCompilePrompt(input: {
     "Allowed actions are generic interpreter primitives only: screen_wake,unlock,open_app,close_app,intent_send,a11y_find_tap,ocr_find_tap,tap,long_press,double_tap,swipe,scroll,type_text,set_focused_text,press_key,keyevent,ui_tree_dump,screenshot,screenshot_for_vlm,wait_for_idle,set_variable,classify_ui_tree,request_llm.",
     "Never use semantic_tap or an application-specific opcode. Selectors, packages, URLs, normalized coordinates and state rules must be explicit data from this prompt/App Map.",
     "Use request_llm only when semantic reasoning or creative generation is genuinely required. It must declare prompt, targetVariable or saveOutputAs, timeoutMs, responseFormat, and success/failure branches.",
-    "For navigation to an absolute http:// or https:// URL, prefer one intent_send action with android.intent.action.VIEW, the target package from runtime data, and the URL as uri. Do not edit a browser address bar with tap/type_text/press_key when intent_send can express the goal directly.",
     "Prefer selector-first navigation. Coordinates, when required, must be normalized and followed by an explicit state check.",
     `Use params.packageName=${input.packageName} when the workflow explicitly opens the target app.`,
     safetyClass === "read_only" ? "Do not include mutating actions." : "Include only mutations explicitly requested by the user.",
     "checkpoint is type checkpoint, never an action.",
     "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
     "No intent or outputSchema fields.",
-  ].join("\n");
+    input.compilerPolicy ? `Runtime compiler policy from PostgreSQL:\n${input.compilerPolicy}` : "",
+  ].filter(Boolean).join("\n");
 }
 
 function buildHumanWorkflowRepairPrompt(input: {
@@ -783,12 +798,14 @@ export class HumanWorkflowCompilerService {
     const platform = input.target.account_platform;
     const packageName = await humanWorkflowPackageName(platform);
     const appMap = await loadMap(packageName);
+    const compilerPolicy = await loadHumanWorkflowCompilerPolicy();
     const prompt = buildHumanWorkflowCompilePrompt({
       platform,
       packageName,
       goal: input.intent,
       target: input.target,
       appMap,
+      compilerPolicy,
     });
 
     const llmDebug: HumanWorkflowLlmDebug = {

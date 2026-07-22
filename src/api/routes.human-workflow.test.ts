@@ -1368,8 +1368,8 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.workflowService.saveExecutableGeneratedPlanCache).not.toHaveBeenCalled();
   });
 
-  it("repairs a structurally invalid read-only URL workflow with validator feedback", async () => {
-    const intent = "deschide browserul Chrome si mergi pe ciprianneculai.com";
+  it("repairs a structurally invalid workflow with validator feedback", async () => {
+    const intent = "deschide aplicatia tinta si verifica starea curenta";
     const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
     mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);
@@ -1385,8 +1385,8 @@ describe("dashboard human workflow routes", () => {
     mocks.llmJson.mockReset();
     mocks.llmJson
       .mockResolvedValueOnce({
-        id: "open_url_invalid",
-        name: "Open URL",
+        id: "inspect_app_invalid",
+        name: "Inspect app",
         platform: "android",
         safetyClass: "read_only",
         description: intent,
@@ -1397,13 +1397,13 @@ describe("dashboard human workflow routes", () => {
         steps: [
           { id: "wake", type: "action", action: "screen_wake", params: {} },
           { id: "unlock", type: "action", action: "unlock", params: {} },
-          { id: "type_url", type: "action", action: "type_text", params: { text: "https://ciprianneculai.com" } },
+          { id: "invalid_mutation", type: "action", action: "type_text", params: { text: "test" } },
           { id: "bad_condition", type: "condition", condition: { visible: true }, if_true: [] },
         ],
       })
       .mockResolvedValueOnce({
-        id: "open_url_repaired",
-        name: "Open URL",
+        id: "inspect_app_repaired",
+        name: "Inspect app",
         platform: "android",
         safetyClass: "read_only",
         description: intent,
@@ -1414,18 +1414,9 @@ describe("dashboard human workflow routes", () => {
         steps: [
           { id: "wake", type: "action", action: "screen_wake", params: {} },
           { id: "unlock", type: "action", action: "unlock", params: {} },
-          {
-            id: "open_url",
-            type: "action",
-            action: "intent_send",
-            params: {
-              action: "android.intent.action.VIEW",
-              packageName: "com.android.chrome",
-              uri: "https://ciprianneculai.com",
-            },
-          },
-          { id: "settle", type: "wait", duration: { min: 1_000, max: 1_000, distribution: "uniform" } },
-          { id: "done", type: "checkpoint", reason: "URL opened" },
+          { id: "open_target", type: "action", action: "open_app", params: { packageName: "android" } },
+          { id: "inspect", type: "action", action: "ui_tree_dump", params: {} },
+          { id: "done", type: "checkpoint", reason: "Current state inspected" },
         ],
       });
 
@@ -1435,6 +1426,9 @@ describe("dashboard human workflow routes", () => {
     });
 
     expect(response.status).toBe(202);
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{ content: "Database-owned compiler policy marker." }],
+    });
     const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
     await runner();
 
@@ -1442,17 +1436,12 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.llmJson.mock.calls[1][0]).toContain("condition step requires check or expression");
     expect(mocks.llmJson.mock.calls[1][0]).toContain("if_true must be a non-empty step array");
     expect(mocks.llmJson.mock.calls[1][0]).toContain("cannot include mutating term: type_text");
-    expect(mocks.llmJson.mock.calls[1][0]).toContain("prefer one intent_send action");
+    expect(mocks.llmJson.mock.calls[0][0]).toContain("Database-owned compiler policy marker.");
+    expect(mocks.llmJson.mock.calls[1][0]).toContain("Database-owned compiler policy marker.");
     expect(mocks.workflowService.saveExecutableGeneratedPlanCache).toHaveBeenCalledWith(
       expect.objectContaining({
         safetyClass: "read_only",
-        steps: expect.arrayContaining([
-          expect.objectContaining({
-            id: "open_url",
-            action: "intent_send",
-            params: expect.objectContaining({ uri: "https://ciprianneculai.com" }),
-          }),
-        ]),
+        steps: expect.arrayContaining([expect.objectContaining({ id: "inspect", action: "ui_tree_dump" })]),
       }),
       expect.anything(),
       key,
