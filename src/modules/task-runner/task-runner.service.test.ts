@@ -1245,6 +1245,13 @@ describe("task-runner compiled_workflow routine", () => {
       },
     });
     expect(mocks.compiledWorkflowToEdgeTemplate).toHaveBeenCalledWith(compiledWorkflow);
+    expect(mocks.saveTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      id: compiledWorkflow.id,
+      runtimeContract: "edge-workflow/v2",
+    }));
+    expect(mocks.saveTemplate.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.dispatchGeneratedWorkflowTemplate.mock.invocationCallOrder[0],
+    );
     expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
       deviceId: DEVICE_ID,
       templateId: compiledWorkflow.id,

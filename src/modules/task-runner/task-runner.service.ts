@@ -199,6 +199,10 @@ async function executeCompiledWorkflowTask(task: TaskRow): Promise<TaskRunnerRes
 
   try {
     const template = await compiledWorkflowToEdgeTemplate(workflow);
+    // The durable workflow row references workflow_templates(id).  Compiled
+    // edge workflows are created dynamically, so persist the complete template
+    // before dispatch instead of relying on a pre-existing cache artifact.
+    await workflowService.saveTemplate(template);
     const dispatch = await dispatchGeneratedWorkflowTemplate({
     templateId: template.id,
     template,
