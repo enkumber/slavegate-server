@@ -2,8 +2,6 @@ import { getDb } from "../../db/client";
 import { loadMap, startRecording } from "../app-mapping/recorder.service";
 import { validateAppMapQuality, type AppMap } from "../app-mapping/schema";
 import { compileInstruction } from "../workflow-compiler/planner.service";
-import { attemptRecovery, resetRecoveryCounts } from "../workflow-compiler/recovery.service";
-import { runCompiledWorkflow } from "../workflow-compiler/runner.service";
 import { workflowEvents } from "../workflow-events";
 import {
   MAX_WORKFLOW_RUN_INSTRUCTION_LENGTH,
@@ -208,50 +206,37 @@ export async function createWorkflowRun(input: CreateWorkflowRunRequest): Promis
       return { ok: false, code: "WORKFLOW_NOT_PERSISTED", status: "failed", httpStatus: 500, data: run, error };
     }
 
-    run = await updateRun(run.id, "running", {
+    const taskResult = await getDb().query<{ id: string }>(
+      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
+       VALUES (NULL, $1, 'compiled_workflow', $2, NOW(), 'queued')
+       RETURNING id`,
+      [
+        run.deviceId,
+        JSON.stringify({
+          compiledWorkflow: compileResult.compiledWorkflow,
+          compileLlmCalls: compileResult.fromCache ? 0 : 1,
+          disableTaskRetry: true,
+          source: "workflow_run",
+          workflowRunId: run.id,
+        }),
+      ],
+    );
+
+    run = await updateRun(run.id, "queued", {
       workflowId: compileResult.workflowId,
-      result: { fromCache: compileResult.fromCache ?? false },
+      result: { fromCache: compileResult.fromCache ?? false, taskId: taskResult.rows[0].id },
     });
-    publishRunEvent(run, "started", {
-      phase: "execute",
+    publishRunEvent(run, "queued", {
+      phase: "queue",
       workflowId: compileResult.workflowId,
+      taskId: taskResult.rows[0].id,
       stepsTotal: compileResult.compiledWorkflow.steps.length,
     });
 
-    resetRecoveryCounts(compileResult.compiledWorkflow.id);
-    const execution = await runCompiledWorkflow(
-      {
-        deviceId: run.deviceId,
-        workflow: compileResult.compiledWorkflow,
-        compileLlmCalls: compileResult.fromCache ? 0 : 1,
-      },
-      async (ctx, stepIndex, reason) => attemptRecovery(ctx, stepIndex, reason, compileResult.compiledWorkflow!.recoveryModel)
-    );
-
-    const finalStatus: WorkflowRunStatus = execution.status === "completed" ? "completed" : execution.status;
-    run = await updateRun(run.id, finalStatus, {
-      result: {
-        fromCache: compileResult.fromCache ?? false,
-        stepsCompleted: execution.stepsCompleted,
-        stepsTotal: execution.stepsTotal,
-        recoveryCount: execution.recoveryCount,
-        counters: execution.counters,
-        totalLatencyMs: execution.totalLatencyMs,
-      },
-      error: execution.error ?? null,
-    });
-    publishRunEvent(run, execution.ok ? "completed" : "failed", {
-      phase: "execute",
-      stepsCompleted: execution.stepsCompleted,
-      stepsTotal: execution.stepsTotal,
-      recoveryCount: execution.recoveryCount,
-      error: execution.error,
-    });
-
     return {
-      ok: execution.ok,
-      status: finalStatus,
-      httpStatus: execution.ok ? 201 : 502,
+      ok: true,
+      status: "queued",
+      httpStatus: 202,
       data: {
         ...run,
         appMap: {
@@ -261,10 +246,8 @@ export async function createWorkflowRun(input: CreateWorkflowRunRequest): Promis
           transitionCount: appMap.transitionCount,
         },
         compiledWorkflow: compileResult.compiledWorkflow,
-        execution,
         fromCache: compileResult.fromCache ?? false,
       },
-      error: execution.error,
     };
   } catch (err) {
     const error = (err as Error).message;

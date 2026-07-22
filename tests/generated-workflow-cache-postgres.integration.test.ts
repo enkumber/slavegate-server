@@ -52,6 +52,8 @@ describe("generated workflow cache PostgreSQL contract", () => {
         "034_generated_workflow_request_key.sql",
         "035_generated_workflow_canonical_artifact.sql",
         "060_generated_workflow_artifact_lifecycle.sql",
+        "088_app_runtime_profiles.sql",
+        "090_edge_workflow_runtime_contract.sql",
       ]) {
         await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", migration), "utf8"));
       }
@@ -75,7 +77,7 @@ describe("generated workflow cache PostgreSQL contract", () => {
     await adminPool?.end();
   });
 
-  it("persists, immediately reads, and dispatches an executable cache artifact by cacheKey", async () => {
+  it("persists and reads a cache artifact, then refuses server fallback without an edge agent", async () => {
     const persisted = await postJson("/api/workflows/generated", {
       workflow: generatedWorkflow(),
       requestKey: REQUEST_KEY,
@@ -106,16 +108,11 @@ describe("generated workflow cache PostgreSQL contract", () => {
       cacheKey,
       deviceId: DEVICE_ID,
     });
-    expect(dispatched.status, JSON.stringify(dispatched.body)).toBe(202);
-    expect(dispatched.body.data).toMatchObject({
-      cacheHit: true,
-      canExecuteFromCache: true,
-      cacheKey,
-      requestKey: REQUEST_KEY,
-      mode: "server",
-      templateId: "pg_generated_cache_contract_v1",
+    expect(dispatched.status, JSON.stringify(dispatched.body)).toBe(409);
+    expect(dispatched.body).toMatchObject({
+      ok: false,
+      code: "EDGE_WORKFLOW_V2_UNSUPPORTED",
     });
-    expect(dispatched.body.data.workflowId).toMatch(/^[0-9a-f-]{36}$/);
   });
 });
 
@@ -176,6 +173,7 @@ function generatedWorkflow() {
     name: "PG generated cache contract",
     description: "Validates persisted generated workflow cache reads and dispatch.",
     version: "1.0.0",
+    runtimeContract: "edge-workflow/v2",
     platform: "reddit",
     safetyClass: "read_only",
     intent: "reddit_account_health_scan",

@@ -2,11 +2,11 @@ import { scalabilityConfig } from "../../config/scalability.config";
 import { directWsServer } from "../../ws/direct-ws.server";
 import { sendEdgeWorkflowToDeviceEnforced } from "../../transport/transport";
 import { hbeService } from "../hbe/hbe.service";
-import { startWorkflow } from "./workflow.executor";
 import { workflowService } from "./workflow.service";
 import type { WorkflowCheckpoint, WorkflowTemplate } from "./types";
 import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 import { workflowEvents } from "../workflow-events";
+import { assertOperationalRuntimeContract } from "./runtime-contract.service";
 import { scheduleEdgeWorkflowAckWatchdog } from "./edge-workflow-lifecycle.service";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
@@ -35,7 +35,6 @@ export function resolveGeneratedWorkflowDeviceId(deviceId: string): string {
 function createGeneratedWorkflowCheckpoint(
   variables: Record<string, unknown> | undefined,
   hbeSession: Record<string, unknown>,
-  mode: "edge" | "server"
 ): WorkflowCheckpoint {
   return {
     stepIndex: 0,
@@ -54,17 +53,16 @@ function createGeneratedWorkflowCheckpoint(
       retriedSteps: 0,
       recoveryAttempts: 0,
       recoveryBudgetExhausted: 0,
-      mode,
+      mode: "edge",
     },
     checkpointAt: new Date().toISOString(),
   };
 }
 
-function requiresServerSemanticResolution(template: WorkflowTemplate): boolean {
+function containsLegacySemanticOpcode(template: WorkflowTemplate): boolean {
   const visit = (steps: WorkflowTemplate["steps"]): boolean => steps.some((step) => {
     if (step.type === "action" && step.action === "semantic_tap") return true;
-    if (step.type === "action" && step.action === "ui_tree_dump") return true;
-    if (step.type === "action" && step.params && typeof step.params.outputVariable === "string") return true;
+    if (step.type === "action" && step.onFailureSteps && visit(step.onFailureSteps)) return true;
     if (step.type === "condition") return visit(step.if_true) || visit(step.if_false ?? []);
     if (step.type === "loop") return visit(step.steps);
     return false;
@@ -92,7 +90,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
   variables?: Record<string, unknown>;
   controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
   logPrefix?: string;
-}): Promise<{ workflowId: string; status: "queued" | "running"; mode: "edge" | "server"; templateId: string; controlPlaneContext?: GeneratedWorkflowControlPlaneContext }> {
+}): Promise<{ workflowId: string; status: "queued" | "running"; mode: "edge"; templateId: string; controlPlaneContext?: GeneratedWorkflowControlPlaneContext }> {
   const { templateId, template, deviceId, accountId, variables, controlPlaneContext, logPrefix = "workflow" } = input;
   const validation = validateGeneratedWorkflowTemplate(template);
   if (!validation.template) {
@@ -100,6 +98,19 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     (err as Error & { status?: number; code?: string; validationErrors?: string[] }).status = 400;
     (err as Error & { status?: number; code?: string; validationErrors?: string[] }).code = "GENERATED_WORKFLOW_VALIDATION_FAILED";
     (err as Error & { status?: number; code?: string; validationErrors?: string[] }).validationErrors = validation.errors;
+    throw err;
+  }
+  await assertOperationalRuntimeContract(validation.template);
+  if (containsLegacySemanticOpcode(validation.template)) {
+    const err = new Error("semantic_tap is a legacy server-resolved opcode; recompile the workflow with explicit selectors or normalized coordinates");
+    (err as Error & { status?: number; code?: string }).status = 409;
+    (err as Error & { status?: number; code?: string }).code = "WORKFLOW_RECOMPILE_REQUIRED";
+    throw err;
+  }
+  if (!directWsServer.supportsEdgeExecution(deviceId)) {
+    const err = new Error("Full workflow execution requires an edge-capable Android agent");
+    (err as Error & { status?: number; code?: string }).status = 409;
+    (err as Error & { status?: number; code?: string }).code = "EDGE_WORKFLOW_V2_UNSUPPORTED";
     throw err;
   }
 
@@ -143,15 +154,14 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     ? { ...(variables ?? {}), controlPlaneContext }
     : variables;
 
-  const requiresServerMode = requiresServerSemanticResolution(template);
-  if (directWsServer.supportsEdgeExecution(deviceId) && !requiresServerMode) {
+  {
     const wf = await workflowService.create({
       templateId,
       deviceId,
       accountId,
       totalSteps: template.steps.length,
       hbeParams: hbeSession,
-      checkpoint: createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "edge"),
+      checkpoint: createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession),
     });
     const dispatch = await sendEdgeWorkflowToDeviceEnforced(
       deviceId,
@@ -214,44 +224,9 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     }
 
     await workflowService.markFailed(wf.id, "Edge dispatch failed");
-    console.warn(`[${logPrefix}] Edge dispatch failed for ${deviceId} — falling back to server execution`);
-  } else if (requiresServerMode) {
-    console.log(`[${logPrefix}] semantic resolution required — using server execution`);
+    const err = new Error("Full workflow edge dispatch failed; server step execution is forbidden");
+    (err as Error & { status?: number; code?: string }).status = 503;
+    (err as Error & { status?: number; code?: string }).code = "EDGE_WORKFLOW_V2_DISPATCH_FAILED";
+    throw err;
   }
-
-  const checkpoint = createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "server");
-  const wf = await workflowService.create({
-    templateId,
-    deviceId,
-    accountId,
-    totalSteps: template.steps.length,
-    hbeParams: hbeSession,
-    checkpoint,
-  });
-
-  startWorkflow(wf.id).catch(err => {
-    console.error(`[${logPrefix}] Failed to enqueue ${wf.id}: ${err.message}`);
-  });
-
-  workflowEvents.publish({
-    source: "workflow_executor",
-    event: "dispatch_queued",
-    workflowId: wf.id,
-    taskId: controlPlaneContext?.taskId,
-    agencyWorkflowRunId: controlPlaneContext?.agencyWorkflowRunId,
-    clientId: controlPlaneContext?.clientId,
-    accountId,
-    deviceId,
-    mode: "server",
-    status: "queued",
-    totalSteps: template.steps.length,
-    details: {
-      mode: "server",
-      templateId,
-      accountId,
-      controlPlaneContext,
-    },
-  });
-
-  return { workflowId: wf.id, status: "queued", mode: "server", templateId, controlPlaneContext };
 }

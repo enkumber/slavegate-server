@@ -45,9 +45,6 @@ export {
 
 // ─── Runner Service (VOLT — T5) ────────────────────────────────────────────
 
-export {
-  runCompiledWorkflow,
-} from "./runner.service";
 export type {
   RunCompiledRequest as RunnerRequest,
   StepExecutionResult,

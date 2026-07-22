@@ -258,8 +258,8 @@ describe("runCompiledWorkflow recovery budget", () => {
       expectedHash: "expected_hash",
       actualHash: "actual_hash",
     });
-    expect(generatedWorkflowRecoveryAttempts?.labels).toHaveBeenCalledWith("reddit", "fingerprint_mismatch");
-    expect(generatedWorkflowRecoveryBudgetExhausted?.labels).toHaveBeenCalledWith("reddit");
+    expect(generatedWorkflowRecoveryAttempts?.labels).toHaveBeenCalledWith("com.reddit.frontpage", "fingerprint_mismatch");
+    expect(generatedWorkflowRecoveryBudgetExhausted?.labels).toHaveBeenCalledWith("com.reddit.frontpage");
   });
 
   it("honors an explicit zero recovery budget without calling the recovery model", async () => {

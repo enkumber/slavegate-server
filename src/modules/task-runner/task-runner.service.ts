@@ -13,7 +13,6 @@
  */
 
 import { getDb } from "../../db/client";
-import { agentOrchestrator } from "../agents/orchestrator";
 import { isDeviceOnline } from "../../transport/transport";
 import type { TaskResult } from "../agents/types";
 import { llmJson } from "../../utils/llm";
@@ -37,8 +36,7 @@ import { assertHumanWorkflowMeaningful } from "../human-workflow/human-workflow-
 import { normalizeCachedHumanWorkflowTemplate } from "../human-workflow/human-workflow-normalization";
 import { cancelPersistedWorkflowSafely } from "../workflows/workflow-cancellation.service";
 import type { CompiledWorkflow } from "../workflow-compiler/types";
-import { runCompiledWorkflow } from "../workflow-compiler/runner.service";
-import { attemptRecovery, resetRecoveryCounts } from "../workflow-compiler/recovery.service";
+import { compiledWorkflowToEdgeTemplate } from "../workflow-compiler/edge-template.adapter";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -163,10 +161,32 @@ function isCompiledWorkflow(value: unknown): value is CompiledWorkflow {
       && typeof step.expectedPageHash === "string");
 }
 
+async function finalizeQueuedWorkflowRun(
+  task: TaskRow,
+  status: "completed" | "failed",
+  result: Record<string, unknown>,
+  error?: string,
+): Promise<void> {
+  const workflowRunId = typeof task.params?.workflowRunId === "string" ? task.params.workflowRunId : null;
+  if (!workflowRunId || !UUID_RE.test(workflowRunId)) return;
+  await getDb().query(
+    `UPDATE workflow_runs
+        SET status = $2,
+            result = $3,
+            error = $4,
+            started_at = COALESCE(started_at, NOW()),
+            completed_at = NOW(),
+            updated_at = NOW()
+      WHERE id = $1`,
+    [workflowRunId, status, JSON.stringify(result), error ?? null],
+  );
+}
+
 async function executeCompiledWorkflowTask(task: TaskRow): Promise<TaskRunnerResult> {
   const startedAt = Date.now();
   const workflow = task.params?.compiledWorkflow;
   if (!isCompiledWorkflow(workflow)) {
+    await finalizeQueuedWorkflowRun(task, "failed", { phase: "edge_admission" }, "INVALID_COMPILED_WORKFLOW");
     return {
       success: false,
       stepsCompleted: 0,
@@ -177,37 +197,63 @@ async function executeCompiledWorkflowTask(task: TaskRow): Promise<TaskRunnerRes
     };
   }
 
-  const compileLlmCalls = typeof task.params?.compileLlmCalls === "number"
-    ? Math.max(0, Math.floor(task.params.compileLlmCalls))
-    : 0;
-  resetRecoveryCounts(workflow.id);
-  const run = await runCompiledWorkflow(
-    { deviceId: task.device_id, workflow, compileLlmCalls },
-    async (ctx, stepIndex, reason) => attemptRecovery(
-      ctx,
-      stepIndex,
-      reason,
-      workflow.recoveryModel,
-    ),
-  );
-
-  const failedStep = run.results.find((result) => !result.success);
-  return {
-    success: run.ok,
-    stepsCompleted: run.stepsCompleted,
-    totalSteps: run.stepsTotal,
-    failedStep: failedStep?.stepIndex,
-    failReason: run.ok ? undefined : run.error ?? `Compiled workflow ended with status ${run.status}`,
-    tokenUsage: zeroTokenUsage(),
-    durationMs: run.totalLatencyMs,
-    output: {
-      workflowId: run.workflowId,
-      status: run.status,
-      recoveryCount: run.recoveryCount,
-      counters: run.counters,
-      results: run.results,
+  try {
+    const template = await compiledWorkflowToEdgeTemplate(workflow);
+    const dispatch = await dispatchGeneratedWorkflowTemplate({
+    templateId: template.id,
+    template,
+    deviceId: task.device_id,
+    variables: {
+      taskId: task.id,
+      compiledWorkflowId: workflow.id,
+      compileLlmCalls: typeof task.params?.compileLlmCalls === "number"
+        ? Math.max(0, Math.floor(task.params.compileLlmCalls))
+        : 0,
     },
-  };
+    controlPlaneContext: {
+      source: "task_runner",
+      routine: COMPILED_WORKFLOW_ROUTINE,
+      taskId: task.id,
+      deviceId: task.device_id,
+      platform: template.platform,
+    },
+    logPrefix: "task-runner-compiled-edge",
+    });
+    const finalWorkflow = await waitForGeneratedWorkflowFinal(dispatch.workflowId);
+    const finalVariables = checkpointVariables(finalWorkflow);
+    const ok = finalWorkflow.status === "completed";
+    const output = {
+      workflowId: dispatch.workflowId,
+      status: finalWorkflow.status,
+      mode: dispatch.mode,
+      runtimeContract: template.runtimeContract,
+      variables: finalVariables,
+    };
+    const failReason = ok ? undefined : finalWorkflow.error ?? `Compiled edge workflow ended with status ${finalWorkflow.status}`;
+    await finalizeQueuedWorkflowRun(task, ok ? "completed" : "failed", output, failReason);
+    return {
+      success: ok,
+      stepsCompleted: finalWorkflow.currentStep,
+      totalSteps: finalWorkflow.totalSteps ?? template.steps.length,
+      failReason,
+      tokenUsage: zeroTokenUsage(),
+      durationMs: Date.now() - startedAt,
+      output,
+    };
+  } catch (err) {
+    const error = (err as Error).message;
+    const output = { phase: "edge_dispatch", runtimeContract: "edge-workflow/v2", error };
+    await finalizeQueuedWorkflowRun(task, "failed", output, error);
+    return {
+      success: false,
+      stepsCompleted: 0,
+      totalSteps: workflow.steps.length,
+      failReason: error,
+      tokenUsage: zeroTokenUsage(),
+      durationMs: Date.now() - startedAt,
+      output,
+    };
+  }
 }
 
 function generatedWorkflowTaskSource(cacheKey?: string, requestKey?: string): "cache_key" | "request_key" {
@@ -267,136 +313,6 @@ function generatedWorkflowOutput(cached: GeneratedWorkflowPlanCacheRecord, varia
     output[key] = Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : null;
   }
   return output;
-}
-
-function sourceMetadataValue(cached: GeneratedWorkflowPlanCacheRecord, key: string): unknown {
-  return cached.sourceMetadata && typeof cached.sourceMetadata === "object"
-    ? cached.sourceMetadata[key]
-    : undefined;
-}
-
-function extractUiTreeEvidence(value: unknown): string {
-  if (!value || typeof value !== "object") return "";
-  const record = value as Record<string, unknown>;
-  const uiTree = record.uiTree ?? record.tree ?? record.nodes;
-  if (typeof uiTree === "string") return uiTree;
-  if (uiTree && typeof uiTree === "object") return JSON.stringify(uiTree);
-  return JSON.stringify(record);
-}
-
-function humanIntentRequestsComments(intent: string, cached: GeneratedWorkflowPlanCacheRecord): boolean {
-  if (/\bcomments?\b|comentarii|sectiunea de comentarii|secțiunea de comentarii/i.test(intent)) return true;
-  return cached.workflow.steps.some((step) =>
-    step.type === "action" &&
-    step.action === "semantic_tap" &&
-    step.params &&
-    (step.params as Record<string, unknown>).target === "reddit.first_visible_post.open_comments"
-  );
-}
-
-function uiTreeLooksLikeRedditComments(uiTreeText: string): boolean {
-  const normalized = uiTreeText.toLowerCase();
-  if (!normalized.includes("com.reddit.frontpage")) return false;
-  if (normalized.includes("inbox_screen") || normalized.includes("activity_title") || normalized.includes("notificationsscreen")) {
-    return false;
-  }
-  return (
-    normalized.includes("comment_list") ||
-    normalized.includes("comments_list") ||
-    normalized.includes("comment_layout") ||
-    normalized.includes("comment_header") ||
-    normalized.includes("search comments") ||
-    normalized.includes("sort comments") ||
-    normalized.includes("add a comment") ||
-    normalized.includes("join the conversation") ||
-    normalized.includes("/comments/")
-  );
-}
-
-function humanIntentRequestsAppInstall(intent: string): boolean {
-  return /\b(instaleaza|instalează|instalez|instalare|install|download|descarca|descarcă|actualizeaza|actualizează|update)\b/.test(intent) &&
-    /\b(reddit|com\.reddit\.frontpage)\b/.test(intent);
-}
-
-function validateRedditInstallEvidence(uiTreeText: string): string | null {
-  const normalized = uiTreeText.toLowerCase();
-  if (!normalized) {
-    return "HUMAN_WORKFLOW_APP_INSTALL_NOT_VERIFIED: final install evidence was empty";
-  }
-  if (
-    normalized.includes("sign in") ||
-    normalized.includes("signin") ||
-    normalized.includes("add account") ||
-    normalized.includes("google account") ||
-    normalized.includes("choose an account") ||
-    normalized.includes("not signed in") ||
-    normalized.includes("conectează-te") ||
-    normalized.includes("conecteaza-te") ||
-    normalized.includes("adaugă un cont") ||
-    normalized.includes("adauga un cont")
-  ) {
-    return "HUMAN_WORKFLOW_APP_INSTALL_BLOCKED: Google Play requires a signed-in Google account";
-  }
-  if (normalized.includes("com.reddit.frontpage")) return null;
-  if (!normalized.includes("com.android.vending")) {
-    return "HUMAN_WORKFLOW_APP_INSTALL_NOT_VERIFIED: Play Store or Reddit was not visible in final evidence";
-  }
-  const hasOpen = /\bopen\b|\bdeschide\b/.test(normalized);
-  const hasUninstall = /\buninstall\b|\bdezinstalează\b|\bdezinstaleaza\b/.test(normalized);
-  const stillInstallable = /\binstall\b|\binstalează\b|\binstaleaza\b/.test(normalized);
-  const updatingOrPending =
-    /\bupdate\b|\bactualizează\b|\bactualizeaza\b|\bpending\b|\bwaiting\b|\binstalling\b|\bse instalează\b|\bse instaleaza\b/.test(normalized);
-  if (hasOpen || hasUninstall) return null;
-  if (stillInstallable) {
-    return "HUMAN_WORKFLOW_APP_INSTALL_NOT_COMPLETED: Reddit is still installable in Play Store";
-  }
-  if (updatingOrPending) {
-    return "HUMAN_WORKFLOW_APP_INSTALL_NOT_COMPLETED: Reddit install did not finish before final verification";
-  }
-  return "HUMAN_WORKFLOW_APP_INSTALL_NOT_VERIFIED: Reddit install success was not visible in final evidence";
-}
-
-function validateHumanWorkflowFinalEvidence(
-  cached: GeneratedWorkflowPlanCacheRecord,
-  variables: Record<string, unknown>,
-): string | null {
-  if (sourceMetadataValue(cached, "source") !== "dashboard_human") return null;
-  const intent = String(sourceMetadataValue(cached, "intent") ?? "").toLowerCase();
-  if (!intent) return null;
-
-  const needsUiEvidence = cached.workflow.steps.some((step) =>
-    step.type === "action" &&
-    step.params &&
-    typeof step.params.outputVariable === "string"
-  );
-  if (needsUiEvidence && !variables._finalUiTree) {
-    return "HUMAN_WORKFLOW_FINAL_EVIDENCE_MISSING: final UI evidence was not captured";
-  }
-
-  if (intent.includes("askreddit") || intent.includes("/askreddit")) {
-    const uiTreeText = extractUiTreeEvidence(variables._finalUiTree).toLowerCase();
-    if (!uiTreeText.includes("com.reddit.frontpage")) {
-      return "HUMAN_WORKFLOW_TARGET_NOT_REACHED: Reddit was not visible in final UI evidence";
-    }
-    if (!uiTreeText.includes("askreddit") && !uiTreeText.includes("r/askreddit")) {
-      return "HUMAN_WORKFLOW_TARGET_NOT_REACHED: AskReddit was not visible in final UI evidence";
-    }
-  }
-
-  if (humanIntentRequestsComments(intent, cached)) {
-    const uiTreeText = extractUiTreeEvidence(variables._finalUiTree);
-    if (!uiTreeLooksLikeRedditComments(uiTreeText)) {
-      return "HUMAN_WORKFLOW_TARGET_NOT_REACHED: Reddit comments were not visible in final UI evidence";
-    }
-  }
-
-  if (humanIntentRequestsAppInstall(intent)) {
-    const uiTreeText = extractUiTreeEvidence(variables._finalUiTree);
-    const installFailure = validateRedditInstallEvidence(uiTreeText);
-    if (installFailure) return installFailure;
-  }
-
-  return null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1007,9 +923,7 @@ async function executeTask(task: TaskRow): Promise<void> {
         )
       : { rows: [] };
     const taskPlatform = typeof task.params?.platform === "string" ? task.params.platform : null;
-    const platform = task.routine === GENERATED_WORKFLOW_ROUTINE
-      ? taskPlatform || accountResult.rows[0]?.platform || "instagram"
-      : accountResult.rows[0]?.platform || taskPlatform || "instagram";
+    const platform = taskPlatform || accountResult.rows[0]?.platform || "android";
     const accountClientId = accountResult.rows[0]?.client_id ?? null;
     
     // Route by task type
@@ -1022,23 +936,8 @@ async function executeTask(task: TaskRow): Promise<void> {
       case "compiled_workflow":
         result = await executeCompiledWorkflowTask(task);
         break;
-      case "engage_session":
-        result = await executeEngageSession(task, platform);
-        break;
-      case "engage_feed":
-        result = await executeEngageFeed(task, platform);
-        break;
-      case "follow_users":
-        result = await executeFollowUsers(task, platform);
-        break;
-      case "post_photo":
-      case "post_reel":
-      case "post_story":
-        result = await executePost(task, platform);
-        break;
       default:
-        // Generic orchestrator execution
-        result = await executeGenericTask(task, platform);
+        result = legacyRoutineRequiresWorkflow(task);
     }
     
     // Prepare result JSON
@@ -1167,90 +1066,20 @@ async function executeTask(task: TaskRow): Promise<void> {
 
 // ─── Task Type Handlers ───────────────────────────────────────────────────────
 
-/**
- * engage_session: Combined session with likes, comments, follows
- * Uses params.actions and params.duration_minutes
- */
-async function executeEngageSession(task: TaskRow, platform: string): Promise<TaskResult> {
-  const params = task.params as {
-    session_index: number;
-    total_sessions: number;
-    duration_minutes: number;
-    actions: { likes: number; comments: number; follows?: number };
-    target: string;
+function legacyRoutineRequiresWorkflow(task: TaskRow): TaskRunnerResult {
+  return {
+    success: false,
+    stepsCompleted: 0,
+    totalSteps: 0,
+    failReason: `LEGACY_ROUTINE_REQUIRES_DB_WORKFLOW: ${task.routine}`,
+    tokenUsage: zeroTokenUsage(),
+    durationMs: 0,
+    output: {
+      code: "LEGACY_ROUTINE_REQUIRES_DB_WORKFLOW",
+      routine: task.routine,
+      requiredExecution: "edge-workflow/v2",
+    },
   };
-  
-  const { actions, duration_minutes, target } = params;
-  
-  // Build task description for orchestrator
-  const parts: string[] = [];
-  
-  if (actions.likes > 0) {
-    parts.push(`like ${actions.likes} posts`);
-  }
-  if (actions.comments > 0) {
-    parts.push(`comment on ${actions.comments} posts`);
-  }
-  if (actions.follows && actions.follows > 0) {
-    parts.push(`follow ${actions.follows} users`);
-  }
-  
-  const targetDesc = target.startsWith("hashtag:")
-    ? `from ${target.replace("hashtag:", "#")}`
-    : `from ${target}`;
-  
-  const taskDescription = `Open Instagram, browse ${targetDesc}, and ${parts.join(", ")}. Take about ${duration_minutes} minutes with natural pauses.`;
-  
-  return agentOrchestrator.executeTask(taskDescription, task.device_id, platform);
-}
-
-/**
- * engage_feed: Legacy engagement task
- */
-async function executeEngageFeed(task: TaskRow, platform: string): Promise<TaskResult> {
-  const params = task.params as {
-    actions: { likes: number; comments: number };
-    target: string;
-    duration_minutes: number;
-  };
-  
-  const taskDescription = `Open Instagram, go to ${params.target}, and like ${params.actions.likes} posts and comment on ${params.actions.comments} posts over ${params.duration_minutes} minutes.`;
-  
-  return agentOrchestrator.executeTask(taskDescription, task.device_id, platform);
-}
-
-/**
- * follow_users: Follow task
- */
-async function executeFollowUsers(task: TaskRow, platform: string): Promise<TaskResult> {
-  const params = task.params as {
-    count: number;
-    target: string;
-    unfollow_after_days?: number;
-  };
-  
-  const taskDescription = `Open Instagram, explore ${params.target}, and follow ${params.count} interesting users who might follow back.`;
-  
-  return agentOrchestrator.executeTask(taskDescription, task.device_id, platform);
-}
-
-/**
- * post_photo/post_reel/post_story: Posting tasks
- */
-async function executePost(task: TaskRow, platform: string): Promise<TaskResult> {
-  const params = task.params as {
-    post_id: string;
-    material_url: string;
-    caption: string;
-    hashtags: string[];
-  };
-  
-  const postType = task.routine.replace("post_", "");
-  const fullCaption = params.caption + (params.hashtags.length > 0 ? "\n\n" + params.hashtags.join(" ") : "");
-  
-  const taskDescription = `Open Instagram, create a new ${postType} using the image/video at ${params.material_url}, and post it with caption: "${fullCaption}"`;
-  
-  return agentOrchestrator.executeTask(taskDescription, task.device_id, platform);
 }
 
 /**
@@ -1375,16 +1204,6 @@ async function executeGeneratedWorkflowTask(
     }
   }
 
-  if (cached.compiledPlan.llmBudget.happyPathRequests !== 0) {
-    generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "dispatch_failed").inc();
-    return generatedWorkflowTaskFailure(
-      "GENERATED_WORKFLOW_LLM_BUDGET_NOT_CACHE_SAFE",
-      "compiled plan happy path must not require LLM calls",
-      startedAt,
-      cached,
-    );
-  }
-
   try {
     const suppliedVariables = params.variables && typeof params.variables === "object" && !Array.isArray(params.variables)
       ? params.variables as Record<string, unknown>
@@ -1457,23 +1276,6 @@ async function executeGeneratedWorkflowTask(
       };
     }
 
-    const humanEvidenceError = validateHumanWorkflowFinalEvidence(cached, finalVariables);
-    if (humanEvidenceError) {
-      return {
-        success: false,
-        stepsCompleted: finalWorkflow.currentStep,
-        totalSteps: finalWorkflow.totalSteps ?? cached.workflow.steps.length,
-        output: finalOutput,
-        tokenUsage: zeroTokenUsage(),
-        durationMs: Date.now() - startedAt,
-        failReason: humanEvidenceError,
-        generatedWorkflow: {
-          ...generatedWorkflowResult,
-          failureCode: humanEvidenceError.split(":")[0],
-        },
-      };
-    }
-
     return {
       success: true,
       stepsCompleted: finalWorkflow.currentStep,
@@ -1492,15 +1294,6 @@ async function executeGeneratedWorkflowTask(
       cached,
     );
   }
-}
-
-/**
- * Generic task: Pass routine as task description
- */
-async function executeGenericTask(task: TaskRow, platform: string): Promise<TaskResult> {
-  const taskDescription = `${task.routine}: ${JSON.stringify(task.params)}`;
-  
-  return agentOrchestrator.executeTask(taskDescription, task.device_id, platform);
 }
 
 // ─── Manual Task Execution ────────────────────────────────────────────────────
@@ -1540,9 +1333,7 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
       )
     : { rows: [] };
   const taskPlatform = typeof task.params?.platform === "string" ? task.params.platform : null;
-  const platform = task.routine === GENERATED_WORKFLOW_ROUTINE
-    ? taskPlatform || accountResult.rows[0]?.platform || "instagram"
-    : accountResult.rows[0]?.platform || taskPlatform || "instagram";
+  const platform = taskPlatform || accountResult.rows[0]?.platform || "android";
   const accountClientId = accountResult.rows[0]?.client_id ?? null;
   
   deviceLocks.set(task.device_id, true);
@@ -1560,22 +1351,8 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
       case "compiled_workflow":
         taskResult = await executeCompiledWorkflowTask(task);
         break;
-      case "engage_session":
-        taskResult = await executeEngageSession(task, platform);
-        break;
-      case "engage_feed":
-        taskResult = await executeEngageFeed(task, platform);
-        break;
-      case "follow_users":
-        taskResult = await executeFollowUsers(task, platform);
-        break;
-      case "post_photo":
-      case "post_reel":
-      case "post_story":
-        taskResult = await executePost(task, platform);
-        break;
       default:
-        taskResult = await executeGenericTask(task, platform);
+        taskResult = legacyRoutineRequiresWorkflow(task);
     }
     
     const status = taskResult.success ? "completed" : "failed";

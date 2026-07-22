@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   runCompiledWorkflow: vi.fn(),
   attemptRecovery: vi.fn(),
   resetRecoveryCounts: vi.fn(),
+  compiledWorkflowToEdgeTemplate: vi.fn(),
 }));
 
 vi.mock("../../db/client", () => ({
@@ -79,6 +80,10 @@ vi.mock("../workflow-compiler/runner.service", () => ({
 vi.mock("../workflow-compiler/recovery.service", () => ({
   attemptRecovery: mocks.attemptRecovery,
   resetRecoveryCounts: mocks.resetRecoveryCounts,
+}));
+
+vi.mock("../workflow-compiler/edge-template.adapter", () => ({
+  compiledWorkflowToEdgeTemplate: mocks.compiledWorkflowToEdgeTemplate,
 }));
 
 vi.mock("../workflow-events", () => ({
@@ -422,7 +427,7 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.taskRunnerDispatchLabels).toHaveBeenCalledWith("generated_workflow", "request_key", "dispatch_failed");
   });
 
-  it("fails cached browser workflows that try to open packageName android", async () => {
+  it("does not rewrite application packages from cached workflow data", async () => {
     const cached = cacheRecord({
       sourceMetadata: {
         source: "dashboard_human",
@@ -451,17 +456,17 @@ describe("task-runner generated_workflow routine", () => {
 
     const result = await executeTaskNow(TASK_ID);
 
-    expect(result).toMatchObject({
-      success: false,
-      failReason: expect.stringContaining("packageName=android"),
-      generatedWorkflow: expect.objectContaining({
-        failureCode: "HUMAN_WORKFLOW_UNDERCOMPILED",
+    expect(result).toMatchObject({ success: true });
+    expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      template: expect.objectContaining({
+        steps: expect.arrayContaining([
+          expect.objectContaining({ action: "open_app", params: { packageName: "android" } }),
+        ]),
       }),
-    });
-    expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
+    }));
   });
 
-  it("normalizes cached Gmail app workflows away from web intents before dispatch", async () => {
+  it("dispatches cached workflow navigation data without application-specific rewriting", async () => {
     const cached = cacheRecord({
       sourceMetadata: {
         source: "dashboard_human",
@@ -497,14 +502,14 @@ describe("task-runner generated_workflow routine", () => {
         steps: expect.arrayContaining([
           expect.objectContaining({
             id: "open_gmail_web",
-            action: "open_app",
-            params: expect.objectContaining({ packageName: "com.google.android.gm" }),
+            action: "intent_send",
+            params: expect.objectContaining({ uri: "https://mail.google.com" }),
           }),
         ]),
       }),
     }));
     const dispatched = mocks.dispatchGeneratedWorkflowTemplate.mock.calls[0][0].template;
-    expect(JSON.stringify(dispatched.steps)).not.toContain("mail.google.com");
+    expect(JSON.stringify(dispatched.steps)).toContain("mail.google.com");
   });
 
   it("materializes output schema defaults so edge checkpoints retain required result fields", async () => {
@@ -520,7 +525,7 @@ describe("task-runner generated_workflow routine", () => {
     expect(result).toMatchObject({ output: REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS });
   });
 
-  it("repairs cached dashboard human AskReddit hot workflows before dispatch", async () => {
+  it("does not repair product-specific routes in cached workflows", async () => {
     const cached = cacheRecord({
       sourceMetadata: {
         source: "dashboard_human",
@@ -562,20 +567,16 @@ describe("task-runner generated_workflow routine", () => {
 
     expect(result).toMatchObject({ success: true });
     const dispatched = mocks.dispatchGeneratedWorkflowTemplate.mock.calls[0][0];
-    expect(dispatched.template.steps).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          action: "semantic_tap",
-          params: expect.objectContaining({ target: "reddit_home_feed.subreddit_toolbar_search_button" }),
-        }),
-      ]),
-    );
     expect(dispatched.template.steps).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: "open_askreddit",
           action: "intent_send",
-          params: expect.objectContaining({ uri: "https://www.reddit.com/r/AskReddit/hot/" }),
+          params: expect.objectContaining({ uri: "https://www.reddit.com/r/AskReddit/" }),
+        }),
+        expect.objectContaining({
+          action: "semantic_tap",
+          params: expect.objectContaining({ target: "reddit_home_feed.subreddit_toolbar_search_button" }),
         }),
         expect.objectContaining({
           id: "open_first_post_comments",
@@ -854,7 +855,7 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledTimes(2);
   });
 
-  it("fails dashboard human AskReddit workflows without final UI evidence", async () => {
+  it("does not apply server-side product evidence rules", async () => {
     const cached = cacheRecord({
       sourceMetadata: {
         source: "dashboard_human",
@@ -881,13 +882,7 @@ describe("task-runner generated_workflow routine", () => {
 
     const result = await executeTaskNow(TASK_ID);
 
-    expect(result).toMatchObject({
-      success: false,
-      failReason: expect.stringContaining("HUMAN_WORKFLOW_FINAL_EVIDENCE_MISSING"),
-      generatedWorkflow: {
-        failureCode: "HUMAN_WORKFLOW_FINAL_EVIDENCE_MISSING",
-      },
-    });
+    expect(result).toMatchObject({ success: true });
   });
 
   it("accepts dashboard human AskReddit workflows with matching final UI evidence", async () => {
@@ -923,7 +918,7 @@ describe("task-runner generated_workflow routine", () => {
     expect(result).toMatchObject({ success: true });
   });
 
-  it("fails dashboard human Reddit comments workflows when final UI evidence is Activity inbox", async () => {
+  it("leaves final-state validation to workflow-declared edge conditions", async () => {
     const cached = cacheRecord({
       sourceMetadata: {
         source: "dashboard_human",
@@ -953,13 +948,7 @@ describe("task-runner generated_workflow routine", () => {
 
     const result = await executeTaskNow(TASK_ID);
 
-    expect(result).toMatchObject({
-      success: false,
-      failReason: expect.stringContaining("HUMAN_WORKFLOW_TARGET_NOT_REACHED"),
-      generatedWorkflow: {
-        failureCode: "HUMAN_WORKFLOW_TARGET_NOT_REACHED",
-      },
-    });
+    expect(result).toMatchObject({ success: true });
   });
 
   it("accepts dashboard human Reddit comments workflows with comments detail evidence", async () => {
@@ -995,7 +984,7 @@ describe("task-runner generated_workflow routine", () => {
     expect(result).toMatchObject({ success: true });
   });
 
-  it("fails dashboard human app install workflows when Play Store requires sign-in", async () => {
+  it("does not infer install failure from product-specific UI text", async () => {
     const cached = cacheRecord({
       sourceMetadata: {
         source: "dashboard_human",
@@ -1025,16 +1014,10 @@ describe("task-runner generated_workflow routine", () => {
 
     const result = await executeTaskNow(TASK_ID);
 
-    expect(result).toMatchObject({
-      success: false,
-      failReason: expect.stringContaining("HUMAN_WORKFLOW_APP_INSTALL_BLOCKED"),
-      generatedWorkflow: {
-        failureCode: "HUMAN_WORKFLOW_APP_INSTALL_BLOCKED",
-      },
-    });
+    expect(result).toMatchObject({ success: true });
   });
 
-  it("fails dashboard human app install workflows when Reddit is still installable", async () => {
+  it("does not infer install completion from product-specific UI text", async () => {
     const cached = cacheRecord({
       sourceMetadata: {
         source: "dashboard_human",
@@ -1064,13 +1047,7 @@ describe("task-runner generated_workflow routine", () => {
 
     const result = await executeTaskNow(TASK_ID);
 
-    expect(result).toMatchObject({
-      success: false,
-      failReason: expect.stringContaining("HUMAN_WORKFLOW_APP_INSTALL_NOT_COMPLETED"),
-      generatedWorkflow: {
-        failureCode: "HUMAN_WORKFLOW_APP_INSTALL_NOT_COMPLETED",
-      },
-    });
+    expect(result).toMatchObject({ success: true });
   });
 
   it("accepts dashboard human app install workflows with installed evidence", async () => {
@@ -1228,16 +1205,30 @@ describe("task-runner compiled_workflow routine", () => {
     mocks.dbQuery
       .mockResolvedValueOnce({ rows: [row] })
       .mockResolvedValue({ rows: [] });
-    mocks.runCompiledWorkflow.mockResolvedValueOnce({
-      ok: true,
-      workflowId: compiledWorkflow.id,
+    mocks.compiledWorkflowToEdgeTemplate.mockResolvedValueOnce({
+      id: compiledWorkflow.id,
+      name: compiledWorkflow.name,
+      platform: compiledWorkflow.appId,
+      description: compiledWorkflow.source,
+      version: "compiled-1",
+      runtimeContract: "edge-workflow/v2",
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 0,
+      steps: [{ type: "action", id: "observe", action: "screenshot", params: {} }],
+    });
+    mocks.dispatchGeneratedWorkflowTemplate.mockResolvedValueOnce({
+      workflowId: WORKFLOW_ID,
+      status: "running",
+      mode: "edge",
+      templateId: compiledWorkflow.id,
+    });
+    mocks.getWorkflow.mockResolvedValueOnce({
+      id: WORKFLOW_ID,
       status: "completed",
-      stepsCompleted: 1,
-      stepsTotal: 1,
-      recoveryCount: 1,
-      counters: { recoveryLlmCalls: 1, vlmCalls: 0 },
-      results: [{ stepIndex: 0, stepId: "observe", success: true, fingerprintMatch: true, postActionVerified: true, latencyMs: 12 }],
-      totalLatencyMs: 12,
+      currentStep: 1,
+      totalSteps: 1,
+      checkpoint: { variables: { observed: true } },
+      error: null,
     });
 
     const result = await executeTaskNow(TASK_ID);
@@ -1247,16 +1238,19 @@ describe("task-runner compiled_workflow routine", () => {
       stepsCompleted: 1,
       totalSteps: 1,
       output: {
-        workflowId: compiledWorkflow.id,
+        workflowId: WORKFLOW_ID,
         status: "completed",
-        recoveryCount: 1,
+        mode: "edge",
+        runtimeContract: "edge-workflow/v2",
       },
     });
-    expect(mocks.resetRecoveryCounts).toHaveBeenCalledWith(compiledWorkflow.id);
-    expect(mocks.runCompiledWorkflow).toHaveBeenCalledWith(
-      expect.objectContaining({ deviceId: DEVICE_ID, workflow: compiledWorkflow, compileLlmCalls: 0 }),
-      expect.any(Function),
-    );
+    expect(mocks.compiledWorkflowToEdgeTemplate).toHaveBeenCalledWith(compiledWorkflow);
+    expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      deviceId: DEVICE_ID,
+      templateId: compiledWorkflow.id,
+      template: expect.objectContaining({ runtimeContract: "edge-workflow/v2" }),
+    }));
+    expect(mocks.runCompiledWorkflow).not.toHaveBeenCalled();
     expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
   });
 });

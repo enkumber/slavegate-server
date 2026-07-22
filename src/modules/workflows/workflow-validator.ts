@@ -227,6 +227,7 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "detect_current_screen",
   "classify_reddit_health_scan",
   "a11y_find_tap",
+  "classify_ui_tree",
   "semantic_tap",
   "set_variable",
   "swipe",
@@ -235,6 +236,37 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "ui_tree_dump",
   "unlock",
   "vlm_generate_comment",
+  "wait_for_idle",
+] as const;
+
+// Generic interpreter primitives. Application packages, selectors, text,
+// coordinates, timing and decisions belong to the workflow payload/DB.
+const EDGE_WORKFLOW_V2_ACTIONS = [
+  "a11y_find_tap",
+  "classify_ui_tree",
+  "close_app",
+  "double_tap",
+  "get_foreground_app",
+  "get_screen_state",
+  "intent_send",
+  "keyevent",
+  "long_press",
+  "ocr_find_tap",
+  "open_app",
+  "press_key",
+  "request_llm",
+  "screen_off",
+  "screen_wake",
+  "screenshot",
+  "screenshot_for_vlm",
+  "scroll",
+  "set_focused_text",
+  "set_variable",
+  "swipe",
+  "tap",
+  "type_text",
+  "ui_tree_dump",
+  "unlock",
   "wait_for_idle",
 ] as const;
 
@@ -523,7 +555,8 @@ function validateGeneratedWorkflowStepInput(
   step: unknown,
   path: string,
   errors: string[],
-  seenIds: Set<string>
+  seenIds: Set<string>,
+  runtimeContract?: WorkflowTemplate["runtimeContract"],
 ): void {
   if (!isRecord(step)) {
     errors.push(`${path} must be an object`);
@@ -542,14 +575,32 @@ function validateGeneratedWorkflowStepInput(
   }
 
   switch (step.type) {
-    case "action":
+    case "action": {
+      const allowedActions = runtimeContract === "edge-workflow/v2"
+        ? EDGE_WORKFLOW_V2_ACTIONS
+        : GENERATED_WORKFLOW_ALLOWED_ACTIONS;
       if (typeof step.action !== "string" || step.action.length === 0) {
         errors.push(`${path}.action must be a non-empty string for action steps`);
-      } else if (!GENERATED_WORKFLOW_ALLOWED_ACTIONS.includes(step.action as typeof GENERATED_WORKFLOW_ALLOWED_ACTIONS[number])) {
-        errors.push(`${path}.action must be one of: ${GENERATED_WORKFLOW_ALLOWED_ACTIONS.join(", ")}`);
+      } else if (!(allowedActions as readonly string[]).includes(step.action)) {
+        errors.push(`${path}.action "${step.action}" is not allowed; must be one of: ${allowedActions.join(", ")}`);
       }
       if (step.params !== undefined && !isRecord(step.params)) {
         errors.push(`${path}.params must be an object when provided`);
+      }
+      if (step.action === "request_llm") {
+        const params = isRecord(step.params) ? step.params : {};
+        if (typeof params.prompt !== "string" || !params.prompt.trim()) {
+          errors.push(`${path}.params.prompt is required for request_llm`);
+        }
+        if (params.responseFormat !== undefined && !["text", "json"].includes(String(params.responseFormat))) {
+          errors.push(`${path}.params.responseFormat must be text or json`);
+        }
+        if (params.requiredKeys !== undefined && (!Array.isArray(params.requiredKeys) || params.requiredKeys.some((key) => typeof key !== "string" || !key))) {
+          errors.push(`${path}.params.requiredKeys must be an array of non-empty strings`);
+        }
+        if (params.captureScreenshot === true && params.screenshotVariable !== undefined) {
+          errors.push(`${path}.params must not define both captureScreenshot and screenshotVariable`);
+        }
       }
       if (step.action === "semantic_tap") {
         const target = isRecord(step.params) ? step.params.target : undefined;
@@ -572,7 +623,9 @@ function validateGeneratedWorkflowStepInput(
       if (step.expectedScreen !== undefined) {
         const screens = Array.isArray(step.expectedScreen) ? step.expectedScreen : [step.expectedScreen];
         for (const screen of screens) {
-          if (typeof screen !== "string" || !ALL_SCREEN_IDS.includes(screen as typeof ALL_SCREEN_IDS[number])) {
+          if (typeof screen !== "string" || !screen.trim()) {
+            errors.push(`${path}.expectedScreen must contain non-empty state identifiers`);
+          } else if (runtimeContract !== "edge-workflow/v2" && !ALL_SCREEN_IDS.includes(screen as typeof ALL_SCREEN_IDS[number])) {
             errors.push(`${path}.expectedScreen contains unknown screen: ${String(screen)}`);
           }
         }
@@ -601,13 +654,37 @@ function validateGeneratedWorkflowStepInput(
       if (step.retries !== undefined && (typeof step.retries !== "number" || step.retries < 0)) {
         errors.push(`${path}.retries must be a non-negative number when provided`);
       }
+      for (const key of ["retryDelayMs", "delayAfterMs"] as const) {
+        if (step[key] !== undefined && (typeof step[key] !== "number" || step[key] < 0 || step[key] > 600_000)) {
+          errors.push(`${path}.${key} must be a number between 0 and 600000 when provided`);
+        }
+      }
+      if (step.saveOutputAs !== undefined && (typeof step.saveOutputAs !== "string" || step.saveOutputAs.length === 0)) {
+        errors.push(`${path}.saveOutputAs must be a non-empty string when provided`);
+      }
+      if (
+        step.failureMode !== undefined &&
+        !["abort", "continue", "run_branch", "run_branch_then_retry"].includes(String(step.failureMode))
+      ) {
+        errors.push(`${path}.failureMode is invalid`);
+      }
+      if (step.onFailureSteps !== undefined) {
+        if (!Array.isArray(step.onFailureSteps)) {
+          errors.push(`${path}.onFailureSteps must be a step array when provided`);
+        } else {
+          step.onFailureSteps.forEach((child, index) =>
+            validateGeneratedWorkflowStepInput(child, `${path}.onFailureSteps[${index}]`, errors, seenIds, runtimeContract)
+          );
+        }
+      }
       if (step.timeoutMs !== undefined && (typeof step.timeoutMs !== "number" || step.timeoutMs < 1)) {
         errors.push(`${path}.timeoutMs must be a positive number when provided`);
       }
       break;
+    }
     case "wait":
-      if (step.duration === undefined && step.condition === undefined) {
-        errors.push(`${path} wait step must define duration or condition`);
+      if (step.duration === undefined && step.condition === undefined && step.until === undefined) {
+        errors.push(`${path} wait step must define duration, condition, or until`);
       }
       if (step.duration !== undefined) {
         validateRangeObject(step.duration, `${path}.duration`, errors, ["uniform", "lognormal", "normal"]);
@@ -615,10 +692,28 @@ function validateGeneratedWorkflowStepInput(
       if (step.condition !== undefined && typeof step.condition !== "string") {
         errors.push(`${path}.condition must be a string when provided`);
       }
+      if (step.until !== undefined) {
+        if (!isRecord(step.until)) {
+          errors.push(`${path}.until must be an object when provided`);
+        } else {
+          if (typeof step.until.action !== "string" || !(EDGE_WORKFLOW_V2_ACTIONS as readonly string[]).includes(step.until.action)) {
+            errors.push(`${path}.until.action must be a generic edge primitive`);
+          }
+          if (step.until.params !== undefined && !isRecord(step.until.params)) {
+            errors.push(`${path}.until.params must be an object when provided`);
+          }
+          if (typeof step.until.operator !== "string" || !["truthy", "falsy", "equals", "not_equals", "contains", "contains_ci", "not_contains", "not_contains_ci", "exists", "missing"].includes(step.until.operator)) {
+            errors.push(`${path}.until.operator is invalid`);
+          }
+          if (typeof step.until.timeoutMs !== "number" || step.until.timeoutMs < 1 || step.until.timeoutMs > 600_000) {
+            errors.push(`${path}.until.timeoutMs must be between 1 and 600000`);
+          }
+        }
+      }
       break;
     case "condition":
-      if (typeof step.check !== "string" || step.check.length === 0) {
-        errors.push(`${path}.check must be a non-empty string for condition steps`);
+      if ((typeof step.check !== "string" || step.check.length === 0) && (typeof step.expression !== "string" || step.expression.length === 0)) {
+        errors.push(`${path} condition step requires check or expression`);
       }
       if (step.probability !== undefined && (typeof step.probability !== "number" || step.probability < 0 || step.probability > 1)) {
         errors.push(`${path}.probability must be a number between 0 and 1 when provided`);
@@ -627,7 +722,7 @@ function validateGeneratedWorkflowStepInput(
         errors.push(`${path}.if_true must be a non-empty step array`);
       } else {
         step.if_true.forEach((child, index) =>
-          validateGeneratedWorkflowStepInput(child, `${path}.if_true[${index}]`, errors, seenIds)
+          validateGeneratedWorkflowStepInput(child, `${path}.if_true[${index}]`, errors, seenIds, runtimeContract)
         );
       }
       if (step.if_false !== undefined) {
@@ -635,7 +730,7 @@ function validateGeneratedWorkflowStepInput(
           errors.push(`${path}.if_false must be a step array when provided`);
         } else {
           step.if_false.forEach((child, index) =>
-            validateGeneratedWorkflowStepInput(child, `${path}.if_false[${index}]`, errors, seenIds)
+            validateGeneratedWorkflowStepInput(child, `${path}.if_false[${index}]`, errors, seenIds, runtimeContract)
           );
         }
       }
@@ -646,7 +741,7 @@ function validateGeneratedWorkflowStepInput(
         errors.push(`${path}.steps must be a non-empty step array for loop steps`);
       } else {
         step.steps.forEach((child, index) =>
-          validateGeneratedWorkflowStepInput(child, `${path}.steps[${index}]`, errors, seenIds)
+          validateGeneratedWorkflowStepInput(child, `${path}.steps[${index}]`, errors, seenIds, runtimeContract)
         );
       }
       break;
@@ -804,7 +899,7 @@ export interface GeneratedWorkflowCompiledPlan {
   checkpointCount: number;
   maxDepth: number;
   llmBudget: {
-    happyPathRequests: 0;
+    happyPathRequests: number;
     recoveryRequests: "only_on_failure";
   };
   steps: GeneratedWorkflowCompiledStep[];
@@ -834,13 +929,24 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
   }
 
   const candidate = template as Partial<WorkflowTemplate>;
+  if (candidate.runtimeContract !== undefined && candidate.runtimeContract !== "edge-workflow/v2") {
+    errors.push("workflow.runtimeContract must be edge-workflow/v2 when provided");
+  }
   if (!candidate.id || typeof candidate.id !== "string") errors.push("workflow.id must be a non-empty string");
   if (!candidate.name || typeof candidate.name !== "string") errors.push("workflow.name must be a non-empty string");
   if (!candidate.platform || typeof candidate.platform !== "string") {
     errors.push("workflow.platform must be a non-empty string");
   } else {
     const normalizedPlatform = normalizeGeneratedWorkflowPlatform(candidate.platform);
-    if (!GENERATED_WORKFLOW_PLATFORMS.includes(normalizedPlatform as typeof GENERATED_WORKFLOW_PLATFORMS[number])) {
+    if (
+      candidate.runtimeContract === "edge-workflow/v2" &&
+      !/^[a-z0-9][a-z0-9._-]{0,199}$/.test(normalizedPlatform)
+    ) {
+      errors.push("workflow.platform must be a safe app/profile identifier");
+    } else if (
+      candidate.runtimeContract !== "edge-workflow/v2" &&
+      !GENERATED_WORKFLOW_PLATFORMS.includes(normalizedPlatform as typeof GENERATED_WORKFLOW_PLATFORMS[number])
+    ) {
       errors.push(`workflow.platform must be one of: ${GENERATED_WORKFLOW_PLATFORMS.join(", ")}`);
     } else {
       candidate.platform = normalizedPlatform;
@@ -893,7 +999,7 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
   } else {
     const seenIds = new Set<string>();
     candidate.steps.forEach((step, index) =>
-      validateGeneratedWorkflowStepInput(step, `workflow.steps[${index}]`, errors, seenIds)
+      validateGeneratedWorkflowStepInput(step, `workflow.steps[${index}]`, errors, seenIds, candidate.runtimeContract)
     );
   }
   validateRedditAccountHealthIntent(candidate, errors);
@@ -921,6 +1027,7 @@ export function summarizeGeneratedWorkflowTemplate(
     outputSchema: template.outputSchema ?? null,
     allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
     recoveryPolicy: template.recoveryPolicy ?? null,
+    runtimeContract: template.runtimeContract ?? null,
     stepCount: template.steps.length,
     compiledPlan: options?.compiledPlan ?? compileGeneratedWorkflowTemplate(template),
   };
@@ -931,6 +1038,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
   let actionCount = 0;
   let checkpointCount = 0;
   let maxDepth = 0;
+  let explicitLlmRequests = 0;
 
   const visit = (stepList: WorkflowStep[], prefix: string, depth: number): void => {
     maxDepth = Math.max(maxDepth, depth);
@@ -944,6 +1052,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
 
       if (step.type === "action") {
         actionCount++;
+        if (step.action === "request_llm") explicitLlmRequests++;
         compiledStep.action = step.action;
         compiledStep.verification = step.verification ?? template.defaultVerificationStrategy;
         compiledStep.provenance = getGeneratedWorkflowStepProvenance(step);
@@ -962,7 +1071,9 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
 
       steps.push(compiledStep);
 
-      if (step.type === "condition") {
+      if (step.type === "action" && step.onFailureSteps) {
+        visit(step.onFailureSteps, `${path}.onFailureSteps`, depth + 1);
+      } else if (step.type === "condition") {
         visit(step.if_true, `${path}.if_true`, depth + 1);
         if (step.if_false) visit(step.if_false, `${path}.if_false`, depth + 1);
       } else if (step.type === "loop") {
@@ -984,6 +1095,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
     recoveryPolicy: template.recoveryPolicy ?? null,
     defaultVerificationStrategy: template.defaultVerificationStrategy,
     steps: template.steps,
+    runtimeContract: template.runtimeContract ?? null,
   });
   const cacheKey = createHash("sha256").update(cacheSource).digest("hex").slice(0, 24);
 
@@ -1006,7 +1118,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
     checkpointCount,
     maxDepth,
     llmBudget: {
-      happyPathRequests: 0,
+      happyPathRequests: explicitLlmRequests,
       recoveryRequests: "only_on_failure",
     },
     steps,
@@ -1271,8 +1383,8 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       cacheFirstPrompt: "POST /api/workflows/generated/prompt returns cached workflow+plan when requestKey is already known.",
       executeFromCache: "POST /api/workflows/generated can execute cached templates directly by cacheKey or requestKey.",
       canExecuteFromCache: "Boolean response hint; true means a later call can use cacheKey/requestKey without regenerating the workflow.",
-      happyPathLlmRequests: 0,
-      recovery: "LLM is reserved for recovery after deterministic execution fails.",
+      happyPathLlmRequests: "explicit_workflow_steps_only",
+      recovery: "LLM recovery must be declared by the workflow failure branch.",
     },
     template: {
       required: ["id", "name", "platform", "description", "version", "steps"],

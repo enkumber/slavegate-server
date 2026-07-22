@@ -41,6 +41,11 @@ const mocks = vi.hoisted(() => ({
   },
   llmJson: vi.fn(),
   loadMap: vi.fn(),
+  runtimeProfiles: [
+    { appId: "reddit", appName: "Reddit", packageName: "com.reddit.frontpage" },
+    { appId: "instagram", appName: "Instagram", packageName: "com.instagram.android" },
+    { appId: "gmail", appName: "Gmail", packageName: "com.google.android.gm" },
+  ],
   shortcutRegistryService: {
     lookupActiveShortcut: vi.fn(),
     recordHit: vi.fn(),
@@ -67,6 +72,13 @@ vi.mock("../modules/workflows/workflow.service", () => ({
 
 vi.mock("../modules/app-mapping/recorder.service", () => ({
   loadMap: mocks.loadMap,
+}));
+
+vi.mock("../modules/app-mapping/runtime-profile", () => ({
+  listRuntimeProfiles: vi.fn(async () => mocks.runtimeProfiles),
+  loadRuntimeProfile: vi.fn(async (appId: string) => mocks.runtimeProfiles.find((profile) =>
+    profile.appId === appId || profile.packageName === appId || profile.appName.toLowerCase() === appId.toLowerCase()
+  ) ?? null),
 }));
 
 vi.mock("../utils/llm", () => ({
@@ -496,7 +508,7 @@ describe("dashboard human workflow routes", () => {
     expect(response.body.data.plan.actions).toHaveLength(2);
   }, 10_000);
 
-  it("compiles accountless device app install workflows", async () => {
+  it("routes accountless app workflows through the data-driven compiler without built-in app shortcuts", async () => {
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
     mocks.db.query.mockResolvedValueOnce({
       rows: [{
@@ -511,34 +523,17 @@ describe("dashboard human workflow routes", () => {
       intent: INSTALL_REDDIT_INTENT,
     });
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
     expect(response.body.data).toMatchObject({
-      status: "ready",
+      status: "compiling",
       requestKey: accountlessRequestKey(),
-      cacheHit: false,
-      source: "shortcut",
-      safetyClass: "standard",
-      platform: "reddit",
-      target: {
-        device_id: DEVICE_ID,
-        account_id: null,
-        account_username: null,
-        account_platform: "reddit",
-      },
+      source: "llm",
     });
-    expect(mocks.workflowService.saveGeneratedPlanCache).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "dashboard_human_android_install_reddit_v1" }),
-      expect.any(Object),
-      accountlessRequestKey(),
-      expect.objectContaining({
-        artifactState: "promoted",
-        sourceMetadata: expect.objectContaining({
-          source: "dashboard_human",
-          accountId: null,
-          platform: "reddit",
-        }),
-      }),
-    );
+    expect(mocks.compileJobService.createOrGet).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: null,
+      platform: "reddit",
+    }));
+    expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
   });
 
   it("allows social human workflows without account_id during temporary no-safety mode", async () => {
@@ -1235,6 +1230,7 @@ describe("dashboard human workflow routes", () => {
         id: "gmail_vlad_complete",
         name: "Create Gmail account",
         platform: "android",
+        safetyClass: "standard",
         description: "Create the requested Gmail account.",
         version: "1.0.0",
         defaultVerificationStrategy: "local_only",
@@ -1277,7 +1273,7 @@ describe("dashboard human workflow routes", () => {
     );
   });
 
-  it("rejects cached dashboard human workflows that only wake and unlock for a real task", async () => {
+  it("invalidates stale cached dashboard workflows and queues a v2 recompile", async () => {
     const intent = "fa un cont nou de gmail si da-mi aici credentialele";
     const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce({
@@ -1313,16 +1309,16 @@ describe("dashboard human workflow routes", () => {
       intent,
     });
 
-    expect(response.status).toBe(422);
-    expect(response.body).toMatchObject({
-      ok: false,
-      code: "HUMAN_WORKFLOW_UNDERCOMPILED",
-      retryable: true,
-      nextAction: "retry_compile",
+    expect(response.status).toBe(202);
+    expect(response.body.data).toMatchObject({
+      status: "compiling",
+      source: "llm",
+      requestKey: key,
     });
+    expect(mocks.compileJobService.runInProcess).toHaveBeenCalled();
   });
 
-  it("normalizes browser Gmail account workflows away from hardcoded browser packages", async () => {
+  it("rejects invalid application plans instead of rewriting them with hardcoded packages", async () => {
     const intent = "deschide browserul chrome pe device si deschide un cont nou de gmail pt ioana popescu";
     const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
@@ -1366,24 +1362,13 @@ describe("dashboard human workflow routes", () => {
 
     expect(response.status).toBe(202);
     const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
-    await runner();
-
-    const savedTemplate = mocks.workflowService.saveExecutableGeneratedPlanCache.mock.calls[0][0];
-    expect(savedTemplate.steps).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        id: "open",
-        action: "intent_send",
-        params: expect.objectContaining({
-          uri: "https://www.gmail.com",
-        }),
-      }),
-    ]));
-    expect(savedTemplate.steps.find((step: { id: string }) => step.id === "open").params.packageName).toBeUndefined();
-    expect(JSON.stringify(savedTemplate.steps)).not.toContain("\"packageName\":\"android\"");
-    expect(JSON.stringify(savedTemplate.steps)).not.toContain("com.android.chrome");
+    await expect(runner()).rejects.toMatchObject({
+      code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
+    });
+    expect(mocks.workflowService.saveExecutableGeneratedPlanCache).not.toHaveBeenCalled();
   });
 
-  it("normalizes explicit Gmail app workflows away from web URLs", async () => {
+  it("preserves generic intent navigation without application-specific rewrites", async () => {
     const intent = "Deschide gmail si fa un cont nou de email pt mihai pavel";
     const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
@@ -1431,21 +1416,19 @@ describe("dashboard human workflow routes", () => {
     expect(savedTemplate.steps).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: "open",
-        action: "open_app",
+        action: "intent_send",
         params: expect.objectContaining({
-          packageName: "com.google.android.gm",
+          uri: "https://mail.google.com",
         }),
       }),
     ]));
-    expect(JSON.stringify(savedTemplate.steps)).not.toContain("mail.google.com");
+    expect(JSON.stringify(savedTemplate.steps)).not.toContain("com.google.android.gm");
     const prompt = mocks.llmJson.mock.calls[0][0] as string;
-    expect(prompt).toContain("package com.google.android.gm");
-    expect(prompt).toContain("For Gmail app goals, use open_app with params.packageName=com.google.android.gm");
-    expect(prompt).toContain("No intent or outputSchema fields.");
-    expect(prompt).not.toContain("No intent, outputSchema, credentials, passwords, or private tokens.");
+    expect(prompt).not.toContain("For Gmail app goals");
+    expect(prompt).toContain("Context: platform gmail, package com.google.android.gm");
   });
 
-  it("normalizes AI AskReddit hot workflows away from invented sort targets", async () => {
+  it("rejects legacy application-specific opcodes instead of normalizing them", async () => {
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
     mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);
     mocks.compileJobService.createOrGet.mockResolvedValueOnce(compileJobRecord({
@@ -1483,30 +1466,14 @@ describe("dashboard human workflow routes", () => {
 
     expect(response.status).toBe(202);
     const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
-    await runner();
-
-    const savedTemplate = mocks.workflowService.saveExecutableGeneratedPlanCache.mock.calls[0][0];
-    expect(savedTemplate.steps).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          action: "semantic_tap",
-          params: expect.objectContaining({ target: "reddit_home_feed.subreddit_toolbar_search_button" }),
-        }),
+    await expect(runner()).rejects.toMatchObject({
+      code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
+      validationErrors: expect.arrayContaining([
+        expect.stringContaining("semantic_tap"),
+        expect.stringContaining("vlm_generate_comment"),
       ]),
-    );
-    expect(savedTemplate.steps).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: "open_askreddit",
-          action: "intent_send",
-          params: expect.objectContaining({ uri: "https://www.reddit.com/r/AskReddit/hot/" }),
-        }),
-        expect.objectContaining({
-          action: "semantic_tap",
-          params: expect.objectContaining({ target: "reddit.first_visible_post.open_comments" }),
-        }),
-      ]),
-    );
+    });
+    expect(mocks.workflowService.saveExecutableGeneratedPlanCache).not.toHaveBeenCalled();
   });
 
   it("compiles explicit Reddit contextual comment workflows as standard write workflows", async () => {
@@ -1521,6 +1488,7 @@ describe("dashboard human workflow routes", () => {
       id: "workflow_reddit_greece_travel_comment",
       name: "Reddit GreeceTravel contextual comment",
       platform: "reddit",
+      safetyClass: "standard",
       description: "Open r/GreeceTravel, enter first post comments, and leave a contextual comment.",
       version: "1.0.0",
       defaultVerificationStrategy: "local_only",
@@ -1530,10 +1498,10 @@ describe("dashboard human workflow routes", () => {
         { id: "wait_after_open", type: "wait" },
         { id: "open_subreddit", type: "action", action: "intent_send", params: { uri: "https://www.reddit.com/r/GreeceTravel/", packageName: "com.reddit.frontpage" } },
         { id: "wait_subreddit", type: "wait", params: { waitMs: 1500 } },
-        { id: "open_first_post_comments", type: "action", action: "semantic_tap", params: { target: "reddit.first_visible_post.open_comments" } },
+        { id: "open_first_post_comments", type: "action", action: "a11y_find_tap", params: { textContains: "comment" } },
         { id: "dump_post_context", type: "action", action: "ui_tree_dump", params: { outputVariable: "_postContextUiTree" } },
         { id: "wait_context", type: "wait", condition: "page_loaded", duration: 10 },
-        { id: "generate_comment", type: "action", action: "vlm_generate_comment", params: { post_description_var: "_postContextUiTree", target_variable: "_generated_comment" } },
+        { id: "generate_comment", type: "action", action: "request_llm", params: { prompt: "Write a contextual reply using {{_postContextUiTree}}", responseFormat: "text", saveOutputAs: "_generated_comment", timeoutMs: 20000 } },
         { id: "tap_comment_input", type: "action", action: "a11y_find_tap", params: { textContains: "Add a comment" } },
         { id: "type_comment", type: "action", action: "type_text", params: { textFromVariable: "_generated_comment" } },
         { id: "wait_before_post", type: "wait" },
@@ -1557,7 +1525,7 @@ describe("dashboard human workflow routes", () => {
       expect.objectContaining({
         safetyClass: "standard",
         steps: expect.arrayContaining([
-          expect.objectContaining({ action: "vlm_generate_comment" }),
+          expect.objectContaining({ action: "request_llm" }),
           expect.objectContaining({ action: "type_text" }),
           expect.objectContaining({ id: "wait_after_open", duration: { min: 1000, max: 1000, distribution: "uniform" } }),
           expect.objectContaining({ id: "wait_subreddit", duration: { min: 1500, max: 1500, distribution: "uniform" } }),

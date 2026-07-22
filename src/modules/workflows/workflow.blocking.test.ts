@@ -184,10 +184,10 @@ describe("workflow executor package resolution", () => {
   });
 });
 
-// ─── POST /workflows — fire-and-forget startWorkflow ──────────────────────
+// ─── POST /workflows — full edge workflow only ────────────────────────────
 
-describe("POST /workflows — non-blocking startWorkflow", () => {
-  it("should NOT await startWorkflow in the route handler", async () => {
+describe("POST /workflows — no server step execution", () => {
+  it("does not invoke the legacy server-side workflow executor", async () => {
     const fs = await import("fs");
     const path = await import("path");
     const workflowSection = fs.readFileSync(
@@ -195,11 +195,9 @@ describe("POST /workflows — non-blocking startWorkflow", () => {
       "utf8"
     );
 
-    // Should NOT have "await startWorkflow" (fire-and-forget in legacy path)
-    expect(workflowSection).not.toMatch(/await\s+startWorkflow\(/);
-
-    // Legacy path should have fire-and-forget with .catch
-    expect(workflowSection).toContain("startWorkflow(wf.id).catch");
+    expect(workflowSection).not.toContain('from "./workflow.executor"');
+    expect(workflowSection).not.toContain("startWorkflow(");
+    expect(workflowSection).toContain("server step execution is forbidden");
   });
 });
 
@@ -224,8 +222,8 @@ describe("Generated workflow contract validation", () => {
         execute: "POST /api/workflows/generated with { deviceId, workflow | cacheKey | requestKey }",
       },
       compiledPlan: {
-        happyPathLlmRequests: 0,
-        recovery: "LLM is reserved for recovery after deterministic execution fails.",
+        happyPathLlmRequests: "explicit_workflow_steps_only",
+        recovery: "LLM recovery must be declared by the workflow failure branch.",
         requestKey: "Stable hash returned by /prompt before LLM generation; use it to check cache first.",
         cacheFirstPrompt: "POST /api/workflows/generated/prompt returns cached workflow+plan when requestKey is already known.",
         executeFromCache: "POST /api/workflows/generated can execute cached templates directly by cacheKey or requestKey.",
@@ -252,7 +250,7 @@ describe("Generated workflow contract validation", () => {
     expect(result.ok).toBe(false);
     expect(result.errors).toContain("workflow.steps[0].action must be a non-empty string for action steps");
     expect(result.errors).toContain('workflow.steps[1].id duplicates step id "same"');
-    expect(result.errors).toContain("workflow.steps[1] wait step must define duration or condition");
+    expect(result.errors).toContain("workflow.steps[1] wait step must define duration, condition, or until");
     expect(result.errors).toContain("workflow.steps[2].count.min must be <= workflow.steps[2].count.max");
     expect(result.errors).toContain("workflow.steps[2].steps must be a non-empty step array for loop steps");
   });
@@ -299,10 +297,10 @@ describe("Generated workflow contract validation", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors).toEqual(expect.arrayContaining([
-      expect.stringContaining("workflow.steps[0].action must be one of:"),
-      expect.stringContaining("workflow.steps[1].action must be one of:"),
-      expect.stringContaining("workflow.steps[2].action must be one of:"),
-      expect.stringContaining("workflow.steps[3].action must be one of:"),
+      expect.stringContaining('workflow.steps[0].action "pm_uninstall" is not allowed; must be one of:'),
+      expect.stringContaining('workflow.steps[1].action "cascade_tap" is not allowed; must be one of:'),
+      expect.stringContaining('workflow.steps[2].action "file_delete" is not allowed; must be one of:'),
+      expect.stringContaining('workflow.steps[3].action "reboot" is not allowed; must be one of:'),
     ]));
   });
 
@@ -750,7 +748,7 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("generatedWorkflowLlmAvoided");
     expect(source).toContain('"prompt", "canonical_hit"');
     expect(source).toContain("generatedWorkflowCacheResult(cacheKey, requestKey)");
-    expect(source).toContain("compiledPlan.llmBudget.happyPathRequests === 0");
+    expect(source).not.toContain("GENERATED_WORKFLOW_LLM_BUDGET_NOT_CACHE_SAFE");
   });
 
   it("exports generated workflow control-plane DTOs in the shared API contract", async () => {
@@ -762,7 +760,7 @@ describe("POST /workflows/generated — dry-run validation", () => {
     );
 
     expect(source).toContain("export interface GeneratedWorkflowCompiledPlanSummary");
-    expect(source).toContain("happyPathRequests: 0");
+    expect(source).toContain("happyPathRequests: number");
     expect(source).toContain("export interface GeneratedWorkflowPlanCacheRecordDto");
     expect(source).toContain("canonicalWorkflowId: string");
     expect(source).toContain("canonicalWorkflowVersion: string");
@@ -825,11 +823,11 @@ describe("Generated workflow validator module", () => {
     expect(source).toContain("function validateGeneratedWorkflowStepInput");
     expect(source).toContain("workflow.steps[${index}]");
     expect(source).toContain(".action must be a non-empty string for action steps");
-    expect(source).toContain("wait step must define duration or condition");
+    expect(source).toContain("wait step must define duration, condition, or until");
     expect(source).toContain(".type must be one of: ${GENERATED_WORKFLOW_STEP_TYPES.join");
     expect(source).toContain("isBlockedPackage");
     expect(source).toContain("compileGeneratedWorkflowTemplate");
-    expect(source).toContain("happyPathRequests: 0");
+    expect(source).toContain("happyPathRequests: explicitLlmRequests");
     expect(source).toContain("canExecuteFromCache");
     expect(source).toContain("generated-workflow-plan/v1");
     expect(source).toContain('"action",');

@@ -261,7 +261,7 @@ export interface GeneratedWorkflowCompiledPlanSummary {
   checkpointCount: number;
   maxDepth: number;
   llmBudget: {
-    happyPathRequests: 0;
+    happyPathRequests: number;
     recoveryRequests: "only_on_failure";
   };
   steps: GeneratedWorkflowCompiledStep[];

@@ -44,6 +44,9 @@ const mocks = vi.hoisted(() => {
     appMapping: {
       loadMap: vi.fn(),
     },
+    db: {
+      query: vi.fn(),
+    },
     metrics: {
       executionInc,
       executionLabels,
@@ -101,7 +104,7 @@ vi.mock("../../../modules/observability/alerts", () => ({
   alerting: {},
   AlertType: {},
 }));
-vi.mock("../../../db/client", () => ({ getDb: vi.fn() }));
+vi.mock("../../../db/client", () => ({ getDb: vi.fn(() => mocks.db) }));
 vi.mock("../../../config/scalability.config", () => ({
   scalabilityConfig: {
     requestTimeout: 30_000,
@@ -123,6 +126,7 @@ function redditHomeWorkflow(): WorkflowTemplate {
     platform: "reddit",
     description: "Non-mutating generated workflow for cache-only execution tests.",
     version: "1.0.0",
+    runtimeContract: "edge-workflow/v2",
     defaultVerificationStrategy: "local_with_screenshot",
     dataRetentionDays: 1,
     steps: [
@@ -301,6 +305,15 @@ describe("generated workflow cache-only execution route", () => {
     mocks.directWsServer.getAgentVersion.mockReturnValue("4.0.0");
     mocks.hbeService.initSession.mockReturnValue({});
     mocks.appMapping.loadMap.mockResolvedValue(null);
+    mocks.db.query.mockResolvedValue({
+      rows: [{
+        contract_id: "edge-workflow/v2",
+        schema_version: 2,
+        allowed_actions: ["open_app", "get_screen_state"],
+        limits: { maxSteps: 500 },
+        active: true,
+      }],
+    });
   });
 
   afterEach(() => {
@@ -383,7 +396,7 @@ describe("generated workflow cache-only execution route", () => {
     expect(mocks.workflowService.markFailedIfEdgeStartUnacknowledged).not.toHaveBeenCalled();
   });
 
-  it("runs semantic workflows server-side so semantic targets resolve from live UI tree", async () => {
+  it("rejects legacy semantic workflows instead of falling back to server step execution", async () => {
     const cached = cacheRecord();
     cached.workflow.steps = [
       {
@@ -401,20 +414,16 @@ describe("generated workflow cache-only execution route", () => {
     ];
     const { dispatchGeneratedWorkflowTemplate } = await import("../generated-workflow-execution.service");
 
-    const result = await dispatchGeneratedWorkflowTemplate({
-      templateId: cached.workflow.id,
-      template: cached.workflow,
-      deviceId: "11111111-1111-4111-8111-111111111111",
-      accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      variables: { generatedWorkflow: true },
-      logPrefix: "test",
-    });
+    await expect(dispatchGeneratedWorkflowTemplate({
+        templateId: cached.workflow.id,
+        template: cached.workflow,
+        deviceId: "11111111-1111-4111-8111-111111111111",
+        accountId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        variables: { generatedWorkflow: true },
+        logPrefix: "test",
+      }))
+      .rejects.toMatchObject({ code: "GENERATED_WORKFLOW_VALIDATION_FAILED", status: 400 });
 
-    expect(result).toMatchObject({
-      workflowId: "wf-cache-smoke",
-      status: "queued",
-      mode: "server",
-    });
     expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
   });
 

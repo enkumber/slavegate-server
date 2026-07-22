@@ -135,6 +135,9 @@ function setupDbMock() {
       };
       return { rows: [row] };
     }
+    if (sql.includes("INSERT INTO tasks")) {
+      return { rows: [{ id: "99999999-9999-4999-8999-999999999999" }] };
+    }
     if (sql.includes("UPDATE workflow_runs")) {
       row = { ...row, status: values[1], updated_at: new Date("2026-05-26T00:01:00.000Z") };
       if (sql.includes("discovery_ran")) row.discovery_ran = values.find((v) => typeof v === "boolean") ?? row.discovery_ran;
@@ -218,7 +221,12 @@ describe("workflow-run service", () => {
       appId: "com.example.app",
       instruction: "tap continue",
     });
-    expect(mocks.runCompiledWorkflow).toHaveBeenCalled();
+    expect(result.status).toBe("queued");
+    expect(result.httpStatus).toBe(202);
+    expect(result.data?.result).toEqual(expect.objectContaining({
+      taskId: "99999999-9999-4999-8999-999999999999",
+    }));
+    expect(mocks.runCompiledWorkflow).not.toHaveBeenCalled();
   });
 
   it("runs discovery and reloads the persisted app-map when the map is missing", async () => {
@@ -309,9 +317,10 @@ describe("workflow-run service", () => {
     }));
     expect(mocks.workflowEvents.publish).toHaveBeenCalledWith(expect.objectContaining({
       source: "workflow_runs",
-      event: "completed",
+      event: "queued",
       workflowRunId: "11111111-1111-4111-8111-111111111111",
       workflowId: compiledWorkflow.id,
+      details: expect.objectContaining({ taskId: "99999999-9999-4999-8999-999999999999" }),
     }));
   });
 

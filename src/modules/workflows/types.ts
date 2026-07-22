@@ -46,6 +46,16 @@ export interface ActionStep {
   verification?: VerificationStrategy;
   /** How many times to retry on failure */
   retries?:  number;
+  /** Delay between retries. Declared by the workflow; the runtime adds no hidden pacing. */
+  retryDelayMs?: number;
+  /** Explicit delay after a successful action. */
+  delayAfterMs?: number;
+  /** Persist the primitive output in workflow variables under this key. */
+  saveOutputAs?: string;
+  /** Data-driven failure behavior after retries are exhausted. */
+  failureMode?: "abort" | "continue" | "run_branch" | "run_branch_then_retry";
+  /** Recovery branch shipped with the workflow. */
+  onFailureSteps?: WorkflowStep[];
   /** Timeout for this step in ms (overrides workflow default) */
   timeoutMs?: number;
 
@@ -105,10 +115,22 @@ export interface WaitStep {
   id?:       string;
   /** Fixed duration range (ms) */
   duration?: FixedDurationSpec;
+  /** Poll an existing device primitive until its output satisfies a predicate. */
+  until?: WaitUntilSpec;
   /** Wait until UI element is visible */
   condition?: "ui_element_visible" | "ui_element_gone" | "app_launched" | "network_available";
   element?:  string;   // For ui_element_visible/gone
   timeoutMs?: number;  // Max wait for condition
+}
+
+export interface WaitUntilSpec {
+  action: string;
+  params?: Record<string, unknown>;
+  outputPath?: string;
+  operator: "truthy" | "falsy" | "equals" | "not_equals" | "contains" | "contains_ci" | "not_contains" | "not_contains_ci" | "exists" | "missing";
+  expected?: unknown;
+  pollIntervalMs?: number;
+  timeoutMs: number;
 }
 
 // ─── Condition steps ──────────────────────────────────────────────────────────
@@ -116,7 +138,9 @@ export interface WaitStep {
 export interface ConditionStep {
   type:        "condition";
   id?:         string;
-  check:       "random_probability" | "mood_engaged" | "mood_explorer" | "account_warmup";
+  check:       string;
+  /** Generic expression evaluated against workflow variables on the device. */
+  expression?: string;
   probability?: number;  // For random_probability: 0.0-1.0
   if_true:     WorkflowStep[];
   if_false?:   WorkflowStep[];
@@ -137,6 +161,8 @@ export interface LoopStep {
   steps:    WorkflowStep[];
   /** Break condition — exit early if met */
   breakOn?: "session_time_exceeded" | "engagement_limit_reached";
+  /** Generic expression evaluated before each iteration. */
+  breakWhen?: string;
 }
 
 // ─── Checkpoint steps ─────────────────────────────────────────────────────────
@@ -181,6 +207,8 @@ export interface WorkflowTemplate {
   dataRetentionDays: number;
   /** Compatible app version patterns (e.g. "300+", "301") */
   compatibleAppVersions?: string[];
+  /** Contract marker: all timing/branching/retry behavior is explicit in the payload. */
+  runtimeContract?: "edge-workflow/v2";
 }
 
 export interface WorkflowRecoveryPolicy {

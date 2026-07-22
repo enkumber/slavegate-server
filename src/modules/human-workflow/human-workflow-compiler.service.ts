@@ -3,9 +3,6 @@ import { getDb } from "../../db/client";
 import { loadMap } from "../app-mapping/recorder.service";
 import { validateAppMapQuality, type AppMap, type AppMapQualityReport, type ElementDef } from "../app-mapping/schema";
 import {
-  resolveGeneratedWorkflowScreens,
-} from "../workflows/generated-workflow-prompt";
-import {
   buildGeneratedWorkflowAppMapCacheMetadata,
   compileGeneratedWorkflowTemplate,
   generatedWorkflowPlanUsesAppMap,
@@ -20,8 +17,8 @@ import { shortcutRegistryService } from "../workflow-shortcuts/shortcut-registry
 import { humanWorkflowCompileJobService, type HumanWorkflowCompileJobRecord } from "./compile-job.service";
 import {
   normalizeCachedHumanWorkflowTemplate,
-  normalizeHumanWorkflowForKnownRedditTargets,
 } from "./human-workflow-normalization";
+import { listRuntimeProfiles, loadRuntimeProfile } from "../app-mapping/runtime-profile";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
@@ -29,17 +26,18 @@ const MAX_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 120_000;
 const HUMAN_WORKFLOW_INITIAL_MAX_TOKENS = 4_096;
 const HUMAN_WORKFLOW_REPAIR_MAX_TOKENS = 6_144;
 const HUMAN_WORKFLOW_DEBUG_RESPONSE_MAX_CHARS = 100_000;
-const HUMAN_WORKFLOW_COMPILER_CACHE_VERSION = "2026-07-20-credentials-v3";
-const PLATFORM_APP_IDS: Record<string, string> = {
-  browser: "com.android.chrome",
-  chrome: "com.android.chrome",
-  gmail: "com.google.android.gm",
-  reddit: "com.reddit.frontpage",
-  instagram: "com.instagram.android",
-  tiktok: "com.zhiliaoapp.musically",
-  facebook: "com.facebook.katana",
-  twitter: "com.twitter.android",
-};
+const HUMAN_WORKFLOW_COMPILER_CACHE_VERSION = "2026-07-22-data-driven-edge-v1";
+
+async function availableRuntimeProfiles() {
+  try {
+    return await listRuntimeProfiles();
+  } catch {
+    // The runtime registry is optional while compiling in isolated/test
+    // environments. Never replace missing data with application-specific
+    // constants: retain the caller-provided generic app identifier instead.
+    return [];
+  }
+}
 
 export type HumanWorkflowSafetyClass = "read_only" | "standard" | "destructive";
 
@@ -107,66 +105,38 @@ export function computeHumanWorkflowRequestKey(deviceId: string, accountId: stri
     .slice(0, 24);
 }
 
-function humanWorkflowAppId(platform: string): string {
-  return PLATFORM_APP_IDS[platform.toLowerCase()] ?? platform;
+async function humanWorkflowPackageName(platform: string): Promise<string> {
+  let direct = null;
+  try {
+    direct = await loadRuntimeProfile(platform);
+  } catch {
+    direct = null;
+  }
+  if (direct) return direct.packageName;
+  const profiles = await availableRuntimeProfiles();
+  const normalized = platform.trim().toLowerCase();
+  const match = profiles.find((profile) =>
+    typeof profile.appId === "string" && profile.appId.toLowerCase() === normalized ||
+    typeof profile.packageName === "string" && profile.packageName.toLowerCase() === normalized ||
+    typeof profile.appName === "string" && profile.appName.toLowerCase() === normalized
+  );
+  return match?.packageName ?? platform;
 }
 
-function isExplicitBrowserWorkflowIntent(goal: string): boolean {
+async function inferHumanWorkflowPlatform(goal: string): Promise<string> {
   const normalized = goal.toLowerCase();
-  return /\b(browser|chrome|gmail\.com|web)\b/.test(normalized) || /https?:\/\//.test(normalized);
-}
-
-function isGmailAppWorkflowIntent(goal: string): boolean {
-  const normalized = goal.toLowerCase();
-  return (/\bgmail\b/.test(normalized) || normalized.includes("com.google.android.gm"))
-    && !isExplicitBrowserWorkflowIntent(goal);
-}
-
-function isBrowserWorkflowIntent(goal: string): boolean {
-  return isExplicitBrowserWorkflowIntent(goal);
-}
-
-function humanWorkflowPackageNameForIntent(platform: string, goal: string): string {
-  if (platform.toLowerCase() === "android" && isBrowserWorkflowIntent(goal)) {
-    return "android";
-  }
-  if (platform.toLowerCase() === "android" && isGmailAppWorkflowIntent(goal)) {
-    return "com.google.android.gm";
-  }
-  return humanWorkflowAppId(platform);
-}
-
-function isBrowserPackageName(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  const normalized = value.trim().toLowerCase();
-  return normalized === "android" || normalized === "browser" || normalized === "chrome" || normalized === "com.android.chrome";
-}
-
-function isGmailWebUri(value: unknown): boolean {
-  return typeof value === "string" && /https?:\/\/([^/]+\.)?(mail|accounts|workspace)\.google\.com\b/i.test(value.trim());
-}
-
-function normalizeBrowserIntentSendParams(params: Record<string, unknown>): Record<string, unknown> {
-  const normalized = { ...params };
-  if (typeof normalized.uri === "string" && /^https?:\/\//i.test(normalized.uri.trim())) {
-    delete normalized.packageName;
-  }
-  return normalized;
-}
-
-function removeRedundantBrowserOpenSteps(steps: unknown[], goal: string): unknown[] {
-  if (!isBrowserWorkflowIntent(goal)) return steps;
-  const hasWebIntent = steps.some((step) => {
-    if (!isRecord(step) || step.type !== "action" || step.action !== "intent_send") return false;
-    const params = isRecord(step.params) ? step.params : {};
-    return typeof params.uri === "string" && /^https?:\/\//i.test(params.uri.trim());
-  });
-  if (!hasWebIntent) return steps;
-  return steps.filter((step) => {
-    if (!isRecord(step) || step.type !== "action" || step.action !== "open_app") return true;
-    const params = isRecord(step.params) ? step.params : {};
-    return !isBrowserPackageName(params.packageName);
-  });
+  const profiles = await availableRuntimeProfiles();
+  const match = profiles
+    .map((profile) => {
+      const labels = [profile.appId, profile.packageName, profile.appName]
+        .filter((value): value is string => typeof value === "string" && value.length > 0)
+        .map((value) => value.toLowerCase());
+      const score = labels.reduce((total, label) => total + (normalized.includes(label) ? label.length : 0), 0);
+      return { profile, score };
+    })
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)[0]?.profile;
+  return match?.appId ?? "android";
 }
 
 export function isAccountlessHumanWorkflowIntent(goal: string): boolean {
@@ -177,23 +147,6 @@ export function isAccountlessHumanWorkflowIntent(goal: string): boolean {
   // - App installation
   // - Any other device-level action
   return true;
-}
-
-function inferHumanWorkflowPlatform(goal: string): string {
-  const normalized = goal.toLowerCase();
-  if (normalized.includes("reddit") || normalized.includes("com.reddit.frontpage")) return "reddit";
-  if (normalized.includes("instagram") || normalized.includes("com.instagram.android")) return "instagram";
-  if (normalized.includes("tiktok") || normalized.includes("com.zhiliaoapp.musically")) return "tiktok";
-  if (normalized.includes("facebook") || normalized.includes("com.facebook.katana")) return "facebook";
-  if (normalized.includes("twitter") || normalized.includes(" x ") || normalized.includes("com.twitter.android")) return "twitter";
-  if (normalized.includes("youtube") || normalized.includes("com.google.android.youtube")) return "youtube";
-  if (normalized.includes("threads")) return "threads";
-  return "android";
-}
-
-function explicitHumanWorkflowPlatform(goal: string): string | null {
-  const platform = inferHumanWorkflowPlatform(goal);
-  return platform === "android" ? null : platform;
 }
 
 function humanWorkflowAsyncCompileTimeoutMs(): number {
@@ -228,9 +181,8 @@ function humanWorkflowCacheCompilerVersion(cached: GeneratedWorkflowPlanCacheRec
   return typeof version === "string" && version.length > 0 ? version : null;
 }
 
-function humanWorkflowCacheUsable(cached: GeneratedWorkflowPlanCacheRecord, intent: string): boolean {
+function humanWorkflowCacheUsable(cached: GeneratedWorkflowPlanCacheRecord, _intent: string): boolean {
   if (cached.sourceMetadata?.source !== "dashboard_human") return true;
-  if (!isGmailAppWorkflowIntent(intent)) return true;
   return humanWorkflowCacheCompilerVersion(cached) === HUMAN_WORKFLOW_COMPILER_CACHE_VERSION;
 }
 
@@ -272,7 +224,7 @@ const READINESS_ONLY_ACTIONS = new Set([
 function isReadinessOnlyIntent(goal: string): boolean {
   const normalized = goal.toLowerCase();
   const asksForReadiness = /\b(wake|wakeup|unlock|deblocheaza|deblochează|aprinde|trezeste|trezește|screen)\b/.test(normalized);
-  const asksForRealWork = /\b(gmail|cont|account|create|creeaza|creează|fa |fă |install|instaleaza|instalează|open|deschide|navigate|mergi|reddit|instagram|tiktok|facebook|youtube|comment|comentariu|posteaza|postează|type|scrie)\b/.test(normalized);
+  const asksForRealWork = /\b(create|creeaza|creează|install|instaleaza|instalează|open|deschide|navigate|mergi|comment|comentariu|posteaza|postează|type|scrie)\b/.test(normalized);
   return asksForReadiness && !asksForRealWork;
 }
 
@@ -286,18 +238,6 @@ export function humanWorkflowUndercompiledReason(workflow: WorkflowTemplate, int
   const readinessOnly = actionSteps.every((step) => READINESS_ONLY_ACTIONS.has(String(step.action ?? "")));
   if (readinessOnly) {
     return "workflow only wakes/unlocks/observes the device and does not perform the requested task";
-  }
-  if (isBrowserWorkflowIntent(intent)) {
-    const invalidOpenApp = actionSteps.find((step) => {
-      if (step.action !== "open_app") return false;
-      const packageName = isRecord(step.params) && typeof step.params.packageName === "string"
-        ? step.params.packageName.trim().toLowerCase()
-        : "";
-      return packageName === "android";
-    });
-    if (invalidOpenApp) {
-      return "browser workflow tries to open invalid packageName=android instead of Chrome";
-    }
   }
   return null;
 }
@@ -361,53 +301,25 @@ function buildHumanWorkflowCompilePrompt(input: {
   appMap: AppMap | null;
 }): string {
   const safetyClass = inferHumanWorkflowSafetyClass(input.goal);
-  const writeInstructions = safetyClass === "standard"
-    ? [
-        "This is a standard write workflow because the user explicitly asked for a social action.",
-        "For contextual comments, first reach the post detail/comments screen, dump UI into _postContextUiTree, generate the comment with vlm_generate_comment into _generated_comment, tap the add comment input, type_text with params.textFromVariable=\"_generated_comment\", then tap the Post button.",
-        "Use a11y_find_tap for visible labels/resource hints such as Add a comment, Your comment, or Post when no semantic_tap target exists.",
-      ]
-    : [
-        "This is a read-only workflow. Do not like, vote, join, follow, type, post, submit, or comment.",
-      ];
-  const screens = resolveGeneratedWorkflowScreens(input.platform)
-    .filter((screen) => screen === "UNKNOWN" || screen.startsWith(input.platform.toUpperCase()))
-    .slice(0, 8)
-    .join(", ");
   return [
     "Return JSON only. Generate one Phone Network WorkflowTemplate.",
     `Goal: ${input.goal}`,
     `Context: platform ${input.platform}, package ${input.packageName}, account ${input.target.account_username ? `@${input.target.account_username}` : "(none; device-management workflow)"}, preview compile only.`,
     compactHumanWorkflowAppMapHints(input.appMap, input.goal),
-    "Required fields: id,name,platform,description,version,steps,defaultVerificationStrategy,dataRetentionDays.",
+    "Required fields: id,name,platform,description,version,runtimeContract,steps,defaultVerificationStrategy,dataRetentionDays.",
+    "runtimeContract must be edge-workflow/v2. The complete workflow runs locally on Android.",
     `platform must be exactly ${input.platform}.`,
-    "Every step needs id and type. Step types: action,wait,checkpoint. Wait steps must include duration or condition.",
+    "Every step needs id and type. Step types: action,wait,condition,loop,checkpoint.",
+    "All pauses, timeouts, retries, failure branches and decisions must be explicit in the workflow payload.",
     `safetyClass must be exactly ${safetyClass}.`,
-    "Include recoveryPolicy with autonomy=\"ai_autopilot\", learnFromFailure=true, requireStateVerification=true.",
-    safetyClass === "read_only"
-      ? "For read-only/navigation workflows set recoveryPolicy.maxAttemptsPerStep=3, maxAttemptsPerWorkflow=6, maxRecoveryActionsPerAttempt=6."
-      : "For standard write workflows set recoveryPolicy.maxAttemptsPerStep=2, maxAttemptsPerWorkflow=4, maxRecoveryActionsPerAttempt=4.",
-    "recoveryPolicy.allowedRecoveryRequests may include ai_recovery_workflow, refresh_screen_state, retry_current_step, return_to_anchor, dismiss_transient_ui, navigate_back_once, verify_anchor.",
-    "Allowed actions: open_app,intent_send,wait_for_idle,semantic_tap,a11y_find_tap,press_key,scroll,detect_current_screen,ui_tree_dump,type_text,vlm_generate_comment.",
-    "For app install goals, open the Play Store listing with intent_send using packageName=com.android.vending and uri=market://details?id=<targetPackage>, then tap Install if visible.",
-    "For Gmail app goals, use open_app with params.packageName=com.google.android.gm. Do not open mail.google.com unless the user explicitly asks for browser, Chrome, gmail.com, or a URL.",
-    "For web/browser goals, open URLs with intent_send using uri=https://... and no packageName, so Android can choose an installed browser/app instead of assuming Chrome.",
-    "For Android Add Account goals when the requested app is unavailable, use intent_send with params.action=android.settings.ADD_ACCOUNT_SETTINGS and no uri, then select the requested account provider.",
-    ...writeInstructions,
-    "Start device workflows with action screen_wake, then action unlock, before opening or navigating apps.",
-    isBrowserWorkflowIntent(input.goal)
-      ? "For browser/Gmail goals, do not use open_app for Chrome; start navigation directly with intent_send and a URL."
-      : isGmailAppWorkflowIntent(input.goal)
-        ? "For Gmail app goals, open the Gmail Android app with open_app params.packageName=com.google.android.gm before tapping account creation UI."
-      : `open_app must use params.packageName=${input.packageName}.`,
-    isBrowserWorkflowIntent(input.goal)
-      ? "For browser/Gmail goals, do not hardcode com.android.chrome in intent_send."
-      : `To open a subreddit or URL, use intent_send with params.uri=https://www.reddit.com/r/<subreddit>/ and params.packageName=${input.packageName}. Do not put uri on open_app.`,
-    "For navigation/read-only goals, include a final ui_tree_dump with params.outputVariable=\"_finalUiTree\" before the checkpoint.",
-    "semantic_tap is only for known product targets and must include params.target, for example reddit.first_visible_post.open_comments.",
+    "Allowed actions are generic interpreter primitives only: screen_wake,unlock,open_app,close_app,intent_send,a11y_find_tap,ocr_find_tap,tap,long_press,double_tap,swipe,scroll,type_text,set_focused_text,press_key,keyevent,ui_tree_dump,screenshot,screenshot_for_vlm,wait_for_idle,set_variable,classify_ui_tree,request_llm.",
+    "Never use semantic_tap or an application-specific opcode. Selectors, packages, URLs, normalized coordinates and state rules must be explicit data from this prompt/App Map.",
+    "Use request_llm only when semantic reasoning or creative generation is genuinely required. It must declare prompt, targetVariable or saveOutputAs, timeoutMs, responseFormat, and success/failure branches.",
+    "Prefer selector-first navigation. Coordinates, when required, must be normalized and followed by an explicit state check.",
+    `Use params.packageName=${input.packageName} when the workflow explicitly opens the target app.`,
+    safetyClass === "read_only" ? "Do not include mutating actions." : "Include only mutations explicitly requested by the user.",
     "checkpoint is type checkpoint, never an action.",
     "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
-    screens ? `Known screens: ${screens}.` : "Use UNKNOWN if screen is uncertain.",
     "No intent or outputSchema fields.",
   ].join("\n");
 }
@@ -433,84 +345,9 @@ function buildHumanWorkflowRepairPrompt(input: {
 
 function inferHumanWorkflowSafetyClass(goal: string): HumanWorkflowSafetyClass {
   const normalized = goal.toLowerCase();
-  if (isAccountlessHumanWorkflowIntent(goal)) return "standard";
-  return /\b(las|lasa|lasă|lasi|lași|scrie|trimite|posteaza|postează|submit|post|write|leave|send|type)\b.*\b(comment|comentariu|comentarii|reply|raspuns|răspuns)\b|\b(comment|comenteaza|comentează|comentezi|comentează|reply)\b/.test(normalized)
-    ? "standard"
-    : "read_only";
-}
-
-function redditInstallWorkflowTemplate(): WorkflowTemplate {
-  return {
-    id: "dashboard_human_android_install_reddit_v1",
-    name: "Install Reddit from Play Store",
-    platform: "reddit",
-    description: "Open the Reddit Play Store listing and start installation when possible.",
-    version: "1.0.0",
-    safetyClass: "standard",
-    defaultVerificationStrategy: "local_only",
-    dataRetentionDays: 7,
-    recoveryPolicy: {
-      autonomy: "ai_autopilot",
-      maxAttemptsPerStep: 2,
-      maxAttemptsPerWorkflow: 4,
-      maxRecoveryActionsPerAttempt: 4,
-      allowedRecoveryRequests: [
-        "ai_recovery_workflow",
-        "refresh_screen_state",
-        "retry_current_step",
-        "return_to_anchor",
-        "dismiss_transient_ui",
-        "navigate_back_once",
-        "verify_anchor",
-      ],
-      requireStateVerification: true,
-      learnFromFailure: true,
-    },
-    steps: [
-      { id: "wake_screen", type: "action", action: "screen_wake", params: {}, timeoutMs: 10_000 },
-      { id: "unlock_device", type: "action", action: "unlock", params: {}, timeoutMs: 15_000 },
-      {
-        id: "open_reddit_play_store",
-        type: "action",
-        action: "intent_send",
-        params: {
-          action: "android.intent.action.VIEW",
-          packageName: "com.android.vending",
-          uri: "market://details?id=com.reddit.frontpage",
-        },
-        timeoutMs: 15_000,
-      },
-      { id: "settle_play_store", type: "action", action: "wait_for_idle", params: { timeoutMs: 3_000 } },
-      {
-        id: "tap_install",
-        type: "action",
-        action: "a11y_find_tap",
-        params: {
-          text: "Install",
-          textAlternatives: ["Install", "Instalează", "Update", "Open"],
-          optional: true,
-        },
-        timeoutMs: 20_000,
-      },
-      { id: "wait_for_install_completion", type: "action", action: "wait_for_idle", params: { timeoutMs: 45_000 } },
-      {
-        id: "capture_install_state",
-        type: "action",
-        action: "ui_tree_dump",
-        params: {
-          packageName: "com.android.vending",
-          outputVariable: "_finalUiTree",
-        },
-        timeoutMs: 10_000,
-      },
-      { id: "install_verified", type: "checkpoint", reason: "Reddit install state captured for verification" },
-    ],
-  };
-}
-
-function accountlessShortcutTemplate(intent: string, platform: string): WorkflowTemplate | null {
-  if (platform === "reddit" && isAccountlessHumanWorkflowIntent(intent)) return redditInstallWorkflowTemplate();
-  return null;
+  if (/\b(delete|remove|uninstall|factory reset|sterge|șterge|dezinstaleaza|dezinstalează)\b/.test(normalized)) return "destructive";
+  if (/\b(create|install|update|write|type|send|post|submit|comment|like|follow|join|creeaza|creează|instaleaza|instalează|scrie|trimite|posteaza|postează|comenteaza|comentează)\b/.test(normalized)) return "standard";
+  return "read_only";
 }
 
 function normalizeHumanWorkflowTemplateCandidate(
@@ -528,10 +365,13 @@ function normalizeHumanWorkflowTemplateCandidate(
     ? workflow.description
     : input.goal;
   workflow.version = typeof workflow.version === "string" && workflow.version.trim() ? workflow.version : "1.0.0";
+  workflow.runtimeContract = "edge-workflow/v2";
   workflow.defaultVerificationStrategy = workflow.defaultVerificationStrategy === "local_with_screenshot"
     ? "local_with_screenshot"
     : "local_only";
-  workflow.safetyClass = inferHumanWorkflowSafetyClass(input.goal);
+  workflow.safetyClass = workflow.safetyClass === "standard" || workflow.safetyClass === "destructive" || workflow.safetyClass === "read_only"
+    ? workflow.safetyClass
+    : inferHumanWorkflowSafetyClass(input.goal);
   workflow.dataRetentionDays = typeof workflow.dataRetentionDays === "number" && workflow.dataRetentionDays >= 0
     ? workflow.dataRetentionDays
     : 7;
@@ -565,10 +405,9 @@ function normalizeHumanWorkflowTemplateCandidate(
   }
 
   if (Array.isArray(workflow.steps)) {
-    const originalSteps = workflow.steps;
     const normalizedSteps: unknown[] = [];
-    for (let index = 0; index < originalSteps.length; index += 1) {
-      const step = originalSteps[index];
+    for (let index = 0; index < workflow.steps.length; index += 1) {
+      const step = workflow.steps[index];
       if (!isRecord(step)) {
         normalizedSteps.push(step);
         continue;
@@ -583,47 +422,11 @@ function normalizeHumanWorkflowTemplateCandidate(
       }
       if (normalized.type === "action" && (normalized.action === "open_app" || normalized.action === "close_app")) {
         const params = isRecord(normalized.params) ? { ...normalized.params } : {};
-        const packageName = typeof params.packageName === "string" ? params.packageName.trim().toLowerCase() : "";
-        if (
-          typeof params.packageName !== "string"
-          || (isBrowserWorkflowIntent(input.goal) && packageName === "android")
-          || (isGmailAppWorkflowIntent(input.goal) && isBrowserPackageName(packageName))
-        ) {
+        if (typeof params.packageName !== "string" || !params.packageName.trim()) {
           params.packageName = typeof params.app_id === "string" ? params.app_id : input.packageName;
         }
         delete params.app_id;
         normalized.params = params;
-      }
-      if (
-        isBrowserWorkflowIntent(input.goal) &&
-        normalized.type === "action" &&
-        normalized.action === "open_app" &&
-        isRecord(normalized.params)
-      ) {
-        const nextStep = originalSteps[index + 1];
-        const nextParams = isRecord(nextStep) && isRecord(nextStep.params) ? nextStep.params : {};
-        const maybeUrl = typeof nextParams.text === "string" ? nextParams.text.trim() : "";
-        const enterStep = originalSteps[index + 2];
-        const enterParams = isRecord(enterStep) && isRecord(enterStep.params) ? enterStep.params : {};
-        const hasEnterAfterUrl = isRecord(enterStep)
-          && enterStep.type === "action"
-          && enterStep.action === "press_key"
-          && String(enterParams.key ?? "").toUpperCase() === "ENTER";
-        if (
-          isRecord(nextStep) &&
-          nextStep.type === "action" &&
-          nextStep.action === "type_text" &&
-          /^https?:\/\//i.test(maybeUrl) &&
-          hasEnterAfterUrl
-        ) {
-          normalized.action = "intent_send";
-          normalized.params = {
-            action: "android.intent.action.VIEW",
-            uri: maybeUrl,
-          };
-          normalized.params = normalizeBrowserIntentSendParams(normalized.params as Record<string, unknown>);
-          index += 2;
-        }
       }
       if (normalized.type === "action" && normalized.action === "open_app" && isRecord(normalized.params)) {
         const params = { ...normalized.params };
@@ -635,28 +438,7 @@ function normalizeHumanWorkflowTemplateCandidate(
             packageName: typeof params.packageName === "string" ? params.packageName : input.packageName,
             uri: params.uri,
           };
-          if (isBrowserWorkflowIntent(input.goal)) {
-            normalized.params = normalizeBrowserIntentSendParams(normalized.params as Record<string, unknown>);
-          }
         }
-      }
-      if (
-        isBrowserWorkflowIntent(input.goal) &&
-        normalized.type === "action" &&
-        normalized.action === "intent_send" &&
-        isRecord(normalized.params)
-      ) {
-        normalized.params = normalizeBrowserIntentSendParams(normalized.params);
-      }
-      if (
-        isGmailAppWorkflowIntent(input.goal) &&
-        normalized.type === "action" &&
-        normalized.action === "intent_send" &&
-        isRecord(normalized.params) &&
-        isGmailWebUri(normalized.params.uri)
-      ) {
-        normalized.action = "open_app";
-        normalized.params = { packageName: input.packageName };
       }
       if (normalized.type === "checkpoint" && isRecord(normalized.params)) {
         const reason = normalized.params.reason ?? normalized.params.label ?? normalized.params.expectedScreen;
@@ -668,13 +450,9 @@ function normalizeHumanWorkflowTemplateCandidate(
       }
       normalizedSteps.push(normalized);
     }
-    workflow.steps = removeRedundantBrowserOpenSteps(normalizedSteps, input.goal);
+    workflow.steps = normalizedSteps;
     workflow.steps = ensureHumanWorkflowPreambleSteps(workflow.steps as unknown[]);
-    workflow.steps = ensureHumanWorkflowEvidenceSteps(workflow.steps as unknown[], input);
-    return normalizeHumanWorkflowForKnownRedditTargets(workflow, {
-      intent: input.goal,
-      packageName: input.packageName,
-    });
+    return workflow;
   }
   return workflow;
 }
@@ -741,49 +519,6 @@ function ensureHumanWorkflowPreambleSteps(steps: unknown[]): unknown[] {
   return normalized;
 }
 
-function isHumanNavigationGoal(input: { platform: string; goal: string }): boolean {
-  const goal = input.goal.toLowerCase();
-  return input.platform.toLowerCase() === "reddit" && (
-    goal.includes("mergi pe") ||
-    goal.includes("go to") ||
-    goal.includes("navigate") ||
-    goal.includes("/r/") ||
-    goal.includes("/askreddit") ||
-    goal.includes("askreddit")
-  );
-}
-
-function ensureHumanWorkflowEvidenceSteps(
-  steps: unknown[],
-  input: { platform: string; packageName: string; goal: string },
-): unknown[] {
-  if (!isHumanNavigationGoal(input)) return steps;
-  const hasEvidenceDump = steps.some((step) => {
-    if (!isRecord(step) || step.type !== "action" || step.action !== "ui_tree_dump") return false;
-    const params = isRecord(step.params) ? step.params : {};
-    return params.outputVariable === "_finalUiTree";
-  });
-  if (hasEvidenceDump) return steps;
-
-  const evidenceStep = {
-    id: "capture_final_ui_tree",
-    type: "action",
-    action: "ui_tree_dump",
-    params: {
-      packageName: input.packageName,
-      outputVariable: "_finalUiTree",
-    },
-    timeoutMs: 10_000,
-  };
-  const checkpointIndex = steps.findIndex((step) => isRecord(step) && step.type === "checkpoint");
-  if (checkpointIndex === -1) return [...steps, evidenceStep];
-  return [
-    ...steps.slice(0, checkpointIndex),
-    evidenceStep,
-    ...steps.slice(checkpointIndex),
-  ];
-}
-
 async function loadGeneratedWorkflowCurrentAppMap(
   appId: string | null | undefined
 ): Promise<{ appMap: AppMap | null; quality: AppMapQualityReport | null }> {
@@ -839,7 +574,7 @@ function cacheKeyFromCompileJob(job: HumanWorkflowCompileJobRecord): string | nu
 export class HumanWorkflowCompilerService {
   async resolveTarget(deviceId: string, accountId: string | null | undefined, intent?: string): Promise<HumanWorkflowTarget | null> {
     if (!accountId && intent && isAccountlessHumanWorkflowIntent(intent)) {
-      const platform = inferHumanWorkflowPlatform(intent);
+      const platform = await inferHumanWorkflowPlatform(intent);
       const result = await getDb().query(
         `SELECT id AS device_id, model AS device_model, friendly_name AS device_name
          FROM devices
@@ -879,7 +614,8 @@ export class HumanWorkflowCompilerService {
     if (row.account_device_id !== row.device_id) {
       throw Object.assign(new Error("Account is not bound to selected device"), { status: 400, code: "ACCOUNT_DEVICE_MISMATCH" });
     }
-    const explicitPlatform = intent ? explicitHumanWorkflowPlatform(intent) : null;
+    const inferredPlatform = intent ? await inferHumanWorkflowPlatform(intent) : "android";
+    const explicitPlatform = inferredPlatform === "android" ? null : inferredPlatform;
     if (explicitPlatform && explicitPlatform !== String(row.account_platform).toLowerCase()) {
       return {
         device_id: row.device_id as string,
@@ -916,15 +652,6 @@ export class HumanWorkflowCompilerService {
 
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
     if (cached && humanWorkflowCacheUsable(cached, intent)) return readyFromCache(cached, target, requestKey, "cache");
-
-    const accountlessTemplate = !target.account_id ? accountlessShortcutTemplate(intent, target.account_platform) : null;
-    if (accountlessTemplate) {
-      return this.compileShortcut("accountless-device-management", "accountless_device_management", accountlessTemplate, {
-        requestKey,
-        intent,
-        target,
-      });
-    }
 
     const shortcutMatch = target.account_id
       ? await shortcutRegistryService.lookupActiveShortcut({
@@ -1003,7 +730,7 @@ export class HumanWorkflowCompilerService {
     input: { requestKey: string; intent: string; target: HumanWorkflowTarget },
   ): Promise<HumanWorkflowCompileReady> {
     const platform = input.target.account_platform.toLowerCase();
-    const packageName = humanWorkflowPackageNameForIntent(platform, input.intent);
+    const packageName = await humanWorkflowPackageName(platform);
     const hydrated = hydrateTemplatePlaceholders(rawTemplate, { platform, packageName }) as WorkflowTemplate;
     const validation = validateGeneratedWorkflowTemplate(hydrated);
     if (!validation.template) {
@@ -1053,7 +780,7 @@ export class HumanWorkflowCompilerService {
     target: HumanWorkflowTarget;
   }): Promise<HumanWorkflowCompileReady> {
     const platform = input.target.account_platform;
-    const packageName = humanWorkflowPackageNameForIntent(platform, input.intent);
+    const packageName = await humanWorkflowPackageName(platform);
     const appMap = await loadMap(packageName);
     const prompt = buildHumanWorkflowCompilePrompt({
       platform,
@@ -1127,7 +854,7 @@ export class HumanWorkflowCompilerService {
         template = validation.template;
       }
       assertHumanWorkflowMeaningful(template, input.intent);
-      const safetyClass = inferHumanWorkflowSafetyClass(input.intent);
+      const safetyClass = template.safetyClass ?? inferHumanWorkflowSafetyClass(input.intent);
       let compiledPlan = compileGeneratedWorkflowTemplate(template);
       compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
       await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, input.requestKey, {

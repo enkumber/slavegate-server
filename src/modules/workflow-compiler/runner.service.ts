@@ -189,13 +189,7 @@ export function reconcileFingerprintWithResolvedState(input: {
 }
 
 function recoveryPlatform(workflow: CompiledWorkflow): string {
-  const source = `${workflow.appId ?? ""} ${workflow.source ?? ""}`.toLowerCase();
-  if (source.includes("reddit")) return "reddit";
-  if (source.includes("instagram")) return "instagram";
-  if (source.includes("tiktok")) return "tiktok";
-  if (source.includes("youtube")) return "youtube";
-  if (source.includes("x.com") || source.includes("twitter")) return "twitter";
-  return "unknown";
+  return workflow.appId?.trim() || "android";
 }
 
 function recoveryReason(reason: string): string {
