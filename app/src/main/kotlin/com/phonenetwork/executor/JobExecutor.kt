@@ -13,6 +13,7 @@ import com.phonenetwork.verification.VerificationCascade
 import com.phonenetwork.verification.VerificationStrategy
 import com.phonenetwork.verification.L2PixelDiffVerifier
 import com.phonenetwork.utils.ScreenMetrics
+import com.phonenetwork.utils.BoundedProcessRunner
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -58,6 +59,14 @@ class JobExecutor(
         private const val IDEMPOTENCY_FILE = "executed_jobs.json"
         private const val MAX_CACHE_SIZE   = 1000
         private const val MAX_TREE_DEPTH   = 30  // Prevent stack overflow on deep UI trees
+        private const val ROOT_COMMAND_TIMEOUT_MS = 5_000L
+        private val OBSERVATION_ONLY_JOB_TYPES = setOf(
+            "ui_tree_dump",
+            "get_screen_state",
+            "get_foreground_app",
+            "screenshot",
+            "screenshot_for_vlm",
+        )
     }
 
     /**
@@ -125,7 +134,14 @@ class JobExecutor(
         Log.i(TAG, "Executing job $jobId type=$type strategy=$strategyRaw")
 
         // Build cascade (L1 + L2; null if A11y not connected)
-        val cascade = buildCascade(strategy, l1TimeoutMs, l2SettleMs)
+        // Observation jobs do not mutate UI. Running a before/after UI-diff
+        // cascade around them is redundant and can recursively pressure the
+        // accessibility tree while a workflow wait predicate is polling it.
+        val cascade = if (type in OBSERVATION_ONLY_JOB_TYPES) {
+            null
+        } else {
+            buildCascade(strategy, l1TimeoutMs, l2SettleMs)
+        }
 
         // PRE-ACTION snapshot — hard timeout 2s (rootInActiveWindow is Binder IPC;
         // can block indefinitely on slow UI transitions).
@@ -149,6 +165,7 @@ class JobExecutor(
                     "swipe"          -> { executeSwipe(params);         Triple("completed", null, null) }
                     "long_press"     -> { executeLongPress(params);     Triple("completed", null, null) }
                     "type_text"      -> { executeTypeText(params);      Triple("completed", null, null) }
+                    "set_focused_text" -> Triple("completed", executeSetFocusedText(params), null)
                     "scroll"         -> { executeScroll(params);        Triple("completed", null, null) }
                     "open_app"       -> { executeOpenApp(params);       Triple("completed", null, null) }
                     "open_app_fresh" -> { executeOpenAppFresh(params);  Triple("completed", null, null) }
@@ -173,7 +190,7 @@ class JobExecutor(
                     "reboot"         -> { executeReboot();              Triple("completed", null, null) }
                     "ota_update"     -> { executeOtaUpdate(params);     Triple("completed", null, null) }
                     "get_foreground_app" -> Triple("completed", executeGetForegroundApp(), null)
-                    "intent_send"    -> Triple("completed", executeIntentSend(params), null)
+                    "intent_send"    -> executeIntentSendJob(params)
                     // Skill system
                     "skill_tap"      -> Triple("completed", executeSkillTap(params), null)
                     "a11y_find_tap"  -> Triple("completed", executeA11yFindTap(params), null)
@@ -239,7 +256,36 @@ class JobExecutor(
     }
 
     private suspend fun executeTypeText(params: JSONObject) =
-        automation.typeText(params.getString("text"))
+        automation.typeText(
+            params.getString("text"),
+            exact = params.optBoolean("exact", false),
+            verifyFinal = params.optBoolean("verifyFinal", true)
+        )
+
+    private suspend fun executeSetFocusedText(params: JSONObject): JSONObject = withContext(Dispatchers.Main) {
+        val text = params.getString("text")
+        val svc = accessibilityService
+            ?: throw IllegalStateException("AccessibilityService not connected")
+        val rootNode = svc.rootInActiveWindow
+            ?: throw IllegalStateException("No active window root")
+
+        val focused = rootNode.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: throw IllegalStateException("No focused input field")
+        try {
+            val args = android.os.Bundle().apply {
+                putCharSequence(
+                    android.view.accessibility.AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    text
+                )
+            }
+            val ok = focused.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            if (!ok) throw IllegalStateException("ACTION_SET_TEXT failed")
+            JSONObject().put("set", true).put("length", text.length)
+        } finally {
+            focused.recycle()
+            rootNode.recycle()
+        }
+    }
 
     private suspend fun executeScroll(params: JSONObject) =
         automation.scroll(
@@ -373,16 +419,32 @@ class JobExecutor(
     }
 
     private suspend fun executePressKey(params: JSONObject) = withContext(Dispatchers.Main) {
-        val key = params.optString("key", "back")
+        val key = PressKeyResolver.normalize(params.optString("key", "back"))
         val svc = accessibilityService
             ?: throw IllegalStateException("AccessibilityService not connected")
-        val action = when (key) {
-            "back"    -> AccessibilityService.GLOBAL_ACTION_BACK
-            "home"    -> AccessibilityService.GLOBAL_ACTION_HOME
-            "recents" -> AccessibilityService.GLOBAL_ACTION_RECENTS
-            else      -> throw IllegalArgumentException("Unknown key: $key")
+
+        if (PressKeyResolver.isGlobalAction(key)) {
+            val action = when (key) {
+                "back" -> AccessibilityService.GLOBAL_ACTION_BACK
+                "home" -> AccessibilityService.GLOBAL_ACTION_HOME
+                else -> AccessibilityService.GLOBAL_ACTION_RECENTS
+            }
+            if (!svc.performGlobalAction(action)) {
+                throw IllegalStateException("Global key action failed: $key")
+            }
+        } else {
+            val keyCode = PressKeyResolver.shellKeyCode(key)
+                ?: throw IllegalArgumentException("Unknown key: $key")
+            val result = BoundedProcessRunner.run(
+                arrayOf("su", "-c", "input keyevent $keyCode"),
+                ROOT_COMMAND_TIMEOUT_MS,
+            )
+            if (!result.success) {
+                throw IllegalStateException(
+                    "Key event failed: $key (code=$keyCode, exit=${result.exitCode}, ${result.output})"
+                )
+            }
         }
-        svc.performGlobalAction(action)
         delay(300L)
     }
 
@@ -440,8 +502,11 @@ class JobExecutor(
             svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
         } else {
             // Fallback: power button via root
-            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent 26"))
-            proc.waitFor()
+            val result = BoundedProcessRunner.run(
+                arrayOf("su", "-c", "input keyevent 26"),
+                ROOT_COMMAND_TIMEOUT_MS,
+            )
+            if (!result.success) throw IllegalStateException("screen_off root fallback failed: ${result.output}")
         }
         delay(300L)
         val pm = context.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
@@ -496,7 +561,11 @@ class JobExecutor(
             automation.typeText(pin)
             delay(200L)
             // Press enter
-            Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent 66")).waitFor()
+            val result = BoundedProcessRunner.run(
+                arrayOf("su", "-c", "input keyevent 66"),
+                ROOT_COMMAND_TIMEOUT_MS,
+            )
+            if (!result.success) throw IllegalStateException("unlock enter failed: ${result.output}")
         }
 
         // Enter pattern if provided (array of points 0-8)
@@ -525,7 +594,11 @@ class JobExecutor(
                 val (px, py) = pointToCoords(patternArray.getInt(i))
                 sb.append(" $px $py")
             }
-            Runtime.getRuntime().exec(arrayOf("su", "-c", sb.toString())).waitFor()
+            val result = BoundedProcessRunner.run(
+                arrayOf("su", "-c", sb.toString()),
+                ROOT_COMMAND_TIMEOUT_MS,
+            )
+            if (!result.success) throw IllegalStateException("unlock pattern failed: ${result.output}")
         }
 
         delay(500L)
@@ -594,6 +667,18 @@ class JobExecutor(
 
     // ─── Intent/Deep link sending ─────────────────────────────────────────────
 
+    private suspend fun executeIntentSendJob(params: JSONObject): Triple<String, JSONObject, String?> {
+        val output = executeIntentSend(params)
+        val launched = output.optBoolean("launched", false)
+        if (launched) {
+            return Triple("completed", output, null)
+        }
+
+        val error = output.optString("error", "intent_send did not launch an activity")
+            .ifBlank { "intent_send did not launch an activity" }
+        return Triple("failed", output, error)
+    }
+
     private suspend fun executeIntentSend(params: JSONObject): JSONObject = withContext(Dispatchers.Main) {
         val uri = params.getString("uri")
         val action = params.optString("action", android.content.Intent.ACTION_VIEW)
@@ -642,18 +727,24 @@ class JobExecutor(
             }
         }
 
-        // Verify intent can be resolved
+        // Package visibility can make resolveActivity return null on modern Android
+        // even when startActivity would succeed. Treat startActivity as canonical.
         val pm = context.packageManager
         val resolveInfo = pm.resolveActivity(intent, 0)
 
         val result = JSONObject()
-        if (resolveInfo != null) {
+        try {
             context.startActivity(intent)
             result.put("launched", true)
-            result.put("resolvedActivity", "${resolveInfo.activityInfo.packageName}/${resolveInfo.activityInfo.name}")
-        } else {
+            if (resolveInfo != null) {
+                result.put("resolvedActivity", "${resolveInfo.activityInfo.packageName}/${resolveInfo.activityInfo.name}")
+            }
+        } catch (e: android.content.ActivityNotFoundException) {
             result.put("launched", false)
             result.put("error", "No activity found to handle intent: $uri")
+        } catch (e: Exception) {
+            result.put("launched", false)
+            result.put("error", e.message ?: "Failed to send intent: $uri")
         }
 
         result

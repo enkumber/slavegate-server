@@ -1,19 +1,26 @@
 package com.phonenetwork.automation
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Path
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
 import com.phonenetwork.utils.ScreenMetrics
+import com.phonenetwork.utils.BoundedProcessRunner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.coroutines.resume
 import kotlin.random.Random
 
 /**
@@ -22,14 +29,14 @@ import kotlin.random.Random
  * Actions:
  *   tap(x, y)                       — single tap gesture at screen coordinates
  *   swipe(startX,startY,endX,endY)  — swipe gesture with configurable duration
- *   typeText(text)                  — type text into focused field via clipboard+paste
+ *   typeText(text, exact)           — type text into focused field
  *   scroll(direction, distancePx)   — scroll gesture (up/down/left/right)
  *   openApp(packageName)            — launch via getLaunchIntentForPackage
  *   closeApp(packageName)           — GLOBAL_ACTION_HOME + killBackgroundProcesses
  *   uiTreeDump(packageName?)        — dump accessibility node tree as JSON
  *
  * All gesture-based methods use GestureDescription (API 24+, our minSdk=29).
- * typeText uses clipboard for reliability across input fields.
+ * typeText can set/paste exact generated text, or humanize text entry when requested.
  *
  * Reference: ARCHITECTURE_AUDIT_v3.md §4 (Automation)
  */
@@ -42,11 +49,21 @@ class AutomationController(private val service: AccessibilityService?) {
 
     // ─── Tap ──────────────────────────────────────────────────────────────────
 
-    suspend fun tap(x: Int, y: Int) = withContext(Dispatchers.IO) {
+    suspend fun tap(x: Int, y: Int) {
         Log.d(TAG, "tap($x, $y)")
-        // Use root shell input tap — dispatchGesture callback unreliable on MIUI
-        runShellCommand("input tap $x $y")
-        Log.d(TAG, "tap: completed via shell")
+        val gestureCompleted = dispatchGesture(
+            Path().apply { moveTo(x.toFloat(), y.toFloat()) },
+            durationMs = 60L,
+        )
+        if (gestureCompleted) {
+            Log.d(TAG, "tap: completed via Accessibility gesture")
+            return
+        }
+
+        Log.w(TAG, "tap: Accessibility gesture unavailable/cancelled; trying bounded root fallback")
+        val shellCompleted = runShellCommand("input tap $x $y")
+        if (!shellCompleted) throw IllegalStateException("Tap failed: Accessibility and bounded root fallback unavailable")
+        Log.d(TAG, "tap: completed via bounded root fallback")
     }
 
     // ─── Swipe ────────────────────────────────────────────────────────────────
@@ -55,37 +72,89 @@ class AutomationController(private val service: AccessibilityService?) {
         startX: Int, startY: Int,
         endX:   Int, endY:   Int,
         durationMs: Long = 300L
-    ) = withContext(Dispatchers.IO) {
+    ) {
         Log.d(TAG, "swipe($startX,$startY → $endX,$endY, ${durationMs}ms)")
-        // Use root shell input swipe — dispatchGesture callback unreliable on MIUI
-        runShellCommand("input swipe $startX $startY $endX $endY $durationMs")
-        Log.d(TAG, "swipe: completed via shell")
+        val gestureCompleted = dispatchGesture(
+            Path().apply {
+                moveTo(startX.toFloat(), startY.toFloat())
+                lineTo(endX.toFloat(), endY.toFloat())
+            },
+            durationMs = durationMs.coerceAtLeast(1L),
+        )
+        if (gestureCompleted) {
+            Log.d(TAG, "swipe: completed via Accessibility gesture")
+            return
+        }
+
+        Log.w(TAG, "swipe: Accessibility gesture unavailable/cancelled; trying bounded root fallback")
+        val shellCompleted = withContext(Dispatchers.IO) {
+            runShellCommand("input swipe $startX $startY $endX $endY $durationMs")
+        }
+        if (!shellCompleted) throw IllegalStateException("Swipe failed: Accessibility and bounded root fallback unavailable")
+        Log.d(TAG, "swipe: completed via bounded root fallback")
+    }
+
+    private suspend fun dispatchGesture(path: Path, durationMs: Long): Boolean {
+        val svc = service ?: return false
+        return withContext(Dispatchers.Main) {
+            withTimeoutOrNull(GESTURE_TIMEOUT_MS) {
+                suspendCancellableCoroutine { continuation ->
+                    val gesture = GestureDescription.Builder()
+                        .addStroke(GestureDescription.StrokeDescription(path, 0L, durationMs))
+                        .build()
+                    val accepted = svc.dispatchGesture(
+                        gesture,
+                        object : AccessibilityService.GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: GestureDescription?) {
+                                if (continuation.isActive) continuation.resume(true)
+                            }
+
+                            override fun onCancelled(gestureDescription: GestureDescription?) {
+                                if (continuation.isActive) continuation.resume(false)
+                            }
+                        },
+                        null,
+                    )
+                    if (!accepted && continuation.isActive) continuation.resume(false)
+                }
+            } ?: false
+        }
     }
 
     // ─── Type text ────────────────────────────────────────────────────────────
 
     /**
-     * Type text into the currently focused input field, character by character
-     * with human-like timing and occasional typo simulation.
+     * Type text into the currently focused input field.
      *
-     * Strategy: `su -c input text <char>` per character (root required).
-     * Falls back to ACTION_SET_TEXT if root is unavailable (logs warning).
+     * Generated comments need both humanized entry and final exactness.
+     * The default path types character-by-character, then reads the focused
+     * field and corrects it if the final value differs from the target text.
+     * exact=true skips humanized entry and uses ACTION_SET_TEXT/paste directly.
      *
-     * Timing:
+     * Humanized timing:
      *   - Inter-character delay: none (shell exec latency ~500ms is enough)
      *   - Inter-word pause:      100-250ms
      *   - Typo simulation:       5-10% chance per char (wrong key → pause → backspace → correct key)
      *   - Thinking pause:        ~4% chance, 300-800ms
      */
-    suspend fun typeText(text: String) {
-        Log.d(TAG, "typeText(${text.take(20)}…, len=${text.length})")
+    suspend fun typeText(text: String, exact: Boolean = false, verifyFinal: Boolean = true) {
+        Log.d(TAG, "typeText(${text.take(20)}…, len=${text.length}, exact=$exact)")
+
+        if (exact) {
+            if (!setFocusedTextExact(text)) {
+                throw IllegalStateException("typeText exact entry failed: unable to set focused field")
+            }
+            return
+        }
 
         // ── Quick root check ──────────────────────────────────────────────────
         val rootAvailable = withContext(Dispatchers.IO) { isRootAvailable() }
 
         if (!rootAvailable) {
             Log.w(TAG, "typeText: root unavailable — falling back to instant ACTION_SET_TEXT")
-            typeTextFallback(text)
+            if (!setFocusedTextExact(text)) {
+                throw IllegalStateException("typeText fallback failed: unable to set focused field")
+            }
             return
         }
 
@@ -118,6 +187,16 @@ class AutomationController(private val service: AccessibilityService?) {
             }
         }
 
+        if (verifyFinal) {
+            val actual = readFocusedEditableText()
+            if (actual != text) {
+                Log.w(TAG, "typeText: final text mismatch; correcting focused field (actualLen=${actual?.length ?: -1}, expectedLen=${text.length})")
+                if (!setFocusedTextExact(text)) {
+                    throw IllegalStateException("typeText final verification failed: unable to correct focused field")
+                }
+            }
+        }
+
         Log.d(TAG, "typeText: done (${text.length} chars)")
     }
 
@@ -130,22 +209,22 @@ class AutomationController(private val service: AccessibilityService?) {
     private suspend fun shellInputText(s: String) = withContext(Dispatchers.IO) {
         // Shell-escape: wrap in single quotes, escape embedded single quotes
         val escaped = s.replace("'", "'\\''")
-        val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", "input text '$escaped'"))
-        proc.waitFor()
-        proc.inputStream.close()
-        proc.errorStream.close()
-        proc.destroy()
+        val result = BoundedProcessRunner.run(
+            arrayOf("su", "-c", "input text '$escaped'"),
+            GESTURE_TIMEOUT_MS,
+        )
+        if (!result.success) throw IllegalStateException("input text failed: ${result.output}")
     }
 
     /**
      * Send a key event via root `input keyevent`.
      */
     private suspend fun shellInputKeyEvent(keyCode: Int) = withContext(Dispatchers.IO) {
-        val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent $keyCode"))
-        proc.waitFor()
-        proc.inputStream.close()
-        proc.errorStream.close()
-        proc.destroy()
+        val result = BoundedProcessRunner.run(
+            arrayOf("su", "-c", "input keyevent $keyCode"),
+            GESTURE_TIMEOUT_MS,
+        )
+        if (!result.success) throw IllegalStateException("input keyevent failed: ${result.output}")
     }
 
     /**
@@ -153,12 +232,10 @@ class AutomationController(private val service: AccessibilityService?) {
      */
     private fun isRootAvailable(): Boolean {
         return try {
-            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", "echo ok"))
-            val ok = proc.waitFor() == 0
-            proc.inputStream.close()
-            proc.errorStream.close()
-            proc.destroy()
-            ok
+            BoundedProcessRunner.runBlocking(
+                arrayOf("su", "-c", "echo ok"),
+                GESTURE_TIMEOUT_MS,
+            ).success
         } catch (_: Exception) {
             false
         }
@@ -185,31 +262,44 @@ class AutomationController(private val service: AccessibilityService?) {
         return if (char.isUpperCase()) typo.uppercaseChar() else typo
     }
 
-    /**
-     * Fallback: instant text entry via ACTION_SET_TEXT (no root needed).
-     */
-    private suspend fun typeTextFallback(text: String) = withContext(Dispatchers.Main) {
+    private suspend fun readFocusedEditableText(): String? = withContext(Dispatchers.Main) {
         val svc = requireService()
         val root = svc.rootInActiveWindow
         val focused = findFocusedOrEditableNode(root)
+        val value = focused?.text?.toString()
+        focused?.recycle()
+        root?.recycle()
+        value
+    }
+
+    /**
+     * Exact text entry via ACTION_SET_TEXT with clipboard/paste fallback.
+     */
+    private suspend fun setFocusedTextExact(text: String): Boolean = withContext(Dispatchers.Main) {
+        val svc = requireService()
+        val root = svc.rootInActiveWindow
+        val focused = findFocusedOrEditableNode(root)
+        var success = false
 
         if (focused != null) {
             val args = Bundle().apply {
                 putString(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
             }
             val ok = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-            if (!ok) {
+            success = ok
+            if (!success) {
                 // Last resort: clipboard + paste
                 val clipboard = svc.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("typed", text))
                 focused.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
-                focused.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                success = focused.performAction(AccessibilityNodeInfo.ACTION_PASTE)
             }
             focused.recycle()
         } else {
-            Log.w(TAG, "typeTextFallback: no focused editable node found")
+            Log.w(TAG, "setFocusedTextExact: no focused editable node found")
         }
         root?.recycle()
+        success
     }
 
     // ─── Scroll ───────────────────────────────────────────────────────────────
@@ -313,15 +403,20 @@ class AutomationController(private val service: AccessibilityService?) {
      *                       Null = dump entire screen.
      * Returns JSON string (not JSONObject) to avoid deep recursion overhead.
      */
-    suspend fun uiTreeDump(packageFilter: String? = null): String = withContext(Dispatchers.Main) {
-        val svc  = requireService()
-        val root = svc.rootInActiveWindow
+    suspend fun uiTreeDump(packageFilter: String? = null): String {
+        val svc = requireService()
+        val root = withContext(Dispatchers.Main) { svc.rootInActiveWindow }
         if (root == null) {
             Log.w(TAG, "uiTreeDump: rootInActiveWindow is null")
-            return@withContext "{\"error\":\"no_root\"}"
+            return "{\"error\":\"no_root\"}"
         }
-        try {
-            val json = nodeToJson(root, packageFilter)
+        return try {
+            // Accessibility traversal performs Binder calls. Keep it off the
+            // main thread and make the blocking section interruptible so the
+            // workflow/action timeout can actually stop a stalled tree dump.
+            val json = runInterruptible(Dispatchers.IO) {
+                nodeToJson(root, packageFilter)
+            }
             json.toString()
         } finally {
             root.recycle()
@@ -413,14 +508,13 @@ class AutomationController(private val service: AccessibilityService?) {
      * Run a shell command via root (su -c).
      * Blocks until command exits. Throws on non-zero exit or execution error.
      */
-    private fun runShellCommand(cmd: String) {
+    private suspend fun runShellCommand(cmd: String): Boolean {
         Log.d(TAG, "shell: $cmd")
-        val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-        val exit = proc.waitFor()
-        if (exit != 0) {
-            val err = proc.errorStream.bufferedReader().readText().trim()
-            Log.w(TAG, "shell exit=$exit stderr=$err for: $cmd")
-            // Non-fatal: log but don't throw — gesture may still have applied
+        val result = BoundedProcessRunner.run(arrayOf("su", "-c", cmd), GESTURE_TIMEOUT_MS)
+        if (!result.success) {
+            Log.w(TAG, "shell failed exit=${result.exitCode} timedOut=${result.timedOut} for: $cmd")
+            return false
         }
+        return true
     }
 }

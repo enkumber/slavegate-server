@@ -1,5 +1,7 @@
 package com.phonenetwork.connection
 
+import android.app.Notification
+import android.app.NotificationManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.net.ConnectivityManager
@@ -11,6 +13,7 @@ import android.util.Log
 import com.phonenetwork.executor.BatchExecutor
 import com.phonenetwork.executor.JobExecutor
 import com.phonenetwork.workflow.WorkflowEngine
+import com.phonenetwork.utils.BoundedProcessRunner
 import kotlinx.coroutines.*
 import okhttp3.*
 import org.json.JSONObject
@@ -46,11 +49,13 @@ class DirectWsClient(
     private val scope: CoroutineScope,
     private val onConnected: (deviceId: String) -> Unit = {},
     private val onDisconnected: () -> Unit = {},
+    private val onModelConfigUpdated: () -> Unit = {},
     private val onOtaUpdate: (version: String, versionCode: Int, apkUrl: String, apkSha256: String, mandatory: Boolean) -> Unit = { _, _, _, _, _ -> },
     private val onTaskResult: (taskType: String, success: Boolean, result: Map<String, Any?>, error: String?) -> Unit = { _, _, _, _ -> },
     private var batchExecutor: BatchExecutor? = null,
     private var workflowEngine: WorkflowEngine? = null,
 ) {
+    private var workflowCancellationWatchdogJob: Job? = null
 
     /**
      * Set the BatchExecutor instance. Called after dependencies are initialized.
@@ -82,10 +87,10 @@ class DirectWsClient(
 
         // 2. Try hardware serial via root
         val serial = try {
-            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", "getprop ro.serialno"))
-            val output = proc.inputStream.bufferedReader().readText().trim()
-            proc.waitFor()
-            output
+            BoundedProcessRunner.runBlocking(
+                arrayOf("su", "-c", "getprop ro.serialno"),
+                5_000L,
+            ).output
         } catch (_: Exception) { "" }
 
         if (serial.isNotBlank() && serial != "unknown") {
@@ -131,6 +136,9 @@ class DirectWsClient(
         private const val RECONNECT_MAX_MS      = 60_000L
         private const val RECONNECT_MAX_ATTEMPTS = 10
         private const val SERVER_HEALTH_POLL_MS  = 60_000L
+        private const val WORKFLOW_CANCEL_GRACE_MS = 5_000L
+        private const val AGENT_RECOVERY_DELAY_MS = 2_000L
+        private const val AGENT_RECOVERY_REQUEST_CODE = 9107
     }
 
     private val prefs: SharedPreferences =
@@ -296,6 +304,12 @@ class DirectWsClient(
                 Log.i(TAG, "AUTH_OK — deviceId=$deviceId")
                 startKeepalive(webSocket)
                 onConnected(deviceId)
+                onModelConfigUpdated()
+            }
+
+            "MODEL_CONFIG_UPDATED" -> {
+                Log.i(TAG, "MODEL_CONFIG_UPDATED received")
+                onModelConfigUpdated()
             }
 
             "AUTH_FAIL" -> {
@@ -309,8 +323,9 @@ class DirectWsClient(
                 val jobId = msg.optString("jobId")
                 val jobType = msg.optString("jobType")
                 val params = msg.optJSONObject("params") ?: JSONObject()
+                val timeoutMs = msg.optLong("timeoutMs", 0L)
                 Log.i(TAG, "JOB received: $jobId type=$jobType")
-                executeJob(webSocket, jobId, jobType, params)
+                executeJob(webSocket, jobId, jobType, params, timeoutMs)
             }
 
             "BATCH_START" -> {
@@ -352,8 +367,29 @@ class DirectWsClient(
 
             // ─── Edge Workflow Execution (ADR-001) ───────────────────────────────
             "WORKFLOW_START" -> {
+                workflowCancellationWatchdogJob?.cancel()
                 Log.i(TAG, "WORKFLOW_START received: ${msg.optString("id")}")
+                notifyDebug(
+                    "Workflow START",
+                    "template=${msg.optString("id")} run=${msg.optString("workflowId", "none").take(8)}"
+                )
                 executeWorkflow(msg)
+            }
+
+            "WORKFLOW_CANCEL" -> {
+                val runId = msg.optString("workflowId", "")
+                Log.i(TAG, "WORKFLOW_CANCEL received: ${runId.take(8)}")
+                notifyDebug("Workflow CANCEL", "run=${runId.take(8)}")
+                val engine = workflowEngine
+                engine?.cancel(runId)
+                workflowCancellationWatchdogJob?.cancel()
+                workflowCancellationWatchdogJob = scope.launch {
+                    delay(WORKFLOW_CANCEL_GRACE_MS)
+                    if (engine?.isRunning() == true) {
+                        Log.e(TAG, "Workflow cancel did not unwind within grace period; restarting agent process")
+                        scheduleAgentProcessRecovery()
+                    }
+                }
             }
 
             "LLM_RESULT" -> {
@@ -379,7 +415,7 @@ class DirectWsClient(
 
     // ─── Job execution ────────────────────────────────────────────────────────
 
-    private fun executeJob(webSocket: WebSocket, jobId: String, jobType: String, params: JSONObject) {
+    private fun executeJob(webSocket: WebSocket, jobId: String, jobType: String, params: JSONObject, timeoutMs: Long = 0L) {
         scope.launch {
             val startMs = System.currentTimeMillis()
             try {
@@ -387,6 +423,7 @@ class DirectWsClient(
                     put("jobId", jobId)
                     put("type", jobType)
                     put("params", params)
+                    if (timeoutMs > 0L) put("timeoutMs", timeoutMs)
                 }
                 executor.execute(jobPayload) { result ->
                     val durationMs = System.currentTimeMillis() - startMs
@@ -618,9 +655,10 @@ class DirectWsClient(
         val engine = workflowEngine
         if (engine == null) {
             Log.e(TAG, "WORKFLOW_START received but WorkflowEngine not initialized")
+            notifyDebug("Workflow FAILED", "WorkflowEngine not initialized")
             sendRaw(ws ?: return, JSONObject().apply {
                 put("type", "WORKFLOW_STATUS")
-                put("workflowId", msg.optString("id"))
+                put("workflowId", msg.optString("workflowId", msg.optString("id")))
                 put("status", "failed")
                 put("error", "WorkflowEngine not initialized on device")
             })
@@ -633,6 +671,53 @@ class DirectWsClient(
             } catch (e: Exception) {
                 Log.e(TAG, "Workflow execution failed: ${e.message}")
             }
+        }
+    }
+
+    /**
+     * Last-resort local watchdog. This is deliberately process-only recovery:
+     * it does not reboot the phone and does not use root. The launch alarm is
+     * registered before killing the process, so Android starts a clean agent
+     * even if an OEM fails to restart the sticky foreground service promptly.
+     */
+    private fun scheduleAgentProcessRecovery() {
+        val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+        if (launchIntent == null) {
+            Log.e(TAG, "Cannot schedule agent recovery: launch intent unavailable")
+            return
+        }
+        launchIntent.addFlags(
+            android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+        )
+        val pendingIntent = android.app.PendingIntent.getActivity(
+            context,
+            AGENT_RECOVERY_REQUEST_CODE,
+            launchIntent,
+            android.app.PendingIntent.FLAG_CANCEL_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE,
+        )
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+        val triggerAt = android.os.SystemClock.elapsedRealtime() + AGENT_RECOVERY_DELAY_MS
+        alarmManager.setAndAllowWhileIdle(
+            android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            triggerAt,
+            pendingIntent,
+        )
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
+
+    private fun notifyDebug(title: String, text: String) {
+        try {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val notification = Notification.Builder(context, "phone_network_agent")
+                .setContentTitle("Phone Network Agent — $title")
+                .setContentText(text.take(120))
+                .setSmallIcon(android.R.drawable.ic_menu_manage)
+                .setShowWhen(true)
+                .build()
+            nm.notify(1102, notification)
+        } catch (e: Exception) {
+            Log.w(TAG, "notifyDebug failed: ${e.message}")
         }
     }
 
@@ -677,6 +762,23 @@ class DirectWsClient(
             webSocket.send(payload.toString())
         } catch (e: Exception) {
             Log.w(TAG, "Send failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Send a raw JSON payload to the server via the current WebSocket connection.
+     * Used by WorkflowEngine to send WORKFLOW_STATUS updates.
+     */
+    fun sendRaw(payload: JSONObject) {
+        val ws = this.ws
+        if (ws != null) {
+            try {
+                ws.send(payload.toString())
+            } catch (e: Exception) {
+                Log.w(TAG, "Send raw failed: ${e.message}")
+            }
+        } else {
+            Log.w(TAG, "Cannot send raw payload — WebSocket not connected")
         }
     }
 

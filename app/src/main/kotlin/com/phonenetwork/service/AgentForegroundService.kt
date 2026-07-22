@@ -14,16 +14,21 @@ import com.phonenetwork.anti_detection.DnsBackgroundService
 import com.phonenetwork.automation.AutomationController
 import com.phonenetwork.capture.CaptureController
 import com.phonenetwork.connection.DirectWsClient
+import com.phonenetwork.llm.OpenAiCompatibleClient
+import com.phonenetwork.model.DeviceModelConfigClient
 import com.phonenetwork.connection.WifiWatchdog
 import com.phonenetwork.executor.JobExecutor
 import com.phonenetwork.health.HealthMonitor
 import com.phonenetwork.ota.OtaInstaller
+import com.phonenetwork.workflow.WorkflowEngine
+import com.phonenetwork.utils.BoundedProcessRunner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /**
  * AgentForegroundService — sticky foreground service, owns all agent components.
@@ -116,6 +121,8 @@ class AgentForegroundService : Service() {
         // Start DirectWs transport
         serviceScope.launch {
             try {
+                val modelConfigClient = DeviceModelConfigClient(applicationContext)
+                val llmClient = OpenAiCompatibleClient(modelConfigClient)
                 val dwc = DirectWsClient(
                     context    = applicationContext,
                     executor   = jobExecutor,
@@ -128,9 +135,17 @@ class AgentForegroundService : Service() {
                         Log.i(TAG, "DirectWs disconnected")
                         updateNotification("Disconnected — reconnecting…")
                     },
+                    onModelConfigUpdated = {
+                        serviceScope.launch {
+                            modelConfigClient.invalidate()
+                            runCatching { modelConfigClient.getConfig(forceRefresh = true) }
+                                .onFailure { Log.w(TAG, "Model config refresh failed: ${it.message}") }
+                        }
+                    },
                     onOtaUpdate = { version, versionCode, apkUrl, apkSha256, mandatory ->
                         Log.i(TAG, "OTA update available: $version (code=$versionCode)")
                         updateNotification("Downloading update $version…")
+                        sendOtaResult("started", version, versionCode, apkSha256, null)
                         serviceScope.launch {
                             try {
                                 val result = otaInstaller.downloadVerifyInstall(
@@ -141,15 +156,34 @@ class AgentForegroundService : Service() {
                                     forceDowngrade   = false
                                 )
                                 Log.i(TAG, "OTA update result: $result")
+                                sendOtaResult("success", version, versionCode, apkSha256, null)
                                 updateNotification("Update applied — restart to activate")
                             } catch (e: Exception) {
                                 Log.e(TAG, "OTA update error: ${e.message}")
+                                sendOtaResult("failed", version, versionCode, apkSha256, e.message)
                                 updateNotification("Update failed")
                             }
                         }
                     },
                 )
                 directWsClient = dwc
+
+                // Initialize WorkflowEngine for edge execution (ADR-001)
+                val workflowEngine = WorkflowEngine(
+                    context = applicationContext,
+                    automation = automation,
+                    capture = captureCtrl,
+                    jobExecutor = jobExecutor,
+                    sendStatus = { statusJson ->
+                        dwc.sendRaw(statusJson)
+                    },
+                    requestLLM = { prompt, screenshot, model ->
+                        llmClient.complete(prompt, screenshot, model)
+                    }
+                )
+                dwc.setWorkflowEngine(workflowEngine)
+                Log.i(TAG, "WorkflowEngine initialized and attached")
+
                 dwc.connect()
                 Log.i(TAG, "DirectWsClient started")
             } catch (e: Exception) {
@@ -216,18 +250,30 @@ class AgentForegroundService : Service() {
 
     private fun runRootCommand(cmd: String): Int {
         return try {
-            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-            val exitCode = proc.waitFor()
-            val stdout = proc.inputStream.bufferedReader().readText().trim()
-            val stderr = proc.errorStream.bufferedReader().readText().trim()
-            if (stdout.isNotEmpty()) Log.i(TAG, "root[$cmd] stdout: $stdout")
-            if (stderr.isNotEmpty()) Log.w(TAG, "root[$cmd] stderr: $stderr")
-            Log.i(TAG, "root[$cmd] exit=$exitCode")
-            exitCode
+            val result = BoundedProcessRunner.runBlocking(arrayOf("su", "-c", cmd), 10_000L)
+            Log.i(TAG, "root command exit=${result.exitCode} timeout=${result.timedOut}")
+            result.exitCode ?: -1
         } catch (e: Exception) {
-            Log.w(TAG, "root[$cmd] exception: ${e.message}")
+            Log.w(TAG, "root command exception: ${e.message}")
             -1
         }
+    }
+
+    private fun sendOtaResult(
+        status: String,
+        version: String,
+        versionCode: Int,
+        apkSha256: String,
+        error: String?
+    ) {
+        directWsClient?.sendRaw(JSONObject().apply {
+            put("type", "OTA_RESULT")
+            put("status", status)
+            put("version", version)
+            put("versionCode", versionCode)
+            put("apkSha256", apkSha256)
+            if (error != null) put("error", error)
+        })
     }
 
     private fun initComponents() {

@@ -1,16 +1,20 @@
 package com.phonenetwork.ota
 
+import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.phonenetwork.utils.BoundedProcessRunner
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URL
@@ -45,10 +49,12 @@ class OtaInstaller(private val context: Context) {
     companion object {
         private const val TAG          = "PhoneNet/OTA"
         private const val DOWNLOAD_DIR = "phone_network_ota"
-        private const val TIMEOUT_MS   = 120_000       // 120s download timeout (GitHub can be slow on mobile)
+        private const val CONNECT_TIMEOUT_MS = 30_000
+        private const val READ_TIMEOUT_MS    = 600_000 // APK downloads over mobile/DDNS can stall >120s
         private const val CHANNEL_ID   = "ota_debug"
         private const val CHANNEL_NAME = "OTA Debug"
-        
+        private const val ROOT_COMMAND_TIMEOUT_MS = 120_000L
+
         /** Prevents multiple OTA updates running simultaneously */
         private val isOtaInProgress = AtomicBoolean(false)
     }
@@ -145,10 +151,8 @@ class OtaInstaller(private val context: Context) {
             // ── 2. SHA256 verification ────────────────────────────────────────
             notify("OTA Step 2/6", "Verifying SHA256...")
             val actualSha256 = sha256Hex(apkFile)
-            if (!MessageDigest.isEqual(
-                    actualSha256.lowercase().toByteArray(),
-                    expectedSha256.lowercase().toByteArray()
-                )) {
+            Log.i(TAG, "SHA256 expected: ${expectedSha256.take(16)}... actual: ${actualSha256.take(16)}...")
+            if (actualSha256.lowercase() != expectedSha256.lowercase()) {
                 throw SecurityException(
                     "SHA256 mismatch.\nExpected: ${expectedSha256.take(16)}...\nGot: ${actualSha256.take(16)}..."
                 )
@@ -198,8 +202,8 @@ class OtaInstaller(private val context: Context) {
 
     private fun downloadFile(url: String, dest: File) {
         val conn = (URL(url).openConnection() as java.net.HttpURLConnection).apply {
-            connectTimeout = TIMEOUT_MS
-            readTimeout    = TIMEOUT_MS
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout    = READ_TIMEOUT_MS
             requestMethod  = "GET"
             setRequestProperty("User-Agent", "PhoneNetworkAgent/1.0")
         }
@@ -219,13 +223,17 @@ class OtaInstaller(private val context: Context) {
     // ─── Private: SHA256 ──────────────────────────────────────────────────────
 
     private fun sha256Hex(file: File): String {
+        val start = System.currentTimeMillis()
         val md = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { stream ->
-            val buf = ByteArray(8192)
+            val buf = ByteArray(65536) // 64KB buffer for faster reads
             var read: Int
+            var total = 0L
             while (stream.read(buf).also { read = it } != -1) {
                 md.update(buf, 0, read)
+                total += read
             }
+            Log.d(TAG, "SHA256 computed for $total bytes in ${System.currentTimeMillis() - start}ms")
         }
         return md.digest().joinToString("") { "%02x".format(it) }
     }
@@ -289,40 +297,49 @@ class OtaInstaller(private val context: Context) {
     // ─── Private: Install via root ────────────────────────────────────────────
     // Note: App restart after install is handled by OtaRestartReceiver (MY_PACKAGE_REPLACED broadcast)
 
-    private fun installApk(apkFile: File) {
+    private suspend fun installApk(apkFile: File) {
         // Root install via `pm install` — works on Magisk-rooted devices
         // -r = replace existing, -d = allow downgrade (when forceDowngrade)
-        val result = runRootCommand("pm install -r ${apkFile.absolutePath}")
-        if (!result.success || result.output.contains("INSTALL_FAILED", ignoreCase = true)) {
+        //
+        // CRITICAL: pm install running as system may not have access to app's private cache.
+        // Solution: copy APK to /data/local/tmp/ (world-readable) before install.
+        val tmpApk = File("/data/local/tmp/phone_network_ota.apk")
+
+        // Copy to tmp (needs root)
+        val copyResult = runRootCommand("cp ${apkFile.absolutePath} ${tmpApk.absolutePath} && chmod 644 ${tmpApk.absolutePath}")
+        if (!copyResult.success) {
+            throw RuntimeException("Failed to copy APK to /data/local/tmp: ${copyResult.output}")
+        }
+
+        Log.i(TAG, "APK copied to ${tmpApk.absolutePath}, starting pm install...")
+        val result = runRootCommand("pm install -r ${tmpApk.absolutePath}")
+
+        // Cleanup tmp file
+        runRootCommand("rm -f ${tmpApk.absolutePath}")
+
+        if (!result.success) {
             throw RuntimeException("pm install failed: ${result.output}")
         }
-        // Force-start the app after install (MY_PACKAGE_REPLACED broadcast may not fire with pm install)
-        try {
-            Thread.sleep(1000)
-            runRootCommand("am start -n com.phonenetwork.debug/com.phonenetwork.service.BootReceiver")
-            runRootCommand("am start -n com.phonenetwork/com.phonenetwork.service.BootReceiver")
-            // Also try starting the foreground service directly
-            runRootCommand("am startservice com.phonenetwork.debug/com.phonenetwork.service.AgentForegroundService")
-            runRootCommand("am startservice com.phonenetwork/com.phonenetwork.service.AgentForegroundService")
-        } catch (e: Exception) {
-            Log.w(TAG, "Auto-start after install failed: ${e.message}")
-        }
+
+        Log.i(TAG, "pm install succeeded: ${result.output}")
+
+        // Note: Our process may be killed here by Android.
+        // OtaRestartReceiver will handle restart via MY_PACKAGE_REPLACED broadcast.
+        // If that doesn't fire, the local recovery watchdog restarts the agent process.
     }
 
     // ─── Private: Root command ────────────────────────────────────────────────
 
     private data class CmdResult(val success: Boolean, val output: String)
 
-    private fun runRootCommand(cmd: String): CmdResult {
+    private suspend fun runRootCommand(cmd: String): CmdResult {
         return try {
-            val process  = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-            val stdout   = process.inputStream.bufferedReader().readText().trim()
-            val stderr   = process.errorStream.bufferedReader().readText().trim()
-            val exitCode = process.waitFor()
-            process.destroy()
-            val output = listOf(stdout, stderr).filter { it.isNotEmpty() }.joinToString(" | ")
-            Log.d(TAG, "Root cmd exit=$exitCode output=$output")
-            CmdResult(exitCode == 0, output)
+            val result = BoundedProcessRunner.run(
+                arrayOf("su", "-c", cmd),
+                ROOT_COMMAND_TIMEOUT_MS,
+            )
+            Log.d(TAG, "Root cmd exit=${result.exitCode} timedOut=${result.timedOut}")
+            CmdResult(result.success, result.output)
         } catch (e: Exception) {
             Log.w(TAG, "Root command exception: ${e.message}")
             CmdResult(false, e.message ?: "unknown error")

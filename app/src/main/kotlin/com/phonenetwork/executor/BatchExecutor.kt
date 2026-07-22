@@ -5,6 +5,7 @@ import android.util.Log
 import com.phonenetwork.automation.AutomationController
 import com.phonenetwork.capture.CaptureController
 import com.phonenetwork.utils.ScreenMetrics
+import com.phonenetwork.utils.BoundedProcessRunner
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -38,6 +39,7 @@ class BatchExecutor(
     private val capture: CaptureController,
 ) {
     companion object {
+        private const val ROOT_COMMAND_TIMEOUT_MS = 5_000L
         private const val TAG = "BatchExecutor"
 
         // Default timeouts
@@ -245,6 +247,7 @@ class BatchExecutor(
             "long_press"  -> executeLongPress(params)
             "open_app"    -> executeOpenApp(params)
             "close_app"   -> executeCloseApp(params)
+            "intent_send" -> executeIntentSend(params)
             "double_tap"  -> executeDoubleTap(params)
             else          -> throw UnsupportedOperationException("Unknown action: $action")
         }
@@ -383,7 +386,11 @@ class BatchExecutor(
             else            -> 4
         }
 
-        Runtime.getRuntime().exec(arrayOf("su", "-c", "input keyevent $keyCode")).waitFor()
+        val result = BoundedProcessRunner.run(
+            arrayOf("su", "-c", "input keyevent $keyCode"),
+            ROOT_COMMAND_TIMEOUT_MS,
+        )
+        if (!result.success) throw IllegalStateException("keyevent failed: ${result.output}")
 
         return JSONObject().apply { put("keyCode", keyCode) }
     }
@@ -405,9 +412,11 @@ class BatchExecutor(
         val py = if (rawY <= 1.0) (rawY * screenH).roundToInt() else rawY.roundToInt()
 
         // Use shell input swipe with 0 distance = long press
-        Runtime.getRuntime().exec(
-            arrayOf("su", "-c", "input swipe $px $py $px $py $durationMs")
-        ).waitFor()
+        val result = BoundedProcessRunner.run(
+            arrayOf("su", "-c", "input swipe $px $py $px $py $durationMs"),
+            (durationMs + ROOT_COMMAND_TIMEOUT_MS).coerceAtMost(30_000L),
+        )
+        if (!result.success) throw IllegalStateException("long_press failed: ${result.output}")
 
         return JSONObject().apply {
             put("x", rawX)
@@ -448,6 +457,66 @@ class BatchExecutor(
         automation.closeApp(packageName)
 
         return JSONObject().apply { put("packageName", packageName) }
+    }
+
+    /**
+     * Send an Android intent/deep link. A missing resolver is an execution
+     * failure so the batch stops at the real failing step.
+     */
+    private suspend fun executeIntentSend(params: JSONObject): JSONObject = withContext(Dispatchers.Main) {
+        val uri = params.getString("uri")
+        val action = params.optString("action", android.content.Intent.ACTION_VIEW)
+        val targetPackage = params.optString("packageName", "").takeIf { it.isNotEmpty() }
+        val extrasObj = params.optJSONObject("extras")
+        val flagsArray = params.optJSONArray("flags")
+
+        val intent = android.content.Intent(action).apply {
+            data = android.net.Uri.parse(uri)
+            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+
+            if (flagsArray != null) {
+                for (i in 0 until flagsArray.length()) {
+                    when (flagsArray.getString(i)) {
+                        "FLAG_ACTIVITY_CLEAR_TOP" -> addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                        "FLAG_ACTIVITY_SINGLE_TOP" -> addFlags(android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        "FLAG_ACTIVITY_CLEAR_TASK" -> addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                        "FLAG_ACTIVITY_NO_HISTORY" -> addFlags(android.content.Intent.FLAG_ACTIVITY_NO_HISTORY)
+                    }
+                }
+            }
+
+            if (targetPackage != null) {
+                setPackage(targetPackage)
+            }
+
+            if (extrasObj != null) {
+                val keys = extrasObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    when (val value = extrasObj.get(key)) {
+                        is String -> putExtra(key, value)
+                        is Int -> putExtra(key, value)
+                        is Boolean -> putExtra(key, value)
+                        is Long -> putExtra(key, value)
+                        is Double -> putExtra(key, value.toFloat())
+                    }
+                }
+            }
+        }
+
+        val resolveInfo = context.packageManager.resolveActivity(intent, 0)
+        try {
+            context.startActivity(intent)
+            JSONObject().apply {
+                put("uri", uri)
+                put("launched", true)
+                if (resolveInfo != null) {
+                    put("resolvedActivity", "${resolveInfo.activityInfo.packageName}/${resolveInfo.activityInfo.name}")
+                }
+            }
+        } catch (e: android.content.ActivityNotFoundException) {
+            throw IllegalStateException("No activity found to handle intent: $uri", e)
+        }
     }
 
     /**

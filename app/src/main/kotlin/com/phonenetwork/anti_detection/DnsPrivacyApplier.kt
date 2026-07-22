@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import android.util.Log
+import com.phonenetwork.utils.BoundedProcessRunner
 
 /**
  * DnsPrivacyApplier — sets Android Private DNS (DoT) per device config.
@@ -80,23 +81,15 @@ object DnsPrivacyApplier {
      * Never throws — catches all exceptions and returns false.
      */
     private fun runRootCommand(cmd: String): Boolean {
-        var process: Process? = null
         return try {
-            process = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-            val exitCode = process.waitFor()
-            if (exitCode != 0) {
-                val err = process.errorStream.bufferedReader().readText().trim()
-                Log.w(TAG, "Root cmd failed (exit $exitCode): $cmd — $err")
+            val result = BoundedProcessRunner.runBlocking(arrayOf("su", "-c", cmd), 10_000L)
+            if (!result.success) {
+                Log.w(TAG, "Root cmd failed (exit ${result.exitCode}, timeout=${result.timedOut}): $cmd")
             }
-            exitCode == 0
+            result.success
         } catch (e: Exception) {
             Log.w(TAG, "Root cmd exception: $cmd — ${e.message}")
             false
-        } finally {
-            // Close streams to prevent file descriptor leak (2 root calls per config apply)
-            process?.inputStream?.close()
-            process?.errorStream?.close()
-            process?.destroy()
         }
     }
 

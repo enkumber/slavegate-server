@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.util.Log
+import com.phonenetwork.utils.BoundedProcessRunner
 
 /**
  * RustDeskWatchdog — monitors and auto-configures RustDesk on rooted devices.
@@ -299,26 +300,12 @@ object RustDeskWatchdog {
      * Execute a root command and return result. Properly closes all streams.
      */
     private fun execRoot(command: String): RootResult {
-        var process: Process? = null
         try {
-            process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
-            val stdout = process.inputStream.bufferedReader().readText()
-            val stderr = process.errorStream.bufferedReader().readText()
-            val exitCode = process.waitFor()
-            if (stderr.isNotEmpty() && exitCode != 0) {
-                Log.d(TAG, "Root cmd stderr ($exitCode): $stderr")
-            }
-            return RootResult(exitCode, stdout, stderr)
+            val result = BoundedProcessRunner.runBlocking(arrayOf("su", "-c", command), 15_000L)
+            return RootResult(result.exitCode ?: -1, result.output, if (result.success) "" else result.output)
         } catch (e: Exception) {
             Log.w(TAG, "Root exec failed: ${e.message}")
             return RootResult(-1, "", e.message ?: "unknown error")
-        } finally {
-            process?.let {
-                try { it.inputStream.close() } catch (_: Exception) {}
-                try { it.errorStream.close() } catch (_: Exception) {}
-                try { it.outputStream.close() } catch (_: Exception) {}
-                it.destroy()
-            }
         }
     }
 

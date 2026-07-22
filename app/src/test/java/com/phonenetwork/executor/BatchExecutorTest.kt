@@ -186,8 +186,8 @@ class BatchExecutorTest {
         }
 
         // Verify automation was called correctly
-        verify(automation).openApp("com.instagram.android")
-        verify(automation).typeText("hello")
+        runBlocking { verify(automation).openApp("com.instagram.android") }
+        runBlocking { verify(automation).typeText("hello") }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -251,7 +251,7 @@ class BatchExecutorTest {
         assertEquals("success", results.getJSONObject(3).optString("status"))
 
         // Verify type was called despite earlier failure
-        verify(automation).typeText("test")
+        runBlocking { verify(automation).typeText("test") }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -433,7 +433,7 @@ class BatchExecutorTest {
         val result = runBatch(batch)
 
         assertEquals("completed", result.optString("status"))
-        verify(automation).closeApp("com.instagram.android")
+        runBlocking { verify(automation).closeApp("com.instagram.android") }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -555,8 +555,8 @@ class BatchExecutorTest {
         val result = runBatch(batch)
 
         assertEquals("completed", result.optString("status"))
-        verify(automation).openAppFresh("com.instagram.android")
-        verify(automation, never()).openApp(anyString())
+        runBlocking { verify(automation).openAppFresh("com.instagram.android") }
+        runBlocking { verify(automation, never()).openApp(anyString()) }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
