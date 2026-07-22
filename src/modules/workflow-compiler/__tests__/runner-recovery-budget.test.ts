@@ -140,10 +140,12 @@ describe("runCompiledWorkflow recovery budget", () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(vi.mocked(sendDeviceExecutionJobToDevice).mock.calls.map((call) => call[1].type)).toEqual([
+    const dispatched = vi.mocked(sendDeviceExecutionJobToDevice).mock.calls.map((call) => call[1]);
+    expect(dispatched.map((payload) => payload.type)).toEqual([
       "screen_wake",
       "unlock",
     ]);
+    expect(dispatched.every((payload) => payload.verificationStrategy === "local_only")).toBe(true);
   });
 
   it("preserves DB-profile package and action constraints for intent_send", async () => {
@@ -178,6 +180,7 @@ describe("runCompiledWorkflow recovery budget", () => {
       "device-1",
       expect.objectContaining({
         type: "intent_send",
+        verificationStrategy: "local_only",
         params: {
           uri: "https://www.reddit.com/search/?q=AskReddit",
           packageName: "com.reddit.frontpage",
@@ -476,7 +479,11 @@ describe("runCompiledWorkflow recovery budget", () => {
     expect(result.ok).toBe(true);
     expect(sendDeviceExecutionJobToDevice).toHaveBeenCalledWith(
       "device-1",
-      expect.objectContaining({ type: "a11y_find_tap", params: { resourceId: "search_field" } }),
+      expect.objectContaining({
+        type: "a11y_find_tap",
+        params: { resourceId: "search_field" },
+        verificationStrategy: "local_only",
+      }),
       expect.any(Object),
     );
     expect(waitForResult).toHaveBeenCalledTimes(1);

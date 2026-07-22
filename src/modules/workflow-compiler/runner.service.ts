@@ -128,6 +128,11 @@ const MIN_COMPILED_BATCH_SIZE = 2;
 const DEFAULT_RECOVERY_ATTEMPTS_PER_STEP = 1;
 const MAX_TOTAL_RECOVERY_ATTEMPTS = 10;
 const RECOVERY_READINESS_TIMEOUT_MS = 10_000;
+// The server runner already performs UI-tree/fingerprint verification after
+// each step. Leaving this unset makes the Android agent default every atomic
+// child job to local_with_screenshot, duplicating verification and allowing
+// slow root screencaps to consume the PNQ operation deadline.
+const SERVER_RUNNER_VERIFICATION = "local_only" as const;
 export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED";
 export const AI_RECOVERY_DISABLED = "AI_RECOVERY_DISABLED";
 
@@ -147,6 +152,7 @@ async function ensureDeviceReadyForRecoveryReplay(
       type,
       params: {},
       timeoutMs: RECOVERY_READINESS_TIMEOUT_MS,
+      verificationStrategy: SERVER_RUNNER_VERIFICATION,
     }, {
       boundary: "generated_child",
       rootExternalId: workflowRootExternalId,
@@ -276,6 +282,7 @@ async function captureUiTree(deviceId: string, workflowRootExternalId: string, t
     type: "ui_tree_dump",
     params: {},
     timeoutMs,
+    verificationStrategy: SERVER_RUNNER_VERIFICATION,
   }, {
     boundary: "generated_child",
     rootExternalId: workflowRootExternalId,
@@ -338,6 +345,7 @@ async function executeStepAction(
       type,
       params,
       timeoutMs,
+      verificationStrategy: SERVER_RUNNER_VERIFICATION,
     }, {
       boundary: "generated_child",
       rootExternalId: workflowRootExternalId,
@@ -356,6 +364,7 @@ async function executeStepAction(
       type: "a11y_find_tap",
       params,
       timeoutMs: STEP_TIMEOUT_MS,
+      verificationStrategy: SERVER_RUNNER_VERIFICATION,
     }, {
       boundary: "generated_child",
       rootExternalId: workflowRootExternalId,
@@ -473,6 +482,7 @@ async function executeStepAction(
           type: "tap",
           params: { x: step.target.coords.x, y: step.target.coords.y },
           timeoutMs: 5_000,
+          verificationStrategy: SERVER_RUNNER_VERIFICATION,
         }, {
           boundary: "generated_child",
           rootExternalId: workflowRootExternalId,
