@@ -1519,7 +1519,7 @@ export async function runCompiledWorkflow(
         evidence: { ...(candidate.evidence ?? {}), actionExecuted: true, postActionVerified: true },
       }).then(async (candidateId) => {
         observeLearningCandidate(candidate.appId, candidate.type, "observed");
-        await uiGraphLearningLoop.validate({
+        const decision = await uiGraphLearningLoop.validate({
           candidateId,
           context: candidate.context,
           success: true,
@@ -1532,6 +1532,15 @@ export async function runCompiledWorkflow(
           },
         });
         observeLearningCandidate(candidate.appId, candidate.type, "validated");
+        if (uiGraph?.flags.autoPromotion && decision.autoPromotable) {
+          await uiGraphLearningLoop.promote(
+            candidateId,
+            "ui_graph_auto_promotion",
+            "Five state-verified executions completed without failures",
+            true,
+          );
+          observeLearningCandidate(candidate.appId, candidate.type, "promoted");
+        }
       })
         .catch((error) => console.warn(`[ui-graph] verified recovery learning candidate failed: ${(error as Error).message}`));
     }

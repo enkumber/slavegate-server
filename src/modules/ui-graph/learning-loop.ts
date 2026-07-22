@@ -69,14 +69,16 @@ export function promotionDecision(input: {
   failureCount: number;
   stateVerified: boolean;
 }): PromotionDecision {
-  const expensive = ["ocr", "vlm", "llm_recovery"].includes(input.discoveryMethod);
-  const requiredSuccesses = expensive ? 5 : 3;
+  const requiredSuccesses = 5;
   // Repeated state-verified executions are the safety gate. Portable
   // environment diversity is telemetry, never a cross-device prerequisite.
   const blockers: string[] = [];
   if (input.successCount < requiredSuccesses) blockers.push("insufficient_successes");
   if (!input.stateVerified) blockers.push("destination_state_not_verified");
-  if (input.failureCount > Math.max(1, Math.floor(input.successCount * 0.2))) blockers.push("failure_rate_too_high");
+  // Automatic reuse is deliberately a clean 5/5 gate. A candidate with any
+  // failed or unverified execution remains available for manual review, but
+  // is never promoted into the shared fast path automatically.
+  if (input.failureCount > 0) blockers.push("manual_review_required_after_failed_validation");
   if (["mutating", "sensitive"].includes(input.safetyClass)) blockers.push("manual_review_required_for_safety_class");
   if (input.type === "state") blockers.push("state_candidates_require_manual_review");
   if (input.type === "recovery_rule") blockers.push("recovery_rules_require_manual_materialization");
@@ -190,6 +192,10 @@ export class UiGraphLearningLoop {
       const locked = await client.query(`SELECT * FROM ui_graph_learning_candidates WHERE id = $1 FOR UPDATE`, [candidateId]);
       const candidate = locked.rows[0];
       if (!candidate) throw new Error("UI_GRAPH_CANDIDATE_NOT_FOUND");
+      if (candidate.status === "promoted" && candidate.promoted_entity_id) {
+        await client.query("COMMIT");
+        return candidate.promoted_entity_id;
+      }
       const validationStats = await client.query(
         `SELECT BOOL_OR(success AND state_verified) AS state_verified FROM ui_graph_candidate_validations WHERE candidate_id = $1`,
         [candidateId],

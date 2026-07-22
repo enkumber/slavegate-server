@@ -837,7 +837,7 @@ async function persistCascadeLearning(input: {
     });
     observeLearningCandidate(appId, "selector", "validated");
     if (flags.autoPromotion && decision.autoPromotable) {
-      await uiGraphLearningLoop.promote(candidateId, "ui_graph_auto_promotion", "Cross-context A11y selector validation threshold met", true);
+      await uiGraphLearningLoop.promote(candidateId, "ui_graph_auto_promotion", "Five state-verified executions completed without failures", true);
       observeLearningCandidate(appId, "selector", "promoted");
     }
   }

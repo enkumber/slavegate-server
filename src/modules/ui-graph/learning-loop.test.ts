@@ -35,6 +35,22 @@ describe("UI graph learning policy", () => {
     expect(ready.blockers).not.toContain("insufficient_distinct_contexts");
   });
 
+  it("requires five clean validations for every automatically promoted selector", () => {
+    const blocked = promotionDecision({ type: "selector", discoveryMethod: "ui_tree", safetyClass: "read_only", successCount: 4, failureCount: 0, stateVerified: true });
+    expect(blocked.autoPromotable).toBe(false);
+    expect(blocked.requiredSuccesses).toBe(5);
+
+    const ready = promotionDecision({ type: "selector", discoveryMethod: "ui_tree", safetyClass: "read_only", successCount: 5, failureCount: 0, stateVerified: true });
+    expect(ready.autoPromotable).toBe(true);
+  });
+
+  it("never auto-promotes a candidate with a failed validation", () => {
+    const decision = promotionDecision({ type: "selector", discoveryMethod: "ui_tree", safetyClass: "navigation", successCount: 5, failureCount: 1, stateVerified: true });
+    expect(decision.autoPromotable).toBe(false);
+    expect(decision.ready).toBe(true);
+    expect(decision.blockers).toContain("manual_review_required_after_failed_validation");
+  });
+
   it("never auto-promotes mutating knowledge", () => {
     const decision = promotionDecision({ type: "transition", discoveryMethod: "ui_tree", safetyClass: "mutating", successCount: 10, failureCount: 0, stateVerified: true });
     expect(decision.ready).toBe(true);

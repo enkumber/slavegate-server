@@ -46,13 +46,40 @@ vi.mock("../../observability/metrics", () => ({
   uiGraphLearningCandidates: {
     labels: vi.fn(() => ({ inc: vi.fn() })),
   },
+  uiGraphActions: {
+    labels: vi.fn(() => ({ inc: vi.fn() })),
+  },
+  uiGraphActionLatency: {
+    labels: vi.fn(() => ({ observe: vi.fn() })),
+  },
 }));
 
 vi.mock("../../ui-graph/learning-loop", () => ({
   uiGraphLearningLoop: {
     observe: vi.fn().mockResolvedValue("candidate-1"),
     validate: vi.fn().mockResolvedValue({ ready: false, autoPromotable: false, blockers: ["insufficient_successes"] }),
+    promote: vi.fn().mockResolvedValue("selector-1"),
   },
+}));
+
+vi.mock("../../ui-graph/runner-bridge", () => ({
+  createRunnerUiGraphSession: vi.fn().mockResolvedValue({
+    flags: {
+      mode: "disabled",
+      selectorFirst: true,
+      graphRuntime: true,
+      aiRecovery: true,
+      candidateLearning: true,
+      autoPromotion: false,
+    },
+    states: [],
+    enabled: false,
+    enforced: false,
+    stateByKey: vi.fn().mockReturnValue(null),
+    observeState: vi.fn(),
+    acceptsExpectedState: vi.fn().mockReturnValue(false),
+    resolveTarget: vi.fn().mockResolvedValue(null),
+  }),
 }));
 
 import {
@@ -69,6 +96,7 @@ import {
 import { deviceExecutionArbiter } from "../../device-execution";
 import { updateWorkflowStatus } from "../planner.service";
 import { uiGraphLearningLoop } from "../../ui-graph/learning-loop";
+import { createRunnerUiGraphSession } from "../../ui-graph/runner-bridge";
 
 function makeWorkflow(overrides: Partial<CompiledWorkflow> = {}): CompiledWorkflow {
   return {
@@ -107,6 +135,29 @@ describe("runCompiledWorkflow recovery budget", () => {
     vi.mocked(deviceExecutionArbiter.observeAdmission).mockResolvedValue({ decision: "admitted", root: null });
     vi.mocked(deviceExecutionArbiter.finishServerWorkflowRoot).mockResolvedValue({ decision: "terminal", root: null });
     vi.mocked(deviceExecutionArbiter.markAmbiguous).mockResolvedValue({ decision: "ambiguous", root: null });
+    vi.mocked(createRunnerUiGraphSession).mockResolvedValue({
+      flags: {
+        mode: "disabled",
+        selectorFirst: true,
+        graphRuntime: true,
+        aiRecovery: true,
+        candidateLearning: true,
+        autoPromotion: false,
+      },
+      states: [],
+      enabled: false,
+      enforced: false,
+      stateByKey: vi.fn().mockReturnValue(null),
+      observeState: vi.fn(),
+      acceptsExpectedState: vi.fn().mockReturnValue(false),
+      resolveTarget: vi.fn().mockResolvedValue(null),
+    } as never);
+    vi.mocked(uiGraphLearningLoop.validate).mockResolvedValue({
+      ready: false,
+      autoPromotable: false,
+      requiredSuccesses: 5,
+      blockers: ["insufficient_successes"],
+    });
   });
 
   it("keeps happy-path token and recovery usage at zero", async () => {
@@ -430,6 +481,73 @@ describe("runCompiledWorkflow recovery budget", () => {
       stateVerified: true,
       evidence: expect.objectContaining({ actionExecuted: true, postActionVerified: true }),
     }));
+  });
+
+  it("auto-promotes a verified recovery candidate when the scoped flag and 5/5 gate allow it", async () => {
+    const workflow = makeWorkflow({
+      steps: [{
+        id: "stale-selector-auto-promote",
+        action: "tap",
+        target: { resourceId: "stale_selector" },
+        expectedPage: "page",
+        expectedPageHash: "",
+        retries: 0,
+        retryDelay: 0,
+        description: "Recover, validate, and promote",
+      }],
+    });
+    vi.mocked(createRunnerUiGraphSession).mockResolvedValue({
+      flags: {
+        mode: "disabled",
+        selectorFirst: true,
+        graphRuntime: true,
+        aiRecovery: true,
+        candidateLearning: true,
+        autoPromotion: true,
+      },
+      states: [],
+      enabled: false,
+      enforced: false,
+      stateByKey: vi.fn().mockReturnValue(null),
+      observeState: vi.fn(),
+      acceptsExpectedState: vi.fn().mockReturnValue(false),
+      resolveTarget: vi.fn().mockResolvedValue(null),
+    } as never);
+    vi.mocked(uiGraphLearningLoop.validate).mockResolvedValue({
+      ready: true,
+      autoPromotable: true,
+      requiredSuccesses: 5,
+      blockers: [],
+    });
+    vi.mocked(waitForResult)
+      .mockResolvedValueOnce({ status: "completed", output: { found: false } })
+      .mockResolvedValueOnce({ status: "completed", output: { screenOn: true } })
+      .mockResolvedValueOnce({ status: "completed", output: { unlocked: true } })
+      .mockResolvedValueOnce({ status: "completed", output: { found: true } });
+    const onRecoveryNeeded = vi.fn().mockImplementation(async (ctx) => {
+      ctx.workflow.steps[0] = { ...ctx.workflow.steps[0], target: { text: "Stable label" } };
+      ctx.pendingRecoveryLearning = {
+        appId: workflow.appId,
+        type: "selector",
+        sourceStateId: "state-1",
+        payload: { elementKey: "stable_label", strategy: "text", selector: { value: "Stable label" } },
+        context: { appId: workflow.appId, deviceId: "device-1", workflowId: workflow.id },
+        discoveryMethod: "llm_recovery",
+        confidence: 0.75,
+        safetyClass: "navigation",
+      };
+      return true;
+    });
+
+    const result = await runCompiledWorkflow({ deviceId: "device-1", workflow }, onRecoveryNeeded);
+
+    expect(result.ok).toBe(true);
+    expect(uiGraphLearningLoop.promote).toHaveBeenCalledWith(
+      "candidate-1",
+      "ui_graph_auto_promotion",
+      "Five state-verified executions completed without failures",
+      true,
+    );
   });
 
   it("tries Accessibility selectors separately in priority order", async () => {
