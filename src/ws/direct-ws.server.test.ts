@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { DirectWsServer, mergeWorkflowStatusVariables, resolveDirectWsResultHandle, setWorkflowJobResultResolverForTest } from "./direct-ws.server";
+import { DirectWsServer, mergeWorkflowStatusVariables, otaTerminalStatusFromAuthenticatedVersion, resolveDirectWsResultHandle, setWorkflowJobResultResolverForTest } from "./direct-ws.server";
 import { deviceExecutionArbiter, setDeviceExecutionAuthorityForTest, type DeviceExecutionHandle } from "../modules/device-execution";
 import { pnqV2RuntimeService } from "../modules/device-execution/pnq-v2-runtime.service";
 import { setPnqV2RuntimeConfigForTest } from "../modules/device-execution/pnq-v2-runtime-config";
@@ -73,6 +73,33 @@ describe("mergeWorkflowStatusVariables", () => {
       observedUsername: "u_healthcheck",
       error: "",
     });
+  });
+});
+
+describe("OTA terminal reconciliation", () => {
+  const started = {
+    deviceId: "00000000-0000-4000-8000-000000000002",
+    status: "started",
+    version: "4.0.60",
+    versionCode: 116,
+    apkSha256: "abc123",
+    updatedAt: "2026-07-22T16:41:43.809Z",
+  };
+
+  it("marks an in-flight OTA successful when the reauthenticated package version matches", () => {
+    expect(otaTerminalStatusFromAuthenticatedVersion(started, "4.0.60")).toEqual({
+      status: "success",
+      version: "4.0.60",
+      versionCode: 116,
+      apkSha256: "abc123",
+      error: undefined,
+    });
+  });
+
+  it("does not reconcile mismatched, missing, or already-terminal statuses", () => {
+    expect(otaTerminalStatusFromAuthenticatedVersion(started, "4.0.59")).toBeNull();
+    expect(otaTerminalStatusFromAuthenticatedVersion(undefined, "4.0.60")).toBeNull();
+    expect(otaTerminalStatusFromAuthenticatedVersion({ ...started, status: "failed" }, "4.0.60")).toBeNull();
   });
 });
 

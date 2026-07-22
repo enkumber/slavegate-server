@@ -283,6 +283,23 @@ interface OtaDeviceStatus {
   updatedAt: string;
 }
 
+export function otaTerminalStatusFromAuthenticatedVersion(
+  current: OtaDeviceStatus | undefined,
+  authenticatedAgentVersion: string | undefined,
+): Omit<Partial<OtaDeviceStatus>, "deviceId" | "updatedAt"> & { status: string } | null {
+  if (!current || !authenticatedAgentVersion) return null;
+  if (current.status === "success" || current.status === "failed") return null;
+  if (!current.version || current.version !== authenticatedAgentVersion) return null;
+
+  return {
+    status: "success",
+    version: current.version,
+    versionCode: current.versionCode,
+    apkSha256: current.apkSha256,
+    error: undefined,
+  };
+}
+
 interface JobResult {
   jobId:    string;
   success:  boolean;
@@ -1400,6 +1417,24 @@ export class DirectWsServer {
           );
           console.log(`[direct-ws] Device info: ${friendlyName} Android ${androidVer} agent=${agentVersion}`);
         }
+      }
+
+      // A successful package replacement can kill the old process after it sent
+      // `started` but before it sent the terminal OTA_RESULT. The new process
+      // authenticates with the version read from PackageManager, which is
+      // authoritative evidence that the requested release is installed. Reconcile
+      // the in-flight status before AUTH_OK so the dashboard cannot remain stuck
+      // on `started` merely because the process boundary dropped one message.
+      const reconciledOtaStatus = otaTerminalStatusFromAuthenticatedVersion(
+        this.otaStatuses.get(finalDeviceId),
+        deviceInfo?.agentVersion,
+      );
+      if (reconciledOtaStatus) {
+        this.recordOtaStatus(finalDeviceId, reconciledOtaStatus);
+        console.log(
+          `[direct-ws] OTA reconciled from authenticated package version ` +
+          `device=${finalDeviceId.slice(0, 8)} version=${deviceInfo?.agentVersion}`,
+        );
       }
 
       // Send AUTH_OK with deviceId + deviceKey (so device can save for future reconnects)
