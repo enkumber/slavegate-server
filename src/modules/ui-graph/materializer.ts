@@ -1,5 +1,6 @@
 import { getDb } from "../../db/client";
 import type { AppMap } from "../app-mapping/schema";
+import { applyRuntimeStateDetectionOverrides, loadRuntimeProfile } from "../app-mapping/runtime-profile";
 import { projectLegacyAppMap } from "./legacy-adapter";
 
 function parseMap(value: unknown): AppMap | null {
@@ -137,7 +138,11 @@ export async function materializeAllLegacyAppMaps(): Promise<MaterializationSumm
       continue;
     }
     try {
-      const result = await materializeLegacyAppMap(map);
+      const profile = await loadRuntimeProfile(row.app_id);
+      const mapForMaterialization = profile
+        ? applyRuntimeStateDetectionOverrides(map, profile.metadata ?? {})
+        : map;
+      const result = await materializeLegacyAppMap(mapForMaterialization);
       summary.apps++;
       summary.states += result.states;
       summary.variants += result.variants;

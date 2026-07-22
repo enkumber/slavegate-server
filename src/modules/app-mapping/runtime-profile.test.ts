@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyRuntimeStateDetectionOverrides,
   assertRuntimeActionSafe,
   renderRuntimeParams,
   runtimeProfileFromRow,
@@ -83,6 +84,39 @@ describe("app runtime profiles", () => {
     expect(() => runtimeStateDetectionOverrides({
       stateDetectionOverrides: { search_entry: { forbiddenAnchors: "bad" } },
     })).toThrow("must be an array");
+  });
+
+  it("applies DB-owned state detection overrides to existing maps without mutating the source", () => {
+    const map = {
+      appId: "com.example.app",
+      pages: {
+        search_entry: {
+          detection: {
+            anchors: ["resourceId:toolbar"],
+            optionalAnchors: ["contentDescription:Search"],
+          },
+        },
+      },
+    };
+
+    const applied = applyRuntimeStateDetectionOverrides(map, {
+      stateDetectionOverrides: {
+        search_entry: {
+          requiredAnchors: ["resourceId:toolbar", "resourceId:collapsed_content"],
+          forbiddenAnchors: ["resourceId:search_results"],
+        },
+      },
+    });
+
+    expect(applied.pages.search_entry.detection).toEqual({
+      anchors: ["resourceId:toolbar", "resourceId:collapsed_content"],
+      optionalAnchors: ["contentDescription:Search"],
+      forbiddenAnchors: ["resourceId:search_results"],
+    });
+    expect(map.pages.search_entry.detection).toEqual({
+      anchors: ["resourceId:toolbar"],
+      optionalAnchors: ["contentDescription:Search"],
+    });
   });
 
   it("permits only HTTPS VIEW intents to allowlisted hosts and the configured package", () => {

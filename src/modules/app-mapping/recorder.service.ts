@@ -19,6 +19,7 @@ import fs from "fs/promises";
 import path from "path";
 import { computePageSignature, buildPageDetection, isSamePage } from "./page-fingerprint";
 import { filterRelevantElements, generateElementId } from "./element-filter";
+import { applyRuntimeStateDetectionOverrides, loadRuntimeProfile } from "./runtime-profile";
 import type {
   AppMap,
   PageDef,
@@ -453,9 +454,11 @@ export async function loadMap(appId: string): Promise<AppMap | null> {
   );
   if (rows.length > 0) {
     try {
-      return typeof rows[0].map_data === "string"
+      const map = typeof rows[0].map_data === "string"
         ? JSON.parse(rows[0].map_data)
         : (rows[0].map_data as AppMap);
+      const profile = await loadRuntimeProfile(appId);
+      return profile ? applyRuntimeStateDetectionOverrides(map, profile.metadata ?? {}) : map;
     } catch {
       return null;
     }

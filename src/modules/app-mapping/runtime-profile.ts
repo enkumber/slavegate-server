@@ -53,6 +53,16 @@ export interface RuntimeStateDetectionOverride {
   forbiddenAnchors?: string[];
 }
 
+export interface RuntimeStateDetectionTarget {
+  pages: Record<string, {
+    detection: {
+      anchors: string[];
+      optionalAnchors?: string[];
+      forbiddenAnchors?: string[];
+    };
+  }>;
+}
+
 function stringArray(value: unknown, field: string): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
@@ -80,6 +90,30 @@ export function runtimeStateDetectionOverrides(
       forbiddenAnchors: stringArray(entry.forbiddenAnchors, `${stateKey}.forbiddenAnchors`),
     }];
   }));
+}
+
+export function applyRuntimeStateDetectionOverrides<T extends RuntimeStateDetectionTarget>(
+  map: T,
+  metadata: Record<string, unknown>,
+): T {
+  const overrides = runtimeStateDetectionOverrides(metadata);
+  if (Object.keys(overrides).length === 0) return map;
+
+  const pages = Object.fromEntries(Object.entries(map.pages).map(([stateKey, page]) => {
+    const override = overrides[stateKey];
+    if (!override) return [stateKey, page];
+    return [stateKey, {
+      ...page,
+      detection: {
+        ...page.detection,
+        anchors: override.requiredAnchors ?? page.detection.anchors,
+        optionalAnchors: override.optionalAnchors ?? page.detection.optionalAnchors,
+        forbiddenAnchors: override.forbiddenAnchors ?? page.detection.forbiddenAnchors,
+      },
+    }];
+  })) as T["pages"];
+
+  return { ...map, pages };
 }
 
 function asArray(value: unknown): unknown[] {
