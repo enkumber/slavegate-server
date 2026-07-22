@@ -315,6 +315,7 @@ function buildHumanWorkflowCompilePrompt(input: {
     "Allowed actions are generic interpreter primitives only: screen_wake,unlock,open_app,close_app,intent_send,a11y_find_tap,ocr_find_tap,tap,long_press,double_tap,swipe,scroll,type_text,set_focused_text,press_key,keyevent,ui_tree_dump,screenshot,screenshot_for_vlm,wait_for_idle,set_variable,classify_ui_tree,request_llm.",
     "Never use semantic_tap or an application-specific opcode. Selectors, packages, URLs, normalized coordinates and state rules must be explicit data from this prompt/App Map.",
     "Use request_llm only when semantic reasoning or creative generation is genuinely required. It must declare prompt, targetVariable or saveOutputAs, timeoutMs, responseFormat, and success/failure branches.",
+    "For navigation to an absolute http:// or https:// URL, prefer one intent_send action with android.intent.action.VIEW, the target package from runtime data, and the URL as uri. Do not edit a browser address bar with tap/type_text/press_key when intent_send can express the goal directly.",
     "Prefer selector-first navigation. Coordinates, when required, must be normalized and followed by an explicit state check.",
     `Use params.packageName=${input.packageName} when the workflow explicitly opens the target app.`,
     safetyClass === "read_only" ? "Do not include mutating actions." : "Include only mutations explicitly requested by the user.",
@@ -333,7 +334,7 @@ function buildHumanWorkflowRepairPrompt(input: {
     input.compilePrompt,
     "",
     "CORRECTIVE COMPILATION REQUIRED.",
-    `The previous candidate was rejected as undercompiled: ${input.reason}.`,
+    `The previous candidate was rejected as invalid or undercompiled: ${input.reason}.`,
     "Return a complete replacement workflow that performs the user's actual goal end to end.",
     "Wake, unlock, waits, screen detection, UI dumps, and checkpoints are preparation/evidence only; they do not satisfy the goal.",
     "Include the concrete app-opening, navigation, tapping, and text-entry actions needed by the goal.",
@@ -820,20 +821,15 @@ export class HumanWorkflowCompilerService {
       });
       let normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, { platform, packageName, goal: input.intent });
       let validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
-      if (!validation.template) {
-        throw Object.assign(new Error("workflow failed validation"), {
-          status: 400,
-          code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
-          validationErrors: validation.errors,
-        });
-      }
       let template = validation.template;
-      const undercompiledReason = humanWorkflowUndercompiledReason(template, input.intent);
-      if (undercompiledReason) {
+      const correctiveReason = template
+        ? humanWorkflowUndercompiledReason(template, input.intent)
+        : `workflow validation failed: ${validation.errors.join("; ")}`;
+      if (correctiveReason) {
         rawWorkflow = await llmJson<WorkflowTemplate>(buildHumanWorkflowRepairPrompt({
           compilePrompt: prompt,
           rejectedWorkflow: rawWorkflow,
-          reason: undercompiledReason,
+          reason: correctiveReason,
         }), undefined, {
           max_tokens: HUMAN_WORKFLOW_REPAIR_MAX_TOKENS,
           system: "You are a Phone Network workflow compiler repairing an undercompiled plan. Return only complete valid WorkflowTemplate JSON. No reasoning.",
@@ -852,6 +848,13 @@ export class HumanWorkflowCompilerService {
           });
         }
         template = validation.template;
+      }
+      if (!template) {
+        throw Object.assign(new Error("workflow failed validation"), {
+          status: 400,
+          code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
+          validationErrors: validation.errors,
+        });
       }
       assertHumanWorkflowMeaningful(template, input.intent);
       const safetyClass = template.safetyClass ?? inferHumanWorkflowSafetyClass(input.intent);

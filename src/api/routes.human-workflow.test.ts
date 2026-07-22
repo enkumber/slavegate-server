@@ -1368,6 +1368,98 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.workflowService.saveExecutableGeneratedPlanCache).not.toHaveBeenCalled();
   });
 
+  it("repairs a structurally invalid read-only URL workflow with validator feedback", async () => {
+    const intent = "deschide browserul Chrome si mergi pe ciprianneculai.com";
+    const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{ device_id: DEVICE_ID, device_model: "ONEPLUS A5010", device_name: "Test Phone" }],
+    });
+    mocks.compileJobService.createOrGet.mockResolvedValueOnce(compileJobRecord({
+      requestKey: key,
+      accountId: null,
+      intent,
+      platform: "android",
+    }));
+    mocks.llmJson.mockReset();
+    mocks.llmJson
+      .mockResolvedValueOnce({
+        id: "open_url_invalid",
+        name: "Open URL",
+        platform: "android",
+        safetyClass: "read_only",
+        description: intent,
+        version: "1.0.0",
+        runtimeContract: "edge-workflow/v2",
+        defaultVerificationStrategy: "local_only",
+        dataRetentionDays: 7,
+        steps: [
+          { id: "wake", type: "action", action: "screen_wake", params: {} },
+          { id: "unlock", type: "action", action: "unlock", params: {} },
+          { id: "type_url", type: "action", action: "type_text", params: { text: "https://ciprianneculai.com" } },
+          { id: "bad_condition", type: "condition", condition: { visible: true }, if_true: [] },
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: "open_url_repaired",
+        name: "Open URL",
+        platform: "android",
+        safetyClass: "read_only",
+        description: intent,
+        version: "1.0.0",
+        runtimeContract: "edge-workflow/v2",
+        defaultVerificationStrategy: "local_only",
+        dataRetentionDays: 7,
+        steps: [
+          { id: "wake", type: "action", action: "screen_wake", params: {} },
+          { id: "unlock", type: "action", action: "unlock", params: {} },
+          {
+            id: "open_url",
+            type: "action",
+            action: "intent_send",
+            params: {
+              action: "android.intent.action.VIEW",
+              packageName: "com.android.chrome",
+              uri: "https://ciprianneculai.com",
+            },
+          },
+          { id: "settle", type: "wait", duration: { min: 1_000, max: 1_000, distribution: "uniform" } },
+          { id: "done", type: "checkpoint", reason: "URL opened" },
+        ],
+      });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      intent,
+    });
+
+    expect(response.status).toBe(202);
+    const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
+    await runner();
+
+    expect(mocks.llmJson).toHaveBeenCalledTimes(2);
+    expect(mocks.llmJson.mock.calls[1][0]).toContain("condition step requires check or expression");
+    expect(mocks.llmJson.mock.calls[1][0]).toContain("if_true must be a non-empty step array");
+    expect(mocks.llmJson.mock.calls[1][0]).toContain("cannot include mutating term: type_text");
+    expect(mocks.llmJson.mock.calls[1][0]).toContain("prefer one intent_send action");
+    expect(mocks.workflowService.saveExecutableGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({
+        safetyClass: "read_only",
+        steps: expect.arrayContaining([
+          expect.objectContaining({
+            id: "open_url",
+            action: "intent_send",
+            params: expect.objectContaining({ uri: "https://ciprianneculai.com" }),
+          }),
+        ]),
+      }),
+      expect.anything(),
+      key,
+      expect.objectContaining({ source: "dashboard_human", intent }),
+    );
+  });
+
   it("preserves generic intent navigation without application-specific rewrites", async () => {
     const intent = "Deschide gmail si fa un cont nou de email pt mihai pavel";
     const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
@@ -1436,7 +1528,7 @@ describe("dashboard human workflow routes", () => {
       intent: ASKREDDIT_HOT_COMMENT_INTENT,
     }));
     mocks.llmJson.mockReset();
-    mocks.llmJson.mockResolvedValueOnce({
+    const legacyWorkflow = {
       id: "workflow_reddit_askreddit_hot_comment",
       name: "AskReddit hot contextual comment",
       platform: "reddit",
@@ -1456,7 +1548,10 @@ describe("dashboard human workflow routes", () => {
         { id: "post_comment", type: "action", action: "a11y_find_tap", params: { text: "Post" } },
         { id: "checkpoint", type: "checkpoint" },
       ],
-    });
+    };
+    mocks.llmJson
+      .mockResolvedValueOnce(legacyWorkflow)
+      .mockResolvedValueOnce(legacyWorkflow);
 
     const response = await postJson("/api/workflows/human/compile", {
       device_id: DEVICE_ID,
