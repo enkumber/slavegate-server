@@ -20,6 +20,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
 import kotlin.random.Random
 
@@ -405,7 +409,7 @@ class AutomationController(private val service: AccessibilityService?) {
      */
     suspend fun uiTreeDump(packageFilter: String? = null): String {
         val svc = requireService()
-        val root = withContext(Dispatchers.Main) { svc.rootInActiveWindow }
+        val root = getRootInActiveWindowBounded(svc, 2_500L)
         if (root == null) {
             Log.w(TAG, "uiTreeDump: rootInActiveWindow is null")
             return "{\"error\":\"no_root\"}"
@@ -427,6 +431,37 @@ class AutomationController(private val service: AccessibilityService?) {
 
     private fun requireService(): AccessibilityService =
         service ?: throw IllegalStateException("AccessibilityService not connected")
+
+    /**
+     * rootInActiveWindow is Binder IPC and can ignore coroutine cancellation. Run it
+     * on a daemon thread and enforce a wall-clock deadline so a broken framework
+     * connection cannot stall the workflow executor.
+     */
+    private suspend fun getRootInActiveWindowBounded(
+        svc: AccessibilityService,
+        timeoutMs: Long,
+    ): AccessibilityNodeInfo? = withContext(Dispatchers.IO) {
+        val latch = CountDownLatch(1)
+        val expired = AtomicBoolean(false)
+        val result = AtomicReference<AccessibilityNodeInfo?>(null)
+        Thread {
+            val root = runCatching { svc.rootInActiveWindow }.getOrNull()
+            if (expired.get()) root?.recycle() else result.set(root)
+            latch.countDown()
+        }.also {
+            it.name = "PhoneNet-A11yRoot"
+            it.isDaemon = true
+            it.start()
+        }
+        if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            expired.set(true)
+            result.getAndSet(null)?.recycle()
+            Log.w(TAG, "rootInActiveWindow timed out after ${timeoutMs}ms")
+            null
+        } else {
+            result.getAndSet(null)
+        }
+    }
 
     /** Recursively convert AccessibilityNodeInfo to JSONObject */
     /**

@@ -27,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -64,6 +65,15 @@ class AgentForegroundService : Service() {
             instance?.onAccessibilityServiceConnected(svc)
         }
 
+        fun unregisterAccessibilityService(svc: AgentAccessibilityService) {
+            if (pendingA11y === svc) pendingA11y = null
+            instance?.onAccessibilityServiceDisconnected(svc)
+        }
+
+        fun requestAccessibilityRecovery() {
+            instance?.requestAccessibilityRecoveryNow()
+        }
+
         var pendingA11y: AgentAccessibilityService? = null
     }
 
@@ -76,6 +86,9 @@ class AgentForegroundService : Service() {
     private lateinit var jobExecutor:     JobExecutor
     private          var directWsClient: DirectWsClient? = null
     private lateinit var wifiWatchdog:    WifiWatchdog
+    @Volatile private var connectedA11y: AgentAccessibilityService? = null
+    @Volatile private var lastA11yRecoveryAt = 0L
+    @Volatile private var started = false
 
     override fun onCreate() {
         super.onCreate()
@@ -88,6 +101,14 @@ class AgentForegroundService : Service() {
         Log.i(TAG, "Service starting (startId=$startId)")
 
         startForeground(NOTIFICATION_ID, buildNotification("Connecting…"))
+
+        // Boot receiver, launcher recovery alarm and START_STICKY can all arrive
+        // together after OTA. Initialize the executor/watchdogs exactly once.
+        if (started) {
+            Log.i(TAG, "Service already initialized; ignoring duplicate start")
+            return START_STICKY
+        }
+        started = true
 
         initComponents()
         DnsBackgroundService.start(serviceScope)
@@ -105,7 +126,24 @@ class AgentForegroundService : Service() {
             delay(3000)
             if (pendingA11y == null) {
                 Log.w(TAG, "A11y not connected after 3s — retrying enablement")
-                enableAccessibilityServiceViaRoot()
+                enableAccessibilityServiceViaRoot(forceRebind = true)
+            }
+        }
+
+        // Accessibility may be killed independently while the foreground process and
+        // DirectWs stay healthy. Keep this watchdog local so recovery never requires a
+        // server release, device reboot, force-stop, or human intervention.
+        serviceScope.launch {
+            while (isActive) {
+                delay(10_000)
+                if (connectedA11y == null || pendingA11y == null) {
+                    val now = System.currentTimeMillis()
+                    if (now - lastA11yRecoveryAt >= 20_000L) {
+                        lastA11yRecoveryAt = now
+                        Log.w(TAG, "A11y watchdog detected disconnect — forcing bounded rebind")
+                        enableAccessibilityServiceViaRoot(forceRebind = true)
+                    }
+                }
             }
         }
 
@@ -196,6 +234,7 @@ class AgentForegroundService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "Service stopping")
+        started = false
         instance = null
         directWsClient?.disconnect()
         if (::wifiWatchdog.isInitialized)  wifiWatchdog.stop()
@@ -206,14 +245,16 @@ class AgentForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun enableAccessibilityServiceViaRoot() {
+    @Synchronized
+    private fun enableAccessibilityServiceViaRoot(forceRebind: Boolean = false) {
+        if (forceRebind) lastA11yRecoveryAt = System.currentTimeMillis()
         val component = "$packageName/${AgentAccessibilityService::class.java.name}"
         try {
             val current = Settings.Secure.getString(
                 contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
             ) ?: ""
             Log.i(TAG, "A11y: current services='$current', target='$component'")
-            if (component in current) {
+            if (component in current && !forceRebind) {
                 Log.i(TAG, "A11y service already enabled")
                 return
             }
@@ -223,6 +264,7 @@ class AgentForegroundService : Service() {
             // Remove old package references (com.phonenetwork.debug or com.phonenetwork)
             val oldPrefixes = listOf("com.phonenetwork.debug/", "com.phonenetwork/")
             parts.removeAll { part -> oldPrefixes.any { prefix -> part.startsWith(prefix) } }
+            val withoutTarget = parts.joinToString(":")
             parts.add(component)
             val newList = parts.joinToString(":")
             Log.i(TAG, "A11y: setting services='$newList'")
@@ -230,6 +272,17 @@ class AgentForegroundService : Service() {
             // Use separate commands to avoid quoting issues with su -c
             val cmd1 = "settings put secure enabled_accessibility_services $newList"
             val cmd2 = "settings put secure accessibility_enabled 1"
+            if (forceRebind && component in current) {
+                // Android 10 may ignore a 0→1 toggle while the component list is
+                // unchanged. Remove the dead binding first, then restore the exact list.
+                runRootCommand("settings put secure accessibility_enabled 0")
+                if (withoutTarget.isEmpty()) {
+                    runRootCommand("settings delete secure enabled_accessibility_services")
+                } else {
+                    runRootCommand("settings put secure enabled_accessibility_services $withoutTarget")
+                }
+                Thread.sleep(300)
+            }
             runRootCommand(cmd1)
             runRootCommand(cmd2)
 
@@ -294,6 +347,7 @@ class AgentForegroundService : Service() {
 
     private fun onAccessibilityServiceConnected(svc: AgentAccessibilityService) {
         Log.i(TAG, "AccessibilityService connected")
+        connectedA11y = svc
         if (::jobExecutor.isInitialized) {
             jobExecutor.setAccessibilityService(svc)
             automation = AutomationController(service = svc)
@@ -301,6 +355,27 @@ class AgentForegroundService : Service() {
             Log.i(TAG, "AutomationController wired to A11yService")
         }
         updateNotification("Connected")
+    }
+
+    private fun onAccessibilityServiceDisconnected(svc: AgentAccessibilityService) {
+        if (connectedA11y !== svc) return
+        connectedA11y = null
+        if (::jobExecutor.isInitialized) {
+            jobExecutor.clearAccessibilityService()
+            automation = AutomationController(service = null)
+            jobExecutor.setAutomationController(automation)
+        }
+        updateNotification("Accessibility reconnecting…")
+        requestAccessibilityRecoveryNow()
+    }
+
+    private fun requestAccessibilityRecoveryNow() {
+        serviceScope.launch {
+            val now = System.currentTimeMillis()
+            if (now - lastA11yRecoveryAt < 2_000L) return@launch
+            lastA11yRecoveryAt = now
+            enableAccessibilityServiceViaRoot(forceRebind = true)
+        }
     }
 
     private fun createNotificationChannel() {

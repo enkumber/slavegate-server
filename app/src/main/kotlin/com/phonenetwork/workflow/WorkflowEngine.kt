@@ -149,21 +149,27 @@ class WorkflowEngine(
      * Cancel the current workflow only if it matches the requested run id.
      * If workflowId is blank, cancel whatever is active.
      */
-    fun cancel(workflowId: String?) {
+    fun cancel(workflowId: String?): Boolean {
         val requested = workflowId?.takeIf { it.isNotBlank() }
         if (requested == null || requested == this.workflowId) {
             Log.w(TAG, "Workflow cancellation requested for ${requested ?: "active"}")
             currentJob?.cancel(CancellationException("Cancelled by server"))
             currentScope?.cancel(CancellationException("Cancelled by server"))
+            return true
         } else {
             Log.w(TAG, "Ignoring cancel for $requested; active workflow is ${this.workflowId}")
+            return false
         }
     }
 
     /**
      * Check if a workflow is currently running.
      */
-    fun isRunning(): Boolean = running.availablePermits == 0
+    fun isRunning(workflowId: String? = null): Boolean {
+        if (running.availablePermits != 0) return false
+        val requested = workflowId?.takeIf { it.isNotBlank() } ?: return true
+        return requested == this.workflowId
+    }
 
     /**
      * Load last checkpoint for a workflow (for resume on restart).
@@ -531,7 +537,15 @@ class WorkflowEngine(
         step.duration?.let { duration ->
             val durationMs = hbe.resolveDuration(duration)
             Log.d(TAG, "Wait: ${durationMs}ms (${duration.distribution})")
-            delay(durationMs)
+            val deadline = android.os.SystemClock.elapsedRealtime() + durationMs
+            sendStatusUpdate("running", stepIndex = currentStepIndex)
+            while (true) {
+                ensureActive()
+                val remaining = deadline - android.os.SystemClock.elapsedRealtime()
+                if (remaining <= 0L) break
+                delay(min(remaining, 1_000L))
+                sendStatusUpdate("running", stepIndex = currentStepIndex)
+            }
             return
         }
 
@@ -1277,7 +1291,10 @@ class WorkflowEngine(
         }
 
         Log.d(TAG, "Status: $status step=$stepIndex/$totalSteps${error?.let { " err=$it" } ?: ""}")
-        notifyWorkflowStatus(status, stepIndex, error)
+        // Running checkpoints may be emitted every second during waits. Posting an
+        // Android notification for each heartbeat is another Binder IPC and can
+        // itself stall the executor. Only terminal states need a local notification.
+        if (status != "running") notifyWorkflowStatus(status, stepIndex, error)
         sendStatus(payload)
     }
 

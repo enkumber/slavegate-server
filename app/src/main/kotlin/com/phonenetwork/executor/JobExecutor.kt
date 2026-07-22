@@ -9,6 +9,7 @@ import com.phonenetwork.automation.AutomationController
 import com.phonenetwork.capture.CaptureController
 import com.phonenetwork.ocr.OcrController
 import com.phonenetwork.ota.OtaInstaller
+import com.phonenetwork.service.AgentForegroundService
 import com.phonenetwork.verification.VerificationCascade
 import com.phonenetwork.verification.VerificationStrategy
 import com.phonenetwork.verification.L2PixelDiffVerifier
@@ -44,10 +45,14 @@ class JobExecutor(
     private val capture: CaptureController,
     private val otaInstaller: OtaInstaller,
     /** Nullable — set after AccessibilityService connects (Phase 2+) */
-    private var accessibilityService: AgentAccessibilityService? = null
+    @Volatile private var accessibilityService: AgentAccessibilityService? = null
 ) {
     fun setAccessibilityService(service: AgentAccessibilityService) {
         accessibilityService = service
+    }
+
+    fun clearAccessibilityService() {
+        accessibilityService = null
     }
 
     /** Called when AccessibilityService connects — replaces stub AutomationController */
@@ -319,8 +324,19 @@ class JobExecutor(
     }
 
     private suspend fun executeUiTreeDump(params: JSONObject): JSONObject {
+        ensureAccessibilityConnected()
         val pkg = params.optString("packageName").takeIf { it.isNotEmpty() }
         return JSONObject().put("uiTree", automation.uiTreeDump(pkg))
+    }
+
+    private suspend fun ensureAccessibilityConnected() {
+        if (accessibilityService != null) return
+        AgentForegroundService.requestAccessibilityRecovery()
+        val connected = withTimeoutOrNull(12_000L) {
+            while (accessibilityService == null) delay(100L)
+            true
+        } ?: false
+        if (!connected) throw IllegalStateException("AccessibilityService recovery timed out")
     }
 
     /**

@@ -381,14 +381,18 @@ class DirectWsClient(
                 Log.i(TAG, "WORKFLOW_CANCEL received: ${runId.take(8)}")
                 notifyDebug("Workflow CANCEL", "run=${runId.take(8)}")
                 val engine = workflowEngine
-                engine?.cancel(runId)
+                val cancellationAccepted = engine?.cancel(runId) == true
                 workflowCancellationWatchdogJob?.cancel()
-                workflowCancellationWatchdogJob = scope.launch {
-                    delay(WORKFLOW_CANCEL_GRACE_MS)
-                    if (engine?.isRunning() == true) {
-                        Log.e(TAG, "Workflow cancel did not unwind within grace period; restarting agent process")
-                        scheduleAgentProcessRecovery()
+                if (cancellationAccepted) {
+                    workflowCancellationWatchdogJob = scope.launch {
+                        delay(WORKFLOW_CANCEL_GRACE_MS)
+                        if (engine?.isRunning(runId) == true) {
+                            Log.e(TAG, "Workflow cancel did not unwind within grace period; restarting agent process")
+                            scheduleAgentProcessRecovery()
+                        }
                     }
+                } else {
+                    Log.i(TAG, "Ignoring stale WORKFLOW_CANCEL for ${runId.take(8)}")
                 }
             }
 

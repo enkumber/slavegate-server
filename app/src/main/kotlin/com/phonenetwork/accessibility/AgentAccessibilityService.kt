@@ -2,6 +2,7 @@ package com.phonenetwork.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.content.Intent
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import com.phonenetwork.service.AgentForegroundService
@@ -49,6 +50,13 @@ class AgentAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         Log.w(tag, "AccessibilityService destroyed — Boot/Phase 2 watchdog will restart")
+        AgentForegroundService.unregisterAccessibilityService(this)
         super.onDestroy()
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        Log.w(tag, "AccessibilityService unbound — local watchdog will rebind")
+        AgentForegroundService.unregisterAccessibilityService(this)
+        return super.onUnbind(intent)
     }
 }
