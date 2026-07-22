@@ -8,7 +8,7 @@ import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 import { workflowEvents } from "../workflow-events";
 import { assertOperationalRuntimeContract } from "./runtime-contract.service";
 import { scheduleEdgeWorkflowAckWatchdog } from "./edge-workflow-lifecycle.service";
-import { prepareEdgeLearningBindings } from "../ui-graph/edge-learning.service";
+import { attachEdgeLearningBindings, prepareEdgeLearningBindings } from "../ui-graph/edge-learning.service";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
 
@@ -152,6 +152,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
   const simulatedTimezone = (variables?.["timezone"] as string) ?? "Europe/Bucharest";
   const hbeSession = hbeService.initSession(accountAgeDays, simulatedTimezone) as unknown as Record<string, unknown>;
   const edgeLearningBindings = await prepareEdgeLearningBindings(validation.template);
+  const edgeTemplate = attachEdgeLearningBindings(validation.template, edgeLearningBindings);
   const dispatchVariables = controlPlaneContext
     ? { ...(variables ?? {}), controlPlaneContext }
     : variables;
@@ -172,7 +173,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     const dispatch = await sendEdgeWorkflowToDeviceEnforced(
       deviceId,
       wf.id,
-      template as unknown as Record<string, unknown>,
+      edgeTemplate as unknown as Record<string, unknown>,
       edgeVariables,
     );
 

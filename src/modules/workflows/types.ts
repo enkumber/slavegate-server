@@ -58,6 +58,8 @@ export interface ActionStep {
   onFailureSteps?: WorkflowStep[];
   /** Timeout for this step in ms (overrides workflow default) */
   timeoutMs?: number;
+  /** Opaque server-issued id used to correlate compact edge learning evidence. */
+  learningBindingId?: string;
 
   // ─── Screen Verification (US-WORKFLOW-SCREEN-VERIFY) ────────────────────────
   
@@ -121,6 +123,8 @@ export interface WaitStep {
   condition?: "ui_element_visible" | "ui_element_gone" | "app_launched" | "network_available";
   element?:  string;   // For ui_element_visible/gone
   timeoutMs?: number;  // Max wait for condition
+  /** Bindings whose action becomes state-verified when this wait succeeds. */
+  learningBindingIds?: string[];
 }
 
 export interface WaitUntilSpec {
