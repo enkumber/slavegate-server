@@ -23,14 +23,21 @@ function flatten(nodes: UiTreeNode[], path: string[] = []): FlatNode[] {
 
 function contextMatches(selector: UiSelectorDefinition, context: UiGraphContext): boolean {
   if (selector.stateId && context.currentStateId && selector.stateId !== context.currentStateId) return false;
-  if (selector.variantId && context.currentVariantId && selector.variantId !== context.currentVariantId) return false;
+  // A materialized selector is scoped to the UI variant from which it was
+  // observed. Do not silently widen it when runtime metadata is incomplete.
+  if (selector.variantId && selector.variantId !== context.currentVariantId) return false;
   if (selector.deviceClass && clean(selector.deviceClass) !== clean(context.deviceClass)) return false;
   if (selector.appVersionPattern) {
-    if (!context.appVersion) return false;
-    try {
-      if (!new RegExp(selector.appVersionPattern, "i").test(context.appVersion)) return false;
-    } catch {
-      if (clean(selector.appVersionPattern) !== clean(context.appVersion)) return false;
+    if (context.appVersion) {
+      try {
+        if (!new RegExp(selector.appVersionPattern, "i").test(context.appVersion)) return false;
+      } catch {
+        if (clean(selector.appVersionPattern) !== clean(context.appVersion)) return false;
+      }
+    } else if (!selector.variantId || selector.variantId !== context.currentVariantId) {
+      // Missing package-version metadata may be replaced only by an exact
+      // state-variant guard already proven from the current UI tree.
+      return false;
     }
   }
   return true;

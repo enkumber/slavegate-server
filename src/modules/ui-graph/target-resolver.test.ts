@@ -51,4 +51,68 @@ describe("resolveUiTarget", () => {
     ], { appId: "com.reddit.frontpage", currentStateId: "home", currentVariantId: "home-default" });
     expect(result.found).toBe(false);
   });
+
+  it("uses a version-scoped selector when the exact observed variant is proven", () => {
+    const result = resolveUiTarget(tree, [
+      {
+        ...base,
+        id: "versioned-rid",
+        strategy: "resource_id",
+        value: "com.reddit.frontpage:id/search",
+        appVersionPattern: "^observed-live$",
+      },
+    ], {
+      appId: "com.reddit.frontpage",
+      currentStateId: "home",
+      currentVariantId: "home-default",
+      appVersion: null,
+      screenWidth: 1080,
+      screenHeight: 2400,
+    });
+
+    expect(result.found).toBe(true);
+    expect(result.selectorId).toBe("versioned-rid");
+  });
+
+  it("rejects a version-scoped selector when its observed variant is not proven", () => {
+    const result = resolveUiTarget(tree, [
+      {
+        ...base,
+        id: "versioned-rid",
+        strategy: "resource_id",
+        value: "com.reddit.frontpage:id/search",
+        appVersionPattern: "^observed-live$",
+      },
+    ], {
+      appId: "com.reddit.frontpage",
+      currentStateId: "home",
+      currentVariantId: null,
+      appVersion: null,
+      screenWidth: 1080,
+      screenHeight: 2400,
+    });
+
+    expect(result.found).toBe(false);
+  });
+
+  it("keeps a known app version as a strict selector guard", () => {
+    const result = resolveUiTarget(tree, [
+      {
+        ...base,
+        id: "versioned-rid",
+        strategy: "resource_id",
+        value: "com.reddit.frontpage:id/search",
+        appVersionPattern: "^1\\.2\\.3$",
+      },
+    ], {
+      appId: "com.reddit.frontpage",
+      currentStateId: "home",
+      currentVariantId: "home-default",
+      appVersion: "2.0.0",
+      screenWidth: 1080,
+      screenHeight: 2400,
+    });
+
+    expect(result.found).toBe(false);
+  });
 });
