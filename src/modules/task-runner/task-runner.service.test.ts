@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   llmJson: vi.fn(),
   compiledWorkflowToEdgeTemplate: vi.fn(),
   recordExhaustedTaskIncident: vi.fn(),
+  reconcileSupersededTaskIncidents: vi.fn(),
 }));
 
 vi.mock("../../db/client", () => ({
@@ -81,6 +82,7 @@ vi.mock("../workflow-events", () => ({
 
 vi.mock("../incidents/incident.service", () => ({
   recordExhaustedTaskIncident: mocks.recordExhaustedTaskIncident,
+  reconcileSupersededTaskIncidents: mocks.reconcileSupersededTaskIncidents,
 }));
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";

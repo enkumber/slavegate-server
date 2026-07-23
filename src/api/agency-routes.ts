@@ -1164,6 +1164,11 @@ async function findPromotedWorkflowDefinitionArtifact(db: ReturnType<typeof getD
     `SELECT *
      FROM generated_workflow_plan_cache
      WHERE artifact_state = 'promoted'
+       AND COALESCE(
+         compiled_plan #>> '{metadata,safetyClass}',
+         workflow ->> 'safetyClass',
+         source_metadata ->> 'safetyClass'
+       ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive')
        AND (
          source_metadata ->> 'definitionId' = $1
          OR (
@@ -2820,6 +2825,11 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
       `SELECT * FROM generated_workflow_plan_cache
        WHERE cache_key = $1
          AND artifact_state = 'promoted'
+         AND COALESCE(
+           compiled_plan #>> '{metadata,safetyClass}',
+           workflow ->> 'safetyClass',
+           source_metadata ->> 'safetyClass'
+         ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive')
        FOR UPDATE`,
       [cached.cache_key]
     );

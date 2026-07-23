@@ -580,13 +580,33 @@ router.post("/incidents/:id/events", async (req, res) => {
   if (!["shadow_check", "quarantined", "routed", "note"].includes(eventType)) {
     return res.status(400).json({ ok: false, error: "Invalid incident event type" });
   }
-  await incidentService.addIncidentEvent({
+  const inserted = await incidentService.addIncidentEvent({
     id: req.params.id,
     eventType,
     actor: typeof req.body?.actor === "string" ? req.body.actor : "kraken",
     details: req.body?.details && typeof req.body.details === "object" ? req.body.details : {},
+    idempotencyKey: typeof req.body?.idempotencyKey === "string" ? req.body.idempotencyKey : undefined,
   });
-  res.status(201).json({ ok: true });
+  res.status(inserted ? 201 : 200).json({ ok: true, inserted });
+});
+
+router.post("/incidents/:id/ownership", async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) return res.status(400).json({ ok: false, error: "Invalid incident id" });
+  try {
+    const data = await incidentService.updateIncidentOwnership({
+      id: req.params.id,
+      incidentCommander: typeof req.body?.incidentCommander === "string" ? req.body.incidentCommander : "kraken",
+      remediationOwner: req.body?.remediationOwner === null || typeof req.body?.remediationOwner === "string"
+        ? req.body.remediationOwner
+        : undefined,
+      actor: typeof req.body?.actor === "string" ? req.body.actor : "kraken",
+      note: typeof req.body?.note === "string" ? req.body.note : undefined,
+    });
+    if (!data) return res.status(404).json({ ok: false, error: "Incident not found" });
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
 });
 
 router.get("/audits/daily", async (req, res) => {

@@ -7,6 +7,7 @@ interface TerminalTaskFailure {
   device_id: string;
   routine: string;
   account_id?: string | null;
+  retry_count?: number | null;
   params?: Record<string, unknown>;
 }
 
@@ -20,7 +21,16 @@ interface FailureResult {
     workflowId?: string;
     cacheKey?: string;
     failureCode?: string;
+    selfHealing?: {
+      attempts?: number;
+      status?: string;
+    };
   };
+}
+
+interface IncidentRecoveryContext {
+  taskRetryAttempts?: number;
+  recoveryBudget?: number;
 }
 
 const SAFE_TIMEZONES = new Set(["Europe/Bucharest", "UTC"]);
@@ -53,38 +63,143 @@ function classifyFailure(reason: string): { category: string; severity: string }
   return { category: "execution", severity: "medium" };
 }
 
-async function addEvent(incidentId: string, eventType: string, actor: string, details: Record<string, unknown>): Promise<void> {
-  await getDb().query(
-    `INSERT INTO phone_network_incident_events (incident_id, event_type, actor, details)
-     VALUES ($1, $2, $3, $4::jsonb)`,
-    [incidentId, eventType, cleanText(actor, 80), JSON.stringify(details)],
+function optionalText(value: unknown, max = 200): string | null {
+  return typeof value === "string" && value.trim() ? cleanText(value, max) : null;
+}
+
+function remediationOwner(category: string, reason: string): string {
+  if (category === "account") return "nautilus";
+  if (category === "security") return "dan";
+  if (category === "availability" && /offline|disconnect|unreachable|not connected/i.test(reason)) return "hydra";
+  return "nox";
+}
+
+async function addEvent(
+  incidentId: string,
+  eventType: string,
+  actor: string,
+  details: Record<string, unknown>,
+  eventKey?: string,
+): Promise<boolean> {
+  const result = await getDb().query(
+    `INSERT INTO phone_network_incident_events (incident_id, event_type, actor, details, event_key)
+     VALUES ($1, $2, $3, $4::jsonb, $5)
+     ON CONFLICT (incident_id, event_key) WHERE event_key IS NOT NULL DO NOTHING
+     RETURNING id`,
+    [incidentId, eventType, cleanText(actor, 80), JSON.stringify(details), eventKey ?? null],
   );
+  return result.rows.length > 0;
+}
+
+function actualRecoveryAttempts(result: FailureResult): number {
+  const value = result.generatedWorkflow?.selfHealing?.attempts;
+  return Number.isFinite(value) ? Math.max(0, Number(value)) : 0;
+}
+
+function taskContext(task: TerminalTaskFailure): Record<string, string | null> {
+  return {
+    intent: optionalText(task.params?.intent),
+    clientId: optionalText(task.params?.clientId),
+    definitionId: optionalText(task.params?.definitionId),
+    definitionKey: optionalText(task.params?.definitionKey),
+  };
+}
+
+export async function reconcileSupersededTaskIncidents(
+  task: TerminalTaskFailure,
+  result: FailureResult,
+): Promise<number> {
+  const context = taskContext(task);
+  if (!context.intent || !task.account_id || !context.clientId) return 0;
+  const resolved = await getDb().query<{ id: string }>(
+    `UPDATE phone_network_incidents incident
+        SET status = 'resolved',
+            resolved_at = NOW(),
+            superseded_by_task_id = $1,
+            updated_at = NOW()
+       FROM tasks failed_task
+      WHERE incident.task_id = failed_task.id
+        AND incident.status IN ('open', 'acknowledged', 'investigating')
+        AND incident.source_type = 'task'
+        AND failed_task.id <> $1
+        AND failed_task.device_id = $2
+        AND failed_task.account_id = $3
+        AND failed_task.routine = $4
+        AND failed_task.params->>'intent' = $5
+        AND failed_task.params->>'clientId' = $6
+        AND (
+          NULLIF(failed_task.params->>'definitionId', '') IS NULL
+          OR NULLIF($7::text, '') IS NULL
+          OR failed_task.params->>'definitionId' = $7
+        )
+        AND failed_task.scheduled_time <= COALESCE(
+          (SELECT completed_at FROM tasks WHERE id = $1),
+          NOW()
+        )
+      RETURNING incident.id`,
+    [
+      task.id,
+      task.device_id,
+      task.account_id,
+      task.routine,
+      context.intent,
+      context.clientId,
+      context.definitionId,
+    ],
+  );
+  for (const incident of resolved.rows) {
+    await addEvent(
+      incident.id,
+      "superseded",
+      "phone-network",
+      {
+        supersededByTaskId: task.id,
+        workflowId: result.generatedWorkflow?.workflowId ?? null,
+        matchingContext: context,
+      },
+      `superseded:${task.id}`,
+    );
+  }
+  return resolved.rows.length;
 }
 
 export async function recordExhaustedTaskIncident(
   task: TerminalTaskFailure,
   result: FailureResult,
-  recoveryAttempts: number,
+  recovery: IncidentRecoveryContext = {},
 ): Promise<void> {
   try {
     const reason = cleanText(result.failReason);
     const classification = classifyFailure(reason);
+    const owner = remediationOwner(classification.category, reason);
+    const selfHealingAttempts = actualRecoveryAttempts(result);
+    const taskRetryAttempts = Math.max(0, recovery.taskRetryAttempts ?? task.retry_count ?? 0);
     const workflowId = result.generatedWorkflow?.workflowId
       ?? (typeof task.params?.workflowId === "string" ? task.params.workflowId : null);
+    const context = taskContext(task);
     const telemetry = {
       routine: task.routine,
       failedStep: result.failedStep ?? null,
       stepsCompleted: result.stepsCompleted ?? null,
       totalSteps: result.totalSteps ?? null,
       durationMs: result.durationMs ?? null,
-      cacheKey: result.generatedWorkflow?.cacheKey ?? null,
+      cacheKey: result.generatedWorkflow?.cacheKey ?? optionalText(task.params?.cacheKey),
       accountId: task.account_id ?? null,
+      ...context,
+      recoveryBudget: recovery.recoveryBudget ?? null,
+      recoveryAttemptsActual: selfHealingAttempts,
+      taskRetryAttempts,
     };
     const saved = await getDb().query<{ id: string; inserted: boolean }>(
       `INSERT INTO phone_network_incidents (
          incident_key, source_type, source_id, task_id, workflow_id, device_id,
-         category, severity, error_code, summary, recovery_attempts, telemetry
-       ) VALUES ($1, 'task', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         category, severity, error_code, summary, recovery_attempts,
+         recovery_budget, task_retry_attempts, incident_commander,
+         remediation_owner, assigned_agent, telemetry
+       ) VALUES (
+         $1, 'task', $2, $3, $4, $5, $6, $7, $8, $9, $10,
+         $11, $12, 'kraken', $13, 'kraken', $14::jsonb
+       )
        ON CONFLICT (incident_key) DO UPDATE SET
          status = CASE
            WHEN phone_network_incidents.status IN ('resolved', 'closed') THEN 'open'
@@ -95,6 +210,11 @@ export async function recordExhaustedTaskIncident(
          error_code = EXCLUDED.error_code,
          summary = EXCLUDED.summary,
          recovery_attempts = GREATEST(phone_network_incidents.recovery_attempts, EXCLUDED.recovery_attempts),
+         recovery_budget = EXCLUDED.recovery_budget,
+         task_retry_attempts = GREATEST(phone_network_incidents.task_retry_attempts, EXCLUDED.task_retry_attempts),
+         incident_commander = 'kraken',
+         remediation_owner = EXCLUDED.remediation_owner,
+         assigned_agent = 'kraken',
          telemetry = EXCLUDED.telemetry,
          occurrence_count = phone_network_incidents.occurrence_count + 1,
          last_detected_at = NOW(),
@@ -111,7 +231,10 @@ export async function recordExhaustedTaskIncident(
         classification.severity,
         errorCode(result),
         reason,
-        Math.max(0, recoveryAttempts),
+        selfHealingAttempts,
+        recovery.recoveryBudget ?? null,
+        taskRetryAttempts,
+        owner,
         JSON.stringify(telemetry),
       ],
     );
@@ -120,8 +243,11 @@ export async function recordExhaustedTaskIncident(
       await addEvent(row.id, row.inserted ? "created" : "reopened", "phone-network", {
         source: "task-runner",
         taskId: task.id,
-        recoveryAttempts,
-      });
+        recoveryAttemptsActual: selfHealingAttempts,
+        taskRetryAttempts,
+        recoveryBudget: recovery.recoveryBudget ?? null,
+        remediationOwner: owner,
+      }, `${row.inserted ? "created" : "reopened"}:${task.id}:${selfHealingAttempts}:${taskRetryAttempts}`);
     }
   } catch (err) {
     console.error("[incidents] Failed to persist exhausted task incident:", (err as Error).message);
@@ -181,13 +307,63 @@ export async function updateIncidentStatus(input: {
   return result.rows[0];
 }
 
+export async function updateIncidentOwnership(input: {
+  id: string;
+  incidentCommander?: string;
+  remediationOwner?: string | null;
+  actor: string;
+  note?: string;
+}): Promise<{ changed: boolean; incident: unknown } | null> {
+  const commander = optionalText(input.incidentCommander, 80) ?? "kraken";
+  const owner = input.remediationOwner === null ? null : optionalText(input.remediationOwner, 80);
+  const result = await getDb().query(
+    `WITH previous AS (
+       SELECT id, incident_commander, remediation_owner
+       FROM phone_network_incidents
+       WHERE id = $1
+       FOR UPDATE
+     )
+     UPDATE phone_network_incidents incident
+        SET incident_commander = $2,
+            remediation_owner = $3,
+            assigned_agent = $2,
+            updated_at = CASE
+              WHEN previous.incident_commander IS DISTINCT FROM $2
+                OR previous.remediation_owner IS DISTINCT FROM $3
+              THEN NOW() ELSE incident.updated_at END
+       FROM previous
+      WHERE incident.id = previous.id
+      RETURNING incident.*,
+        (previous.incident_commander IS DISTINCT FROM $2
+          OR previous.remediation_owner IS DISTINCT FROM $3) AS ownership_changed`,
+    [input.id, commander, owner],
+  );
+  const incident = result.rows[0];
+  if (!incident) return null;
+  const changed = incident.ownership_changed === true;
+  if (changed) {
+    await addEvent(
+      input.id,
+      "ownership_changed",
+      input.actor,
+      {
+        incidentCommander: commander,
+        remediationOwner: owner,
+        note: cleanText(input.note ?? "", 2000),
+      },
+    );
+  }
+  return { changed, incident };
+}
+
 export async function addIncidentEvent(input: {
   id: string;
   eventType: "shadow_check" | "quarantined" | "routed" | "note";
   actor: string;
   details?: Record<string, unknown>;
-}): Promise<void> {
-  await addEvent(input.id, input.eventType, input.actor, input.details ?? {});
+  idempotencyKey?: string;
+}): Promise<boolean> {
+  return addEvent(input.id, input.eventType, input.actor, input.details ?? {}, input.idempotencyKey);
 }
 
 export async function getDailyAuditSnapshot(date: string, timezone = "Europe/Bucharest"): Promise<Record<string, unknown>> {
@@ -222,9 +398,18 @@ export async function getDailyAuditSnapshot(date: string, timezone = "Europe/Buc
         WHERE updated_at >= w.start_at AND updated_at < w.end_at
           AND (payload::text ~* 'device[_-]?id' OR payload::text ~* 'device[_-]?class')
        UNION ALL
-       SELECT 'suspicious_recovery_or_vlm' AS kind, 'medium' AS severity,
+       SELECT CASE
+                WHEN vlm_calls > 0 OR retry_count > 2
+                  THEN 'unexpected_recovery_or_vlm'
+                ELSE 'failed_ui_graph_action'
+              END AS kind,
+              CASE
+                WHEN vlm_calls > 0 OR retry_count > 2 THEN 'high'
+                ELSE 'medium'
+              END AS severity,
               id::text AS subject_id, COALESCE(step_id, workflow_id, id::text) AS candidate_key,
-              retry_count AS success_count, (llm_calls + vlm_calls) AS failure_count, outcome AS safety_class
+              retry_count AS success_count, (llm_calls + vlm_calls) AS failure_count,
+              outcome AS safety_class
          FROM ui_graph_action_events, ${windowSql} w
         WHERE created_at >= w.start_at AND created_at < w.end_at
           AND (retry_count > 2 OR vlm_calls > 0 OR outcome IN ('failed', 'aborted'))
@@ -341,9 +526,11 @@ export async function saveAuditRun(input: {
 
 export const incidentService = {
   recordExhaustedTaskIncident,
+  reconcileSupersededTaskIncidents,
   listIncidents,
   getIncident,
   updateIncidentStatus,
+  updateIncidentOwnership,
   addIncidentEvent,
   getDailyAuditSnapshot,
   saveAuditRun,

@@ -21,7 +21,23 @@ describe("Phone Network incident and audit migration", () => {
     pool = new Pool({ connectionString: postgresUrl, max: 2, options: `-c search_path=${schema}` });
     await pool.query(`
       CREATE TABLE devices (id UUID PRIMARY KEY);
-      CREATE TABLE tasks (id UUID PRIMARY KEY);
+      CREATE TABLE tasks (
+        id UUID PRIMARY KEY,
+        device_id UUID,
+        account_id UUID,
+        routine TEXT,
+        params JSONB NOT NULL DEFAULT '{}'::jsonb,
+        scheduled_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ
+      );
+      CREATE TABLE generated_workflow_plan_cache (
+        cache_key TEXT PRIMARY KEY,
+        artifact_state TEXT NOT NULL,
+        workflow JSONB NOT NULL DEFAULT '{}'::jsonb,
+        compiled_plan JSONB NOT NULL DEFAULT '{}'::jsonb,
+        source_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
     `);
   });
 
@@ -65,6 +81,63 @@ describe("Phone Network incident and audit migration", () => {
       "phone_network_audit_runs",
       "phone_network_incident_events",
       "phone_network_incidents",
+    ]);
+  });
+
+  it("applies reconciliation ownership and safety migration idempotently", async () => {
+    const baseSql = fs.readFileSync(
+      path.join(repoRoot, "src/db/migrations/094_phone_network_incidents_and_audits.sql"),
+      "utf8",
+    );
+    const sql = fs.readFileSync(
+      path.join(repoRoot, "src/db/migrations/095_incident_reconciliation_and_artifact_safety.sql"),
+      "utf8",
+    );
+    await pool.query(baseSql);
+    await pool.query(`
+      INSERT INTO generated_workflow_plan_cache (cache_key, artifact_state, workflow)
+      VALUES
+        ('read-only', 'promoted', '{"steps":[{"action":"ui_tree_dump"}]}'::jsonb),
+        ('navigation', 'promoted', '{"steps":[{"action":"screen_wake"},{"action":"intent_send"}]}'::jsonb),
+        ('unsafe', 'promoted', '{"steps":[{"action":"type_text"}]}'::jsonb)
+      ON CONFLICT (cache_key) DO NOTHING
+    `);
+
+    await pool.query(sql);
+    await pool.query(sql);
+
+    const artifacts = await pool.query(`
+      SELECT cache_key, artifact_state,
+             COALESCE(
+               compiled_plan #>> '{metadata,safetyClass}',
+               workflow ->> 'safetyClass',
+               source_metadata ->> 'safetyClass'
+             ) AS safety_class
+      FROM generated_workflow_plan_cache
+      ORDER BY cache_key
+    `);
+    expect(artifacts.rows).toEqual([
+      { cache_key: "navigation", artifact_state: "promoted", safety_class: "navigation" },
+      { cache_key: "read-only", artifact_state: "promoted", safety_class: "read_only" },
+      { cache_key: "unsafe", artifact_state: "quarantined", safety_class: null },
+    ]);
+
+    const columns = await pool.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = $1
+        AND table_name = 'phone_network_incidents'
+        AND column_name IN (
+          'incident_commander', 'remediation_owner', 'recovery_budget',
+          'task_retry_attempts', 'superseded_by_task_id'
+        )
+      ORDER BY column_name
+    `, [schema]);
+    expect(columns.rows.map((row) => row.column_name)).toEqual([
+      "incident_commander",
+      "recovery_budget",
+      "remediation_owner",
+      "superseded_by_task_id",
+      "task_retry_attempts",
     ]);
   });
 });

@@ -496,6 +496,14 @@ export class WorkflowService {
        SET hit_count = hit_count + 1, last_used_at = NOW()
        WHERE cache_key = $1
          AND artifact_state = ANY($2::text[])
+         AND (
+           artifact_state <> 'promoted'
+           OR COALESCE(
+             compiled_plan #>> '{metadata,safetyClass}',
+             workflow ->> 'safetyClass',
+             source_metadata ->> 'safetyClass'
+           ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive')
+         )
        RETURNING *`,
       [cacheKey, allowedArtifactStates(options)]
     );
@@ -515,6 +523,14 @@ export class WorkflowService {
          SELECT cache_key FROM generated_workflow_plan_cache
          WHERE request_key = $1
            AND artifact_state = ANY($2::text[])
+           AND (
+             artifact_state <> 'promoted'
+             OR COALESCE(
+               compiled_plan #>> '{metadata,safetyClass}',
+               workflow ->> 'safetyClass',
+               source_metadata ->> 'safetyClass'
+             ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive')
+           )
          ORDER BY updated_at DESC
          LIMIT 1
        )
@@ -553,6 +569,11 @@ export class WorkflowService {
              WHEN $2::int = 1
               AND artifact_state IN ('candidate', 'promoted')
               AND COALESCE(compiled_plan #>> '{llmBudget,happyPathRequests}', '') = '0'
+              AND COALESCE(
+                compiled_plan #>> '{metadata,safetyClass}',
+                workflow ->> 'safetyClass',
+                source_metadata ->> 'safetyClass'
+              ) IN ('read_only', 'navigation')
                THEN 'promoted'
              WHEN $3::int = 1 AND artifact_state = 'candidate'
                THEN 'failed'
