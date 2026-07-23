@@ -2,112 +2,13 @@ import type { GeneratedWorkflowPlanCacheRecord } from "../workflows/workflow.ser
 import type { WorkflowTemplate } from "../workflows/types";
 
 const CAPABILITY_KEY_RE = /^[a-z0-9]+(?:_[a-z0-9]+)*$/;
-const NON_SEMANTIC_TOKENS = new Set([
-  "agent",
-  "artifact",
-  "cached",
-  "canonical",
-  "dashboard",
-  "generated",
-  "human",
-  "trace",
-  "verified",
-  "workflow",
-]);
-const STOP_WORDS = new Set([
-  "a",
-  "acest",
-  "acestui",
-  "ai",
-  "al",
-  "an",
-  "and",
-  "app",
-  "application",
-  "aplicatia",
-  "aplicatie",
-  "aplicația",
-  "aplicație",
-  "ca",
-  "can",
-  "catre",
-  "către",
-  "cu",
-  "de",
-  "device",
-  "do",
-  "for",
-  "in",
-  "la",
-  "mai",
-  "on",
-  "pe",
-  "please",
-  "sa",
-  "să",
-  "the",
-  "this",
-  "to",
-  "un",
-  "unei",
-  "vreau",
-]);
-
-const GENERIC_TOKEN_ALIASES: Record<string, string> = {
-  activeaza: "enable",
-  activează: "enable",
-  activate: "enable",
-  activated: "enable",
-  activating: "enable",
-  activa: "enable",
-  enable: "enable",
-  enabled: "enable",
-  enabling: "enable",
-  porneste: "enable",
-  pornește: "enable",
-  porneasca: "enable",
-  pornească: "enable",
-  start: "enable",
-  started: "enable",
-  starting: "enable",
-  ecran: "screen",
-  screen: "screen",
-  share: "share",
-  shared: "share",
-  shares: "share",
-  sharing: "share",
-  cauta: "search",
-  caută: "search",
-  search: "search",
-  searching: "search",
-  deschide: "open",
-  deschisa: "open",
-  deschisă: "open",
-  open: "open",
-  opened: "open",
-  opening: "open",
-  instaleaza: "install",
-  instalează: "install",
-  install: "install",
-  installed: "install",
-  installing: "install",
-  opreste: "stop",
-  oprește: "stop",
-  stop: "stop",
-  stopped: "stop",
-  stopping: "stop",
-};
-
 function asciiFold(value: string): string {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
 function normalizeToken(raw: string): string | null {
   const folded = asciiFold(raw.toLowerCase()).replace(/[^a-z0-9]/g, "");
-  if (!folded || STOP_WORDS.has(folded) || NON_SEMANTIC_TOKENS.has(folded) || /^v?\d+$/.test(folded)) {
-    return null;
-  }
-  return GENERIC_TOKEN_ALIASES[raw.toLowerCase()] ?? GENERIC_TOKEN_ALIASES[folded] ?? folded;
+  return !folded || /^v?\d+$/.test(folded) ? null : folded;
 }
 
 export function portableCapabilityTokens(value: string): string[] {
@@ -159,10 +60,9 @@ export function portableCapabilityMetadata(
     && CAPABILITY_KEY_RE.test(sourceMetadata.capabilityKey)
     ? sourceMetadata.capabilityKey
     : null;
-  const capabilityKey = explicit ?? derivePortableCapabilityKey(workflow, sourceMetadata.intent);
   const portable = inferPortableWorkflow(workflow, sourceMetadata);
   return {
-    ...(capabilityKey ? { capabilityKey } : {}),
+    ...(explicit ? { capabilityKey: explicit } : {}),
     portable,
     portabilityScope: portable ? "global" : "contextual",
   };

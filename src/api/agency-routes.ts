@@ -33,8 +33,6 @@ import { taskRunnerService } from "../modules/task-runner";
 
 const router = Router();
 
-const SPRINT_2_READ_ONLY_INTENTS = new Set(["reddit_account_health_scan"]);
-
 const GENERATED_WORKFLOW_KEY_RE = /^[a-f0-9]{24}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -1675,161 +1673,6 @@ router.patch("/posts/:id", async (req: Request, res: Response) => {
 // WORKFLOW RUNS — Control-plane runs for existing canonical generated workflows
 // ═══════════════════════════════════════════════════════════════════════════════
 
-router.post("/reddit/account-health-scans", async (req: Request, res: Response) => {
-  const db = getDb();
-  const body = req.body as {
-    clientId?: string;
-    accountId?: string;
-    deviceId?: string;
-    scheduledTime?: string;
-    context?: Record<string, unknown>;
-  };
-
-  if (!body.accountId || !body.deviceId) {
-    return res.status(400).json({ ok: false, error: "accountId and deviceId required" });
-  }
-
-  const client = await db.connect();
-  try {
-    await client.query("BEGIN");
-
-    const accountResult = await client.query<{
-      id: string;
-      client_id: string | null;
-      platform: string;
-      username: string | null;
-    }>(
-      `SELECT id, client_id, platform, username FROM accounts WHERE id = $1`,
-      [body.accountId],
-    );
-    const account = accountResult.rows[0];
-    if (!account) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ ok: false, error: "Account not found" });
-    }
-    if (account.platform !== "reddit") {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        ok: false,
-        code: "ACCOUNT_PLATFORM_NOT_REDDIT",
-        error: "Reddit account health scans require a reddit account",
-      });
-    }
-    if (account.client_id && body.clientId && account.client_id !== body.clientId) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        ok: false,
-        code: "ACCOUNT_CLIENT_MISMATCH",
-        error: "Account is linked to a different client",
-      });
-    }
-
-    const resolvedClientId = account.client_id ?? body.clientId;
-    if (!resolvedClientId) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        ok: false,
-        code: "ACCOUNT_CLIENT_REQUIRED",
-        error: "Account must be linked to a client or clientId must be supplied",
-      });
-    }
-
-    const cacheResult = await client.query<Record<string, unknown>>(
-      `SELECT * FROM generated_workflow_plan_cache
-       WHERE platform = 'reddit'
-         AND artifact_state = 'promoted'
-         AND COALESCE(compiled_plan #>> '{metadata,intent}', workflow ->> 'intent', source_metadata ->> 'intent') = 'reddit_account_health_scan'
-         AND COALESCE(compiled_plan #>> '{metadata,safetyClass}', workflow ->> 'safetyClass', source_metadata ->> 'safetyClass') = 'read_only'
-         AND COALESCE(compiled_plan #>> '{llmBudget,happyPathRequests}', '') = '0'
-       ORDER BY updated_at DESC
-       LIMIT 1`,
-    );
-    const cached = cacheResult.rows[0];
-    if (!cached) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({
-        ok: false,
-        code: "REDDIT_HEALTH_SCAN_WORKFLOW_NOT_READY",
-        error: "No cache-safe reddit_account_health_scan workflow artifact found",
-      });
-    }
-
-    const runContext = {
-      ...(body.context ?? {}),
-      source: "agency_reddit_account_health_scan",
-      clientId: resolvedClientId,
-      accountId: body.accountId,
-      deviceId: body.deviceId,
-      intent: "reddit_account_health_scan",
-      accountUsername: account.username,
-      requiresScreenshotArtifact: true,
-      requiresRealClassifierOutput: true,
-    };
-    const runResult = await client.query<{ id: string }>(
-      `INSERT INTO agency_workflow_runs
-         (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
-          canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, status, context)
-       VALUES ($1, $2, $3, 'reddit', 'reddit_account_health_scan', 'read_only', NULL, $4, $5, $6, $7, 'queued', $8)
-      RETURNING id`,
-      [
-        resolvedClientId,
-        body.accountId,
-        body.deviceId,
-        cached.cache_key,
-        cached.canonical_workflow_id,
-        cached.canonical_workflow_version,
-        cached.compiled_plan_hash,
-        JSON.stringify(runContext),
-      ],
-    );
-    const runId = runResult.rows[0].id;
-
-    const taskParams = {
-      cacheKey: cached.cache_key,
-      clientId: resolvedClientId,
-      agencyWorkflowRunId: runId,
-      workflowRunId: runId,
-      intent: "reddit_account_health_scan",
-      source: "agency_reddit_account_health_scan",
-    };
-    const taskResult = await client.query<{ id: string }>(
-      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
-       VALUES ($1, $2, 'generated_workflow', $3, $4, 'queued')
-       RETURNING id`,
-      [
-        body.accountId,
-        body.deviceId,
-        JSON.stringify(taskParams),
-        body.scheduledTime ?? new Date().toISOString(),
-      ],
-    );
-    const taskId = taskResult.rows[0].id;
-
-    await client.query(
-      `UPDATE agency_workflow_runs SET task_id = $1, updated_at = NOW() WHERE id = $2`,
-      [taskId, runId],
-    );
-
-    const hydrated = await hydrateAgencyWorkflowRun(client as unknown as ReturnType<typeof getDb>, runId);
-    await client.query("COMMIT");
-    publishAgencyWorkflowQueued({
-      agencyWorkflowRunId: runId,
-      taskId,
-      clientId: resolvedClientId,
-      accountId: body.accountId,
-      deviceId: body.deviceId,
-      intent: "reddit_account_health_scan",
-      platform: "reddit",
-    });
-    res.status(201).json({ ok: true, data: rowToAgencyWorkflowRun(hydrated!) });
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  } finally {
-    client.release();
-  }
-});
-
 router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
   const body = req.body as {
@@ -1854,14 +1697,6 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
   if (!body.clientId || !body.accountId || !body.deviceId || !body.intent) {
     return res.status(400).json({ ok: false, error: "clientId, accountId, deviceId and intent required" });
   }
-  if (!SPRINT_2_READ_ONLY_INTENTS.has(body.intent)) {
-    return res.status(400).json({
-      ok: false,
-      code: "GENERATED_WORKFLOW_INTENT_NOT_ALLOWED",
-      error: "Sprint 2 agency workflow runs only accept read_only marketing scan intents",
-    });
-  }
-
   const hasRequestKey = typeof body.requestKey === "string" && body.requestKey.length > 0;
   const hasCacheKey = typeof body.cacheKey === "string" && body.cacheKey.length > 0;
   if ((hasRequestKey ? 1 : 0) + (hasCacheKey ? 1 : 0) !== 1) {
@@ -1905,15 +1740,6 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
     }
 
     const safetyClass = cachedWorkflowSafetyClass(cached);
-    if (safetyClass !== "read_only") {
-      await client.query("ROLLBACK");
-      return res.status(400).json({
-        ok: false,
-        code: "GENERATED_WORKFLOW_NOT_READ_ONLY",
-        error: "Sprint 2 agency workflow runs require safetyClass=read_only",
-      });
-    }
-
     const artifactIntent = cachedWorkflowIntent(cached);
     if (artifactIntent && artifactIntent !== body.intent) {
       await client.query("ROLLBACK");
@@ -2267,7 +2093,7 @@ router.get("/tool-catalog", requireAdminAuth, async (req: Request, res: Response
   const source = typeof req.query.source === "string" && req.query.source.trim().length > 0
     ? req.query.source.trim()
     : undefined;
-  const items = listToolCatalog({ category, risk, source });
+  const items = await listToolCatalog({ category, risk, source });
   res.json({
     ok: true,
     data: {
@@ -2295,7 +2121,7 @@ router.get("/compiler-knowledge", requireAdminAuth, async (req: Request, res: Re
   const source = typeof req.query.source === "string" && req.query.source.trim().length > 0
     ? req.query.source.trim()
     : undefined;
-  const items = listCompilerKnowledge({ type, domain, risk, source });
+  const items = await listCompilerKnowledge({ type, domain, risk, source });
   res.json({
     ok: true,
     data: {
@@ -4177,8 +4003,8 @@ router.get("/compiler-control-plane", requireAdminAuth, async (req: Request, res
         ),
   ]);
 
-  const awareness = buildCompilerAwareness({ intent, action, steps: steps.rows });
-  const controlPlane = buildCompilerControlPlane({
+  const awareness = await buildCompilerAwareness({ intent, action, steps: steps.rows });
+  const controlPlane = await buildCompilerControlPlane({
     intent,
     action,
     requestedScope,
@@ -4320,7 +4146,7 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
     values
   );
 
-  const awareness = buildCompilerAwareness({
+  const awareness = await buildCompilerAwareness({
     intent,
     action,
     steps: steps.rows,
@@ -5208,22 +5034,6 @@ router.get("/reports/stats", async (_req: Request, res: Response) => {
       materials: materials.rows[0],
     },
   });
-});
-
-// ─── Creative Workflow E2E ───
-import { createCreativeWorkflowRun } from "../modules/creative-workflows/creative-workflow.service";
-
-router.post("/creative-workflows", async (req, res) => {
-  const { clientId, accountId, deviceId, objective, dryRun } = req.body || {};
-  const result = await createCreativeWorkflowRun({ clientId, accountId, deviceId, objective, dryRun: dryRun ?? false });
-  const status = result.status === "queued"
-    ? 201
-    : result.code === "CREATIVE_WORKFLOW_MISSING_FIELDS"
-      ? 400
-      : result.status === "not_ready"
-        ? 409
-        : 200;
-  res.status(status).json({ ok: result.status !== "not_ready", code: result.code, data: result });
 });
 
 export default router;

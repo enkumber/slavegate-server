@@ -97,6 +97,7 @@ function registryPolicy(overrides: JsonObject = {}): JsonObject {
   const executionChanging = overrides.executionChanging === true;
   const workflowCacheChanging = overrides.workflowCacheChanging === true;
   return {
+    ...overrides,
     readOnly: !autoUseEnabled,
     compilerVisible: overrides.compilerVisible === true || autoUseEnabled,
     autoUseEnabled,
@@ -147,7 +148,7 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
       scopeDetails: objectValue(row.promotion_scope_details),
       rollbackDefinitionId: typeof row.rollback_definition_id === "string" ? row.rollback_definition_id : null,
       rollbackPreview: objectValue(row.rollback_preview),
-      reusable: row.promotion_state === "limited_reuse",
+      reusable: rowPolicy.reusable === true,
       compilerEligible: rowPolicy.compilerVisible === true || rowPolicy.autoUseEnabled === true,
       wouldUseDefinition: rowPolicy.autoUseEnabled === true,
       autoUseEnabled: rowPolicy.autoUseEnabled === true,
@@ -184,16 +185,22 @@ function terms(input: WorkflowDefinitionResolutionInput): string[] {
 }
 
 function scoreDefinition(definition: WorkflowDefinition, input: WorkflowDefinitionResolutionInput, searchTerms: string[]): number {
+  const scoring = objectValue(definition.policy.resolutionScoring);
+  const numberScore = (key: string): number => {
+    const value = scoring[key];
+    return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  };
+  const statusScores = objectValue(scoring.statusScores);
   if (input.key && definition.key !== input.key) return 0;
   let score = 0;
   let exactMatch = false;
   if (input.key && definition.key === input.key) {
-    score += 100;
+    score += numberScore("exactKey");
     exactMatch = true;
   }
-  if (input.intent && definition.intent === input.intent) score += 50;
+  if (input.intent && definition.intent === input.intent) score += numberScore("exactIntent");
   if (input.intent && definition.intent === input.intent) exactMatch = true;
-  if (input.platform && definition.platform === input.platform) score += 10;
+  if (input.platform && definition.platform === input.platform) score += numberScore("platform");
 
   const haystack = [
     definition.key,
@@ -205,21 +212,18 @@ function scoreDefinition(definition: WorkflowDefinition, input: WorkflowDefiniti
   ].join(" ").toLowerCase();
   const termMatches = searchTerms.filter((term) => haystack.includes(term)).length;
   if (!exactMatch && termMatches === 0) return 0;
-  score += termMatches * 12;
-  if (definition.status === "active") score += 10;
-  if (definition.status === "draft") score += 2;
+  score += termMatches * numberScore("termMatch");
+  const configuredStatusScore = statusScores[definition.status];
+  if (typeof configuredStatusScore === "number" && Number.isFinite(configuredStatusScore)) {
+    score += configuredStatusScore;
+  }
+  if (exactMatch && score <= 0) score = 1;
   return score;
 }
 
 function gateSummary(policyGates: CompilerPolicyGate[]): JsonObject {
-  const relevant = policyGates.filter((gate) => [
-    "compiler_knowledge_application",
-    "limited_reuse_scope_match",
-    "compiler_auto_use",
-    "execution_path_change",
-  ].includes(gate.id));
   return {
-    gates: relevant.map((gate) => ({
+    gates: policyGates.map((gate) => ({
       id: gate.id,
       category: gate.category,
       state: gate.state,
@@ -228,10 +232,10 @@ function gateSummary(policyGates: CompilerPolicyGate[]): JsonObject {
       safeToAutoApply: gate.remediation.safeToAutoApply,
       version: gate.version ?? 1,
     })),
-    total: relevant.length,
-    blocked: relevant.filter((gate) => gate.state === "blocked").length,
-    highRisk: relevant.filter((gate) => gate.risk === "high").length,
-    safeToAutoApply: 0,
+    total: policyGates.length,
+    blocked: policyGates.filter((gate) => gate.state !== "enabled").length,
+    highRisk: policyGates.filter((gate) => gate.risk === "high").length,
+    safeToAutoApply: policyGates.filter((gate) => gate.remediation.safeToAutoApply === true).length,
   };
 }
 
@@ -241,9 +245,7 @@ function gateEnabled(policyGates: CompilerPolicyGate[], id: string): boolean {
 
 function scopeMatches(requestedScope: string | undefined, promotionScope: string | null): boolean {
   if (!promotionScope) return false;
-  if (!requestedScope) {
-    return promotionScope.startsWith("auto_use:test:") || promotionScope.startsWith("definition:");
-  }
+  if (!requestedScope) return false;
   if (requestedScope === promotionScope) return true;
   const [requestedType, ...requestedParts] = requestedScope.split(":");
   const [promotionType, ...promotionParts] = promotionScope.split(":");
@@ -259,28 +261,33 @@ function controlledAutoUseDecision(input: {
   policyGates: CompilerPolicyGate[];
 }): JsonObject {
   const blockers: string[] = [];
-  const gates = {
-    compilerVisibility: gateEnabled(input.policyGates, "compiler_knowledge_application"),
-    limitedReuseScopeMatch: gateEnabled(input.policyGates, "limited_reuse_scope_match"),
-    autoUse: gateEnabled(input.policyGates, "compiler_auto_use"),
-    executionPathChange: gateEnabled(input.policyGates, "execution_path_change"),
-  };
+  const policy = input.definition?.policy ?? {};
+  const requiredGateIds = stringArray(policy.requiredGateIds);
+  const gates = Object.fromEntries(requiredGateIds.map((id) => [id, gateEnabled(input.policyGates, id)]));
   if (!input.definition) blockers.push("workflow_definition_not_found");
-  if (!gates.compilerVisibility) blockers.push("compiler_visibility_gate_disabled");
-  if (!gates.limitedReuseScopeMatch) blockers.push("limited_reuse_scope_gate_disabled");
-  if (!gates.autoUse) blockers.push("compiler_auto_use_disabled");
-  if (!gates.executionPathChange) blockers.push("execution_changing_disabled");
+  if (input.definition && requiredGateIds.length === 0) blockers.push("required_policy_gates_not_configured");
+  for (const gateId of requiredGateIds) {
+    if (!gates[gateId]) blockers.push(`policy_gate_disabled:${gateId}`);
+  }
   if (input.definition) {
-    if (input.definition.status !== "active") blockers.push("workflow_definition_not_active");
-    if (input.definition.promotion.state !== "limited_reuse") blockers.push("workflow_definition_not_limited_reuse");
-    if (!scopeMatches(input.requestedScope, input.definition.promotion.scope)) blockers.push("limited_reuse_scope_mismatch");
-    if (Number(input.definition.promotion.confidence ?? 0) < 0.6) blockers.push("promotion_confidence_below_threshold");
-    const readinessState = typeof input.definition.promotion.readiness.state === "string"
-      ? input.definition.promotion.readiness.state
-      : null;
-    if (!["manual_limited_promotion_ready", "manual_rollback_applied", "auto_use_bootstrap_ready", "auto_use_pipeline_ready"].includes(readinessState ?? "")) {
-      blockers.push("promotion_readiness_not_ready");
+    const allowedStatuses = stringArray(policy.allowedStatuses);
+    const allowedPromotionStates = stringArray(policy.allowedPromotionStates);
+    const minimumConfidence = policy.minimumPromotionConfidence;
+    if (allowedStatuses.length === 0) blockers.push("allowed_statuses_not_configured");
+    else if (!allowedStatuses.includes(input.definition.status)) blockers.push("workflow_definition_status_not_allowed");
+    if (allowedPromotionStates.length === 0) blockers.push("allowed_promotion_states_not_configured");
+    else if (!allowedPromotionStates.includes(input.definition.promotion.state)) blockers.push("workflow_definition_promotion_state_not_allowed");
+    if (policy.reusable !== true) blockers.push("workflow_definition_not_reusable");
+    if (policy.compilerVisible !== true) blockers.push("workflow_definition_not_compiler_visible");
+    if (policy.autoUseEnabled !== true) blockers.push("workflow_definition_auto_use_disabled");
+    if (policy.requireScopeMatch !== true) blockers.push("scope_policy_not_configured");
+    else if (!scopeMatches(input.requestedScope, input.definition.promotion.scope)) blockers.push("promotion_scope_mismatch");
+    if (typeof minimumConfidence !== "number" || !Number.isFinite(minimumConfidence)) {
+      blockers.push("minimum_promotion_confidence_not_configured");
+    } else if (Number(input.definition.promotion.confidence ?? 0) < minimumConfidence) {
+      blockers.push("promotion_confidence_below_threshold");
     }
+    if (input.definition.promotion.readiness.safeToAutoApply !== true) blockers.push("promotion_readiness_not_safe");
   }
 
   const uniqueBlockers = Array.from(new Set(blockers));

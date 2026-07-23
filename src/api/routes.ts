@@ -66,8 +66,6 @@ import { alerting, AlertType } from "../modules/observability/alerts";
 import { taskRunnerService } from "../modules/task-runner";
 import { getDb } from "../db/client";
 import { scalabilityConfig } from "../config/scalability.config";
-import { processSkillUpdateJobs, checkAndRollback } from "../modules/skill-updater";
-import { runNightlyPipeline } from "../modules/nautilus/pipeline";
 import type {
   DispatchJobRequest,
   UpdateDeviceRequest,
@@ -763,11 +761,10 @@ router.post("/jobs", async (req, res) => {
   if (body.type === "tap" && !req.headers["x-direct-tap"]) {
     return res.status(403).json({ 
       ok: false, 
-      error: "Direct tap jobs are BLOCKED. Use POST /api/hydra/cascade-tap instead. " +
-             "cascade-tap handles coordinate normalization, ui_tree fallback, and auto-learning.",
+      error: "Direct tap jobs are blocked. Submit a data-driven workflow using semantic_tap.",
       hint: {
-        elementBased: 'POST /api/hydra/cascade-tap {"deviceId": "...", "platform": "instagram", "elementName": "nav.search"}',
-        textBased: 'POST /api/hydra/cascade-tap {"deviceId": "...", "text": "username_to_tap"}'
+        endpoint: "POST /api/workflows/dispatch",
+        primitive: "semantic_tap"
       }
     });
   }
@@ -2195,167 +2192,6 @@ router.get("/health", (_req, res) => {
   });
 });
 
-// ─── Skill Updater (cron trigger) ─────────────────────────────────────────────
-
-router.post("/skill-updater/run", requireAuth, async (_req, res) => {
-  console.log("[skill-updater] Manual/cron trigger received");
-  try {
-    const startTime = Date.now();
-    await processSkillUpdateJobs();
-    await checkAndRollback();
-    const durationMs = Date.now() - startTime;
-    console.log(`[skill-updater] Run completed in ${durationMs}ms`);
-    res.json({ ok: true, data: { durationMs, triggeredAt: new Date().toISOString() } });
-  } catch (err) {
-    console.error("[skill-updater] Run error:", (err as Error).message);
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
-});
-
-router.get("/skill-updater/status", requireAuth, async (_req, res) => {
-  try {
-    const db = getDb();
-    
-    // Get pending jobs count
-    const pendingResult = await db.query(`
-      SELECT COUNT(*) as count FROM skill_update_jobs WHERE status = 'pending'
-    `);
-    const pendingJobs = parseInt(pendingResult.rows[0]?.count) || 0;
-    
-    // Get today's patch count
-    const todayPatchesResult = await db.query(`
-      SELECT COUNT(*) as count FROM skill_patches WHERE applied_at > CURRENT_DATE
-    `);
-    const todayPatches = parseInt(todayPatchesResult.rows[0]?.count) || 0;
-    
-    // Get last 5 completed jobs
-    const recentJobsResult = await db.query(`
-      SELECT id, app, status, result, created_at, completed_at
-      FROM skill_update_jobs
-      ORDER BY completed_at DESC NULLS LAST
-      LIMIT 5
-    `);
-    
-    // Get last 5 patches
-    const recentPatchesResult = await db.query(`
-      SELECT id, app, element, old_selector, new_selector, confidence, applied_at, rolled_back_at
-      FROM skill_patches
-      ORDER BY applied_at DESC
-      LIMIT 5
-    `);
-    
-    res.json({
-      ok: true,
-      data: {
-        pendingJobs,
-        todayPatches,
-        recentJobs: recentJobsResult.rows,
-        recentPatches: recentPatchesResult.rows,
-        checkedAt: new Date().toISOString(),
-      },
-    });
-  } catch (err) {
-    console.error("[skill-updater] Status error:", (err as Error).message);
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
-});
-
-// ─── Nautilus Pipeline (nightly marketing automation) ─────────────────────────
-
-router.post("/nautilus/run", requireAuth, async (req, res) => {
-  console.log("[nautilus] Pipeline trigger received");
-  try {
-    const config = {
-      skip_ba: req.body?.skip_ba ?? false,
-      skip_marketer: req.body?.skip_marketer ?? false,
-      skip_siren: req.body?.skip_siren ?? false,
-      skip_tactician: req.body?.skip_tactician ?? false,
-      stop_on_error: req.body?.stop_on_error ?? false,
-    };
-    
-    const result = await runNightlyPipeline(config);
-    console.log(`[nautilus] Pipeline completed: ${result.success ? 'SUCCESS' : 'FAILED'} in ${result.duration_ms}ms`);
-    
-    res.json({ 
-      ok: result.success, 
-      data: {
-        summary: result.summary,
-        duration_ms: result.duration_ms,
-        phases: {
-          ba: result.phases.ba ? { success: result.phases.ba.success, summary: result.phases.ba.summary } : null,
-          marketer: result.phases.marketer ? { success: result.phases.marketer.success, summary: result.phases.marketer.summary } : null,
-          siren: result.phases.siren ? { success: result.phases.siren.success, summary: result.phases.siren.summary } : null,
-          tactician: result.phases.tactician ? { success: result.phases.tactician.success, summary: result.phases.tactician.summary } : null,
-        },
-        errors: result.errors,
-        started_at: result.started_at,
-        completed_at: result.completed_at,
-      }
-    });
-  } catch (err) {
-    console.error("[nautilus] Pipeline error:", (err as Error).message);
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
-});
-
-router.get("/nautilus/status", requireAuth, async (_req, res) => {
-  try {
-    const db = getDb();
-    
-    // Safe query that works even if marketing tables don't exist
-    let accounts = { total: 0, active: 0 };
-    let prospects = { total: 0, followers: 0, following: 0 };
-    let escalations = 0;
-    
-    try {
-      const accountsResult = await db.query(`
-        SELECT COUNT(*) as total, 
-               SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active
-        FROM marketing_accounts
-      `);
-      accounts = {
-        total: parseInt(accountsResult.rows[0]?.total) || 0,
-        active: parseInt(accountsResult.rows[0]?.active) || 0,
-      };
-    } catch { /* table may not exist */ }
-    
-    try {
-      const prospectsResult = await db.query(`
-        SELECT COUNT(*) as total,
-               SUM(CASE WHEN type = 'follower' THEN 1 ELSE 0 END) as followers,
-               SUM(CASE WHEN type = 'following' THEN 1 ELSE 0 END) as following
-        FROM marketing_prospects WHERE created_at > NOW() - INTERVAL '7 days'
-      `);
-      prospects = {
-        total: parseInt(prospectsResult.rows[0]?.total) || 0,
-        followers: parseInt(prospectsResult.rows[0]?.followers) || 0,
-        following: parseInt(prospectsResult.rows[0]?.following) || 0,
-      };
-    } catch { /* table may not exist */ }
-    
-    try {
-      const escalationsResult = await db.query(`
-        SELECT COUNT(*) as pending FROM marketer_escalations WHERE status = 'pending'
-      `);
-      escalations = parseInt(escalationsResult.rows[0]?.pending) || 0;
-    } catch { /* table may not exist */ }
-    
-    res.json({
-      ok: true,
-      data: {
-        accounts,
-        prospects_7d: prospects,
-        escalations_pending: escalations,
-        checkedAt: new Date().toISOString(),
-        note: accounts.total === 0 ? "Marketing tables may not be initialized" : undefined,
-      },
-    });
-  } catch (err) {
-    console.error("[nautilus] Status error:", (err as Error).message);
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
-});
-
 // ─── Research Jobs API ────────────────────────────────────────────────────────
 // Used by Kraken (polling) and Hydra (reporting results)
 
@@ -2418,33 +2254,6 @@ router.post("/research-jobs/:id/fail", requireAuth, async (req, res) => {
     await researchService.failJob(req.params.id, error);
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ ok: false, error: (err as Error).message });
-  }
-});
-
-// ─── Agent Orchestrator ───────────────────────────────────────────────────────
-
-router.post("/orchestrator/execute", requireAuth, async (req, res) => {
-  const { task, deviceId, appContext } = req.body as {
-    task?: string;
-    deviceId?: string;
-    appContext?: string;
-  };
-
-  if (!task || !deviceId) {
-    return res.status(400).json({ ok: false, error: "task and deviceId required" });
-  }
-
-  if (!isDeviceOnline(deviceId)) {
-    return res.status(409).json({ ok: false, error: "Device is not connected" });
-  }
-
-  try {
-    const { agentOrchestrator } = await import("../modules/agents/orchestrator");
-    const result = await agentOrchestrator.executeTask(task, deviceId, appContext || "instagram");
-    res.json({ ok: true, data: result });
-  } catch (err) {
-    console.error("[orchestrator] Execute error:", (err as Error).message);
     res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });

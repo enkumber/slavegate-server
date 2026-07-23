@@ -1,5 +1,4 @@
 import { listCompilerKnowledge } from "../compiler-knowledge/compiler-knowledge-base";
-import { CompilerPolicyGate, listCompilerPolicyGates } from "../compiler-policy-gates/compiler-policy-gates";
 import { listToolCatalog } from "../tool-catalog/tool-catalog";
 
 export interface CompilerAwarenessStepRow {
@@ -81,22 +80,9 @@ function objectKeys(value: unknown): string[] {
   return value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : [];
 }
 
-function policyGateSummary(gate: CompilerPolicyGate): Record<string, unknown> {
-  return {
-    id: gate.id,
-    category: gate.category,
-    state: gate.state,
-    risk: gate.risk,
-    owner: gate.owner,
-    safeToAutoApply: gate.remediation.safeToAutoApply,
-  };
-}
-
 function policyGatesForBlockers(blockers: string[]): Record<string, unknown>[] {
-  const uniqueBlockers = new Set(blockers);
-  return listCompilerPolicyGates()
-    .filter((gate) => gate.blocks.some((blocker) => uniqueBlockers.has(blocker)))
-    .map(policyGateSummary);
+  void blockers;
+  return [];
 }
 
 function policyGateId(gate: Record<string, unknown>): string | null {
@@ -314,11 +300,15 @@ function decisionFor(input: {
   };
 }
 
-export function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Record<string, unknown> {
+export async function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Promise<Record<string, unknown>> {
   const terms = termsFor([input.intent, input.action].filter(Boolean).join(" "));
   const action = input.action?.trim();
+  const [tools, knowledge] = await Promise.all([
+    listToolCatalog({}),
+    listCompilerKnowledge({}),
+  ]);
 
-  const toolCandidates = listToolCatalog({}).filter((tool) => {
+  const toolCandidates = tools.filter((tool) => {
     const haystack = haystackFor([
       tool.id,
       tool.name,
@@ -344,7 +334,7 @@ export function buildCompilerAwareness(input: CompilerAwarenessInput = {}): Reco
     reason: "read_only_awareness_only",
   }));
 
-  const knowledgeCandidates = listCompilerKnowledge({}).filter((entry) => {
+  const knowledgeCandidates = knowledge.filter((entry) => {
     const haystack = haystackFor([
       entry.id,
       entry.title,

@@ -65,14 +65,8 @@ export interface ActionStep {
   /** Observable effect category used by generic safety enforcement. */
   effect?: WorkflowInteractionEffect;
 
-  // ─── Screen Verification (US-WORKFLOW-SCREEN-VERIFY) ────────────────────────
-  
-  /**
-   * Expected screen after action completes.
-   * If set, workflow executor verifies via Screen Detection Cascade.
-   * Supports single screen or array (for ambiguous transitions).
-   */
-  expectedScreen?: import('../screen-detection/types').ScreenId | import('../screen-detection/types').ScreenId[];
+  /** Expected data-defined state after the action. */
+  expectedScreen?: string | string[];
   
   /**
    * Minimum confidence threshold for screen match (default: 0.75).
@@ -195,7 +189,7 @@ export type WorkflowStep =
 export interface WorkflowTemplate {
   id:          string;
   name:        string;
-  platform:    string;   // "instagram", "tiktok", "reddit", or "*" for platform-agnostic
+  platform:    string;   // Catalog platform identifier or "*" for platform-agnostic
   description: string;
   version:     string;
   /** Business intent for generated/canonical workflows. */

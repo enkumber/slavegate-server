@@ -46,32 +46,43 @@ function errorCode(result: FailureResult): string | null {
   return match?.[1] ?? null;
 }
 
-function classifyFailure(reason: string): { category: string; severity: string } {
-  const value = reason.toLowerCase();
-  if (/credential|secret|token|exfiltrat|unauthori[sz]ed|permission|security/.test(value)) {
-    return { category: "security", severity: "critical" };
+async function classifyFailure(reason: string): Promise<{
+  category: string;
+  severity: string;
+  owner: string;
+}> {
+  const result = await getDb().query(
+    `SELECT payload
+       FROM runtime_semantic_entries
+      WHERE namespace = 'incident_routing_rule'
+        AND status = 'active'
+      ORDER BY priority DESC, entry_key`,
+  );
+  for (const row of result.rows) {
+    const payload = row.payload as Record<string, unknown>;
+    if (typeof payload.pattern !== "string") continue;
+    try {
+      if (!new RegExp(payload.pattern, typeof payload.flags === "string" ? payload.flags : "i").test(reason)) continue;
+    } catch {
+      continue;
+    }
+    if (
+      typeof payload.category === "string"
+      && typeof payload.severity === "string"
+      && typeof payload.owner === "string"
+    ) {
+      return {
+        category: payload.category,
+        severity: payload.severity,
+        owner: payload.owner,
+      };
+    }
   }
-  if (/offline|disconnect|unreachable|no device|not connected/.test(value)) {
-    return { category: "availability", severity: "high" };
-  }
-  if (/account|login|challenge|captcha|verification/.test(value)) {
-    return { category: "account", severity: "high" };
-  }
-  if (/mismatch|contradict|invalid state|checkpoint|integrity/.test(value)) {
-    return { category: "integrity", severity: "high" };
-  }
-  return { category: "execution", severity: "medium" };
+  throw new Error("No active incident routing rule matched the failure");
 }
 
 function optionalText(value: unknown, max = 200): string | null {
   return typeof value === "string" && value.trim() ? cleanText(value, max) : null;
-}
-
-function remediationOwner(category: string, reason: string): string {
-  if (category === "account") return "nautilus";
-  if (category === "security") return "dan";
-  if (category === "availability" && /offline|disconnect|unreachable|not connected/i.test(reason)) return "hydra";
-  return "nox";
 }
 
 async function addEvent(
@@ -170,8 +181,8 @@ export async function recordExhaustedTaskIncident(
 ): Promise<void> {
   try {
     const reason = cleanText(result.failReason);
-    const classification = classifyFailure(reason);
-    const owner = remediationOwner(classification.category, reason);
+    const classification = await classifyFailure(reason);
+    const owner = classification.owner;
     const selfHealingAttempts = actualRecoveryAttempts(result);
     const taskRetryAttempts = Math.max(0, recovery.taskRetryAttempts ?? task.retry_count ?? 0);
     const workflowId = result.generatedWorkflow?.workflowId

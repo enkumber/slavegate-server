@@ -14,7 +14,6 @@
 
 import { getDb } from "../../db/client";
 import { isDeviceOnline } from "../../transport/transport";
-import type { TaskResult } from "../agents/types";
 import { llmJson } from "../../utils/llm";
 import {
   generatedWorkflowCacheLookups,
@@ -43,6 +42,23 @@ import {
 } from "../incidents/incident.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+interface TokenUsage {
+  planner: { input: number; output: number };
+  executor: { input: number; output: number; calls: number };
+  verifier: { input: number; output: number; calls: number };
+  total: number;
+}
+
+interface TaskResult {
+  success: boolean;
+  stepsCompleted: number;
+  totalSteps: number;
+  failedStep?: number;
+  failReason?: string;
+  tokenUsage: TokenUsage;
+  durationMs: number;
+}
 
 export interface TaskRow {
   id: string;

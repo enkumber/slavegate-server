@@ -15,7 +15,6 @@ import type {
   WorkflowTemplate,
 } from "./types";
 import { parseWorkflowGoalContract, workflowGoalContractReason } from "./goal-contract";
-import { ALL_SCREEN_IDS } from "../screen-detection/types";
 
 // ── Allowed step types ──────────────────────────────────────────────────────
 const ALLOWED_STEP_TYPES = [
@@ -213,16 +212,6 @@ const GENERATED_WORKFLOW_VERIFICATION_STRATEGIES = [
   "local_with_screenshot",
 ] as const;
 
-const GENERATED_WORKFLOW_PLATFORMS = [
-  "android",
-  "instagram",
-  "reddit",
-  "threads",
-  "tiktok",
-  "twitter",
-  "youtube",
-] as const;
-
 const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "close_app",
   "get_screen_state",
@@ -233,7 +222,6 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "screenshot",
   "scroll",
   "detect_current_screen",
-  "classify_reddit_health_scan",
   "a11y_find_tap",
   "classify_ui_tree",
   "semantic_tap",
@@ -243,7 +231,6 @@ const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
   "type_text",
   "ui_tree_dump",
   "unlock",
-  "vlm_generate_comment",
   "wait_for_idle",
 ] as const;
 
@@ -284,11 +271,6 @@ const GENERATED_WORKFLOW_ALLOWED_URI_LESS_INTENT_ACTIONS = [
   "android.settings.ADD_ACCOUNT_SETTINGS",
 ] as const;
 
-const GENERATED_WORKFLOW_INTENTS = [
-  "device_unlock",
-  "reddit_account_health_scan",
-] as const;
-
 const GENERATED_WORKFLOW_SAFETY_CLASSES = [
   "read_only",
   "standard",
@@ -310,130 +292,12 @@ const GENERATED_WORKFLOW_RECOVERY_AUTONOMY = [
   "ai_autopilot",
 ] as const;
 
-const REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT = [
-  "loggedIn",
-  "homeFeedVisible",
-  "searchSurfaceAvailable",
-  "challengeDetected",
-  "loginWallDetected",
-  "accountSwitcherVisible",
-  "observedUsername",
-  "screenState",
-  "error",
-] as const;
-
-const READ_ONLY_MUTATION_TERMS = [
-  "comment",
-  "downvote",
-  "edit_profile",
-  "follow",
-  "join",
-  "login",
-  "message",
-  "post",
-  "profile_edit",
-  "reply",
-  "settings",
-  "send",
-  "submit",
-  "type_text",
-  "upvote",
-  "vote",
-] as const;
-
-const READ_ONLY_EVIDENCE_KEYS = new Set<string>(REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT);
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 function normalizeGeneratedWorkflowPlatform(platform: string): string {
   return platform.trim().toLowerCase();
-}
-
-function isReadOnlySafeCommentReference(normalized: string, tokenized: string[], compact: string): boolean {
-  const hasWriteIntent =
-    tokenized.some((token) => ["add", "create", "draft", "leave", "post", "send", "submit", "type", "write"].includes(token)) ||
-    normalized.includes("add a comment");
-  return (
-    (!hasWriteIntent && tokenized.includes("comments")) ||
-    compact.includes("opencomments") ||
-    compact.includes("commentssection") ||
-    compact.includes("commentsection") ||
-    compact.includes("commentscreen") ||
-    compact.includes("commentlist") ||
-    compact.includes("commentspreview") ||
-    compact.includes("commentsopened") ||
-    compact.includes("readcomments") ||
-    compact.includes("viewcomments") ||
-    compact.includes("firstvisiblepostcomments") ||
-    compact.includes("firstvisiblepostopencomments") ||
-    normalized.includes("open comments") ||
-    normalized.includes("comments section") ||
-    normalized.includes("comment section") ||
-    normalized.includes("comments screen") ||
-    normalized.includes("comment list") ||
-    normalized.includes("read comments") ||
-    normalized.includes("view comments") ||
-    normalized.includes("sectiunea de comentarii") ||
-    normalized.includes("secțiunea de comentarii")
-  );
-}
-
-function isReadOnlySafePostReference(normalized: string, compact: string): boolean {
-  return (
-    compact.includes("firstvisiblepost") ||
-    compact.includes("postdetail") ||
-    compact.includes("postcomments") ||
-    compact.includes("openpost") ||
-    normalized.includes("first post") ||
-    normalized.includes("visible post") ||
-    normalized.includes("post detail") ||
-    normalized.includes("post comments") ||
-    normalized.includes("open post")
-  );
-}
-
-function containsMutationTerm(value: unknown): string | null {
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    const tokenized = value
-      .replace(/([a-z])([A-Z])/g, "$1 $2")
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter(Boolean);
-    const compact = normalized.replace(/[^a-z0-9]/g, "");
-    return READ_ONLY_MUTATION_TERMS.find((term) => {
-      if (term === "login" && (normalized.includes("login state") || compact === "loginwalldetected")) {
-        return false;
-      }
-      if (term === "send" && compact === "intentsend") {
-        return false;
-      }
-      if ((term === "comment" || term === "reply") && isReadOnlySafeCommentReference(normalized, tokenized, compact)) {
-        return false;
-      }
-      if (term === "post" && isReadOnlySafePostReference(normalized, compact)) {
-        return false;
-      }
-      const compactTerm = term.replace(/[^a-z0-9]/g, "");
-      return tokenized.includes(compactTerm) || compact.includes(compactTerm);
-    }) ?? null;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = containsMutationTerm(item);
-      if (found) return found;
-    }
-    return null;
-  }
-  if (isRecord(value)) {
-    for (const [key, nested] of Object.entries(value)) {
-      const found = (READ_ONLY_EVIDENCE_KEYS.has(key) ? null : containsMutationTerm(key)) ?? containsMutationTerm(nested);
-      if (found) return found;
-    }
-  }
-  return null;
 }
 
 function validateGeneratedWorkflowOutputSchema(
@@ -482,68 +346,7 @@ function validateGeneratedWorkflowReadOnlySemantics(
   if (candidate.goalContract) {
     const reason = workflowGoalContractReason(candidate as WorkflowTemplate);
     if (reason) errors.push(`workflow goal contract violation: ${reason}`);
-    return;
   }
-  const mutationTerm = containsMutationTerm({
-    id: candidate.id,
-    name: candidate.name,
-    description: candidate.description,
-    intent: candidate.intent,
-    steps: candidate.steps,
-    allowedRecoveryRequests: candidate.allowedRecoveryRequests,
-  });
-  if (mutationTerm) {
-    errors.push(`workflow.safetyClass=read_only cannot include mutating term: ${mutationTerm}`);
-  }
-}
-
-function validateRedditAccountHealthIntent(candidate: Partial<WorkflowTemplate>, errors: string[]): void {
-  if (candidate.intent !== "reddit_account_health_scan") return;
-  if (candidate.platform !== "reddit") {
-    errors.push("workflow.intent=reddit_account_health_scan requires workflow.platform=reddit");
-  }
-  if (candidate.safetyClass !== "read_only") {
-    errors.push("workflow.intent=reddit_account_health_scan requires workflow.safetyClass=read_only");
-  }
-  const schema = candidate.outputSchema;
-  if (!schema) {
-    errors.push("workflow.intent=reddit_account_health_scan requires workflow.outputSchema");
-    return;
-  }
-  for (const key of REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT) {
-    if (!schema.required.includes(key)) {
-      errors.push(`workflow.outputSchema.required must include ${key}`);
-    }
-    const property = schema.properties[key];
-    if (!property) {
-      errors.push(`workflow.outputSchema.properties.${key} is required`);
-    } else if ((key === "error" || key === "observedUsername") && property.type !== "string" && property.type !== "null") {
-      errors.push(`workflow.outputSchema.properties.${key}.type must be string or null`);
-    } else if (
-      key !== "error" &&
-      key !== "observedUsername" &&
-      property.type !== "boolean" &&
-      property.type !== "string"
-    ) {
-      errors.push(`workflow.outputSchema.properties.${key}.type must be boolean or string`);
-    }
-  }
-}
-
-function validateDeviceUnlockIntent(candidate: Partial<WorkflowTemplate>, errors: string[]): void {
-  if (candidate.intent !== "device_unlock") return;
-  if (candidate.platform !== "android") {
-    errors.push("workflow.intent=device_unlock requires workflow.platform=android");
-  }
-  if (candidate.safetyClass !== "standard") {
-    errors.push("workflow.intent=device_unlock requires workflow.safetyClass=standard");
-  }
-  const steps = Array.isArray(candidate.steps) ? candidate.steps : [];
-  const actions = steps
-    .filter((step) => isRecord(step) && step.type === "action")
-    .map((step) => String((step as unknown as Record<string, unknown>).action ?? ""));
-  if (!actions.includes("screen_wake")) errors.push("workflow.intent=device_unlock requires a screen_wake action");
-  if (!actions.includes("unlock")) errors.push("workflow.intent=device_unlock requires an unlock action");
 }
 
 function validateRangeObject(
@@ -727,8 +530,6 @@ function validateGeneratedWorkflowStepInput(
         for (const screen of screens) {
           if (typeof screen !== "string" || !screen.trim()) {
             errors.push(`${path}.expectedScreen must contain non-empty state identifiers`);
-          } else if (runtimeContract !== "edge-workflow/v2" && !ALL_SCREEN_IDS.includes(screen as typeof ALL_SCREEN_IDS[number])) {
-            errors.push(`${path}.expectedScreen contains unknown screen: ${String(screen)}`);
           }
         }
       }
@@ -1043,16 +844,8 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
     errors.push("workflow.platform must be a non-empty string");
   } else {
     const normalizedPlatform = normalizeGeneratedWorkflowPlatform(candidate.platform);
-    if (
-      candidate.runtimeContract === "edge-workflow/v2" &&
-      !/^[a-z0-9][a-z0-9._-]{0,199}$/.test(normalizedPlatform)
-    ) {
+    if (!/^[a-z0-9][a-z0-9._-]{0,199}$/.test(normalizedPlatform)) {
       errors.push("workflow.platform must be a safe app/profile identifier");
-    } else if (
-      candidate.runtimeContract !== "edge-workflow/v2" &&
-      !GENERATED_WORKFLOW_PLATFORMS.includes(normalizedPlatform as typeof GENERATED_WORKFLOW_PLATFORMS[number])
-    ) {
-      errors.push(`workflow.platform must be one of: ${GENERATED_WORKFLOW_PLATFORMS.join(", ")}`);
     } else {
       candidate.platform = normalizedPlatform;
     }
@@ -1060,8 +853,11 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
   if (!candidate.description || typeof candidate.description !== "string") errors.push("workflow.description must be a non-empty string");
   if (!candidate.version || typeof candidate.version !== "string") errors.push("workflow.version must be a non-empty string");
   if (candidate.intent !== undefined) {
-    if (typeof candidate.intent !== "string" || !GENERATED_WORKFLOW_INTENTS.includes(candidate.intent as typeof GENERATED_WORKFLOW_INTENTS[number])) {
-      errors.push(`workflow.intent must be one of: ${GENERATED_WORKFLOW_INTENTS.join(", ")}`);
+    if (
+      typeof candidate.intent !== "string"
+      || !/^[a-z0-9][a-z0-9._-]{0,199}$/.test(candidate.intent.trim().toLowerCase())
+    ) {
+      errors.push("workflow.intent must be a safe catalog identifier when provided");
     }
   }
   if (candidate.safetyClass !== undefined) {
@@ -1117,8 +913,6 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
       validateGeneratedWorkflowStepInput(step, `workflow.steps[${index}]`, errors, seenIds, candidate.runtimeContract)
     );
   }
-  validateRedditAccountHealthIntent(candidate, errors);
-  validateDeviceUnlockIntent(candidate, errors);
   validateGeneratedWorkflowReadOnlySemantics(candidate, errors);
 
   return errors.length > 0
@@ -1482,9 +1276,24 @@ function stableStringify(value: unknown): string {
 
 export function getGeneratedWorkflowContract(): Record<string, unknown> {
   const exampleSteps: WorkflowStep[] = [
-    { type: "action", id: "open_reddit", action: "open_app", params: { packageName: "com.reddit.frontpage" } },
-    { type: "wait", id: "wait_home", condition: "app_launched", timeoutMs: 10000 },
-    { type: "checkpoint", id: "home_loaded", reason: "App reached expected starting screen" },
+    {
+      type: "action",
+      id: "open_target",
+      action: "open_app",
+      params: { packageName: "{{runtime.packageName}}" },
+      goalStage: "open_surface",
+      effect: "navigation",
+    },
+    {
+      type: "action",
+      id: "observe_target",
+      action: "classify_ui_tree",
+      params: { outputs: { state: { patterns: ["{{catalog.statePattern}}"] } } },
+      saveOutputAs: "state",
+      goalStage: "observe_surface",
+      effect: "observation",
+    },
+    { type: "checkpoint", id: "goal_verified", reason: "Catalog-defined goal state was observed" },
   ];
 
   return {
@@ -1509,8 +1318,8 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
     template: {
       required: ["id", "name", "platform", "description", "version", "steps"],
       optional: ["intent", "safetyClass", "outputSchema", "allowedRecoveryRequests", "recoveryPolicy", "defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
-      platforms: GENERATED_WORKFLOW_PLATFORMS,
-      intents: GENERATED_WORKFLOW_INTENTS,
+      platforms: "catalog_managed",
+      intents: "catalog_managed",
       safetyClasses: GENERATED_WORKFLOW_SAFETY_CLASSES,
       allowedRecoveryRequests: GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS,
       recoveryAutonomy: GENERATED_WORKFLOW_RECOVERY_AUTONOMY,
@@ -1541,25 +1350,35 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       },
     },
     example: {
-      id: "agent_generated_reddit_open_home_v1",
-      name: "Agent generated Reddit open home",
-      platform: "reddit",
-      description: "Minimal generated workflow contract example.",
+      id: "agent_generated_catalog_example_v1",
+      name: "Catalog-driven workflow example",
+      platform: "android",
+      description: "Minimal data-driven generated workflow contract example.",
       version: "1.0.0",
-      intent: "reddit_account_health_scan",
       safetyClass: "read_only",
+      goalContract: {
+        version: "1",
+        allowedEffects: ["navigation", "observation"],
+        requiredOutputs: ["state"],
+        stages: [
+          {
+            id: "open_surface",
+            allowedActions: ["open_app"],
+            allowedEffects: ["navigation"],
+          },
+          {
+            id: "observe_surface",
+            allowedActions: ["classify_ui_tree"],
+            allowedEffects: ["observation"],
+            after: ["open_surface"],
+            produces: ["state"],
+          },
+        ],
+      },
       outputSchema: {
-        required: [...REDDIT_ACCOUNT_HEALTH_REQUIRED_OUTPUT],
+        required: ["state"],
         properties: {
-          loggedIn: { type: "string" },
-          homeFeedVisible: { type: "string" },
-          searchSurfaceAvailable: { type: "string" },
-          challengeDetected: { type: "string" },
-          loginWallDetected: { type: "string" },
-          accountSwitcherVisible: { type: "string" },
-          observedUsername: { type: "string" },
-          screenState: { type: "string" },
-          error: { type: "string" },
+          state: { type: "string" },
         },
       },
       allowedRecoveryRequests: ["refresh_screen_state"],

@@ -45,17 +45,16 @@ function artifact(overrides: Partial<GeneratedWorkflowPlanCacheRecord> = {}): Ge
 }
 
 describe("portable workflow capability identity", () => {
-  it("derives a stable capability key from workflow data without trace/version noise", () => {
+  it("keeps workflow-derived keys lexical and does not encode domain aliases", () => {
     expect(derivePortableCapabilityKey({
       id: "remote_support_enable_screen_sharing_trace_v1",
       name: "ignored",
-    })).toBe("remote_support_enable_screen_share");
+    })).toBe("remote_support_enable_screen_sharing_trace");
   });
 
-  it("stores portable capability metadata without device identity", () => {
+  it("does not invent a capability identity when PostgreSQL did not provide one", () => {
     const record = artifact();
     expect(portableCapabilityMetadata(record.workflow, record.sourceMetadata)).toEqual({
-      capabilityKey: "remote_support_enable_screen_share",
       portable: true,
       portabilityScope: "global",
     });
@@ -80,7 +79,7 @@ describe("portable workflow capability identity", () => {
     expect(match?.score).toBeGreaterThanOrEqual(0.62);
   });
 
-  it("covers the recorded RustDesk trace regression without application-specific resolver logic", () => {
+  it("refuses legacy semantic fallback when the catalog identity is absent", () => {
     const recorded = artifact({
       workflow: {
         ...artifact().workflow,
@@ -98,8 +97,7 @@ describe("portable workflow capability identity", () => {
       "android",
       [recorded],
     );
-    expect(match?.record.cacheKey).toBe(recorded.cacheKey);
-    expect(match?.capabilityKey).toBe("rustdesk_enable_screen_share");
+    expect(match).toBeNull();
   });
 
   it("fails closed when two capabilities are semantically ambiguous", () => {

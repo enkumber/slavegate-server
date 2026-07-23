@@ -54,7 +54,6 @@ const excludedFiles = [
 ];
 
 const reviewedRawImportBoundaries = new Set([
-  "src/api/hydra-routes.ts\tdirectWsServer\tdirect-ws",
   "src/api/routes.ts\tdirectWsServer\tdirect-ws",
   "src/index.ts\tdirectWsServer\tdirect-ws",
   "src/modules/workflows/generated-workflow-execution.service.ts\tdirectWsServer\tdirect-ws",
@@ -473,7 +472,6 @@ function isReviewedCallBoundary(finding: EgressFinding): boolean {
     return finding.importedName === "directWsServer" && finding.sourceKind === "direct-ws";
   }
   if (finding.kind === "transport.sendJob") return finding.file === "src/api/routes.ts";
-  if (finding.kind === "adapter.sendJob") return finding.file === "src/modules/skills/skill.cascade.ts";
   if (finding.kind === "sendToDevice") {
     return finding.file === "src/ws/direct-ws.server.ts"
       || finding.file === "src/ws/ws.server.ts"

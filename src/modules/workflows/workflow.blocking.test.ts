@@ -172,7 +172,7 @@ describe("startWorkflow — timeout protection", () => {
 });
 
 describe("workflow executor package resolution", () => {
-  it("can resolve reddit packageName for generated open_app/close_app actions", async () => {
+  it("does not embed application package resolution in the executor", async () => {
     const fs = await import("fs");
     const path = await import("path");
     const source = fs.readFileSync(
@@ -180,7 +180,8 @@ describe("workflow executor package resolution", () => {
       "utf8"
     );
 
-    expect(source).toContain('reddit: "com.reddit.frontpage"');
+    expect(source).not.toContain("com.reddit.frontpage");
+    expect(source).toContain("requires packageName from the DB-authored workflow or runtime profile");
   });
 });
 
@@ -333,7 +334,7 @@ describe("Generated workflow contract validation", () => {
     });
   });
 
-  it("rejects unknown generated workflow platforms before metrics labels can use them", async () => {
+  it("accepts safe catalog-managed platform identifiers without a code allowlist", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
 
     const result = validateGeneratedWorkflowTemplate({
@@ -352,8 +353,7 @@ describe("Generated workflow contract validation", () => {
       ],
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.errors).toContain("workflow.platform must be one of: android, instagram, reddit, threads, tiktok, twitter, youtube");
+    expect(result.ok).toBe(true);
   });
 
   it("rejects semantic_tap generated workflow actions without a target before runtime", async () => {
@@ -510,55 +510,37 @@ describe("Generated workflow contract validation", () => {
     expect(metricsSource).toContain('labelNames: ["platform"]');
   });
 
-  it("rejects read-only generated workflows that include mutating Reddit semantics", async () => {
+  it("rejects read-only mutations by Goal Contract effect instead of vocabulary", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
-    const mutatingTerms = [
-      "upvote",
-      "downvote",
-      "vote",
-      "comment",
-      "post",
-      "join",
-      "follow",
-      "message",
-      "login",
-      "settings",
-      "profile_edit",
-      "type_text",
-    ];
+    const result = validateGeneratedWorkflowTemplate({
+      id: "catalog_effect_probe_v1",
+      name: "Catalog effect probe",
+      platform: "catalog-app",
+      description: "The validator must use declared effects only.",
+      version: "1.0.0",
+      runtimeContract: "edge-workflow/v2",
+      safetyClass: "read_only",
+      goalContract: {
+        version: "1",
+        allowedEffects: ["observation"],
+        stages: [{
+          id: "inspect",
+          allowedActions: ["get_screen_state"],
+          allowedEffects: ["observation"],
+        }],
+      },
+      steps: [{
+        type: "action",
+        id: "inspect",
+        action: "get_screen_state",
+        params: {},
+        goalStage: "inspect",
+        effect: "business_mutation",
+      }],
+    });
 
-    for (const term of mutatingTerms) {
-      const result = validateGeneratedWorkflowTemplate({
-        id: `reddit_${term}_probe_v1`,
-        name: `Reddit ${term} probe`,
-        platform: "reddit",
-        description: "Read-only scan contract must reject mutating semantics.",
-        version: "1.0.0",
-        intent: "reddit_account_health_scan",
-        safetyClass: "read_only",
-        outputSchema: {
-          required: ["loggedIn", "homeFeedVisible", "searchSurfaceAvailable", "challengeDetected", "loginWallDetected", "accountSwitcherVisible", "observedUsername", "screenState", "error"],
-          properties: {
-            loggedIn: { type: "string" },
-            homeFeedVisible: { type: "string" },
-            searchSurfaceAvailable: { type: "string" },
-            challengeDetected: { type: "string" },
-            loginWallDetected: { type: "string" },
-            accountSwitcherVisible: { type: "string" },
-            observedUsername: { type: "string" },
-          screenState: { type: "string" },
-          error: { type: "string" },
-          },
-        },
-        allowedRecoveryRequests: ["refresh_screen_state"],
-        steps: [
-          { type: "action", id: `inspect_${term}`, action: "get_screen_state", params: { target: term } },
-        ],
-      });
-
-      expect(result.ok, term).toBe(false);
-      expect(result.errors).toContain(`workflow.safetyClass=read_only cannot include mutating term: ${term}`);
-    }
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(" ")).toContain('uses disallowed effect "business_mutation"');
   });
 
   it("allows read-only workflows to navigate to Reddit post comments", async () => {
@@ -648,19 +630,20 @@ describe("Generated workflow contract validation", () => {
     );
   });
 
-  it("allows standard generated workflows to create and type contextual comments", async () => {
+  it("allows standard edge workflows to generate and type catalog-authored text", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
     const result = validateGeneratedWorkflowTemplate({
-      id: "reddit_contextual_comment_v1",
-      name: "Reddit contextual comment",
-      platform: "reddit",
-      description: "Open a Reddit post and leave a contextual comment.",
+      id: "catalog_contextual_text_v1",
+      name: "Catalog contextual text",
+      platform: "catalog_app",
+      description: "Generate and submit text using catalog-defined UI data.",
       version: "1.0.0",
+      runtimeContract: "edge-workflow/v2",
       safetyClass: "standard",
       defaultVerificationStrategy: "local_only",
       dataRetentionDays: 7,
       steps: [
-        { type: "action", id: "generate_comment", action: "vlm_generate_comment", params: { sourceVariable: "_postContextUiTree", outputVariable: "_generated_comment" } },
+        { type: "action", id: "generate_comment", action: "request_llm", params: { prompt: "Use {{_postContextUiTree}}", responseFormat: "text", saveOutputAs: "_generated_comment" } },
         { type: "action", id: "tap_comment_input", action: "a11y_find_tap", params: { label: "Add a comment" } },
         { type: "action", id: "type_comment", action: "type_text", params: { textFromVariable: "_generated_comment" } },
         { type: "action", id: "submit_comment", action: "a11y_find_tap", params: { text: "Post" } },

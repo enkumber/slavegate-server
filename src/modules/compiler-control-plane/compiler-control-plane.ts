@@ -77,8 +77,8 @@ function deviceManifestTool(tool: ToolCatalogEntry, device: JsonObject | null): 
   };
 }
 
-function buildCapabilityManifest(device: JsonObject | null): JsonObject {
-  const tools = listToolCatalog({}).map((tool) => deviceManifestTool(tool, device));
+async function buildCapabilityManifest(device: JsonObject | null): Promise<JsonObject> {
+  const tools = (await listToolCatalog({})).map((tool) => deviceManifestTool(tool, device));
   const availableTools = tools.filter((tool) => tool.available === true).length;
   return {
     source: "server_inferred_manifest",
@@ -163,9 +163,9 @@ function buildLimitedReusePlan(input: {
   };
 }
 
-export function buildCompilerControlPlane(input: CompilerControlPlaneInput): JsonObject {
+export async function buildCompilerControlPlane(input: CompilerControlPlaneInput): Promise<JsonObject> {
   const gates = gateSummary(input.policyGates);
-  const capabilityManifest = buildCapabilityManifest(input.device ?? null);
+  const capabilityManifest = await buildCapabilityManifest(input.device ?? null);
   const limitedReusePlan = buildLimitedReusePlan({
     awareness: input.awareness,
     capabilityManifest,

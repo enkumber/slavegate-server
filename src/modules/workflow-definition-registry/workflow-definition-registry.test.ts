@@ -26,7 +26,28 @@ function definition(overrides: Partial<WorkflowDefinition>): WorkflowDefinition 
     constraints: [],
     fallbackRules: [],
     rollback: {},
-    policy: {},
+    policy: {
+      reusable: true,
+      compilerVisible: true,
+      autoUseEnabled: true,
+      requireScopeMatch: true,
+      requiredGateIds: [
+        "compiler_knowledge_application",
+        "limited_reuse_scope_match",
+        "compiler_auto_use",
+        "execution_path_change",
+      ],
+      allowedStatuses: ["active"],
+      allowedPromotionStates: ["limited_reuse"],
+      minimumPromotionConfidence: 0.6,
+      resolutionScoring: {
+        exactKey: 100,
+        exactIntent: 50,
+        platform: 10,
+        termMatch: 12,
+        statusScores: { active: 10, draft: 2 },
+      },
+    },
     promotion: {
       state: "limited_reuse",
       scope: "auto_use:test:android:device_unlock:v1",
@@ -36,7 +57,7 @@ function definition(overrides: Partial<WorkflowDefinition>): WorkflowDefinition 
       revokedBy: null,
       revokedAt: null,
       confidence: 0.85,
-      readiness: { state: "auto_use_bootstrap_ready" },
+      readiness: { state: "auto_use_bootstrap_ready", safeToAutoApply: true },
       scopeDetails: {},
       rollbackDefinitionId: null,
       rollbackPreview: {},
@@ -123,7 +144,7 @@ describe("buildWorkflowDefinitionResolution", () => {
     expect(result.candidateDefinition.key).toBe("gmail_open_inbox");
     expect(result.outcome).toBe("blocked_by_policy");
     expect(result.wouldExecuteWorkflow).toBe(false);
-    expect(result.blockers).toContain("workflow_definition_not_active");
+    expect(result.blockers).toContain("workflow_definition_status_not_allowed");
   });
 
   it("keeps the scoped device unlock definition executable for unlock goals", () => {

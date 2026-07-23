@@ -19,7 +19,6 @@ import {
   normalizeCachedHumanWorkflowTemplate,
 } from "./human-workflow-normalization";
 import { listRuntimeProfiles, loadRuntimeProfile } from "../app-mapping/runtime-profile";
-import { resolvePortableCapabilityArtifact } from "./portable-capability";
 import {
   capabilityCatalogService,
   formatCompilerRetrievalContext,
@@ -235,14 +234,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-const READINESS_ONLY_ACTIONS = new Set([
-  "screen_wake",
-  "unlock",
-  "wait_for_idle",
-  "detect_current_screen",
-  "ui_tree_dump",
-]);
-
 const INTRINSIC_ACTION_EFFECTS: Record<string, "none" | "observation" | "navigation"> = {
   screen_wake: "none",
   unlock: "none",
@@ -261,25 +252,34 @@ const INTRINSIC_ACTION_EFFECTS: Record<string, "none" | "observation" | "navigat
   swipe: "navigation",
 };
 
-function isReadinessOnlyIntent(goal: string): boolean {
-  const normalized = goal.toLowerCase();
-  const asksForReadiness = /\b(wake|wakeup|unlock|deblocheaza|deblochează|aprinde|trezeste|trezește|screen)\b/.test(normalized);
-  const asksForRealWork = /\b(create|creeaza|creează|install|instaleaza|instalează|open|deschide|navigate|mergi|comment|comentariu|posteaza|postează|type|scrie)\b/.test(normalized);
-  return asksForReadiness && !asksForRealWork;
-}
-
-export function humanWorkflowUndercompiledReason(workflow: WorkflowTemplate, intent: string): string | null {
+export function humanWorkflowUndercompiledReason(workflow: WorkflowTemplate, _intent: string): string | null {
   const steps = Array.isArray(workflow.steps) ? workflow.steps : [];
   if (steps.length === 0) return "workflow has no steps";
-  if (isReadinessOnlyIntent(intent)) return null;
-
   const actionSteps = steps.filter((step) => step.type === "action");
   if (actionSteps.length === 0) return "workflow has no executable action steps";
-  const readinessOnly = actionSteps.every((step) => READINESS_ONLY_ACTIONS.has(String(step.action ?? "")));
-  if (readinessOnly) {
-    return "workflow only wakes/unlocks/observes the device and does not perform the requested task";
+  const hasGoalAdvancingAction = actionSteps.some((step) => {
+    const effect = typeof step.effect === "string" ? step.effect : INTRINSIC_ACTION_EFFECTS[step.action ?? ""];
+    return effect !== "none" && effect !== "observation";
+  });
+  if (!hasGoalAdvancingAction) {
+    return "workflow contains only preparation or observation actions";
   }
   return workflowGoalContractReason(workflow);
+}
+
+function humanWorkflowPackageInventoryReason(
+  workflow: WorkflowTemplate,
+  expectedPackageName: string,
+): string | null {
+  for (const step of workflow.steps) {
+    if (step.type !== "action" || (step.action !== "open_app" && step.action !== "close_app")) continue;
+    const actual = typeof step.params?.packageName === "string" ? step.params.packageName.trim() : "";
+    if (!actual) return `${step.id} is missing a packageName from the runtime profile`;
+    if (actual !== expectedPackageName) {
+      return `${step.id} packageName is not present in the selected PostgreSQL runtime profile`;
+    }
+  }
+  return null;
 }
 
 export function assertHumanWorkflowMeaningful(
@@ -396,36 +396,16 @@ function buildHumanWorkflowRepairPrompt(input: {
     "Return a complete replacement workflow that performs the user's actual goal end to end.",
     "Wake, unlock, waits, screen detection, UI dumps, and checkpoints are preparation/evidence only; they do not satisfy the goal.",
     "Include the concrete app-opening, navigation, tapping, and text-entry actions needed by the goal.",
-    "For account-creation goals, include the account-creation path and all requested user-authorized form values, including a generated username/password when requested.",
     "Do not return or repeat a readiness-only workflow.",
     `Rejected candidate: ${JSON.stringify(input.rejectedWorkflow)}`,
   ].join("\n");
 }
 
-function inferHumanWorkflowSafetyClass(goal: string): HumanWorkflowSafetyClass {
-  const normalized = goal.toLowerCase();
-  if (/\b(delete|remove|uninstall|factory reset|sterge|șterge|dezinstaleaza|dezinstalează)\b/.test(normalized)) return "destructive";
-  if (/\b(create|install|update|write|type|send|post|submit|comment|like|follow|join|creeaza|creează|instaleaza|instalează|scrie|trimite|posteaza|postează|comenteaza|comentează)\b/.test(normalized)) return "standard";
-  return "read_only";
-}
-
-function safetyRank(value: CatalogSafetyClass | HumanWorkflowSafetyClass | null): number {
-  switch (value) {
-    case "read_only": return 0;
-    case "navigation": return 1;
-    case "standard": return 2;
-    case "mutating": return 3;
-    case "sensitive": return 4;
-    case "destructive": return 5;
-    default: return 0;
-  }
-}
-
 function compilerSafetyClass(
-  inferred: HumanWorkflowSafetyClass,
   recommended: CatalogSafetyClass | null,
 ): HumanWorkflowSafetyClass {
-  if (!recommended || safetyRank(recommended) <= safetyRank(inferred)) return inferred;
+  if (!recommended) return "standard";
+  if (recommended === "read_only" || recommended === "navigation") return "read_only";
   if (recommended === "destructive") return "destructive";
   return "standard";
 }
@@ -458,7 +438,7 @@ function normalizeHumanWorkflowTemplateCandidate(
   workflow.safetyClass = input.safetyClass ?? (
     workflow.safetyClass === "standard" || workflow.safetyClass === "destructive" || workflow.safetyClass === "read_only"
       ? workflow.safetyClass
-      : inferHumanWorkflowSafetyClass(input.goal)
+      : "standard"
   );
   workflow.dataRetentionDays = typeof workflow.dataRetentionDays === "number" && workflow.dataRetentionDays >= 0
     ? workflow.dataRetentionDays
@@ -799,16 +779,6 @@ export class HumanWorkflowCompilerService {
       }
     }
 
-    const portableCandidates = await workflowService.listPortableGeneratedPlanCacheCandidates(target.account_platform);
-    const portableMatch = resolvePortableCapabilityArtifact(intent, target.account_platform, portableCandidates);
-    if (portableMatch && humanWorkflowCacheUsable(portableMatch.record, intent)) {
-      const selected = await workflowService.getGeneratedPlanCache(portableMatch.record.cacheKey);
-      if (selected) {
-        await workflowService.recordPortableCapabilityIdentity(selected.cacheKey, portableMatch.capabilityKey);
-        return readyFromCache(selected, target, requestKey, "cache");
-      }
-    }
-
     const shortcutMatch = target.account_id
       ? await shortcutRegistryService.lookupActiveShortcut({
           platform: target.account_platform,
@@ -943,14 +913,8 @@ export class HumanWorkflowCompilerService {
         return readyFromCache(cached, input.target, input.requestKey, "cache");
       }
     }
-    const safetyClass = compilerSafetyClass(
-      inferHumanWorkflowSafetyClass(input.intent),
-      retrievalContext.recommendedSafetyClass,
-    );
-    const enforceRetrievedSafetyClass = retrievalContext.recommendedSafetyClass
-      && safetyRank(retrievalContext.recommendedSafetyClass) > safetyRank(inferHumanWorkflowSafetyClass(input.intent))
-      ? safetyClass
-      : undefined;
+    const safetyClass = compilerSafetyClass(retrievalContext.recommendedSafetyClass);
+    const enforceRetrievedSafetyClass = safetyClass;
     const packageName = await humanWorkflowPackageName(platform);
     const appMap = await loadMap(packageName);
     const compilerPolicy = await loadHumanWorkflowCompilerPolicy();
@@ -1005,7 +969,8 @@ export class HumanWorkflowCompilerService {
       const correctiveReason = template
         ? retrievalContext.goalContract && !template.goalContract
           ? "LLM-compiled human workflow is missing mandatory workflow.goalContract"
-          : workflowGoalContractReason(template, retrievalContext.goalContract)
+          : humanWorkflowPackageInventoryReason(template, packageName)
+          ?? workflowGoalContractReason(template, retrievalContext.goalContract)
           ?? humanWorkflowUndercompiledReason(template, input.intent)
         : `workflow validation failed: ${validation.errors.join("; ")}`;
       if (correctiveReason) {
@@ -1051,6 +1016,14 @@ export class HumanWorkflowCompilerService {
           code: "HUMAN_WORKFLOW_GOAL_CONTRACT_REQUIRED",
           retryable: true,
           nextAction: "retry_compile",
+        });
+      }
+      const packageInventoryReason = humanWorkflowPackageInventoryReason(template, packageName);
+      if (packageInventoryReason) {
+        throw Object.assign(new Error(`workflow package inventory validation failed: ${packageInventoryReason}`), {
+          status: 400,
+          code: "HUMAN_WORKFLOW_VALIDATION_FAILED",
+          validationErrors: [packageInventoryReason],
         });
       }
       assertHumanWorkflowMeaningful(template, input.intent, retrievalContext.goalContract);

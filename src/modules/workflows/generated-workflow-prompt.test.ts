@@ -134,18 +134,8 @@ describe("buildGeneratedWorkflowPrompt", () => {
     expect(hintSet.hints.join("\n")).not.toContain("legacy_search: button; label=Search");
   });
 
-  it("resolves platform screens when the caller does not provide a screen list", () => {
-    const redditScreens = resolveGeneratedWorkflowScreens("reddit");
-    expect(redditScreens).toContain("REDDIT_HOME_FEED");
-    expect(redditScreens).toContain("REDDIT_RATE_LIMITED");
-    expect(redditScreens).toContain("ACTION_BLOCKED");
-    expect(redditScreens).not.toContain("HOME_FEED");
-
-    const instagramScreens = resolveGeneratedWorkflowScreens("instagram");
-    expect(instagramScreens).toContain("HOME_FEED");
-    expect(instagramScreens).toContain("ACTION_BLOCKED");
-    expect(instagramScreens).not.toContain("REDDIT_HOME_FEED");
-
-    expect(resolveGeneratedWorkflowScreens("reddit", ["CUSTOM_SCREEN"])).toEqual(["CUSTOM_SCREEN"]);
+  it("uses only caller/catalog supplied state identifiers", () => {
+    expect(resolveGeneratedWorkflowScreens("catalog_app")).toEqual([]);
+    expect(resolveGeneratedWorkflowScreens("catalog_app", ["CUSTOM_SCREEN"])).toEqual(["CUSTOM_SCREEN"]);
   });
 });

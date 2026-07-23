@@ -33,7 +33,7 @@ export type AccountStatus =
 
 export interface Account {
   id:               string;
-  platform:         string;   // "instagram" | "tiktok" | "reddit" | ...
+  platform:         string;
   username:         string;
   deviceId:         string;
   clientId:         string | null;
@@ -123,7 +123,7 @@ export class AccountsService {
     const account = rowToAccount(result.rows[0]);
 
     // Auto-research: queue a profile research job immediately after account creation.
-    // Hydra selects the correct skill based on platform (research_profile_instagram.skill, etc.)
+    // Runtime behavior is selected from the PostgreSQL capability catalog.
     // Fire-and-forget — don't block account creation if research queue is full.
     researchService.requestResearch(
       "research_profile",

@@ -27,7 +27,7 @@ export interface BuildPromptOptions {
  * Build a complete LLM prompt for workflow compilation.
  *
  * @param appMap     — The app map from DB (pages, elements, transitions)
- * @param instruction — Natural language instruction (e.g. "Post on Reddit in r/technology...")
+ * @param instruction — Natural language workflow instruction.
  * @param options    — Optional tuning
  * @returns The full prompt string ready to send to an LLM
  */

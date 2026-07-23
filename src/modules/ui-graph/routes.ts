@@ -4,7 +4,6 @@ import { getDb } from "../../db/client";
 import { describeUiGraphRuntimeFlags } from "./config";
 import { uiGraphLearningLoop } from "./learning-loop";
 import { uiGraphRepository } from "./repository";
-import { materializeAllLegacyAppMaps } from "./materializer";
 import { evaluateCanaryGate, recordCanaryResult } from "./canary.service";
 import { persistStateSnapshot, replaySnapshotCorpus } from "./snapshot-replay.service";
 
@@ -99,12 +98,6 @@ router.get("/promotion-events", requireAdminAuth, async (_req: Request, res: Res
      ORDER BY e.created_at DESC LIMIT 200`,
   );
   res.json({ ok: true, data: result.rows });
-});
-
-router.post("/materialize", requireAdminAuth, async (_req: Request, res: Response) => {
-  const summary = await materializeAllLegacyAppMaps();
-  if (summary.errors.length > 0) return res.status(409).json({ ok: false, error: summary.errors.join("; "), data: summary });
-  res.json({ ok: true, data: summary });
 });
 
 router.post("/candidates/:id/validate", requireAdminAuth, async (req: Request, res: Response) => {

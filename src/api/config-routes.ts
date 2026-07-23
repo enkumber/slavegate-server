@@ -7,7 +7,6 @@
 import { Router, Request, Response } from "express";
 import { getDb } from "../db/client";
 import { workflowService } from "../modules/workflows/workflow.service";
-import { PLANNER_SYSTEM_PROMPT } from "../modules/agents/prompts/planner.prompt";
 
 const router = Router();
 
@@ -151,21 +150,10 @@ router.put("/workflows/:id", async (req: Request, res: Response) => {
   }
 });
 
-// ─── Seed helper (called from index.ts on startup) ────────────────────────────
-
-/**
- * Seed system_prompts table with hardcoded defaults.
- * Uses ON CONFLICT DO NOTHING so existing edits survive restarts.
- */
+// Compatibility hook retained for bootstrap callers. Prompt defaults are
+// migration-owned so a server restart can never reintroduce code-owned policy.
 export async function seedSystemPrompts(): Promise<void> {
-  const db = getDb();
-  await db.query(
-    `INSERT INTO system_prompts (key, content)
-     VALUES ($1, $2)
-     ON CONFLICT (key) DO NOTHING`,
-    ["planner_system_prompt", PLANNER_SYSTEM_PROMPT]
-  );
-  console.log("[config/prompts] Seeded system prompts (ON CONFLICT DO NOTHING).");
+  console.log("[config/prompts] System prompts are PostgreSQL migration-owned.");
 }
 
 /**

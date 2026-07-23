@@ -151,7 +151,7 @@ function cachedPlan(overrides: Record<string, unknown> = {}) {
     compiledPlan: {
       cacheKey: ck,
       metadata: {
-        safetyClass: "read_only",
+        safetyClass: "standard",
         intent: INTENT,
       },
       llmBudget: {
@@ -604,8 +604,18 @@ describe("dashboard human workflow routes", () => {
       },
     });
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
-    mocks.workflowService.listPortableGeneratedPlanCacheCandidates.mockResolvedValueOnce([portable]);
     mocks.workflowService.getGeneratedPlanCache.mockResolvedValueOnce(portable);
+    mocks.capabilityCatalogService.retrieve.mockResolvedValueOnce({
+      fullArtifactCacheKey: "9".repeat(24),
+      matchedCapabilityKey: "remote_support_enable_screen_share",
+      matchedCapabilityScore: 1,
+      recommendedSafetyClass: "standard",
+      knowledge: {
+        promotedArtifacts: [],
+        uiGraph: { selectors: [], transitions: [] },
+        avoid: [],
+      },
+    });
     mocks.db.query.mockResolvedValueOnce({
       rows: [{
         device_id: DEVICE_ID,
@@ -634,12 +644,8 @@ describe("dashboard human workflow routes", () => {
       },
     });
     expect(mocks.workflowService.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(accountlessRequestKey(intent));
-    expect(mocks.workflowService.listPortableGeneratedPlanCacheCandidates).toHaveBeenCalledWith("android");
     expect(mocks.workflowService.getGeneratedPlanCache).toHaveBeenCalledWith("9".repeat(24));
-    expect(mocks.workflowService.recordPortableCapabilityIdentity).toHaveBeenCalledWith(
-      "9".repeat(24),
-      "remote_support_enable_screen_share",
-    );
+    expect(mocks.capabilityCatalogService.retrieve).toHaveBeenCalledWith(intent, "android");
     expect(mocks.compileJobService.createOrGet).not.toHaveBeenCalled();
     expect(mocks.llmJson).not.toHaveBeenCalled();
   });
@@ -1383,7 +1389,7 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.llmJson.mock.calls[0][0]).toContain("known_add_account");
     expect(mocks.llmJson.mock.calls[0][0]).toContain("do not reuse a rejected package");
     expect(mocks.llmJson.mock.calls[1][0]).toContain("CORRECTIVE COMPILATION REQUIRED");
-    expect(mocks.llmJson.mock.calls[1][0]).toContain("workflow only wakes/unlocks/observes the device");
+    expect(mocks.llmJson.mock.calls[1][0]).toContain("workflow contains only preparation or observation actions");
     expect(mocks.llmJson.mock.calls[1][2]).toMatchObject({ max_tokens: 6144 });
     expect(mocks.workflowService.saveExecutableGeneratedPlanCache).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1561,12 +1567,12 @@ describe("dashboard human workflow routes", () => {
     expect(mocks.llmJson).toHaveBeenCalledTimes(2);
     expect(mocks.llmJson.mock.calls[1][0]).toContain("condition step requires check or expression");
     expect(mocks.llmJson.mock.calls[1][0]).toContain("if_true must be a non-empty step array");
-    expect(mocks.llmJson.mock.calls[1][0]).toContain("cannot include mutating term: type_text");
+    expect(mocks.llmJson.mock.calls[1][0]).not.toContain("cannot include mutating term: type_text");
     expect(mocks.llmJson.mock.calls[0][0]).toContain("Database-owned compiler policy marker.");
     expect(mocks.llmJson.mock.calls[1][0]).toContain("Database-owned compiler policy marker.");
     expect(mocks.workflowService.saveExecutableGeneratedPlanCache).toHaveBeenCalledWith(
       expect.objectContaining({
-        safetyClass: "read_only",
+        safetyClass: "standard",
         steps: expect.arrayContaining([expect.objectContaining({ id: "inspect", action: "ui_tree_dump" })]),
       }),
       expect.anything(),
@@ -2325,7 +2331,7 @@ describe("dashboard human workflow routes", () => {
       DEVICE_ID,
       "reddit",
       INTENT,
-      "read_only",
+      "standard",
       null,
       cacheKey(),
       "dashboard_human_reddit_preview_v1",
@@ -2383,7 +2389,7 @@ describe("dashboard human workflow routes", () => {
       DEVICE_ID,
       "reddit",
       INTENT,
-      "read_only",
+      "standard",
       null,
       cacheKey(),
       "dashboard_human_reddit_preview_v1",

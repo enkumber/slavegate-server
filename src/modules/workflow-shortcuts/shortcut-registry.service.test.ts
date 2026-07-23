@@ -122,7 +122,7 @@ describe("shortcutRegistryService", () => {
           key: "reddit_open_app",
           platform: "reddit",
           intent_patterns: [{ type: "contains_all", terms: ["deschide", "reddit"] }],
-          match_config: { readOnlyOnly: true },
+          match_config: { rejectTerms: ["mergi la"] },
         }),
       ],
     });
@@ -145,7 +145,9 @@ describe("shortcutRegistryService", () => {
       rows: [
         shortcutRow({
           intent_patterns: [{ type: "contains_all", terms: ["instagram"] }],
-          match_config: { readOnlyOnly: true },
+          match_config: {
+            rejectTerms: ["schimba parola", "dezactiveaza", "dezurmareste", "trimite mesaj"],
+          },
         }),
       ],
     });
@@ -178,7 +180,7 @@ describe("shortcutRegistryService", () => {
           key: "reddit_first_post_comments",
           platform: "reddit",
           intent_patterns: [{ type: "contains_all", terms }],
-          match_config: { readOnlyOnly: true },
+          match_config: { rejectTerms: ["scrie", "posteaza"] },
         }),
       ],
     });
@@ -202,7 +204,7 @@ describe("shortcutRegistryService", () => {
           key: "reddit_first_post_comments",
           platform: "reddit",
           intent_patterns: [{ type: "contains_all", terms: ["reddit", "prima postare", "comment"] }],
-          match_config: { readOnlyOnly: true },
+          match_config: { rejectTerms: ["scrie", "posteaza"] },
         }),
       ],
     });

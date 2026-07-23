@@ -9,5 +9,4 @@ export * from "./legacy-adapter";
 export * from "./learning-loop";
 export * from "./repository";
 export * from "./telemetry";
-export * from "./materializer";
 export * from "./edge-learning.service";

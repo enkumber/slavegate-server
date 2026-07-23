@@ -18,7 +18,11 @@ function capability(overrides: Partial<WorkflowCapabilityRecord> = {}): Workflow
     capabilityKey: "remote_support_enable_screen_share",
     platform: "android",
     description: "Enable screen sharing for remote support",
-    aliases: ["pornește screen share", "enable remote support"],
+    aliases: [
+      "pornește screen share",
+      "te rog pornește screen sharing pe telefon",
+      "enable remote support",
+    ],
     requiredTerms: [],
     forbiddenTerms: [],
     safetyClass: "standard",

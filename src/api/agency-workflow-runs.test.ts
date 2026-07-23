@@ -94,6 +94,28 @@ function hydratedRun(overrides: Record<string, unknown> = {}) {
 }
 
 function workflowDefinitionRow(overrides: Record<string, unknown> = {}) {
+  const dataDrivenPolicy = {
+    reusable: false,
+    compilerVisible: false,
+    autoUseEnabled: false,
+    requireScopeMatch: true,
+    requiredGateIds: [
+      "compiler_knowledge_application",
+      "limited_reuse_scope_match",
+      "compiler_auto_use",
+      "execution_path_change",
+    ],
+    allowedStatuses: ["active"],
+    allowedPromotionStates: ["limited_reuse"],
+    minimumPromotionConfidence: 0.6,
+    resolutionScoring: {
+      exactKey: 100,
+      exactIntent: 50,
+      platform: 10,
+      termMatch: 12,
+      statusScores: { active: 10, draft: 2 },
+    },
+  };
   return {
     id: "99999999-9999-4999-8999-999999999999",
     definition_key: "reddit_account_health_scan",
@@ -118,7 +140,6 @@ function workflowDefinitionRow(overrides: Record<string, unknown> = {}) {
     constraints: ["read_only_only"],
     fallback_rules: ["if login wall detected classify expected_failure"],
     rollback: { required: false },
-    policy: {},
     promotion_state: "not_promoted",
     promotion_scope: null,
     promotion_confidence: null,
@@ -135,6 +156,12 @@ function workflowDefinitionRow(overrides: Record<string, unknown> = {}) {
     created_at: new Date("2026-05-22T11:00:00.000Z"),
     updated_at: new Date("2026-05-22T11:00:00.000Z"),
     ...overrides,
+    policy: {
+      ...dataDrivenPolicy,
+      ...(overrides.policy && typeof overrides.policy === "object" && !Array.isArray(overrides.policy)
+        ? overrides.policy as Record<string, unknown>
+        : {}),
+    },
   };
 }
 
@@ -308,127 +335,6 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.connect).not.toHaveBeenCalled();
   });
 
-  it("creates a product-level Reddit account health scan from the latest cache-safe artifact", async () => {
-    const run = hydratedRun({ cache_key: "0123456789abcdef01234567", request_key: null });
-    mocks.client.query
-      .mockResolvedValueOnce({ rows: [] }) // BEGIN
-      .mockResolvedValueOnce({
-        rows: [{
-          id: run.account_id,
-          client_id: run.client_id,
-          platform: "reddit",
-          username: "Consistent-Beyond386",
-        }],
-      })
-      .mockResolvedValueOnce({ rows: [cachedArtifact({ cache_key: run.cache_key })] })
-      .mockResolvedValueOnce({ rows: [{ id: run.id }] })
-      .mockResolvedValueOnce({ rows: [{ id: run.task_id }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [run] })
-      .mockResolvedValueOnce({ rows: [] }); // COMMIT
-
-    const response = await postAgency("/api/agency/reddit/account-health-scans", {
-      accountId: run.account_id,
-      deviceId: run.device_id,
-      context: { requestedBy: "test" },
-    });
-
-    expect(response.status).toBe(201);
-    expect(response.body.data).toMatchObject({
-      id: run.id,
-      intent: "reddit_account_health_scan",
-      safetyClass: "read_only",
-      cacheKey: "0123456789abcdef01234567",
-      accountPlatform: "reddit",
-    });
-
-    const cacheLookup = mocks.client.query.mock.calls.find(([sql]) =>
-      String(sql).includes("generated_workflow_plan_cache")
-    );
-    expect(cacheLookup?.[0]).toContain("reddit_account_health_scan");
-    expect(cacheLookup?.[0]).toContain("artifact_state = 'promoted'");
-
-    const taskInsert = mocks.client.query.mock.calls.find(([sql]) =>
-      String(sql).includes("INSERT INTO tasks")
-    );
-    expect(taskInsert).toBeDefined();
-    expect(JSON.parse(taskInsert![1][2])).toMatchObject({
-      cacheKey: "0123456789abcdef01234567",
-      intent: "reddit_account_health_scan",
-      source: "agency_reddit_account_health_scan",
-    });
-  });
-
-  it("creates a product-level Reddit account health scan with an explicit client for an unlinked account", async () => {
-    const run = hydratedRun({ cache_key: "0123456789abcdef01234567", request_key: null });
-    mocks.client.query
-      .mockResolvedValueOnce({ rows: [] }) // BEGIN
-      .mockResolvedValueOnce({
-        rows: [{
-          id: run.account_id,
-          client_id: null,
-          platform: "reddit",
-          username: "Consistent-Beyond386",
-        }],
-      })
-      .mockResolvedValueOnce({ rows: [cachedArtifact({ cache_key: run.cache_key })] })
-      .mockResolvedValueOnce({ rows: [{ id: run.id }] })
-      .mockResolvedValueOnce({ rows: [{ id: run.task_id }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [run] })
-      .mockResolvedValueOnce({ rows: [] }); // COMMIT
-
-    const response = await postAgency("/api/agency/reddit/account-health-scans", {
-      clientId: run.client_id,
-      accountId: run.account_id,
-      deviceId: run.device_id,
-      context: { requestedBy: "test" },
-    });
-
-    expect(response.status).toBe(201);
-
-    const runInsert = mocks.client.query.mock.calls.find(([sql]) =>
-      String(sql).includes("INSERT INTO agency_workflow_runs")
-    );
-    expect(runInsert).toBeDefined();
-    expect(runInsert![1][0]).toBe(run.client_id);
-
-    const taskInsert = mocks.client.query.mock.calls.find(([sql]) =>
-      String(sql).includes("INSERT INTO tasks")
-    );
-    expect(JSON.parse(taskInsert![1][2])).toMatchObject({
-      clientId: run.client_id,
-      cacheKey: "0123456789abcdef01234567",
-    });
-  });
-
-  it("rejects product-level Reddit account health scans when explicit client mismatches the account client", async () => {
-    const run = hydratedRun();
-    mocks.client.query
-      .mockResolvedValueOnce({ rows: [] }) // BEGIN
-      .mockResolvedValueOnce({
-        rows: [{
-          id: run.account_id,
-          client_id: run.client_id,
-          platform: "reddit",
-          username: "Consistent-Beyond386",
-        }],
-      })
-      .mockResolvedValueOnce({ rows: [] }); // ROLLBACK
-
-    const response = await postAgency("/api/agency/reddit/account-health-scans", {
-      clientId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-      accountId: run.account_id,
-      deviceId: run.device_id,
-    });
-
-    expect(response.status).toBe(400);
-    expect(response.body.code).toBe("ACCOUNT_CLIENT_MISMATCH");
-    expect(mocks.client.query.mock.calls.some(([sql]) =>
-      String(sql).includes("generated_workflow_plan_cache")
-    )).toBe(false);
-  });
-
   it("rejects inline workflow payloads before database access", async () => {
     const response = await postWorkflowRun({
       clientId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -459,7 +365,7 @@ describe("agency workflow runs API", () => {
     expect(mocks.db.connect).not.toHaveBeenCalled();
   });
 
-  it("rejects cached artifacts that are not read-only", async () => {
+  it("rejects cached artifacts whose happy path still requires LLM", async () => {
     mocks.client.query
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [cachedArtifact({ workflow: { safetyClass: "mutating" }, compiled_plan: { metadata: { safetyClass: "mutating" } } })] })
@@ -474,7 +380,7 @@ describe("agency workflow runs API", () => {
     });
 
     expect(response.status).toBe(400);
-    expect(response.body.code).toBe("GENERATED_WORKFLOW_NOT_READ_ONLY");
+    expect(response.body.code).toBe("GENERATED_WORKFLOW_LLM_BUDGET_NOT_CACHE_SAFE");
   });
 
   it("supports list filters for run/account/device/status and canonical keys", async () => {
@@ -1038,10 +944,42 @@ describe("agency workflow runs API", () => {
   });
 
   it("lists the read-only Tool Catalog without enabling compiler auto-use", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [
+        {
+          entry_key: "open_app",
+          payload: {
+            id: "open_app",
+            name: "Open application",
+            source: "device_job",
+            category: "navigation",
+            risk: "medium",
+            requiresDevice: true,
+            inputSchema: { required: ["packageName"], optional: [] },
+            outputSchema: { produces: ["launch_status"] },
+            policy: { readOnly: false, mutating: true, compilerVisible: false, autoUseEnabled: false },
+          },
+        },
+        {
+          entry_key: "ui_tree_dump",
+          payload: {
+            id: "ui_tree_dump",
+            name: "Read UI tree",
+            source: "device_job",
+            category: "observation",
+            risk: "low",
+            requiresDevice: true,
+            inputSchema: { required: [], optional: [] },
+            outputSchema: { produces: ["ui_tree"] },
+            policy: { readOnly: true, mutating: false, compilerVisible: false, autoUseEnabled: false },
+          },
+        },
+      ],
+    });
     const response = await getAgency("/api/agency/tool-catalog");
 
     expect(response.status).toBe(200);
-    expect(response.body.data.total).toBeGreaterThan(10);
+    expect(response.body.data.total).toBe(2);
     expect(response.body.data.policy).toEqual({
       compilerVisible: false,
       autoUseEnabled: false,
@@ -1077,10 +1015,26 @@ describe("agency workflow runs API", () => {
     );
     expect(response.body.data.items.every((item: any) => item.policy.compilerVisible === false)).toBe(true);
     expect(response.body.data.items.every((item: any) => item.policy.autoUseEnabled === false)).toBe(true);
-    expect(mocks.db.query).not.toHaveBeenCalled();
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 
   it("filters the Tool Catalog by risk and category", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: ["tap", "semantic_tap", "type_text"].map((id) => ({
+        entry_key: id,
+        payload: {
+          id,
+          name: id,
+          source: "device_job",
+          category: "input",
+          risk: "high",
+          requiresDevice: true,
+          inputSchema: { required: [], optional: [] },
+          outputSchema: { produces: [] },
+          policy: { compilerVisible: false, autoUseEnabled: false },
+        },
+      })),
+    });
     const response = await getAgency("/api/agency/tool-catalog?risk=high&category=input");
 
     expect(response.status).toBe(200);
@@ -1090,14 +1044,54 @@ describe("agency workflow runs API", () => {
     expect(response.body.data.items.map((item: any) => item.id)).toEqual(
       expect.arrayContaining(["tap", "semantic_tap", "type_text"])
     );
-    expect(mocks.db.query).not.toHaveBeenCalled();
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 
   it("lists the read-only Compiler Knowledge Base without enabling compiler auto-use", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [
+        {
+          entry_key: "workflow-failure-never-promotes",
+          payload: {
+            id: "workflow-failure-never-promotes",
+            title: "Failure does not promote",
+            type: "rule",
+            domain: "workflow_lifecycle",
+            risk: "high",
+            source: "product_decision",
+            policy: { compilerVisible: false, autoUseEnabled: false, executionChanging: false },
+          },
+        },
+        {
+          entry_key: "partial-feedback-creates-step-candidates-only",
+          payload: {
+            id: "partial-feedback-creates-step-candidates-only",
+            title: "Partial feedback",
+            type: "rule",
+            domain: "step_library",
+            risk: "high",
+            source: "qa_guardrail",
+            policy: { compilerVisible: false, autoUseEnabled: false, executionChanging: false },
+          },
+        },
+        {
+          entry_key: "login-wall-is-not-success",
+          payload: {
+            id: "login-wall-is-not-success",
+            title: "Negative state",
+            type: "anti_pattern",
+            domain: "app_navigation",
+            risk: "medium",
+            source: "live_incident",
+            policy: { compilerVisible: false, autoUseEnabled: false, executionChanging: false },
+          },
+        },
+      ],
+    });
     const response = await getAgency("/api/agency/compiler-knowledge");
 
     expect(response.status).toBe(200);
-    expect(response.body.data.total).toBeGreaterThan(5);
+    expect(response.body.data.total).toBe(3);
     expect(response.body.data.policy).toEqual({
       compilerVisible: false,
       autoUseEnabled: false,
@@ -1133,10 +1127,24 @@ describe("agency workflow runs API", () => {
     expect(response.body.data.items.every((item: any) => item.policy.compilerVisible === false)).toBe(true);
     expect(response.body.data.items.every((item: any) => item.policy.autoUseEnabled === false)).toBe(true);
     expect(response.body.data.items.every((item: any) => item.policy.executionChanging === false)).toBe(true);
-    expect(mocks.db.query).not.toHaveBeenCalled();
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 
   it("filters the Compiler Knowledge Base by domain and type", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{
+        entry_key: "partial-feedback-creates-step-candidates-only",
+        payload: {
+          id: "partial-feedback-creates-step-candidates-only",
+          title: "Partial feedback",
+          type: "rule",
+          domain: "step_library",
+          risk: "high",
+          source: "qa_guardrail",
+          policy: {},
+        },
+      }],
+    });
     const response = await getAgency("/api/agency/compiler-knowledge?domain=step_library&type=rule");
 
     expect(response.status).toBe(200);
@@ -1146,7 +1154,7 @@ describe("agency workflow runs API", () => {
     expect(response.body.data.items.map((item: any) => item.id)).toEqual(
       expect.arrayContaining(["partial-feedback-creates-step-candidates-only"])
     );
-    expect(mocks.db.query).not.toHaveBeenCalled();
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 
   it("lists read-only Compiler Policy Gates without enabling auto-use", async () => {
@@ -1157,7 +1165,13 @@ describe("agency workflow runs API", () => {
         version: 2,
         owner: "product",
         risk: "high",
-        config: { source: "test" },
+        config: {
+          source: "test",
+          title: "Compiler auto use",
+          category: "auto_use",
+          blocks: ["compiler_auto_use_disabled"],
+          requiredPolicyChanges: ["compiler_auto_use"],
+        },
         updated_by: "test",
         updated_at: new Date("2026-05-22T10:30:00.000Z"),
       }],
@@ -1173,7 +1187,7 @@ describe("agency workflow runs API", () => {
       executionChanging: false,
       mode: "read_only_compiler_policy_gates",
     });
-    expect(response.body.data.total).toBeGreaterThanOrEqual(6);
+    expect(response.body.data.total).toBe(1);
     expect(response.body.data.items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1189,17 +1203,6 @@ describe("agency workflow runs API", () => {
           version: 2,
           configState: "blocked",
         }),
-        expect.objectContaining({
-          id: "step_compiler_eligibility",
-          state: "blocked",
-          blocks: expect.arrayContaining(["step_not_compiler_eligible"]),
-          requiredPolicyChanges: expect.arrayContaining(["step_compiler_eligibility"]),
-        }),
-        expect.objectContaining({
-          id: "execution_path_change",
-          state: "blocked",
-          blocks: expect.arrayContaining(["execution_changing_disabled"]),
-        }),
       ])
     );
     expect(response.body.data.items.every((gate: any) => gate.remediation.safeToAutoApply === false)).toBe(true);
@@ -1209,7 +1212,16 @@ describe("agency workflow runs API", () => {
   });
 
   it("filters Compiler Policy Gates by category and risk", async () => {
-    mocks.db.query.mockResolvedValueOnce({ rows: [] });
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{
+        gate_id: "compiler_auto_use",
+        state: "blocked",
+        version: 2,
+        owner: "product",
+        risk: "high",
+        config: { category: "auto_use" },
+      }],
+    });
 
     const response = await getAgency("/api/agency/compiler-policy-gates?category=auto_use&risk=high");
 
@@ -1807,7 +1819,10 @@ describe("agency workflow runs API", () => {
         device_name: "Pixel",
         validated_at: new Date("2026-05-22T10:08:00.000Z"),
       }],
-    }).mockResolvedValueOnce({ rows: [] });
+    })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
 
     const response = await getAgency("/api/agency/compiler-awareness?intent=unlock%20device");
 
@@ -1837,10 +1852,7 @@ describe("agency workflow runs API", () => {
           autoUseEnabled: false,
         },
         blockers: expect.arrayContaining(["compiler_auto_use_disabled", "step_not_compiler_eligible"]),
-        policyGates: expect.arrayContaining([
-          expect.objectContaining({ id: "compiler_auto_use", state: "blocked", safeToAutoApply: false }),
-          expect.objectContaining({ id: "step_compiler_eligibility", state: "blocked", safeToAutoApply: false }),
-        ]),
+        policyGates: [],
         remediation: {
           state: "manual_review_required",
           safeToAutoApply: false,
@@ -1857,9 +1869,7 @@ describe("agency workflow runs API", () => {
       wouldChangePlan: false,
       wouldExecuteStepLibrary: false,
       blockers: expect.arrayContaining(["compiler_auto_use_disabled"]),
-      policyGateSummary: expect.arrayContaining([
-        expect.objectContaining({ id: "compiler_auto_use", state: "blocked", safeToAutoApply: false }),
-      ]),
+      policyGateSummary: [],
       remediation: {
         state: "manual_review_required",
         safeToAutoApply: false,
@@ -1867,31 +1877,26 @@ describe("agency workflow runs API", () => {
       },
     });
     expect(response.body.data.policyGateSummary).toMatchObject({
-      total: 4,
-      blocked: 4,
-      highRisk: 2,
+      total: 0,
+      blocked: 0,
+      highRisk: 0,
       safeToAutoApply: 0,
-      gates: expect.arrayContaining([
-        expect.objectContaining({ id: "compiler_tool_visibility", state: "blocked", safeToAutoApply: false }),
-        expect.objectContaining({ id: "compiler_knowledge_application", state: "blocked", safeToAutoApply: false }),
-        expect.objectContaining({ id: "step_compiler_eligibility", state: "blocked", safeToAutoApply: false }),
-        expect.objectContaining({ id: "compiler_auto_use", state: "blocked", safeToAutoApply: false }),
-      ]),
+      gates: [],
     });
-    expect(response.body.data.candidates.tools.some((tool: any) => tool.id === "unlock" && tool.wouldUse === false)).toBe(true);
-    expect(response.body.data.candidates.knowledge.every((entry: any) => entry.wouldApply === false)).toBe(true);
+    expect(response.body.data.candidates.tools).toEqual([]);
+    expect(response.body.data.candidates.knowledge).toEqual([]);
     expect(String(mocks.db.query.mock.calls[0][0])).toContain("c.candidate_state = 'validated_step'");
-    expect(String(mocks.db.query.mock.calls[1][0])).toContain("agency_compiler_awareness_events");
-    expect(mocks.db.query.mock.calls[1][1][0]).toBe("unlock device");
-    expect(mocks.db.query.mock.calls[1][1][4]).toContain("\"autoUseEnabled\":false");
-    expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"wouldUse\":false");
-    expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"eligibility\"");
-    expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"policyGates\"");
-    expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"remediation\"");
-    expect(mocks.db.query.mock.calls[1][1][5]).toContain("\"step_not_compiler_eligible\"");
-    expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"outcome\":\"blocked_by_policy\"");
-    expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"policyGateSummary\"");
-    expect(mocks.db.query.mock.calls[1][1][6]).toContain("\"safeToAutoApply\":false");
+    expect(String(mocks.db.query.mock.calls[3][0])).toContain("agency_compiler_awareness_events");
+    expect(mocks.db.query.mock.calls[3][1][0]).toBe("unlock device");
+    expect(mocks.db.query.mock.calls[3][1][4]).toContain("\"autoUseEnabled\":false");
+    expect(mocks.db.query.mock.calls[3][1][5]).toContain("\"wouldUse\":false");
+    expect(mocks.db.query.mock.calls[3][1][5]).toContain("\"eligibility\"");
+    expect(mocks.db.query.mock.calls[3][1][5]).toContain("\"policyGates\"");
+    expect(mocks.db.query.mock.calls[3][1][5]).toContain("\"remediation\"");
+    expect(mocks.db.query.mock.calls[3][1][5]).toContain("\"step_not_compiler_eligible\"");
+    expect(mocks.db.query.mock.calls[3][1][6]).toContain("\"outcome\":\"blocked_by_policy\"");
+    expect(mocks.db.query.mock.calls[3][1][6]).toContain("\"policyGateSummary\"");
+    expect(mocks.db.query.mock.calls[3][1][6]).toContain("\"safeToAutoApply\":false");
   });
 
   it("exposes Compiler Control Plane dry-run without changing execution", async () => {
@@ -1936,6 +1941,41 @@ describe("agency workflow runs API", () => {
           agent_version: "4.0.24",
           status: "online",
           last_seen_at: new Date("2026-05-22T10:34:00.000Z"),
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          entry_key: "unlock",
+          payload: {
+            id: "unlock",
+            name: "Unlock device",
+            source: "device_job",
+            category: "device_control",
+            risk: "medium",
+            requiresDevice: true,
+            inputSchema: { required: [], optional: [] },
+            outputSchema: { produces: ["unlock_status"] },
+            policy: {},
+            availability: { directWs: true, edgeWorkflow: true, serverRuntime: false },
+          },
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          entry_key: "unlock",
+          payload: {
+            id: "unlock",
+            name: "Unlock device",
+            source: "device_job",
+            category: "device_control",
+            risk: "medium",
+            requiresDevice: true,
+            inputSchema: { required: [], optional: [] },
+            outputSchema: { produces: ["unlock_status"] },
+            policy: {},
+            availability: { directWs: true, edgeWorkflow: true, serverRuntime: false },
+          },
         }],
       })
       .mockResolvedValueOnce({ rows: [] });
@@ -1991,10 +2031,10 @@ describe("agency workflow runs API", () => {
       blockers: expect.arrayContaining(["compiler_auto_use_disabled", "step_not_compiler_eligible"]),
     });
     expect(String(mocks.db.query.mock.calls[1][0])).toContain("agency_compiler_policy_gate_config");
-    expect(String(mocks.db.query.mock.calls[3][0])).toContain("agency_compiler_control_plane_events");
-    expect(mocks.db.query.mock.calls[3][1][5]).toContain("\"autoUseEnabled\":false");
-    expect(mocks.db.query.mock.calls[3][1][6]).toContain("\"wouldExecuteStepLibrary\":false");
-    expect(mocks.db.query.mock.calls[3][1][8]).toContain("\"wouldUse\":0");
+    expect(String(mocks.db.query.mock.calls[6][0])).toContain("agency_compiler_control_plane_events");
+    expect(mocks.db.query.mock.calls[6][1][5]).toContain("\"autoUseEnabled\":false");
+    expect(mocks.db.query.mock.calls[6][1][6]).toContain("\"wouldExecuteStepLibrary\":false");
+    expect(mocks.db.query.mock.calls[6][1][8]).toContain("\"wouldUse\":0");
   });
 
   it("lists Workflow Definition Registry entries without enabling compiler use", async () => {
@@ -2124,11 +2164,15 @@ describe("agency workflow runs API", () => {
       wouldExecuteWorkflow: false,
       selectedDefinitionId: null,
       blockers: expect.arrayContaining([
-        "compiler_visibility_gate_disabled",
-        "limited_reuse_scope_gate_disabled",
-        "compiler_auto_use_disabled",
-        "execution_changing_disabled",
-        "workflow_definition_not_limited_reuse",
+        "required_policy_gates_not_configured",
+        "allowed_statuses_not_configured",
+        "allowed_promotion_states_not_configured",
+        "workflow_definition_not_reusable",
+        "workflow_definition_not_compiler_visible",
+        "workflow_definition_auto_use_disabled",
+        "scope_policy_not_configured",
+        "minimum_promotion_confidence_not_configured",
+        "promotion_readiness_not_safe",
       ]),
       candidateDefinition: expect.objectContaining({
         key: "reddit_account_health_scan",
@@ -2156,11 +2200,16 @@ describe("agency workflow runs API", () => {
       promotion_state: "limited_reuse",
       promotion_scope: "device:pixel-1",
       promotion_confidence: "0.86",
-      promotion_readiness: { state: "manual_limited_promotion_ready", validation: "passed" },
+      promotion_readiness: { state: "manual_limited_promotion_ready", validation: "passed", safeToAutoApply: true },
       promotion_scope_details: { type: "device", value: "pixel-1", globalBlocked: true },
       rollback_preview: { available: true, wouldRollbackNow: false },
       promoted_at: new Date("2026-05-22T11:30:00.000Z"),
       promoted_by: "dashboard",
+      policy: {
+        reusable: true,
+        compilerVisible: true,
+        autoUseEnabled: true,
+      },
     });
     mocks.db.query
       .mockResolvedValueOnce({ rows: [definition] })
@@ -2242,8 +2291,9 @@ describe("agency workflow runs API", () => {
       promotion_state: "limited_reuse",
       promotion_scope: "auto_use:test:android:device_unlock:v1",
       promotion_confidence: 0.85,
-      promotion_readiness: { state: "auto_use_bootstrap_ready" },
+      promotion_readiness: { state: "auto_use_bootstrap_ready", safeToAutoApply: true },
       policy: {
+        reusable: true,
         compilerVisible: true,
         autoUseEnabled: true,
         executionChanging: true,
@@ -2670,7 +2720,7 @@ describe("agency workflow runs API", () => {
             scopeType: "device",
             globalScopeAllowed: false,
           }),
-          reusable: true,
+          reusable: false,
           compilerEligible: false,
           wouldUseDefinition: false,
           autoUseEnabled: false,

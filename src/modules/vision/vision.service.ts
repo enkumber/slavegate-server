@@ -14,7 +14,7 @@
  */
 
 import { getDb } from "../../db/client";
-import { resolvePrompt, type RequestType } from "./templates/prompt-templates";
+import { resolveVisionPrompt, type RequestType } from "./prompt-catalog";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.provider";
 import type { VisionProvider, VisionResult, VerifyResult, VisionOptions } from "./vision-provider.interface";
 import { modelConfigService } from "../model-config/model-config.service";
@@ -79,7 +79,7 @@ export class VisionService {
     const provider = await this.getProvider();
 
     // Server-side prompt — device has no influence on prompt content
-    const prompt = resolvePrompt({ requestType: req.requestType, actionType: req.actionType });
+    const prompt = await resolveVisionPrompt(req.requestType, req.actionType);
 
     const screenshotBuffer = Buffer.from(req.screenshotBase64, "base64");
     const result = await provider.analyze(screenshotBuffer, prompt);
@@ -126,7 +126,7 @@ export class VisionService {
     const start    = Date.now();
     const provider = await this.getProvider();
 
-    const prompt = resolvePrompt({ requestType: "verify_action", actionType });
+    const prompt = await resolveVisionPrompt("verify_action", actionType);
     const buf    = Buffer.from(screenshotBase64, "base64");
 
     const result = await provider.verify(buf, prompt);

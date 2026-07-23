@@ -117,7 +117,9 @@ describe("generated workflow plan cache service", () => {
     const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
     const query = mockDbQuery();
 
-    await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97");
+    await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97", {
+      capabilityKey: "reddit_home_smoke",
+    });
 
     expect(query).toHaveBeenCalledTimes(4);
     expect(query.mock.calls[0][0]).toContain("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1");
@@ -158,7 +160,9 @@ describe("generated workflow plan cache service", () => {
     const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
     const query = mockDbQuery([{ cache_key: "oldcachekey000000000001" }]);
 
-    await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97");
+    await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97", {
+      capabilityKey: "reddit_home_smoke",
+    });
 
     expect(query).toHaveBeenCalledTimes(4);
     expect(query.mock.calls[0][0]).toContain("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1");
@@ -177,7 +181,10 @@ describe("generated workflow plan cache service", () => {
 
     await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97", {
       artifactState: "promoted",
-      sourceMetadata: { source: "test_promotion" },
+      sourceMetadata: {
+        capabilityKey: "reddit_home_smoke",
+        source: "test_promotion",
+      },
     });
 
     expect(query).toHaveBeenCalledTimes(4);
@@ -194,6 +201,7 @@ describe("generated workflow plan cache service", () => {
     const query = mockDbQuery();
 
     await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97", {
+      capabilityKey: "reddit_account_health_scan",
       source: "test",
     });
 

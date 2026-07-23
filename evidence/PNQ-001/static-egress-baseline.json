@@ -12,12 +12,6 @@
     "classification": "generic-sendto-device-match"
   },
   {
-    "file": "src/modules/skills/skill.cascade.ts",
-    "kind": "adapter.sendJob",
-    "count": 9,
-    "classification": "skill-cascade-adapter-jobs"
-  },
-  {
     "file": "src/modules/workflow-events/workflow-event.service.ts",
     "kind": "ws.send",
     "count": 2,

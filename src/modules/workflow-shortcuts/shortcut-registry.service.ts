@@ -36,10 +36,6 @@ function rowToShortcut(row: Record<string, unknown>): WorkflowShortcutRecord {
   };
 }
 
-function hasMutationTerms(normalizedIntent: string): boolean {
-  return /\b(?:autentifica|cumpara|delete|dezactiveaza|dezurmareste|follow|join|like|login|mesaj|parola|posteaza|publish|reply|schimba|scrie|send|sterge|trimite|type|unfollow|upvote|vote|urmareste|comenteaza|comentezi)\b/.test(normalizedIntent);
-}
-
 function hasRejectedTerms(matchConfig: Record<string, unknown>, normalizedIntent: string): boolean {
   const rejectTerms = matchConfig.rejectTerms;
   if (!Array.isArray(rejectTerms)) return false;
@@ -63,19 +59,6 @@ function patternMatches(pattern: WorkflowShortcutIntentPattern, normalizedIntent
   return false;
 }
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function isOpenAppOnlyIntent(shortcut: WorkflowShortcutRecord, normalizedIntent: string): boolean {
-  if (!shortcut.key.endsWith("_open_app")) return true;
-  const platform = escapeRegex(normalizeShortcutText(shortcut.platform));
-  return [
-    new RegExp(`^(?:open|launch|start)\\s+(?:the\\s+)?${platform}(?:\\s+(?:app|application))?$`),
-    new RegExp(`^(?:deschide|porneste)\\s+(?:(?:app|aplicatia|aplicatie)\\s+)?${platform}(?:\\s+(?:app|aplicatia|aplicatie))?$`),
-  ].some((pattern) => pattern.test(normalizedIntent));
-}
-
 export class ShortcutRegistryService {
   async lookupActiveShortcut(input: {
     platform: string;
@@ -94,13 +77,11 @@ export class ShortcutRegistryService {
 
     for (const row of result.rows as Record<string, unknown>[]) {
       const shortcut = rowToShortcut(row);
-      if (shortcut.matchConfig.readOnlyOnly === true && hasMutationTerms(normalizedIntent)) continue;
       if (hasRejectedTerms(shortcut.matchConfig, normalizedIntent)) continue;
       const patterns = shortcut.intentPatterns.length > 0
         ? shortcut.intentPatterns
         : shortcut.aliases.map((alias) => ({ type: "exact", pattern: alias }) as WorkflowShortcutIntentPattern);
       const matchedPattern = patterns.find((pattern) => patternMatches(pattern, normalizedIntent)) ?? null;
-      if (matchedPattern && !isOpenAppOnlyIntent(shortcut, normalizedIntent)) continue;
       if (matchedPattern) return { shortcut, normalizedIntent, matchedPattern };
     }
 

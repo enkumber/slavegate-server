@@ -1,116 +1,18 @@
 /**
  * data-pipeline/data-pipeline.service.ts
- * Extracted data storage, deduplication, retention cleanup, and export.
+ * Extracted data storage, retention cleanup, and export.
  *
- * Parser selection: parserRegistry.getCompatible(platform, appVersion)
- * Dedup: SHA256(platform + author + textContent) — contentHash unique per platform
+ * Extraction semantics are supplied by generated workflow classifiers and
+ * PostgreSQL contracts. The server no longer boots application parsers.
  * Retention: cleanup job reads data_retention_days from workflow_templates
  */
 
 import { getDb } from "../../db/client";
-import { parserRegistry } from "./parser-registry";
-import crypto from "crypto";
 import type { ExtractedContent } from "./parser-interface";
-import type { UiNode } from "./parser-interface";
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export class DataPipelineService {
-  /**
-   * Process extracted data from a workflow step.
-   * Runs parser, deduplicates, stores.
-   *
-   * @param platform     "instagram" | "tiktok" | "reddit" | ...
-   * @param appVersion   Device's installed app version
-   * @param uiTree       Raw UI tree from ui_tree_dump job output
-   * @param workflowId   Source workflow (for retention policy lookup)
-   * @param deviceId     Source device
-   */
-  async processUiTreeData(
-    platform:   string,
-    appVersion: string,
-    uiTree:     UiNode[],
-    workflowId: string,
-    deviceId:   string
-  ): Promise<{ stored: number; duplicates: number }> {
-    const parser = parserRegistry.getCompatible(platform, appVersion);
-    if (!parser) {
-      console.error(`[data-pipeline] No compatible parser for ${platform} v${appVersion}`);
-      return { stored: 0, duplicates: 0 };
-    }
-
-    const contents = parser.parseUiTree(uiTree);
-    return this.storeContents(contents, workflowId, deviceId);
-  }
-
-  /**
-   * Process VLM output (fallback when UI tree parser fails).
-   */
-  async processVlmData(
-    platform:   string,
-    vlmResult:  { elements: unknown[]; sceneDescription: string; detectedState?: string | null },
-    workflowId: string,
-    deviceId:   string
-  ): Promise<{ stored: number; duplicates: number }> {
-    const parser = parserRegistry.get(platform);
-    if (!parser) {
-      console.error(`[data-pipeline] No parser for ${platform}`);
-      return { stored: 0, duplicates: 0 };
-    }
-
-    const contents = parser.parseVlmOutput(vlmResult as Parameters<typeof parser.parseVlmOutput>[0]);
-    return this.storeContents(contents, workflowId, deviceId);
-  }
-
-  // ─── Storage ───────────────────────────────────────────────────────────────
-
-  private async storeContents(
-    contents:   ExtractedContent[],
-    workflowId: string,
-    deviceId:   string
-  ): Promise<{ stored: number; duplicates: number }> {
-    const db = getDb();
-    let stored = 0, duplicates = 0;
-
-    for (const content of contents) {
-      try {
-        const result = await db.query(
-          `INSERT INTO extracted_data
-             (platform, content_type, content_hash, author, text_content,
-              engagement, media_urls, confidence, parser_version, workflow_id, device_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-           ON CONFLICT (content_hash) DO NOTHING
-           RETURNING id`,
-          [
-            content.platform,
-            content.contentType,
-            content.contentHash,
-            content.author,
-            content.textContent,
-            JSON.stringify(content.engagement),
-            JSON.stringify(content.mediaUrls),
-            content.confidence,
-            content.parserVersion,
-            workflowId,
-            deviceId,
-          ]
-        );
-        if ((result.rowCount ?? 0) > 0) {
-          stored++;
-        } else {
-          duplicates++;
-        }
-      } catch (err) {
-        console.error(`[data-pipeline] Failed to store content ${content.contentHash}:`, (err as Error).message);
-      }
-    }
-
-    if (stored > 0 || duplicates > 0) {
-      console.log(`[data-pipeline] Stored: ${stored}, duplicates: ${duplicates}`);
-    }
-    return { stored, duplicates };
-  }
-
   // ─── Retention cleanup ────────────────────────────────────────────────────
 
   /**

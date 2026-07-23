@@ -49,13 +49,6 @@ import type {
 import { PHASE2_UNSUPPORTED_STRATEGIES } from "./types";
 import { normal, logNormal, uniform, clamp } from "../hbe/distributions";
 import type { HbeSessionParams } from "../hbe/hbe.service";
-import { executeCascadeTap, resolveCascadeResult } from "../skills/skill.cascade";
-import {
-  isSkillAction,
-  executeSkillAction,
-  type SkillActionContext,
-} from "../skills/skill.actions";
-import { verifyScreenAfterStep } from "./screen-verifier";
 import {
   generatedWorkflowRecoveryAttempts,
   generatedWorkflowRecoveryBudgetExhausted,
@@ -133,9 +126,7 @@ interface GeneratedWorkflowRecoveryPlan {
 
 function generatedWorkflowPlatform(template: WorkflowTemplate): string {
   const platform = template.platform.toLowerCase().trim();
-  return ["instagram", "reddit", "threads", "tiktok", "twitter", "youtube"].includes(platform)
-    ? platform
-    : "unknown";
+  return platform && platform !== "*" ? platform : "unknown";
 }
 
 function isGeneratedWorkflowTemplate(template: WorkflowTemplate): boolean {
@@ -577,15 +568,6 @@ export function resolveJobResult(jobId: string, result: JobStepResult): boolean 
     return true;
   }
   
-  // Try cascade executor
-  const cascadeResolved = resolveCascadeResult(jobId, {
-    status: result.status,
-    output: result.output as Record<string, unknown>,
-    error: result.error,
-    durationMs: result.durationMs,
-  });
-  if (cascadeResolved) return true;
-  
   return false;
 }
 
@@ -1026,15 +1008,7 @@ async function executeStep(
   switch (step.type) {
 
     case "action": {
-      // Skill actions run server-side (control flow, criteria evaluation, etc.)
-      // and bypass device dispatch entirely.
-      if (isSkillAction(step.action)) {
-        await executeSkillActionStep(
-          workflowId, deviceId, template, step, checkpoint, stepIndex, job
-        );
-      } else {
-        await executeActionStep(workflowId, deviceId, template, step, checkpoint, stepIndex);
-      }
+      await executeActionStep(workflowId, deviceId, template, step, checkpoint, stepIndex);
       break;
     }
 
@@ -1102,107 +1076,6 @@ async function executeStep(
       break;
     }
   }
-}
-
-// ─── Skill action step (server-side — control flow, criteria, state) ─────────
-
-async function executeSkillActionStep(
-  workflowId: string,
-  deviceId:   string,
-  template:   WorkflowTemplate,
-  step:       ActionStep,
-  checkpoint: WorkflowCheckpoint,
-  stepIndex:  number,
-  job?: import("bullmq").Job,
-): Promise<void> {
-  const platform = (checkpoint.variables?.platform as string) || template.platform || "instagram";
-
-  const ctx: SkillActionContext = {
-    workflowId,
-    deviceId,
-    platform,
-    checkpoint,
-    stepIndex,
-
-    // Dispatch a device job (ui_tree_dump, a11y_find_tap, etc.) and await JOB_RESULT.
-    async dispatchAndWait(type, params, timeoutMs = 30_000) {
-      const jobType = type as import("../../../shared/protocol/messages").JobType;
-      const { jobId, timeoutMs: dispatchedTimeoutMs } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
-        deviceId,
-        type:     jobType,
-        params:   params as import("../../../shared/protocol/messages").JobParams,
-        timeoutMs,
-        workflowId,
-        stepIndex,
-      });
-      const resultTimeoutMs = Math.max(generatedChildResultTimeoutMs(dispatchedTimeoutMs), scalabilityConfig.jobResultTimeout);
-      const prepared = prepareGeneratedChildJobResult(jobId, resultTimeoutMs);
-      let dispatch: GeneratedChildDispatchResult;
-      try {
-        dispatch = await sendLegacyGeneratedWorkflowJobToDevice(
-          deviceId,
-          { jobId, type: jobType, params: params as import("../../../shared/protocol/messages").JobParams, timeoutMs: dispatchedTimeoutMs },
-          { resultTimeoutMs },
-        );
-      } catch (err) {
-        prepared.cancel();
-        throw err;
-      }
-      return await awaitGeneratedChildJobResult(workflowId, jobId, dispatch, resultTimeoutMs, prepared);
-    },
-
-    // Cascade tap a named element (calls executeCascadeTap from skill.cascade).
-    async cascadeTap(elementName, verify) {
-      const result = await executeCascadeTap({
-        workflowId,
-        deviceId,
-        stepIndex,
-        platform,
-        elementName,
-        timeoutMs: 30_000,
-      });
-      if (!result.success) {
-        console.warn(`[skill-action] cascade tap failed for "${elementName}": ${result.error}`);
-        return false;
-      }
-      if (verify) {
-        // Fire verify-tap via dispatch (ui_tree_dump → check screen indicators).
-        try {
-          const verifyResult = await ctx.dispatchAndWait(
-            'ui_tree_dump', {}, 10_000,
-          );
-          // Presence of a non-empty ui tree is sufficient — deeper screen matching
-          // is handled by HYDRA-CORE on the Hydra side during live sessions.
-          return verifyResult.status === 'ok' || verifyResult.status === 'success';
-        } catch {
-          console.warn(`[skill-action] verify "${verify}" failed after cascade tap`);
-          return false;
-        }
-      }
-      return true;
-    },
-
-    // Execute nested steps (for run_loop body, for_each handler, branch_on_decision).
-    async executeSteps(steps) {
-      await executeSteps(workflowId, deviceId, template, steps, checkpoint, 0, job, true);
-    },
-
-    // Persist checkpoint to DB.
-    async persistCheckpoint(phase) {
-      checkpoint.variables['_checkpoint_phase'] = phase ?? 'skill_action';
-      await workflowService.saveCheckpoint(
-        workflowId,
-        { ...checkpoint, checkpointAt: new Date().toISOString() },
-        stepIndex,
-        stepIndex - 1,
-      );
-    },
-
-    sleep,
-  };
-
-  const params = (step.params as Record<string, unknown>) ?? {};
-  await executeSkillAction(step.action, params, ctx);
 }
 
 // ─── Action step (core: dispatch → await result) ──────────────────────────────
@@ -1277,23 +1150,12 @@ async function executeActionStep(
 
   // Resolve packageName for open_app/close_app actions
   if ((step.action === "open_app" || step.action === "close_app") && !finalParams["packageName"]) {
-    // template.platform can be "*" (wildcard) — treat as unset and fall through to checkpoint or default
-    const rawPlatform = (checkpoint.variables?.platform as string) || template.platform || "instagram";
-    const platform = rawPlatform === "*" ? "instagram" : rawPlatform;
-    const packageMap: Record<string, string> = {
-      instagram: "com.instagram.android",
-      tiktok: "com.zhiliaoapp.musically",
-      facebook: "com.facebook.katana",
-      twitter: "com.twitter.android",
-      youtube: "com.google.android.youtube",
-      reddit: "com.reddit.frontpage",
-    };
-    const resolved = packageMap[platform.toLowerCase()] || (checkpoint.variables?.packageName as string | undefined);
+    const resolved = checkpoint.variables?.packageName as string | undefined;
     if (!resolved) {
-      throw new Error(`open_app/close_app: cannot resolve packageName for platform="${platform}" (rawPlatform="${rawPlatform}") — add platform to checkpoint.variables or packageMap`);
+      throw new Error("open_app/close_app requires packageName from the DB-authored workflow or runtime profile");
     }
     finalParams["packageName"] = resolved;
-    console.log(`[workflow] ${workflowId} resolved packageName=${finalParams["packageName"]} for platform=${platform} (rawPlatform=${rawPlatform})`);
+    console.log(`[workflow] ${workflowId} resolved packageName from workflow runtime profile`);
   }
 
   // Error simulation (before the real action — human corrects their mistake)
@@ -1307,80 +1169,9 @@ async function executeActionStep(
   // CASCADE TAP: If this is a tap action with a target element, use skill system
   // ═══════════════════════════════════════════════════════════════════════════
   const stepTarget = (step as { target?: string }).target;
-  const platform = (checkpoint.variables?.platform as string) || template.platform || "instagram";
-  
+
   if (step.action === "tap" && stepTarget && !step.x && !step.y) {
-    console.log(`[workflow] ${workflowId} step ${stepIndex}: using CASCADE TAP for target="${stepTarget}"`);
-    
-    const cascadeResult = await executeCascadeTap({
-      workflowId,
-      deviceId,
-      stepIndex,
-      platform,
-      elementName: stepTarget,
-      timeoutMs,
-    });
-
-    if (!cascadeResult.success) {
-      const retries = step.retries ?? 0;
-      if (retries > 0) {
-        console.warn(`[workflow] ${workflowId} step ${stepIndex} cascade failed — retrying (${retries} left)`);
-        await executeActionStep(workflowId, deviceId, template, { ...step, retries: retries - 1 }, checkpoint, stepIndex);
-        return;
-      }
-      throw new Error(`Cascade tap failed for ${stepTarget}: ${cascadeResult.error} (chain: ${cascadeResult.fallbackChain.join(" → ")})`);
-    }
-
-    console.log(`[workflow] ${workflowId} step ${stepIndex}: cascade success via ${cascadeResult.method} (${cascadeResult.latencyMs}ms)`);
-    
-    // Post-action HBE delay
-    if (hbeStep.action.postActionDelayMs > 0) {
-      await sleep(hbeStep.action.postActionDelayMs);
-    }
-    
-    // ═══════════════════════════════════════════════════════════════════════════
-    // SCREEN VERIFICATION (after cascade tap)
-    // Story: US-WORKFLOW-SCREEN-VERIFY
-    // ═══════════════════════════════════════════════════════════════════════════
-    if (step.expectedScreen && process.env.SCREEN_DETECTION_CASCADE_ENABLED === 'true') {
-      const verifyResult = await verifyScreenAfterStep({
-        deviceId,
-        platform,
-        workflowId,
-        stepIndex,
-        expectedScreen: step.expectedScreen,
-        confidenceThreshold: step.screenConfidenceThreshold,
-        policy: step.screenMismatchPolicy,
-        currentRetry: step._screenRetryCount ?? 0,
-      });
-
-      if (verifyResult.shouldAbort) {
-        const expected = Array.isArray(step.expectedScreen) 
-          ? step.expectedScreen.join(',') 
-          : step.expectedScreen;
-        throw new Error(
-          `Screen mismatch at step ${stepIndex}: expected [${expected}], ` +
-          `got ${verifyResult.detected.screenId} (conf=${verifyResult.detected.confidence.toFixed(2)})`
-        );
-      }
-
-      if (verifyResult.shouldRetry) {
-        console.log(`[workflow] ${workflowId} step ${stepIndex}: screen mismatch after cascade, retrying...`);
-        await sleep(step.screenMismatchPolicy?.delayMs ?? 500);
-        await executeActionStep(
-          workflowId, deviceId, template,
-          { ...step, _screenRetryCount: (step._screenRetryCount ?? 0) + 1 },
-          checkpoint, stepIndex
-        );
-        return;
-      }
-
-      if (!verifyResult.match) {
-        console.warn(`[workflow] ${workflowId} step ${stepIndex}: screen mismatch (continue_with_warning mode)`);
-      }
-    }
-    
-    return; // Cascade handled the tap — skip regular dispatch
+    throw new Error(`Named target "${stepTarget}" requires the data-driven semantic_tap primitive`);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1525,47 +1316,6 @@ async function executeActionStep(
     await sleep(hbeStep.action.postActionDelayMs);
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // SCREEN VERIFICATION (after regular dispatch)
-  // Story: US-WORKFLOW-SCREEN-VERIFY
-  // ═══════════════════════════════════════════════════════════════════════════
-  if (step.expectedScreen && process.env.SCREEN_DETECTION_CASCADE_ENABLED === 'true') {
-    const verifyResult = await verifyScreenAfterStep({
-      deviceId,
-      platform,
-      workflowId,
-      stepIndex,
-      expectedScreen: step.expectedScreen,
-      confidenceThreshold: step.screenConfidenceThreshold,
-      policy: step.screenMismatchPolicy,
-      currentRetry: step._screenRetryCount ?? 0,
-    });
-
-    if (verifyResult.shouldAbort) {
-      const expected = Array.isArray(step.expectedScreen) 
-        ? step.expectedScreen.join(',') 
-        : step.expectedScreen;
-      throw new Error(
-        `Screen mismatch at step ${stepIndex}: expected [${expected}], ` +
-        `got ${verifyResult.detected.screenId} (conf=${verifyResult.detected.confidence.toFixed(2)})`
-      );
-    }
-
-    if (verifyResult.shouldRetry) {
-      console.log(`[workflow] ${workflowId} step ${stepIndex}: screen mismatch, retrying...`);
-      await sleep(step.screenMismatchPolicy?.delayMs ?? 500);
-      await executeActionStep(
-        workflowId, deviceId, template,
-        { ...step, _screenRetryCount: (step._screenRetryCount ?? 0) + 1 },
-        checkpoint, stepIndex
-      );
-      return;
-    }
-
-    if (!verifyResult.match) {
-      console.warn(`[workflow] ${workflowId} step ${stepIndex}: screen mismatch (continue_with_warning mode)`);
-    }
-  }
 }
 
 // ─── Batch segmentation ───────────────────────────────────────────────────────
@@ -1657,13 +1407,6 @@ export function compileBatchSegments(steps: WorkflowStep[], startIndex = 0): Bat
 
     // Non-action steps → always their own segment (not batched)
     if (step.type !== "action") {
-      segments.push({ steps: [step], isBatched: false, startIndex: startIndex + i });
-      i++;
-      continue;
-    }
-
-    // Skill actions → not batched (server-side execution)
-    if (isSkillAction((step as ActionStep).action)) {
       segments.push({ steps: [step], isBatched: false, startIndex: startIndex + i });
       i++;
       continue;

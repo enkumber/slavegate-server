@@ -14,7 +14,6 @@ import { createWsGateway, wsGateway } from "./ws";
 import apiRouter from "./api/routes";
 import agencyRouter from "./api/agency-routes";
 import workflowRunRouter from "./api/workflow-run-routes";
-import hydraRouter from "./api/hydra-routes";
 import vlmRouter from "./api/vlm-routes";
 import workflowDispatchRoutes from "./api/workflow-dispatch-routes";
 import deviceTokenRouter from "./api/device-tokens.routes";
@@ -26,7 +25,6 @@ import { dispatcherService } from "./modules/dispatcher/dispatcher.service";
 import { authService } from "./modules/auth/auth.service";
 import { startWorkflowWorker } from "./modules/workflows/workflow.executor";
 import { startEdgeWorkflowProgressWatchdog } from "./modules/workflows/edge-workflow-lifecycle.service";
-import { bootstrapParsers } from "./modules/data-pipeline/parser-registry";
 import { lifecycleManager } from "./modules/accounts/lifecycle";
 import { canaryService } from "./modules/canary/canary.service";
 import { runMigrations } from "./db/migrate";
@@ -43,7 +41,6 @@ import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.serv
 import configRoutes, { seedSystemPrompts } from "./api/config-routes";
 import uiGraphRoutes from "./modules/ui-graph/routes";
 import { describeUiGraphRuntimeFlags } from "./modules/ui-graph/config";
-import { materializeAllLegacyAppMaps } from "./modules/ui-graph/materializer";
 
 const PORT = parseInt(process.env.PORT ?? "21211", 10);
 
@@ -68,13 +65,8 @@ async function bootstrap(): Promise<void> {
   console.log("[server] Migrations applied.");
   const uiGraphFlags = describeUiGraphRuntimeFlags();
   console.log(`[server] UI graph runtime mode=${uiGraphFlags.mode} selectorFirst=${uiGraphFlags.selectorFirst} graphRuntime=${uiGraphFlags.graphRuntime} aiRecovery=${uiGraphFlags.aiRecovery} candidateLearning=${uiGraphFlags.candidateLearning} autoPromotion=${uiGraphFlags.autoPromotion}.`);
-  if (uiGraphFlags.mode !== "disabled") {
-    const graphImport = await materializeAllLegacyAppMaps();
-    console.log(`[server] UI graph materialized apps=${graphImport.apps} states=${graphImport.states} variants=${graphImport.variants} selectors=${graphImport.selectors} transitions=${graphImport.transitions} errors=${graphImport.errors.length}.`);
-    if (graphImport.errors.length > 0 && uiGraphFlags.mode === "enforced") {
-      throw new Error(`UI graph materialization failed in enforced mode: ${graphImport.errors.join("; ")}`);
-    }
-  }
+  // UI graph data is migration/catalog owned. Startup never imports semantic
+  // definitions from repository files.
 
   // PNQ-001 observe mode still requires authoritative queue schema.
   await deviceExecutionArbiter.validateSchema();
@@ -151,9 +143,6 @@ async function bootstrap(): Promise<void> {
   startEdgeWorkflowProgressWatchdog();
   console.log("[server] Edge workflow progress watchdog started.");
 
-  // ─── Bootstrap data pipeline parsers ─────────────────────────────────────
-  await bootstrapParsers();
-
   // ─── Kill switch — warm up cache from DB (makes isKillSwitchActiveSync reliable) ──
   const ksActive = await isKillSwitchActive();
   if (ksActive) console.warn("[server] ⚠️ Kill switch is ACTIVE from previous session");
@@ -174,13 +163,6 @@ async function bootstrap(): Promise<void> {
   // Run once at startup to recover any expired cooldowns from before restart
   lifecycleManager.resumeExpiredRateLimits().catch(() => {});
 
-  // ─── Skill Updater — triggered via cron (POST /api/skill-updater/run) ─────
-  // Removed internal setTimeout scheduler — use external cron instead:
-  // Live checks from OpenClaw should use PHONE_NETWORK_API_BASE (default http://enkzoned.go.ro:3000);
-  // localhost is container-local.
-  // openclaw cron add "0 1 * * *" "curl -s -X POST $PHONE_NETWORK_API_BASE/api/skill-updater/run -H 'X-API-Key: $API_KEY'"
-  console.log("[skill-updater] Ready for cron trigger at POST /api/skill-updater/run");
-
   // ─── Ops Monitor — creates skill_update_jobs based on cascade-tap metrics ─
   startOpsMonitorScheduler(60 * 60 * 1000); // Run every 1 hour
 
@@ -199,14 +181,13 @@ async function bootstrap(): Promise<void> {
   app.use("/api", apiRouter);
   app.use("/api/workflow-runs", workflowRunRouter);
   app.use("/api/agency", agencyRouter);
-  // Workflow dispatch — MUST be before hydraRouter so /workflow/dispatch matches before /workflow/:name/dispatch
+  // Generic data-driven workflow control plane.
   app.use("/api/hydra/workflow", workflowDispatchRoutes);
   // Workflow compiler — compile-and-run, compile, run-compiled, compiled/:id
   app.use("/api/hydra/workflow", compilerRoutes);
   app.use("/api/mapping", mappingRoutes);
   app.use("/api/ui-graph", uiGraphRoutes);
   app.use("/api/config", configRoutes);
-  app.use("/api/hydra", hydraRouter);
   app.use("/api/vlm", vlmRouter);
 
   // ─── APK download endpoints ───────────────────────────────────────────────

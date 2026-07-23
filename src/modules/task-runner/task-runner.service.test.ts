@@ -1,14 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { executeTaskNow } from "./task-runner.service";
 import { getDb } from "../../db/client";
-import { agentOrchestrator } from "../agents/orchestrator";
 import type { TaskRow } from "./task-runner.service";
 import type { WorkflowTemplate } from "../workflows/types";
 
 const mocks = vi.hoisted(() => ({
   dbQuery: vi.fn(),
   isDeviceOnline: vi.fn(),
-  agentExecuteTask: vi.fn(),
   dispatchGeneratedWorkflowTemplate: vi.fn(),
   cacheLookupLabels: vi.fn(() => ({ inc: vi.fn() })),
   executionLabels: vi.fn(() => ({ inc: vi.fn() })),
@@ -37,9 +35,6 @@ vi.mock("../../transport/transport", () => ({
   isDeviceOnline: mocks.isDeviceOnline,
 }));
 
-vi.mock("../agents/orchestrator", () => ({
-  agentOrchestrator: { executeTask: mocks.agentExecuteTask },
-}));
 
 vi.mock("../workflows/generated-workflow-execution.service", () => ({
   dispatchGeneratedWorkflowTemplate: mocks.dispatchGeneratedWorkflowTemplate,
@@ -334,7 +329,6 @@ describe("task-runner generated_workflow routine", () => {
     });
     expect(mocks.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(REQUEST_KEY, { includeCandidate: false });
     expect(mocks.getGeneratedPlanCache).not.toHaveBeenCalled();
-    expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
     expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateId: "agent_generated_reddit_account_health_scan_v1",
       template: cached.workflow,
@@ -1152,7 +1146,6 @@ describe("task-runner generated_workflow routine", () => {
     });
     expect(mocks.getGeneratedPlanCacheByRequestKey).not.toHaveBeenCalled();
     expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
-    expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
   });
 
   it("rejects tasks that provide both cacheKey and requestKey", async () => {
@@ -1167,7 +1160,6 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.getGeneratedPlanCache).not.toHaveBeenCalled();
     expect(mocks.getGeneratedPlanCacheByRequestKey).not.toHaveBeenCalled();
     expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
-    expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
   });
 
   it("returns a structured miss before dispatch", async () => {
@@ -1286,6 +1278,5 @@ describe("task-runner compiled_workflow routine", () => {
       templateId: compiledWorkflow.id,
       template: expect.objectContaining({ runtimeContract: "edge-workflow/v2" }),
     }));
-    expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
   });
 });

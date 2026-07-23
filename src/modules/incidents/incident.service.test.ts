@@ -17,6 +17,17 @@ describe("incident service", () => {
 
   it("upserts one idempotent incident for an exhausted task without persisting task params", async () => {
     mocks.db.query
+      .mockResolvedValueOnce({
+        rows: [{
+          payload: {
+            pattern: "mismatch|contradict|invalid state|checkpoint|integrity",
+            flags: "i",
+            category: "integrity",
+            severity: "high",
+            owner: "nox",
+          },
+        }],
+      })
       .mockResolvedValueOnce({ rows: [{ id: "incident-1", inserted: true }] })
       .mockResolvedValueOnce({ rows: [] });
 
@@ -39,7 +50,7 @@ describe("incident service", () => {
       generatedWorkflow: { selfHealing: { attempts: 0, status: "exhausted" } },
     }, { taskRetryAttempts: 0, recoveryBudget: 3 });
 
-    const params = mocks.db.query.mock.calls[0][1];
+    const params = mocks.db.query.mock.calls[1][1];
     expect(params[0]).toBe("task:11111111-1111-4111-8111-111111111111");
     expect(JSON.stringify(params)).not.toContain("must-not-persist");
     expect(params).toContain("integrity");
@@ -54,7 +65,7 @@ describe("incident service", () => {
       recoveryAttemptsActual: 0,
       taskRetryAttempts: 0,
     });
-    expect(mocks.db.query.mock.calls[1][1].slice(0, 3)).toEqual(["incident-1", "created", "phone-network"]);
+    expect(mocks.db.query.mock.calls[2][1].slice(0, 3)).toEqual(["incident-1", "created", "phone-network"]);
   });
 
   it("resolves only strictly matching older incidents after a verified successful task", async () => {
