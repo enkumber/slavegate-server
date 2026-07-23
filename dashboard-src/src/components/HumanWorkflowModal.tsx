@@ -44,7 +44,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
       .then((data) => {
         if (!alive) return;
         setAccounts(data.items);
-        setAccountId((current) => current || data.items[0]?.id || "");
+        setAccountId("");
       })
       .catch((err) => {
         if (alive) setError((err as Error).message);
@@ -210,11 +210,11 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
             <label style={labelStyle}>Account</label>
             <select
               value={accountId}
-              disabled={loadingAccounts || accounts.length === 0}
+              disabled={loadingAccounts}
               onChange={(e) => { setAccountId(e.target.value); resetCompileState(); }}
               style={inputStyle}
             >
-              {accounts.length === 0 && <option value="">No accounts on this device</option>}
+              <option value="">Device only</option>
               {accounts.map((account) => (
                 <option key={account.id} value={account.id}>
                   @{account.username} · {account.platform} · {account.status}
