@@ -11,7 +11,7 @@ import {
   type GeneratedWorkflowCompiledPlan,
 } from "../workflows/workflow-validator";
 import { workflowService, type GeneratedWorkflowPlanCacheRecord } from "../workflows/workflow.service";
-import type { WorkflowTemplate } from "../workflows/types";
+import type { WorkflowGoalContract, WorkflowTemplate } from "../workflows/types";
 import { llmJson, type LlmResponseMetadata } from "../../utils/llm";
 import { shortcutRegistryService } from "../workflow-shortcuts/shortcut-registry.service";
 import { humanWorkflowCompileJobService, type HumanWorkflowCompileJobRecord } from "./compile-job.service";
@@ -26,6 +26,7 @@ import {
   type CatalogSafetyClass,
   type CompilerRetrievalContext,
 } from "./capability-catalog.service";
+import { workflowGoalContractReason } from "../workflows/goal-contract";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
@@ -33,7 +34,7 @@ const MAX_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 120_000;
 const HUMAN_WORKFLOW_INITIAL_MAX_TOKENS = 4_096;
 const HUMAN_WORKFLOW_REPAIR_MAX_TOKENS = 6_144;
 const HUMAN_WORKFLOW_DEBUG_RESPONSE_MAX_CHARS = 100_000;
-const HUMAN_WORKFLOW_COMPILER_CACHE_VERSION = "2026-07-23-goal-contract-v2";
+const HUMAN_WORKFLOW_COMPILER_CACHE_VERSION = "2026-07-23-data-driven-goal-contract-v3";
 const HUMAN_WORKFLOW_COMPILER_POLICY_KEY = "human_workflow_compiler_policy";
 
 async function loadHumanWorkflowCompilerPolicy(): Promise<string> {
@@ -242,6 +243,24 @@ const READINESS_ONLY_ACTIONS = new Set([
   "ui_tree_dump",
 ]);
 
+const INTRINSIC_ACTION_EFFECTS: Record<string, "none" | "observation" | "navigation"> = {
+  screen_wake: "none",
+  unlock: "none",
+  wait_for_idle: "none",
+  ui_tree_dump: "observation",
+  classify_ui_tree: "observation",
+  screenshot: "observation",
+  screenshot_for_vlm: "observation",
+  get_screen_state: "observation",
+  get_foreground_app: "observation",
+  open_app: "navigation",
+  close_app: "navigation",
+  press_key: "navigation",
+  keyevent: "navigation",
+  scroll: "navigation",
+  swipe: "navigation",
+};
+
 function isReadinessOnlyIntent(goal: string): boolean {
   const normalized = goal.toLowerCase();
   const asksForReadiness = /\b(wake|wakeup|unlock|deblocheaza|deblochează|aprinde|trezeste|trezește|screen)\b/.test(normalized);
@@ -260,140 +279,16 @@ export function humanWorkflowUndercompiledReason(workflow: WorkflowTemplate, int
   if (readinessOnly) {
     return "workflow only wakes/unlocks/observes the device and does not perform the requested task";
   }
-  return humanWorkflowGoalCoverageReason(workflow, intent);
+  return workflowGoalContractReason(workflow);
 }
 
-type IndexedHumanWorkflowAction = {
-  action: string;
-  params: Record<string, unknown>;
-  index: number;
-};
-
-function normalizedIntentText(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase();
-}
-
-function collectHumanWorkflowActions(steps: unknown[]): IndexedHumanWorkflowAction[] {
-  const actions: IndexedHumanWorkflowAction[] = [];
-  const visit = (items: unknown[]): void => {
-    for (const item of items) {
-      if (!isRecord(item)) continue;
-      if (item.type === "action" && typeof item.action === "string") {
-        actions.push({
-          action: item.action,
-          params: isRecord(item.params) ? item.params : {},
-          index: actions.length,
-        });
-        if (item.action === "run_state_machine" && isRecord(item.params) && isRecord(item.params.transitions)) {
-          visit(Object.values(item.params.transitions));
-        }
-      }
-      if (item.type === "condition") {
-        if (Array.isArray(item.if_true)) visit(item.if_true);
-        if (Array.isArray(item.if_false)) visit(item.if_false);
-      }
-      if (item.type === "loop" && Array.isArray(item.steps)) visit(item.steps);
-    }
-  };
-  visit(steps);
-  return actions;
-}
-
-function actionSelectorLabel(action: IndexedHumanWorkflowAction): string {
-  const selectors = Array.isArray(action.params.selectors) ? action.params.selectors : [];
-  const values = [
-    action.params.text,
-    action.params.contentDescription,
-    action.params.resourceId,
-    action.params.target,
-    action.params.label,
-    ...selectors.flatMap((selector) => isRecord(selector)
-      ? [selector.text, selector.contentDescription, selector.resourceId, selector.target]
-      : []),
-  ];
-  return normalizedIntentText(values.filter((value): value is string => typeof value === "string").join(" "));
-}
-
-function classifierOutputKeys(action: IndexedHumanWorkflowAction): string[] {
-  if (action.action !== "classify_ui_tree" || !isRecord(action.params.outputs)) return [];
-  return Object.keys(action.params.outputs);
-}
-
-export function humanWorkflowGoalCoverageReason(workflow: WorkflowTemplate, intent: string): string | null {
-  const normalizedIntent = normalizedIntentText(intent);
-  const asksToDiscover = /\b(search|find|locate|look for|caut|gasest|gasesc|identific)\w*\b/.test(normalizedIntent);
-  const asksForContent = /\b(article|articol|post|posting|result|rezultat|story|stire)\w*\b/.test(normalizedIntent);
-  if (!asksToDiscover) return null;
-
-  const actions = collectHumanWorkflowActions(Array.isArray(workflow.steps) ? workflow.steps : []);
-  const queryActions = new Set(["type_text", "set_focused_text"]);
-  const queryIndex = actions.findIndex((action) =>
-    queryActions.has(action.action)
-    || (action.action === "intent_send" && typeof action.params.uri === "string" && action.params.uri.trim().length > 0)
-  );
-  if (asksToDiscover && queryIndex < 0) {
-    return "search/discovery goal has no explicit query input or query URI";
-  }
-
-  const resultSelectionActions = new Set([
-    "a11y_find_tap",
-    "observe_and_transition",
-    "ocr_find_tap",
-    "tap",
-    "run_state_machine",
-  ]);
-  const resultSelection = actions.find((action) => {
-    if (action.index <= queryIndex || !resultSelectionActions.has(action.action)) return false;
-    const label = actionSelectorLabel(action);
-    if (!label) return action.action === "run_state_machine";
-    return !/\b(search|search_bar|search_field|query|cautare|cauta)\b/.test(label);
-  });
-  if (!resultSelection) {
-    return "search/discovery goal does not select a result distinct from the search/query control";
-  }
-
-  const observation = actions.find((action) =>
-    action.index > resultSelection.index
-    && (action.action === "classify_ui_tree" || action.action === "ui_tree_dump")
-  );
-  if (!observation) {
-    return "selected result is not followed by UI observation/extraction";
-  }
-
-  const outputKeys = actions
-    .filter((action) => action.index >= observation.index)
-    .flatMap(classifierOutputKeys);
-  if (asksForContent && outputKeys.length === 0) {
-    return "content discovery goal has no deterministic classifier outputs";
-  }
-
-  const normalizedOutputKeys = outputKeys.map(normalizedIntentText);
-  const requiredFieldGroups: Array<{ requested: RegExp; produced: RegExp; name: string }> = [
-    { requested: /\b(title|titlu)\w*\b/, produced: /\b(title|titlu|headline|text)\w*\b/, name: "title" },
-    { requested: /\b(author|autor)\w*\b/, produced: /\b(author|autor|username|user)\w*\b/, name: "author" },
-    { requested: /\b(score|scor|upvote|vote)\w*\b/, produced: /\b(score|scor|upvote|vote|likes)\w*\b/, name: "score" },
-    { requested: /\b(comment|comentari)\w*\b/, produced: /\b(comment|comentari)\w*\b/, name: "comments" },
-  ];
-  for (const field of requiredFieldGroups) {
-    if (field.requested.test(normalizedIntent) && !normalizedOutputKeys.some((key) => field.produced.test(key))) {
-      return `requested ${field.name} is not produced by deterministic classifier outputs`;
-    }
-  }
-
-  const requiredOutputs = workflow.outputSchema?.required ?? [];
-  for (const outputKey of outputKeys) {
-    if (!requiredOutputs.includes(outputKey)) {
-      return `classifier output "${outputKey}" is missing from workflow.outputSchema.required`;
-    }
-  }
-  return null;
-}
-
-export function assertHumanWorkflowMeaningful(workflow: WorkflowTemplate, intent: string): void {
-  const reason = humanWorkflowUndercompiledReason(workflow, intent);
+export function assertHumanWorkflowMeaningful(
+  workflow: WorkflowTemplate,
+  intent: string,
+  expectedContract?: WorkflowGoalContract | null,
+): void {
+  const reason = workflowGoalContractReason(workflow, expectedContract)
+    ?? humanWorkflowUndercompiledReason(workflow, intent);
   if (!reason) return;
   throw Object.assign(new Error(`human workflow undercompiled: ${reason}`), {
     status: 422,
@@ -423,7 +318,6 @@ function compactHumanWorkflowAppMapHints(appMap: AppMap | null, goal: string): s
         element.semanticId,
       ].filter(Boolean).join(" ").toLowerCase();
       let score = 0;
-      if (label.includes("search")) score += 5;
       if (label.includes("tab") || label.includes("nav")) score += 1;
       for (const term of goalTerms) {
         if (label.includes(term.replace(/^\//, ""))) score += 3;
@@ -468,9 +362,9 @@ function buildHumanWorkflowCompilePrompt(input: {
     "Allowed actions are generic interpreter primitives only: screen_wake,unlock,open_app,close_app,intent_send,a11y_find_tap,observe_and_transition,run_state_machine,ocr_find_tap,tap,long_press,double_tap,swipe,scroll,type_text,set_focused_text,press_key,keyevent,ui_tree_dump,screenshot,screenshot_for_vlm,wait_for_idle,set_variable,classify_ui_tree,request_llm.",
     "For asynchronous UI transitions, prefer observe_and_transition: declare an ordered selectors array and a mandatory postcondition; it polls, performs one UI action, then proves the target state.",
     "For workflows with optional dialogs or multiple UI states, prefer run_state_machine: declare data-only resolver rules, goalStates and one transition per state. Never encode app knowledge in the primitive name or runtime.",
-    "For search/discovery goals, the plan must contain distinct stages: enter/submit the query, select a result that is not the search control, observe the selected detail state, and deterministically extract every requested field with classify_ui_tree.",
-    "For read-only extraction, declare outputSchema.required/properties and make every required key a classify_ui_tree output variable. A UI dump or checkpoint alone is not a business result.",
-    "A result-selection action must target the actual result/card/title and must be followed by detail-state observation; never tap the search field again as the result-selection step.",
+    "workflow.goalContract is mandatory. If retrieval supplies one, copy it exactly. Otherwise derive a minimal contract from the user goal, then tag every action with goalStage and effect and satisfy its ordered stages, produced/consumed bindings, allowed actions/effects and required outputs.",
+    "Valid effect values are none, observation, navigation, ui_input, business_mutation, sensitive, destructive. Text entry may be ui_input when the catalog contract allows it; do not infer business mutation from the primitive name alone.",
+    "Dynamic values must use {{variable.path}} or {$bind:\"variable.path\"} in action params. Never replace a required runtime binding with a guessed static value.",
     "Never use semantic_tap or an application-specific opcode. Selectors, packages, URLs, normalized coordinates and state rules must be explicit data from this prompt/App Map.",
     "Use request_llm only when semantic reasoning or creative generation is genuinely required. It must declare prompt, targetVariable or saveOutputAs, timeoutMs, responseFormat, and success/failure branches.",
     "Prefer selector-first navigation. Coordinates, when required, must be normalized and followed by an explicit state check.",
@@ -484,7 +378,7 @@ function buildHumanWorkflowCompilePrompt(input: {
     `Structured retrieval context from PostgreSQL:\n${formatCompilerRetrievalContext(input.retrievalContext)}`,
     "checkpoint is type checkpoint, never an action.",
     "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
-    "Do not emit workflow.intent. Use outputSchema for business outputs when the goal asks to find, read, inspect, or extract content.",
+    "Do not emit workflow.intent. Emit outputSchema exactly as required by goalContract.",
     input.compilerPolicy ? `Runtime compiler policy from PostgreSQL:\n${input.compilerPolicy}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -538,7 +432,13 @@ function compilerSafetyClass(
 
 function normalizeHumanWorkflowTemplateCandidate(
   rawWorkflow: unknown,
-  input: { platform: string; packageName: string; goal: string; safetyClass?: HumanWorkflowSafetyClass }
+  input: {
+    platform: string;
+    packageName: string;
+    goal: string;
+    safetyClass?: HumanWorkflowSafetyClass;
+    goalContract?: WorkflowGoalContract | null;
+  }
 ): unknown {
   if (!isRecord(rawWorkflow)) return rawWorkflow;
   const workflow: Record<string, unknown> = { ...rawWorkflow };
@@ -565,6 +465,7 @@ function normalizeHumanWorkflowTemplateCandidate(
     : 7;
   delete workflow.intent;
   delete workflow.allowedRecoveryRequests;
+  if (input.goalContract) workflow.goalContract = input.goalContract;
   const isReadOnly = workflow.safetyClass === "read_only";
   workflow.recoveryPolicy = {
     autonomy: "ai_autopilot",
@@ -607,6 +508,14 @@ function normalizeHumanWorkflowTemplateCandidate(
       } else if (!normalized.type && typeof normalized.action === "string") {
         normalized.type = "action";
       }
+      if (
+        normalized.type === "action"
+        && typeof normalized.action === "string"
+        && typeof normalized.effect !== "string"
+        && INTRINSIC_ACTION_EFFECTS[normalized.action]
+      ) {
+        normalized.effect = INTRINSIC_ACTION_EFFECTS[normalized.action];
+      }
       if (normalized.type === "action" && (normalized.action === "open_app" || normalized.action === "close_app")) {
         const params = isRecord(normalized.params) ? { ...normalized.params } : {};
         if (typeof params.packageName !== "string" || !params.packageName.trim()) {
@@ -641,21 +550,40 @@ function normalizeHumanWorkflowTemplateCandidate(
     workflow.steps = ensureHumanWorkflowPreambleSteps(workflow.steps as unknown[]);
     if (!isRecord(workflow.outputSchema)) {
       const outputProperties: Record<string, { type: "boolean" | "string" | "number" | "object" | "array" | "null" }> = {};
-      const actions = collectHumanWorkflowActions(workflow.steps as unknown[]);
-      for (const action of actions) {
-        if (action.action !== "classify_ui_tree" || !isRecord(action.params.outputs)) continue;
-        for (const [key, rawRule] of Object.entries(action.params.outputs)) {
-          const rule = isRecord(rawRule) ? rawRule : {};
-          const sample = rule.trueValue ?? rule.value ?? rule.default;
-          const type = typeof sample === "boolean"
-            ? "boolean"
-            : typeof sample === "number"
-              ? "number"
-              : "string";
-          outputProperties[key] = { type };
+      const visit = (steps: unknown[]): void => {
+        for (const step of steps) {
+          if (!isRecord(step)) continue;
+          if (
+            step.type === "action"
+            && step.action === "classify_ui_tree"
+            && isRecord(step.params)
+            && isRecord(step.params.outputs)
+          ) {
+            for (const [key, rawRule] of Object.entries(step.params.outputs)) {
+              const rule = isRecord(rawRule) ? rawRule : {};
+              const sample = rule.trueValue ?? rule.value ?? rule.default;
+              const type = typeof sample === "boolean"
+                ? "boolean"
+                : typeof sample === "number"
+                  ? "number"
+                  : "string";
+              outputProperties[key] = { type };
+            }
+          }
+          if (step.type === "condition") {
+            if (Array.isArray(step.if_true)) visit(step.if_true);
+            if (Array.isArray(step.if_false)) visit(step.if_false);
+          }
+          if (step.type === "loop" && Array.isArray(step.steps)) visit(step.steps);
         }
+      };
+      visit(workflow.steps as unknown[]);
+      for (const key of input.goalContract?.requiredOutputs ?? []) {
+        outputProperties[key] ??= { type: "string" };
       }
-      const required = Object.keys(outputProperties);
+      const required = input.goalContract?.requiredOutputs?.length
+        ? input.goalContract.requiredOutputs
+        : Object.keys(outputProperties);
       if (required.length > 0) {
         workflow.outputSchema = { required, properties: outputProperties };
       }
@@ -709,6 +637,7 @@ function ensureHumanWorkflowPreambleSteps(steps: unknown[]): unknown[] {
       type: "action",
       action: "screen_wake",
       params: {},
+      effect: "none",
       timeoutMs: 10_000,
     });
   }
@@ -721,6 +650,7 @@ function ensureHumanWorkflowPreambleSteps(steps: unknown[]): unknown[] {
       type: "action",
       action: "unlock",
       params: {},
+      effect: "none",
       timeoutMs: 15_000,
     });
   }
@@ -1068,11 +998,15 @@ export class HumanWorkflowCompilerService {
         packageName,
         goal: input.intent,
         safetyClass: enforceRetrievedSafetyClass,
+        goalContract: retrievalContext.goalContract,
       });
       let validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
       let template = validation.template;
       const correctiveReason = template
-        ? humanWorkflowUndercompiledReason(template, input.intent)
+        ? retrievalContext.goalContract && !template.goalContract
+          ? "LLM-compiled human workflow is missing mandatory workflow.goalContract"
+          : workflowGoalContractReason(template, retrievalContext.goalContract)
+          ?? humanWorkflowUndercompiledReason(template, input.intent)
         : `workflow validation failed: ${validation.errors.join("; ")}`;
       if (correctiveReason) {
         rawWorkflow = await llmJson<WorkflowTemplate>(buildHumanWorkflowRepairPrompt({
@@ -1092,6 +1026,7 @@ export class HumanWorkflowCompilerService {
           packageName,
           goal: input.intent,
           safetyClass: enforceRetrievedSafetyClass,
+          goalContract: retrievalContext.goalContract,
         });
         validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
         if (!validation.template) {
@@ -1110,7 +1045,15 @@ export class HumanWorkflowCompilerService {
           validationErrors: validation.errors,
         });
       }
-      assertHumanWorkflowMeaningful(template, input.intent);
+      if (retrievalContext.goalContract && !template.goalContract) {
+        throw Object.assign(new Error("workflow is missing mandatory goal contract"), {
+          status: 422,
+          code: "HUMAN_WORKFLOW_GOAL_CONTRACT_REQUIRED",
+          retryable: true,
+          nextAction: "retry_compile",
+        });
+      }
+      assertHumanWorkflowMeaningful(template, input.intent, retrievalContext.goalContract);
       const resolvedSafetyClass = template.safetyClass ?? safetyClass;
       let compiledPlan = compileGeneratedWorkflowTemplate(template);
       compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
@@ -1124,6 +1067,7 @@ export class HumanWorkflowCompilerService {
         compiledAt: new Date().toISOString(),
         capabilityKey: retrievalContext.matchedCapabilityKey,
         capabilityRole: "complete",
+        goalContract: template.goalContract,
         compilerRetrieval: {
           capabilityKey: retrievalContext.matchedCapabilityKey,
           capabilityScore: retrievalContext.matchedCapabilityScore,

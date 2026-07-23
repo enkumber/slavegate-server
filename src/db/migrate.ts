@@ -47,6 +47,7 @@ function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("verified_ui_state_machine_runtime") ||
     fileName.includes("human_workflow_compiler_policy") ||
     fileName.includes("workflow_capability_catalog") ||
+    fileName.includes("data_driven_goal_contracts") ||
     fileName.includes("phone_network_incidents_and_audits");
 }
 

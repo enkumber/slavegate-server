@@ -6,7 +6,15 @@
 import { z } from "zod";
 import { createHash } from "crypto";
 import type { AppMap, AppMapQualityReport } from "../app-mapping/schema";
-import type { WorkflowOutputSchema, WorkflowRecoveryPolicy, WorkflowStep, WorkflowTemplate } from "./types";
+import type {
+  WorkflowGoalContract,
+  WorkflowInteractionEffect,
+  WorkflowOutputSchema,
+  WorkflowRecoveryPolicy,
+  WorkflowStep,
+  WorkflowTemplate,
+} from "./types";
+import { parseWorkflowGoalContract, workflowGoalContractReason } from "./goal-contract";
 import { ALL_SCREEN_IDS } from "../screen-detection/types";
 
 // ── Allowed step types ──────────────────────────────────────────────────────
@@ -471,6 +479,11 @@ function validateGeneratedWorkflowReadOnlySemantics(
   errors: string[]
 ): void {
   if (candidate.safetyClass !== "read_only") return;
+  if (candidate.goalContract) {
+    const reason = workflowGoalContractReason(candidate as WorkflowTemplate);
+    if (reason) errors.push(`workflow goal contract violation: ${reason}`);
+    return;
+  }
   const mutationTerm = containsMutationTerm({
     id: candidate.id,
     name: candidate.name,
@@ -588,6 +601,16 @@ function validateGeneratedWorkflowStepInput(
       }
       if (step.params !== undefined && !isRecord(step.params)) {
         errors.push(`${path}.params must be an object when provided`);
+      }
+      if (step.goalStage !== undefined && (typeof step.goalStage !== "string" || !step.goalStage.trim())) {
+        errors.push(`${path}.goalStage must be a non-empty string when provided`);
+      }
+      if (
+        step.effect !== undefined
+        && !["none", "observation", "navigation", "ui_input", "business_mutation", "sensitive", "destructive"]
+          .includes(String(step.effect))
+      ) {
+        errors.push(`${path}.effect is invalid`);
       }
       if (step.action === "request_llm") {
         const params = isRecord(step.params) ? step.params : {};
@@ -895,6 +918,8 @@ export interface GeneratedWorkflowCompiledStep {
   id?: string;
   action?: string;
   verification?: string;
+  goalStage?: string;
+  effect?: WorkflowInteractionEffect;
   bindingSource?: GeneratedWorkflowBindingSource;
   usedAppMap?: boolean;
   selectorId?: string;
@@ -969,6 +994,7 @@ export interface GeneratedWorkflowCompiledPlan {
     intent: string | null;
     safetyClass: "read_only" | "standard" | null;
     outputSchema: WorkflowOutputSchema | null;
+    goalContract: WorkflowGoalContract | null;
     allowedRecoveryRequests: string[];
     recoveryPolicy: WorkflowRecoveryPolicy | null;
     appMap?: GeneratedWorkflowAppMapCacheMetadata;
@@ -1043,11 +1069,21 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
       errors.push(`workflow.safetyClass must be one of: ${GENERATED_WORKFLOW_SAFETY_CLASSES.join(", ")}`);
     }
   }
-  if ((candidate.outputSchema || candidate.allowedRecoveryRequests) && candidate.safetyClass !== "read_only") {
-    errors.push("generated workflow marketing metadata requires workflow.safetyClass=read_only");
+  if (candidate.allowedRecoveryRequests && candidate.safetyClass !== "read_only") {
+    errors.push("workflow.allowedRecoveryRequests requires workflow.safetyClass=read_only");
   }
   if (candidate.outputSchema !== undefined) {
     validateGeneratedWorkflowOutputSchema(candidate.outputSchema, "workflow.outputSchema", errors);
+  }
+  if (candidate.goalContract !== undefined) {
+    const parsedContract = parseWorkflowGoalContract(candidate.goalContract);
+    if (!parsedContract) {
+      errors.push("workflow.goalContract is invalid");
+    } else {
+      candidate.goalContract = parsedContract;
+      const reason = workflowGoalContractReason(candidate as WorkflowTemplate);
+      if (reason) errors.push(`workflow goal contract violation: ${reason}`);
+    }
   }
   if (candidate.allowedRecoveryRequests !== undefined) {
     if (!Array.isArray(candidate.allowedRecoveryRequests) || candidate.allowedRecoveryRequests.some((item) => typeof item !== "string" || item.length === 0)) {
@@ -1104,6 +1140,7 @@ export function summarizeGeneratedWorkflowTemplate(
     intent: template.intent ?? null,
     safetyClass: template.safetyClass ?? null,
     outputSchema: template.outputSchema ?? null,
+    goalContract: template.goalContract ?? null,
     allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
     recoveryPolicy: template.recoveryPolicy ?? null,
     runtimeContract: template.runtimeContract ?? null,
@@ -1133,6 +1170,8 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
         actionCount++;
         if (step.action === "request_llm") explicitLlmRequests++;
         compiledStep.action = step.action;
+        compiledStep.goalStage = step.goalStage;
+        compiledStep.effect = step.effect;
         compiledStep.verification = step.verification ?? template.defaultVerificationStrategy;
         compiledStep.provenance = getGeneratedWorkflowStepProvenance(step);
         compiledStep.bindingSource = compiledStep.provenance.bindingSource;
@@ -1170,6 +1209,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
     intent: template.intent ?? null,
     safetyClass: template.safetyClass ?? null,
     outputSchema: template.outputSchema ?? null,
+    goalContract: template.goalContract ?? null,
     allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
     recoveryPolicy: template.recoveryPolicy ?? null,
     defaultVerificationStrategy: template.defaultVerificationStrategy,
@@ -1188,6 +1228,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
       intent: template.intent ?? null,
       safetyClass: template.safetyClass ?? null,
       outputSchema: template.outputSchema ?? null,
+      goalContract: template.goalContract ?? null,
       allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
       recoveryPolicy: template.recoveryPolicy ?? null,
       appMap: undefined,

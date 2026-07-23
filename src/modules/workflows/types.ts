@@ -60,6 +60,10 @@ export interface ActionStep {
   timeoutMs?: number;
   /** Opaque server-issued id used to correlate compact edge learning evidence. */
   learningBindingId?: string;
+  /** Goal-contract stage fulfilled by this step. Defined by catalog data, not runtime code. */
+  goalStage?: string;
+  /** Observable effect category used by generic safety enforcement. */
+  effect?: WorkflowInteractionEffect;
 
   // ─── Screen Verification (US-WORKFLOW-SCREEN-VERIFY) ────────────────────────
   
@@ -200,6 +204,8 @@ export interface WorkflowTemplate {
   safetyClass?: "read_only" | "standard";
   /** Structured output contract for read-only marketing workflows. */
   outputSchema?: WorkflowOutputSchema;
+  /** Data-driven contract copied from the matched capability catalog entry. */
+  goalContract?: WorkflowGoalContract;
   /** Recovery request types the runtime may ask for after deterministic failure. */
   allowedRecoveryRequests?: string[];
   /** Runtime policy for AI-assisted recovery after deterministic execution fails. */
@@ -242,6 +248,33 @@ export interface WorkflowOutputSchema {
 
 export interface WorkflowOutputSchemaProperty {
   type: "boolean" | "string" | "number" | "object" | "array" | "null";
+}
+
+export type WorkflowInteractionEffect =
+  | "none"
+  | "observation"
+  | "navigation"
+  | "ui_input"
+  | "business_mutation"
+  | "sensitive"
+  | "destructive";
+
+export interface WorkflowGoalContractStage {
+  id: string;
+  required?: boolean;
+  allowedActions: string[];
+  allowedEffects?: WorkflowInteractionEffect[];
+  after?: string[];
+  minOccurrences?: number;
+  produces?: string[];
+  consumes?: string[];
+}
+
+export interface WorkflowGoalContract {
+  version: "1";
+  stages: WorkflowGoalContractStage[];
+  requiredOutputs?: string[];
+  allowedEffects: WorkflowInteractionEffect[];
 }
 
 // ─── Execution state ──────────────────────────────────────────────────────────

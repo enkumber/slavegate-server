@@ -7,6 +7,7 @@ import {
   selectUnambiguousCapability,
   type WorkflowCapabilityRecord,
 } from "./capability-catalog.service";
+import type { WorkflowGoalContract } from "../workflows/types";
 
 vi.mock("../../db/client", () => ({
   getDb: vi.fn(),
@@ -64,6 +65,17 @@ describe("retrieval-before-LLM compiler context", () => {
   });
 
   it("returns a complete promoted hit plus safe partial knowledge and failure constraints", async () => {
+    const goalContract: WorkflowGoalContract = {
+      version: "1",
+      allowedEffects: ["none", "observation", "navigation", "ui_input"],
+      requiredOutputs: ["result"],
+      stages: [{
+        id: "observe",
+        allowedActions: ["classify_ui_tree"],
+        allowedEffects: ["observation"],
+        produces: ["result"],
+      }],
+    };
     const workflow = {
       id: "remote_support_enable_screen_sharing_v1",
       name: "Enable remote support screen sharing",
@@ -90,7 +102,7 @@ describe("retrieval-before-LLM compiler context", () => {
             portability_scope: "global",
             min_match_score: 0.62,
             ambiguity_margin: 0.12,
-            metadata: { appId: "remote_support" },
+            metadata: { appId: "remote_support", goalContract },
             updated_at: new Date("2026-07-23T10:00:00.000Z"),
           }],
         };
@@ -149,6 +161,7 @@ describe("retrieval-before-LLM compiler context", () => {
       fullArtifactCacheKey: "a".repeat(24),
       matchedCapabilityKey: "remote_support_enable_screen_share",
       recommendedSafetyClass: "standard",
+      goalContract,
     });
     expect(context.knowledge.uiGraph.selectors[0]).toMatchObject({
       appId: "remote_support",

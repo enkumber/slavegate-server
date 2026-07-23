@@ -554,7 +554,12 @@ export class WorkflowService {
         aliases,
         safetyClass,
         portabilityScope,
-        JSON.stringify({ syncedBy: "workflow_cache_persistence" }),
+        JSON.stringify({
+          syncedBy: "workflow_cache_persistence",
+          ...(sourceMetadata.goalContract || template.goalContract
+            ? { goalContract: sourceMetadata.goalContract ?? template.goalContract }
+            : {}),
+        }),
       ],
     );
     await db.query(

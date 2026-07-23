@@ -1,6 +1,7 @@
 import { getDb } from "../../db/client";
-import type { WorkflowTemplate } from "../workflows/types";
+import type { WorkflowGoalContract, WorkflowTemplate } from "../workflows/types";
 import { portableCapabilityTokens } from "./portable-capability";
+import { parseWorkflowGoalContract } from "../workflows/goal-contract";
 
 const MAX_CONTEXT_ARTIFACTS = 4;
 const MAX_CONTEXT_UI_ITEMS = 10;
@@ -39,6 +40,7 @@ export interface CompilerRetrievalContext {
   matchedCapabilityKey: string | null;
   matchedCapabilityScore: number | null;
   recommendedSafetyClass: CatalogSafetyClass | null;
+  goalContract: WorkflowGoalContract | null;
   knowledge: {
     promotedArtifacts: Array<Record<string, unknown>>;
     uiGraph: {
@@ -256,6 +258,7 @@ export function formatCompilerRetrievalContext(context: CompilerRetrievalContext
     matchedCapabilityKey: context.matchedCapabilityKey,
     matchedCapabilityScore: context.matchedCapabilityScore,
     recommendedSafetyClass: context.recommendedSafetyClass,
+    goalContract: context.goalContract,
     promotedKnowledge: context.knowledge.promotedArtifacts,
     promotedUiGraph: context.knowledge.uiGraph,
     previousFailuresToAvoid: context.knowledge.avoid,
@@ -426,6 +429,7 @@ export class CapabilityCatalogService {
       matchedCapabilityKey: selected?.capability.capabilityKey ?? null,
       matchedCapabilityScore: selected?.score ?? null,
       recommendedSafetyClass: selected?.capability.safetyClass ?? null,
+      goalContract: parseWorkflowGoalContract(selected?.capability.metadata.goalContract),
       knowledge: {
         promotedArtifacts,
         uiGraph: {
