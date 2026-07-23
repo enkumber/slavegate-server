@@ -22,6 +22,7 @@ import {
   validateGeneratedWorkflowTemplate,
   type GeneratedWorkflowCompiledPlan,
 } from "./workflow-validator";
+import { portableCapabilityMetadata } from "../human-workflow/portable-capability";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -434,12 +435,16 @@ export class WorkflowService {
       );
     }
     const compiledPlanHash = computeGeneratedWorkflowCompiledPlanHash(compiledPlan);
-    const canonicalSourceMetadata = {
+    const sourceMetadata = {
       intent: compiledPlan.metadata.intent,
       safetyClass: compiledPlan.metadata.safetyClass,
       outputSchema: compiledPlan.metadata.outputSchema,
       allowedRecoveryRequests: compiledPlan.metadata.allowedRecoveryRequests,
       ...options.sourceMetadata,
+    };
+    const canonicalSourceMetadata = {
+      ...sourceMetadata,
+      ...portableCapabilityMetadata(template, sourceMetadata),
     };
     if (requestKey && options.replaceRequestKeyArtifacts !== false) {
       await db.query("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1 AND cache_key <> $2", [
@@ -539,6 +544,60 @@ export class WorkflowService {
     );
     if (result.rows.length === 0) return null;
     return rowToGeneratedPlanCache(result.rows[0]);
+  }
+
+  async listPortableGeneratedPlanCacheCandidates(
+    platform: string,
+    limit = 200
+  ): Promise<GeneratedWorkflowPlanCacheRecord[]> {
+    const db = getDb();
+    const result = await db.query(
+      `SELECT *
+       FROM generated_workflow_plan_cache
+       WHERE artifact_state = 'promoted'
+         AND (
+           LOWER(platform) = LOWER($1)
+           OR source_metadata -> 'supportedPlatforms' ? $1
+         )
+         AND COALESCE(source_metadata ->> 'portable', 'true') <> 'false'
+         AND COALESCE(source_metadata ->> 'portabilityScope', 'global') NOT IN ('device', 'account', 'contextual')
+         AND COALESCE(
+           compiled_plan #>> '{metadata,safetyClass}',
+           workflow ->> 'safetyClass',
+           source_metadata ->> 'safetyClass'
+         ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive')
+       ORDER BY updated_at DESC
+       LIMIT $2`,
+      [platform, Math.max(1, Math.min(limit, 500))]
+    );
+    return result.rows.map(rowToGeneratedPlanCache);
+  }
+
+  async recordPortableCapabilityIdentity(
+    cacheKey: string,
+    capabilityKey: string
+  ): Promise<void> {
+    if (!/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(capabilityKey)) {
+      throw Object.assign(new Error("portable capability key is invalid"), {
+        code: "PORTABLE_CAPABILITY_KEY_INVALID",
+      });
+    }
+    const db = getDb();
+    await db.query(
+      `UPDATE generated_workflow_plan_cache
+       SET source_metadata = source_metadata || jsonb_build_object(
+             'capabilityKey', $2::text,
+             'portable', true,
+             'portabilityScope', 'global',
+             'capabilityResolvedAt', NOW()
+           ),
+           updated_at = NOW()
+       WHERE cache_key = $1
+         AND artifact_state = 'promoted'
+         AND COALESCE(source_metadata ->> 'portable', 'true') <> 'false'
+         AND COALESCE(source_metadata ->> 'portabilityScope', 'global') NOT IN ('device', 'account', 'contextual')`,
+      [cacheKey, capabilityKey]
+    );
   }
 
   async getGeneratedPlanCacheForRepair(

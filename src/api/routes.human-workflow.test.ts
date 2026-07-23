@@ -35,6 +35,8 @@ const mocks = vi.hoisted(() => ({
   workflowService: {
     getGeneratedPlanCacheByRequestKey: vi.fn(),
     getGeneratedPlanCache: vi.fn(),
+    listPortableGeneratedPlanCacheCandidates: vi.fn(),
+    recordPortableCapabilityIdentity: vi.fn(),
     saveTemplate: vi.fn(),
     saveGeneratedPlanCache: vi.fn(),
     saveExecutableGeneratedPlanCache: vi.fn(),
@@ -469,6 +471,8 @@ describe("dashboard human workflow routes", () => {
     mocks.db.query.mockResolvedValue({ rows: [targetRow()] });
     mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cachedPlan());
     mocks.workflowService.getGeneratedPlanCache.mockResolvedValue(cachedPlan());
+    mocks.workflowService.listPortableGeneratedPlanCacheCandidates.mockResolvedValue([]);
+    mocks.workflowService.recordPortableCapabilityIdentity.mockResolvedValue(undefined);
     mocks.workflowService.saveTemplate.mockResolvedValue(undefined);
     mocks.workflowService.saveGeneratedPlanCache.mockResolvedValue(undefined);
     mocks.workflowService.saveExecutableGeneratedPlanCache.mockResolvedValue(undefined);
@@ -534,6 +538,91 @@ describe("dashboard human workflow routes", () => {
       platform: "reddit",
     }));
     expect(mocks.workflowService.saveGeneratedPlanCache).not.toHaveBeenCalled();
+  });
+
+  it("reuses a promoted portable capability across device/formulation request keys before LLM", async () => {
+    const intent = "pornește screen share pentru remote support";
+    const portable = cachedPlan({
+      cacheKey: "9".repeat(24),
+      requestKey: "8".repeat(24),
+      artifactState: "promoted",
+      platform: "android",
+      sourceMetadata: {
+        intent: null,
+        capabilityKey: "remote_support_enable_screen_share",
+        portable: true,
+        portabilityScope: "global",
+        safetyClass: "standard",
+      },
+      workflow: {
+        id: "remote_support_enable_screen_sharing_trace_v1",
+        name: "Enable remote support screen sharing from verified UI trace",
+        description: "Resolve the app through the launcher and verify the final ready state.",
+        version: "1.0.0",
+        platform: "android",
+        safetyClass: "standard",
+        steps: [
+          { id: "open_drawer", type: "action", action: "press_key", params: { key: "APP_DRAWER" } },
+          { id: "verify_ready", type: "action", action: "ui_tree_dump", params: { contains: "Ready" } },
+        ],
+      },
+      compiledPlan: {
+        cacheKey: "9".repeat(24),
+        metadata: {
+          safetyClass: "standard",
+          intent: null,
+          outputSchema: null,
+          allowedRecoveryRequests: [],
+        },
+        llmBudget: {
+          happyPathRequests: 0,
+          recoveryRequests: "only_on_failure",
+        },
+        steps: [
+          { id: "open_drawer", type: "action", action: "press_key", path: ["open_drawer"], selectorName: null, selectorId: null },
+          { id: "verify_ready", type: "action", action: "ui_tree_dump", path: ["verify_ready"], selectorName: null, selectorId: null },
+        ],
+      },
+    });
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.workflowService.listPortableGeneratedPlanCacheCandidates.mockResolvedValueOnce([portable]);
+    mocks.workflowService.getGeneratedPlanCache.mockResolvedValueOnce(portable);
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{
+        device_id: DEVICE_ID,
+        device_model: "ONEPLUS A6013",
+        device_name: "acasa",
+      }],
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      intent,
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      status: "ready",
+      requestKey: accountlessRequestKey(intent),
+      cacheHit: true,
+      cacheKey: "9".repeat(24),
+      source: "cache",
+      safetyClass: "standard",
+      platform: "android",
+      target: {
+        device_id: DEVICE_ID,
+        account_id: null,
+      },
+    });
+    expect(mocks.workflowService.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(accountlessRequestKey(intent));
+    expect(mocks.workflowService.listPortableGeneratedPlanCacheCandidates).toHaveBeenCalledWith("android");
+    expect(mocks.workflowService.getGeneratedPlanCache).toHaveBeenCalledWith("9".repeat(24));
+    expect(mocks.workflowService.recordPortableCapabilityIdentity).toHaveBeenCalledWith(
+      "9".repeat(24),
+      "remote_support_enable_screen_share",
+    );
+    expect(mocks.compileJobService.createOrGet).not.toHaveBeenCalled();
+    expect(mocks.llmJson).not.toHaveBeenCalled();
   });
 
   it("allows social human workflows without account_id during temporary no-safety mode", async () => {

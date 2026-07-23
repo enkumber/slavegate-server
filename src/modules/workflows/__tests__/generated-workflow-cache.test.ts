@@ -139,6 +139,9 @@ describe("generated workflow plan cache service", () => {
       safetyClass: null,
       outputSchema: null,
       allowedRecoveryRequests: [],
+      capabilityKey: "reddit_home_smoke",
+      portable: true,
+      portabilityScope: "global",
     }));
     expect(values[7]).toBe(workflow.id);
     expect(values[8]).toBe("reddit");
@@ -199,6 +202,9 @@ describe("generated workflow plan cache service", () => {
       outputSchema: workflow.outputSchema,
       allowedRecoveryRequests: ["refresh_screen_state"],
       source: "test",
+      capabilityKey: "reddit_account_health_scan",
+      portable: true,
+      portabilityScope: "global",
     });
     expect(compiledPlan.metadata).toMatchObject({
       intent: "reddit_account_health_scan",
@@ -317,6 +323,50 @@ describe("generated workflow plan cache service", () => {
     expect(sql).toContain("ORDER BY updated_at DESC");
     expect(sql).toContain("LIMIT 1");
     expect(values).toEqual(["c02c59dfbe512562f8c65c97", ["promoted"]]);
+  });
+
+  it("lists only promoted portable capability candidates for the runtime platform", async () => {
+    const row = cacheRow({
+      platform: "android",
+      source_metadata: {
+        capabilityKey: "remote_support_enable_screen_share",
+        portable: true,
+        portabilityScope: "global",
+        safetyClass: "standard",
+      },
+    });
+    const service = new WorkflowService();
+    const query = mockDbQuery([row]);
+
+    const result = await service.listPortableGeneratedPlanCacheCandidates("android");
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.cacheKey).toBe(row.cache_key);
+    const [sql, values] = query.mock.calls[0];
+    expect(sql).toContain("artifact_state = 'promoted'");
+    expect(sql).toContain("portabilityScope");
+    expect(sql).toContain("ORDER BY updated_at DESC");
+    expect(values).toEqual(["android", 200]);
+  });
+
+  it("persists a lazily resolved portable capability identity on the promoted artifact", async () => {
+    const service = new WorkflowService();
+    const query = mockDbQuery();
+
+    await service.recordPortableCapabilityIdentity(
+      "9298138bc0d3174e92fc526e",
+      "remote_support_enable_screen_share",
+    );
+
+    const [sql, values] = query.mock.calls[0];
+    expect(sql).toContain("'capabilityKey'");
+    expect(sql).toContain("'portable', true");
+    expect(sql).toContain("'portabilityScope', 'global'");
+    expect(sql).toContain("artifact_state = 'promoted'");
+    expect(values).toEqual([
+      "9298138bc0d3174e92fc526e",
+      "remote_support_enable_screen_share",
+    ]);
   });
 
   it("can include candidate artifacts only through an explicit lookup option", async () => {

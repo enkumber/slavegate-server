@@ -19,6 +19,7 @@ import {
   normalizeCachedHumanWorkflowTemplate,
 } from "./human-workflow-normalization";
 import { listRuntimeProfiles, loadRuntimeProfile } from "../app-mapping/runtime-profile";
+import { resolvePortableCapabilityArtifact } from "./portable-capability";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
@@ -668,6 +669,16 @@ export class HumanWorkflowCompilerService {
 
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
     if (cached && humanWorkflowCacheUsable(cached, intent)) return readyFromCache(cached, target, requestKey, "cache");
+
+    const portableCandidates = await workflowService.listPortableGeneratedPlanCacheCandidates(target.account_platform);
+    const portableMatch = resolvePortableCapabilityArtifact(intent, target.account_platform, portableCandidates);
+    if (portableMatch && humanWorkflowCacheUsable(portableMatch.record, intent)) {
+      const selected = await workflowService.getGeneratedPlanCache(portableMatch.record.cacheKey);
+      if (selected) {
+        await workflowService.recordPortableCapabilityIdentity(selected.cacheKey, portableMatch.capabilityKey);
+        return readyFromCache(selected, target, requestKey, "cache");
+      }
+    }
 
     const shortcutMatch = target.account_id
       ? await shortcutRegistryService.lookupActiveShortcut({
