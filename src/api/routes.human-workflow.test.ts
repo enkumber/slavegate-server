@@ -61,6 +61,9 @@ const mocks = vi.hoisted(() => ({
     requeueMissingArtifact: vi.fn(),
     runInProcess: vi.fn(),
   },
+  capabilityCatalogService: {
+    retrieve: vi.fn(),
+  },
 }));
 
 vi.mock("../db/client", () => ({
@@ -93,6 +96,11 @@ vi.mock("../modules/workflow-shortcuts/shortcut-registry.service", () => ({
 
 vi.mock("../modules/human-workflow/compile-job.service", () => ({
   humanWorkflowCompileJobService: mocks.compileJobService,
+}));
+
+vi.mock("../modules/human-workflow/capability-catalog.service", () => ({
+  capabilityCatalogService: mocks.capabilityCatalogService,
+  formatCompilerRetrievalContext: (context: unknown) => JSON.stringify(context),
 }));
 
 vi.mock("../ws/direct-ws.server", () => ({
@@ -487,6 +495,17 @@ describe("dashboard human workflow routes", () => {
     mocks.compileJobService.requeueFailed.mockResolvedValue(null);
     mocks.compileJobService.requeueMissingArtifact.mockResolvedValue(null);
     mocks.compileJobService.runInProcess.mockImplementation(() => undefined);
+    mocks.capabilityCatalogService.retrieve.mockResolvedValue({
+      fullArtifactCacheKey: null,
+      matchedCapabilityKey: null,
+      matchedCapabilityScore: null,
+      recommendedSafetyClass: null,
+      knowledge: {
+        promotedArtifacts: [],
+        uiGraph: { selectors: [], transitions: [] },
+        avoid: [],
+      },
+    });
   });
 
   it("compiles a valid cached human workflow preview", async () => {
@@ -1299,6 +1318,21 @@ describe("dashboard human workflow routes", () => {
       intent,
       platform: "android",
     }));
+    mocks.capabilityCatalogService.retrieve.mockResolvedValue({
+      fullArtifactCacheKey: null,
+      matchedCapabilityKey: "gmail_create_account",
+      matchedCapabilityScore: 0.84,
+      recommendedSafetyClass: "standard",
+      knowledge: {
+        promotedArtifacts: [{
+          capabilityKey: "gmail_create_account",
+          role: "fragment",
+          steps: [{ id: "known_add_account", action: "a11y_find_tap", params: { target: "Add another account" } }],
+        }],
+        uiGraph: { selectors: [], transitions: [] },
+        avoid: [{ reason: "do not reuse a rejected package" }],
+      },
+    });
     mocks.llmJson.mockReset();
     mocks.llmJson
       .mockResolvedValueOnce({
@@ -1345,6 +1379,9 @@ describe("dashboard human workflow routes", () => {
 
     expect(mocks.llmJson).toHaveBeenCalledTimes(2);
     expect(mocks.llmJson.mock.calls[0][2]).toMatchObject({ max_tokens: 4096 });
+    expect(mocks.llmJson.mock.calls[0][0]).toContain("gmail_create_account");
+    expect(mocks.llmJson.mock.calls[0][0]).toContain("known_add_account");
+    expect(mocks.llmJson.mock.calls[0][0]).toContain("do not reuse a rejected package");
     expect(mocks.llmJson.mock.calls[1][0]).toContain("CORRECTIVE COMPILATION REQUIRED");
     expect(mocks.llmJson.mock.calls[1][0]).toContain("workflow only wakes/unlocks/observes the device");
     expect(mocks.llmJson.mock.calls[1][2]).toMatchObject({ max_tokens: 6144 });

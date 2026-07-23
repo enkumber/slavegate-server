@@ -489,6 +489,85 @@ export class WorkflowService {
         JSON.stringify(compiledPlan),
       ]
     );
+    await this.syncCapabilityCatalogWithDb(
+      db,
+      compiledPlan.cacheKey,
+      template,
+      canonicalSourceMetadata,
+    );
+  }
+
+  private async syncCapabilityCatalogWithDb(
+    db: Queryable,
+    cacheKey: string,
+    template: WorkflowTemplate,
+    sourceMetadata: Record<string, unknown>,
+  ): Promise<void> {
+    const capabilityKey = sourceMetadata.capabilityKey;
+    if (typeof capabilityKey !== "string" || !/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(capabilityKey)) return;
+    const aliases = [
+      sourceMetadata.intent,
+      template.intent,
+      template.name,
+      template.description,
+      ...(Array.isArray(sourceMetadata.capabilityAliases) ? sourceMetadata.capabilityAliases : []),
+    ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+    const safetyClass = [
+      "read_only",
+      "navigation",
+      "standard",
+      "mutating",
+      "sensitive",
+      "destructive",
+    ].includes(String(sourceMetadata.safetyClass ?? template.safetyClass))
+      ? String(sourceMetadata.safetyClass ?? template.safetyClass)
+      : "read_only";
+    const portabilityScope = ["global", "contextual", "device", "account"].includes(String(sourceMetadata.portabilityScope))
+      ? String(sourceMetadata.portabilityScope)
+      : "global";
+    const role = sourceMetadata.capabilityRole === "fragment" ? "fragment" : "complete";
+
+    await db.query(
+      `INSERT INTO workflow_capabilities (
+         capability_key, platform, description, aliases, safety_class, portability_scope, metadata
+       )
+       VALUES ($1, $2, $3, $4::text[], $5, $6, $7::jsonb)
+       ON CONFLICT (capability_key) DO UPDATE SET
+         aliases = ARRAY(
+           SELECT DISTINCT value
+           FROM unnest(workflow_capabilities.aliases || EXCLUDED.aliases) AS value
+           WHERE value IS NOT NULL AND BTRIM(value) <> ''
+         ),
+         description = COALESCE(workflow_capabilities.description, EXCLUDED.description),
+         metadata = workflow_capabilities.metadata || EXCLUDED.metadata,
+         updated_at = NOW()`,
+      [
+        capabilityKey,
+        template.platform,
+        template.description ?? null,
+        aliases,
+        safetyClass,
+        portabilityScope,
+        JSON.stringify({ syncedBy: "workflow_cache_persistence" }),
+      ],
+    );
+    await db.query(
+      `INSERT INTO workflow_capability_artifacts (
+         capability_key, cache_key, role, status, evidence
+       )
+       VALUES ($1, $2, $3, 'active', $4::jsonb)
+       ON CONFLICT (capability_key, cache_key) DO UPDATE SET
+         role = EXCLUDED.role,
+         status = 'active',
+         evidence = workflow_capability_artifacts.evidence || EXCLUDED.evidence,
+         updated_at = NOW()`,
+      [
+        capabilityKey,
+        cacheKey,
+        role,
+        JSON.stringify({ syncedBy: "workflow_cache_persistence" }),
+      ],
+    );
   }
 
   async getGeneratedPlanCache(
@@ -583,7 +662,7 @@ export class WorkflowService {
       });
     }
     const db = getDb();
-    await db.query(
+    const result = await db.query(
       `UPDATE generated_workflow_plan_cache
        SET source_metadata = source_metadata || jsonb_build_object(
              'capabilityKey', $2::text,
@@ -595,9 +674,19 @@ export class WorkflowService {
        WHERE cache_key = $1
          AND artifact_state = 'promoted'
          AND COALESCE(source_metadata ->> 'portable', 'true') <> 'false'
-         AND COALESCE(source_metadata ->> 'portabilityScope', 'global') NOT IN ('device', 'account', 'contextual')`,
+         AND COALESCE(source_metadata ->> 'portabilityScope', 'global') NOT IN ('device', 'account', 'contextual')
+       RETURNING *`,
       [cacheKey, capabilityKey]
     );
+    const row = result.rows[0];
+    if (row) {
+      await this.syncCapabilityCatalogWithDb(
+        db,
+        cacheKey,
+        row.workflow as WorkflowTemplate,
+        (row.source_metadata as Record<string, unknown>) ?? {},
+      );
+    }
   }
 
   async getGeneratedPlanCacheForRepair(

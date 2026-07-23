@@ -54,6 +54,7 @@ describe("generated workflow cache PostgreSQL contract", () => {
         "060_generated_workflow_artifact_lifecycle.sql",
         "088_app_runtime_profiles.sql",
         "090_edge_workflow_runtime_contract.sql",
+        "096_workflow_capability_catalog.sql",
       ]) {
         await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", migration), "utf8"));
       }

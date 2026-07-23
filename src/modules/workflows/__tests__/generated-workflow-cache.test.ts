@@ -119,7 +119,7 @@ describe("generated workflow plan cache service", () => {
 
     await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97");
 
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(4);
     expect(query.mock.calls[0][0]).toContain("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1");
     expect(query.mock.calls[0][1]).toEqual(["c02c59dfbe512562f8c65c97", compiledPlan.cacheKey]);
     const [sql, values] = query.mock.calls[1];
@@ -148,6 +148,8 @@ describe("generated workflow plan cache service", () => {
     expect(values[9]).toBe("1.0.0");
     expect(values[10]).toBe(JSON.stringify(workflow));
     expect(values[11]).toBe(JSON.stringify(compiledPlan));
+    expect(query.mock.calls[2][0]).toContain("INSERT INTO workflow_capabilities");
+    expect(query.mock.calls[3][0]).toContain("INSERT INTO workflow_capability_artifacts");
   });
 
   it("replaces an existing canonical requestKey with the freshly compiled artifact", async () => {
@@ -158,7 +160,7 @@ describe("generated workflow plan cache service", () => {
 
     await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97");
 
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(4);
     expect(query.mock.calls[0][0]).toContain("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1");
     expect(query.mock.calls[1][0]).toContain("INSERT INTO generated_workflow_plan_cache");
   });
@@ -178,7 +180,7 @@ describe("generated workflow plan cache service", () => {
       sourceMetadata: { source: "test_promotion" },
     });
 
-    expect(query).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(4);
     const [sql, values] = query.mock.calls[1];
     expect(sql).toContain("ON CONFLICT (cache_key) DO UPDATE");
     expect(values[0]).toBe(compiledPlan.cacheKey);

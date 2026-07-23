@@ -20,6 +20,12 @@ import {
 } from "./human-workflow-normalization";
 import { listRuntimeProfiles, loadRuntimeProfile } from "../app-mapping/runtime-profile";
 import { resolvePortableCapabilityArtifact } from "./portable-capability";
+import {
+  capabilityCatalogService,
+  formatCompilerRetrievalContext,
+  type CatalogSafetyClass,
+  type CompilerRetrievalContext,
+} from "./capability-catalog.service";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
@@ -315,8 +321,10 @@ function buildHumanWorkflowCompilePrompt(input: {
   target: HumanWorkflowTarget;
   appMap: AppMap | null;
   compilerPolicy: string;
+  retrievalContext: CompilerRetrievalContext;
+  safetyClass: HumanWorkflowSafetyClass;
 }): string {
-  const safetyClass = inferHumanWorkflowSafetyClass(input.goal);
+  const safetyClass = input.safetyClass;
   return [
     "Return JSON only. Generate one Phone Network WorkflowTemplate.",
     `Goal: ${input.goal}`,
@@ -334,6 +342,12 @@ function buildHumanWorkflowCompilePrompt(input: {
     "Prefer selector-first navigation. Coordinates, when required, must be normalized and followed by an explicit state check.",
     `Use params.packageName=${input.packageName} when the workflow explicitly opens the target app.`,
     safetyClass === "read_only" ? "Do not include mutating actions." : "Include only mutations explicitly requested by the user.",
+    "RETRIEVED KNOWLEDGE RULES:",
+    "- Reuse promoted knowledge below when compatible; generate only missing steps.",
+    "- Treat previous failures as prohibitions, not as candidate instructions.",
+    "- Never copy credentials, private text, or unverified values from retrieved artifacts.",
+    "- If retrieved knowledge conflicts with the runtime App Map or safety policy, prefer the runtime data and fail closed.",
+    `Structured retrieval context from PostgreSQL:\n${formatCompilerRetrievalContext(input.retrievalContext)}`,
     "checkpoint is type checkpoint, never an action.",
     "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
     "No intent or outputSchema fields.",
@@ -367,9 +381,30 @@ function inferHumanWorkflowSafetyClass(goal: string): HumanWorkflowSafetyClass {
   return "read_only";
 }
 
+function safetyRank(value: CatalogSafetyClass | HumanWorkflowSafetyClass | null): number {
+  switch (value) {
+    case "read_only": return 0;
+    case "navigation": return 1;
+    case "standard": return 2;
+    case "mutating": return 3;
+    case "sensitive": return 4;
+    case "destructive": return 5;
+    default: return 0;
+  }
+}
+
+function compilerSafetyClass(
+  inferred: HumanWorkflowSafetyClass,
+  recommended: CatalogSafetyClass | null,
+): HumanWorkflowSafetyClass {
+  if (!recommended || safetyRank(recommended) <= safetyRank(inferred)) return inferred;
+  if (recommended === "destructive") return "destructive";
+  return "standard";
+}
+
 function normalizeHumanWorkflowTemplateCandidate(
   rawWorkflow: unknown,
-  input: { platform: string; packageName: string; goal: string }
+  input: { platform: string; packageName: string; goal: string; safetyClass?: HumanWorkflowSafetyClass }
 ): unknown {
   if (!isRecord(rawWorkflow)) return rawWorkflow;
   const workflow: Record<string, unknown> = { ...rawWorkflow };
@@ -386,9 +421,11 @@ function normalizeHumanWorkflowTemplateCandidate(
   workflow.defaultVerificationStrategy = workflow.defaultVerificationStrategy === "local_with_screenshot"
     ? "local_with_screenshot"
     : "local_only";
-  workflow.safetyClass = workflow.safetyClass === "standard" || workflow.safetyClass === "destructive" || workflow.safetyClass === "read_only"
-    ? workflow.safetyClass
-    : inferHumanWorkflowSafetyClass(input.goal);
+  workflow.safetyClass = input.safetyClass ?? (
+    workflow.safetyClass === "standard" || workflow.safetyClass === "destructive" || workflow.safetyClass === "read_only"
+      ? workflow.safetyClass
+      : inferHumanWorkflowSafetyClass(input.goal)
+  );
   workflow.dataRetentionDays = typeof workflow.dataRetentionDays === "number" && workflow.dataRetentionDays >= 0
     ? workflow.dataRetentionDays
     : 7;
@@ -670,6 +707,14 @@ export class HumanWorkflowCompilerService {
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
     if (cached && humanWorkflowCacheUsable(cached, intent)) return readyFromCache(cached, target, requestKey, "cache");
 
+    const catalogContext = await capabilityCatalogService.retrieve(intent, target.account_platform);
+    if (catalogContext.fullArtifactCacheKey) {
+      const catalogArtifact = await workflowService.getGeneratedPlanCache(catalogContext.fullArtifactCacheKey);
+      if (catalogArtifact && humanWorkflowCacheUsable(catalogArtifact, intent)) {
+        return readyFromCache(catalogArtifact, target, requestKey, "cache");
+      }
+    }
+
     const portableCandidates = await workflowService.listPortableGeneratedPlanCacheCandidates(target.account_platform);
     const portableMatch = resolvePortableCapabilityArtifact(intent, target.account_platform, portableCandidates);
     if (portableMatch && humanWorkflowCacheUsable(portableMatch.record, intent)) {
@@ -807,6 +852,21 @@ export class HumanWorkflowCompilerService {
     target: HumanWorkflowTarget;
   }): Promise<HumanWorkflowCompileReady> {
     const platform = input.target.account_platform;
+    const retrievalContext = await capabilityCatalogService.retrieve(input.intent, platform);
+    if (retrievalContext.fullArtifactCacheKey) {
+      const cached = await workflowService.getGeneratedPlanCache(retrievalContext.fullArtifactCacheKey);
+      if (cached && humanWorkflowCacheUsable(cached, input.intent)) {
+        return readyFromCache(cached, input.target, input.requestKey, "cache");
+      }
+    }
+    const safetyClass = compilerSafetyClass(
+      inferHumanWorkflowSafetyClass(input.intent),
+      retrievalContext.recommendedSafetyClass,
+    );
+    const enforceRetrievedSafetyClass = retrievalContext.recommendedSafetyClass
+      && safetyRank(retrievalContext.recommendedSafetyClass) > safetyRank(inferHumanWorkflowSafetyClass(input.intent))
+      ? safetyClass
+      : undefined;
     const packageName = await humanWorkflowPackageName(platform);
     const appMap = await loadMap(packageName);
     const compilerPolicy = await loadHumanWorkflowCompilerPolicy();
@@ -817,6 +877,8 @@ export class HumanWorkflowCompilerService {
       target: input.target,
       appMap,
       compilerPolicy,
+      retrievalContext,
+      safetyClass,
     });
 
     const llmDebug: HumanWorkflowLlmDebug = {
@@ -847,7 +909,12 @@ export class HumanWorkflowCompilerService {
         disableThinking: true,
         onRawResponse: captureAttempt(1, HUMAN_WORKFLOW_INITIAL_MAX_TOKENS),
       });
-      let normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, { platform, packageName, goal: input.intent });
+      let normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, {
+        platform,
+        packageName,
+        goal: input.intent,
+        safetyClass: enforceRetrievedSafetyClass,
+      });
       let validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
       let template = validation.template;
       const correctiveReason = template
@@ -866,7 +933,12 @@ export class HumanWorkflowCompilerService {
           disableThinking: true,
           onRawResponse: captureAttempt(2, HUMAN_WORKFLOW_REPAIR_MAX_TOKENS),
         });
-        normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, { platform, packageName, goal: input.intent });
+        normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, {
+          platform,
+          packageName,
+          goal: input.intent,
+          safetyClass: enforceRetrievedSafetyClass,
+        });
         validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
         if (!validation.template) {
           throw Object.assign(new Error("corrective workflow failed validation"), {
@@ -885,7 +957,7 @@ export class HumanWorkflowCompilerService {
         });
       }
       assertHumanWorkflowMeaningful(template, input.intent);
-      const safetyClass = template.safetyClass ?? inferHumanWorkflowSafetyClass(input.intent);
+      const resolvedSafetyClass = template.safetyClass ?? safetyClass;
       let compiledPlan = compileGeneratedWorkflowTemplate(template);
       compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
       await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, input.requestKey, {
@@ -896,6 +968,16 @@ export class HumanWorkflowCompilerService {
         accountId: input.target.account_id,
         platform,
         compiledAt: new Date().toISOString(),
+        capabilityKey: retrievalContext.matchedCapabilityKey,
+        capabilityRole: "complete",
+        compilerRetrieval: {
+          capabilityKey: retrievalContext.matchedCapabilityKey,
+          capabilityScore: retrievalContext.matchedCapabilityScore,
+          promotedArtifactCount: retrievalContext.knowledge.promotedArtifacts.length,
+          promotedSelectorCount: retrievalContext.knowledge.uiGraph.selectors.length,
+          promotedTransitionCount: retrievalContext.knowledge.uiGraph.transitions.length,
+          avoidedFailureCount: retrievalContext.knowledge.avoid.length,
+        },
       });
       return {
         status: "ready",
@@ -904,7 +986,7 @@ export class HumanWorkflowCompilerService {
         cacheKey: compiledPlan.cacheKey,
         source: "llm",
         plan: humanWorkflowPlanPreview(template, compiledPlan),
-        safetyClass,
+        safetyClass: resolvedSafetyClass,
         platform,
         target: input.target,
         llmBudget: compiledPlan.llmBudget,
