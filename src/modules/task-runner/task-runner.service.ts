@@ -92,6 +92,12 @@ interface TaskRunnerResult extends TaskResult {
   };
 }
 
+interface RootFailure {
+  code: string;
+  message: string;
+  details: Record<string, unknown>;
+}
+
 interface GeneratedWorkflowRepairCandidate {
   cacheKey: string;
   requestKey: string;
@@ -148,6 +154,25 @@ function zeroTokenUsage(): TaskResult["tokenUsage"] {
     executor: { input: 0, output: 0, calls: 0 },
     verifier: { input: 0, output: 0, calls: 0 },
     total: 0,
+  };
+}
+
+function rootFailureFromResult(result: TaskRunnerResult): RootFailure | null {
+  if (result.success) return null;
+  const code = result.generatedWorkflow?.failureCode
+    ?? (result.generatedWorkflow?.cacheKey ? "GENERATED_WORKFLOW_EXECUTION_FAILED" : "TASK_EXECUTION_FAILED");
+  return {
+    code,
+    message: result.failReason ?? "Unknown error",
+    details: {
+      workflowId: result.generatedWorkflow?.workflowId ?? null,
+      cacheKey: result.generatedWorkflow?.cacheKey ?? null,
+      requestKey: result.generatedWorkflow?.requestKey ?? null,
+      failedStep: result.failedStep ?? null,
+      stepsCompleted: result.stepsCompleted,
+      totalSteps: result.totalSteps,
+      selfHealing: result.generatedWorkflow?.selfHealing ?? null,
+    },
   };
 }
 
@@ -418,6 +443,7 @@ async function completeAgencyWorkflowRun(task: TaskRow, result: TaskRunnerResult
   const db = getDb();
   const generatedWorkflow = result.generatedWorkflow ?? {};
   const output = result.output ?? generatedWorkflow.output ?? {};
+  const rootFailure = rootFailureFromResult(result);
   await db.query(
     `UPDATE agency_workflow_runs
      SET status = $2,
@@ -426,6 +452,9 @@ async function completeAgencyWorkflowRun(task: TaskRow, result: TaskRunnerResult
          token_usage = $5,
          recovery_requests = $6,
          error = $7,
+         root_error_code = $8,
+         root_error_message = $9,
+         root_error_details = $10,
          completed_at = NOW()
      WHERE id = $1`,
     [
@@ -436,6 +465,9 @@ async function completeAgencyWorkflowRun(task: TaskRow, result: TaskRunnerResult
       JSON.stringify(result.tokenUsage ?? zeroTokenUsage()),
       0,
       result.success ? null : result.failReason ?? "Unknown error",
+      rootFailure?.code ?? null,
+      rootFailure?.message ?? null,
+      JSON.stringify(rootFailure?.details ?? {}),
     ],
   );
 }
@@ -445,6 +477,17 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
   const cacheKey = result.generatedWorkflow?.cacheKey;
   if (!cacheKey) return;
   try {
+    const statePath = Array.isArray(result.output?.statePath)
+      ? result.output.statePath
+      : Array.isArray(result.output?._statePath)
+        ? result.output._statePath
+        : [];
+    const branchKey = statePath.length > 0
+      ? statePath.map((item: unknown) => {
+          const value = item && typeof item === "object" ? item as Record<string, unknown> : {};
+          return String(value.state ?? "unknown");
+        }).join(">")
+      : String(task.params?.branchKey ?? "default");
     await workflowService.recordGeneratedPlanCacheOutcome({
       cacheKey,
       success: result.success,
@@ -454,6 +497,12 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
       agencyWorkflowRunId: agencyWorkflowRunIdFromTask(task),
       stepsCompleted: result.stepsCompleted ?? null,
       totalSteps: result.totalSteps ?? null,
+      deviceId: task.device_id,
+      branchKey,
+      appVersion: typeof task.params?.appVersion === "string" ? task.params.appVersion : null,
+      androidVersion: typeof task.params?.androidVersion === "string" ? task.params.androidVersion : null,
+      recoveryCount: Number(result.generatedWorkflow?.selfHealing?.attempts ?? 0),
+      postconditionVerified: result.success,
     });
   } catch (err) {
     console.error("[task-runner] generated workflow learning update failed:", err);
@@ -741,9 +790,17 @@ async function failAgencyWorkflowRunWithError(task: TaskRow, error: Error): Prom
     `UPDATE agency_workflow_runs
      SET status = 'failed',
          error = $2,
+         root_error_code = $3,
+         root_error_message = $2,
+         root_error_details = $4,
          completed_at = NOW()
      WHERE id = $1`,
-    [runId, error.message],
+    [
+      runId,
+      error.message,
+      (error as Error & { code?: string }).code ?? "UNHANDLED_TASK_EXCEPTION",
+      JSON.stringify({ stack: error.stack?.split("\n").slice(0, 8).join("\n") ?? null }),
+    ],
   );
 }
 
@@ -957,6 +1014,7 @@ async function executeTask(task: TaskRow): Promise<void> {
       failedStep: result.failedStep,
       output: result.output,
       generatedWorkflow: result.generatedWorkflow,
+      rootFailure: rootFailureFromResult(result),
     };
     
     // Update task status
@@ -980,9 +1038,15 @@ async function executeTask(task: TaskRow): Promise<void> {
       console.log(`[task-runner] Task ${taskId.slice(0, 8)} completed ✓ (${result.stepsCompleted}/${result.totalSteps} steps)`);
     } else {
       const currentRetryCount = task.retry_count ?? 0;
-      const newRetryCount = task.params?.disableTaskRetry === true
+      // A deterministic generated-workflow failure invalidates/quarantines the
+      // exact artifact. Re-running the same task can only hide the root cause
+      // behind a later cache miss. Recovery must create a new explicit run.
+      const disableRetry = task.params?.disableTaskRetry === true
+        || task.routine === GENERATED_WORKFLOW_ROUTINE;
+      const newRetryCount = disableRetry
         ? config.maxRetries
         : currentRetryCount + 1;
+      const rootFailure = rootFailureFromResult(result);
       
       await db.query(`
         UPDATE tasks 
@@ -991,9 +1055,20 @@ async function executeTask(task: TaskRow): Promise<void> {
             updated_at = NOW(),
             result = $2, 
             error = $3,
-            retry_count = $4
+            retry_count = $4,
+            root_error_code = $5,
+            root_error_message = $6,
+            root_error_details = $7
         WHERE id = $1
-      `, [taskId, JSON.stringify(resultJson), result.failReason || "Unknown error", newRetryCount]);
+      `, [
+        taskId,
+        JSON.stringify(resultJson),
+        result.failReason || "Unknown error",
+        newRetryCount,
+        rootFailure?.code ?? null,
+        rootFailure?.message ?? null,
+        JSON.stringify(rootFailure?.details ?? {}),
+      ]);
       await completeAgencyWorkflowRun(task, result);
       if (task.routine !== GENERATED_WORKFLOW_ROUTINE) {
         await recordGeneratedWorkflowLearning(task, result);
@@ -1037,6 +1112,7 @@ async function executeTask(task: TaskRow): Promise<void> {
     // Mark as failed on exception, increment retry_count
     const currentRetryCount = task.retry_count ?? 0;
     const newRetryCount = task.params?.disableTaskRetry === true
+      || task.routine === GENERATED_WORKFLOW_ROUTINE
       ? config.maxRetries
       : currentRetryCount + 1;
     const error = err as Error;
@@ -1047,9 +1123,18 @@ async function executeTask(task: TaskRow): Promise<void> {
           completed_at = NOW(), 
           updated_at = NOW(),
           error = $2,
-          retry_count = $3
+          retry_count = $3,
+          root_error_code = $4,
+          root_error_message = $2,
+          root_error_details = $5
       WHERE id = $1
-    `, [taskId, error.message, newRetryCount]);
+    `, [
+      taskId,
+      error.message,
+      newRetryCount,
+      (error as Error & { code?: string }).code ?? "UNHANDLED_TASK_EXCEPTION",
+      JSON.stringify({ stack: error.stack?.split("\n").slice(0, 8).join("\n") ?? null }),
+    ]);
     await failAgencyWorkflowRunWithError(task, error);
     publishGeneratedWorkflowTaskEvent(task, "task_failed", { error: error.message });
     
@@ -1372,8 +1457,11 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
     }
     
     const status = taskResult.success ? "completed" : "failed";
+    const rootFailure = rootFailureFromResult(taskResult);
     await db.query(
-      `UPDATE tasks SET status = $1, completed_at = NOW(), result = $2, error = $3 WHERE id = $4`,
+      `UPDATE tasks SET status = $1, completed_at = NOW(), result = $2, error = $3,
+         root_error_code=$5, root_error_message=$6, root_error_details=$7
+       WHERE id = $4`,
       [
         status,
         JSON.stringify({
@@ -1384,9 +1472,13 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
           failedStep: taskResult.failedStep,
           output: taskResult.output,
           generatedWorkflow: taskResult.generatedWorkflow,
+          rootFailure,
         }),
         taskResult.success ? null : taskResult.failReason ?? "Unknown error",
         taskId,
+        rootFailure?.code ?? null,
+        rootFailure?.message ?? null,
+        JSON.stringify(rootFailure?.details ?? {}),
       ]
     );
     await completeAgencyWorkflowRun(task, taskResult);

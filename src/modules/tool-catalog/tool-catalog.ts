@@ -155,6 +155,38 @@ export const TOOL_CATALOG: ToolCatalogEntry[] = [
     notes: ["Useful for repair paths; must be guarded by screen-state checks."],
   }),
   device({
+    id: "observe_and_transition",
+    name: "Observe and transition",
+    category: "input",
+    description: "Poll ordered A11y selectors, execute one matching action, and require a declared postcondition.",
+    risk: "high",
+    sideEffects: ["ui_interaction"],
+    inputSchema: {
+      required: ["selectors", "postcondition"],
+      optional: ["pollIntervalMs", "settleMs", "allowAlreadySatisfied", "sourceState", "targetState"],
+    },
+    outputSchema: {
+      produces: ["verified", "selectorAttempts", "observationAttempts", "selectedIndex", "lastOutput"],
+    },
+    policy: policy({ readOnly: false, mutating: true, externalAction: true }),
+    notes: ["Application selectors and predicates are workflow data; success requires post-state evidence."],
+  }),
+  device({
+    id: "run_state_machine",
+    name: "Run UI state machine",
+    category: "workflow",
+    description: "Resolve UI state, execute exactly one declared transition, and re-observe until a goal state.",
+    risk: "high",
+    sideEffects: ["ui_interaction"],
+    inputSchema: {
+      required: ["stateVariable", "resolver", "goalStates", "transitions"],
+      optional: ["unknownStates", "maxIterations", "settleMs"],
+    },
+    outputSchema: { produces: ["goalReached", "finalState", "statePath", "transitions"] },
+    policy: policy({ readOnly: false, mutating: true, externalAction: true }),
+    notes: ["Unknown states and exhausted iteration budgets fail closed."],
+  }),
+  device({
     id: "type_text",
     name: "Type text",
     category: "input",

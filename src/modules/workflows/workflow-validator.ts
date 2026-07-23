@@ -251,10 +251,12 @@ const EDGE_WORKFLOW_V2_ACTIONS = [
   "intent_send",
   "keyevent",
   "long_press",
+  "observe_and_transition",
   "ocr_find_tap",
   "open_app",
   "press_key",
   "request_llm",
+  "run_state_machine",
   "screen_off",
   "screen_wake",
   "screenshot",
@@ -600,6 +602,83 @@ function validateGeneratedWorkflowStepInput(
         }
         if (params.captureScreenshot === true && params.screenshotVariable !== undefined) {
           errors.push(`${path}.params must not define both captureScreenshot and screenshotVariable`);
+        }
+      }
+      if (step.action === "observe_and_transition") {
+        const params = isRecord(step.params) ? step.params : {};
+        if (
+          !Array.isArray(params.selectors)
+          || params.selectors.length === 0
+          || params.selectors.some((selector) => !isRecord(selector))
+        ) {
+          errors.push(`${path}.params.selectors must be a non-empty array of selector objects`);
+        }
+        if (!isRecord(params.postcondition)) {
+          errors.push(`${path}.params.postcondition must be an object`);
+        } else {
+          const action = params.postcondition.action;
+          if (
+            typeof action !== "string"
+            || !(EDGE_WORKFLOW_V2_ACTIONS as readonly string[]).includes(action)
+            || ["observe_and_transition", "run_state_machine", "request_llm"].includes(action)
+          ) {
+            errors.push(`${path}.params.postcondition.action must be a non-recursive deterministic edge primitive`);
+          }
+          if (
+            typeof params.postcondition.operator !== "string"
+            || !["truthy", "falsy", "equals", "not_equals", "contains", "contains_ci", "not_contains", "not_contains_ci", "exists", "missing"]
+              .includes(params.postcondition.operator)
+          ) {
+            errors.push(`${path}.params.postcondition.operator is invalid`);
+          }
+        }
+      }
+      if (step.action === "run_state_machine") {
+        const params = isRecord(step.params) ? step.params : {};
+        if (typeof params.stateVariable !== "string" || !params.stateVariable.trim()) {
+          errors.push(`${path}.params.stateVariable is required`);
+        }
+        if (!isRecord(params.resolver) || !isRecord(params.resolver.outputs)) {
+          errors.push(`${path}.params.resolver.outputs must be an object`);
+        } else if (
+          typeof params.stateVariable === "string"
+          && !Object.prototype.hasOwnProperty.call(params.resolver.outputs, params.stateVariable)
+        ) {
+          errors.push(`${path}.params.resolver.outputs must define params.stateVariable`);
+        }
+        if (
+          !Array.isArray(params.goalStates)
+          || params.goalStates.length === 0
+          || params.goalStates.some((state) => typeof state !== "string" || !state.trim())
+        ) {
+          errors.push(`${path}.params.goalStates must be a non-empty array of state names`);
+        }
+        if (!isRecord(params.transitions) || Object.keys(params.transitions).length === 0) {
+          errors.push(`${path}.params.transitions must be a non-empty state-to-action object`);
+        } else {
+          for (const [state, transition] of Object.entries(params.transitions)) {
+            if (!isRecord(transition)) {
+              errors.push(`${path}.params.transitions.${state} must be an action object`);
+              continue;
+            }
+            if (transition.action === "run_state_machine") {
+              errors.push(`${path}.params.transitions.${state} cannot recursively invoke run_state_machine`);
+              continue;
+            }
+            validateGeneratedWorkflowStepInput(
+              { ...transition, type: "action", id: transition.id ?? `${String(step.id ?? "state_machine")}_${state}` },
+              `${path}.params.transitions.${state}`,
+              errors,
+              seenIds,
+              runtimeContract,
+            );
+          }
+        }
+        if (
+          params.maxIterations !== undefined
+          && (typeof params.maxIterations !== "number" || params.maxIterations < 1 || params.maxIterations > 100)
+        ) {
+          errors.push(`${path}.params.maxIterations must be between 1 and 100`);
         }
       }
       if (step.action === "semantic_tap") {

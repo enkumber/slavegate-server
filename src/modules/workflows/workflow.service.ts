@@ -92,6 +92,12 @@ export interface GeneratedWorkflowOutcomeInput {
   agencyWorkflowRunId?: string | null;
   stepsCompleted?: number | null;
   totalSteps?: number | null;
+  deviceId?: string | null;
+  branchKey?: string | null;
+  appVersion?: string | null;
+  androidVersion?: string | null;
+  recoveryCount?: number;
+  postconditionVerified?: boolean;
 }
 
 type Queryable = {
@@ -710,12 +716,55 @@ export class WorkflowService {
     const db = getDb();
     const successIncrement = input.success ? 1 : 0;
     const failureIncrement = input.success ? 0 : 1;
+    await db.query(
+        `INSERT INTO workflow_artifact_coverage
+           (cache_key, device_id, branch_key, app_version, android_version,
+            success_count, failure_count, recovery_count, postcondition_verified, last_evidence)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+         ON CONFLICT (
+           cache_key,
+           COALESCE(device_id, '00000000-0000-0000-0000-000000000000'::uuid),
+           branch_key, COALESCE(app_version,''), COALESCE(android_version,'')
+         ) DO UPDATE SET
+           success_count=workflow_artifact_coverage.success_count + EXCLUDED.success_count,
+           failure_count=workflow_artifact_coverage.failure_count + EXCLUDED.failure_count,
+           recovery_count=workflow_artifact_coverage.recovery_count + EXCLUDED.recovery_count,
+           postcondition_verified=workflow_artifact_coverage.postcondition_verified OR EXCLUDED.postcondition_verified,
+           last_evidence=EXCLUDED.last_evidence,
+           updated_at=NOW()`,
+        [
+          input.cacheKey, input.deviceId ?? null, input.branchKey ?? "default",
+          input.appVersion ?? null, input.androidVersion ?? null, successIncrement, failureIncrement,
+          Math.max(0, Number(input.recoveryCount ?? 0)),
+          input.success && input.postconditionVerified !== false,
+          JSON.stringify({
+            taskId: input.taskId ?? null,
+            workflowId: input.workflowId ?? null,
+            agencyWorkflowRunId: input.agencyWorkflowRunId ?? null,
+            reason: input.reason ?? null,
+          }),
+        ],
+      );
+    const coverage = await db.query(
+        `SELECT COUNT(DISTINCT device_id) FILTER (WHERE success_count > 0 AND postcondition_verified)::int AS distinct_devices,
+                COUNT(DISTINCT branch_key) FILTER (WHERE success_count > 0 AND postcondition_verified)::int AS distinct_branches,
+                COALESCE(SUM(failure_count),0)::int AS failures,
+                COALESCE(SUM(recovery_count),0)::int AS recoveries
+           FROM workflow_artifact_coverage WHERE cache_key=$1`,
+        [input.cacheKey],
+      );
+    const stats = coverage.rows[0] ?? {};
+    const globalCoverage = Number(stats.distinct_devices ?? 0) >= 2
+      && Number(stats.distinct_branches ?? 0) >= 2
+      && Number(stats.failures ?? 0) === 0
+      && Number(stats.recoveries ?? 0) === 0;
     const result = await db.query(
-      `/* recordGeneratedPlanCacheOutcome */
+        `/* recordGeneratedPlanCacheOutcome */
        UPDATE generated_workflow_plan_cache
        SET artifact_state = CASE
              WHEN $2::int = 1
               AND artifact_state IN ('candidate', 'promoted')
+              AND $10::boolean
               AND COALESCE(compiled_plan #>> '{llmBudget,happyPathRequests}', '') = '0'
               AND COALESCE(
                 compiled_plan #>> '{metadata,safetyClass}',
@@ -742,8 +791,14 @@ export class WorkflowService {
                'lastStepsCompleted', $8::int,
                'lastTotalSteps', $9::int,
                'lastEvaluatedAt', NOW(),
+               'validationStage', CASE
+                 WHEN $10::boolean THEN 'global_promoted'
+                 WHEN $2::int = 1 THEN 'device_validated'
+                 ELSE 'candidate'
+               END,
                'decision', CASE
-                 WHEN $2::int = 1 THEN 'auto_promote_or_keep'
+                 WHEN $2::int = 1 AND $10::boolean THEN 'auto_promote_or_keep'
+                 WHEN $2::int = 1 THEN 'retain_candidate_until_coverage'
                  WHEN artifact_state = 'promoted' THEN 'quarantine_promoted_after_failure'
                  WHEN artifact_state = 'candidate' THEN 'mark_candidate_failed'
                  ELSE 'record_learning_only'
@@ -763,6 +818,7 @@ export class WorkflowService {
         input.agencyWorkflowRunId ?? null,
         input.stepsCompleted ?? null,
         input.totalSteps ?? null,
+        globalCoverage,
       ]
     );
     if (result.rows.length === 0) return null;

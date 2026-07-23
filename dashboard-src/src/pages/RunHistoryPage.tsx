@@ -333,6 +333,36 @@ export function RunHistoryPage() {
                   <Badge value={selectedRun.feedback?.rating} palette={feedbackColors} />
                 </div>
               </div>
+              {((selectedRun.statePath?.length ?? 0) > 0 || selectedRun.rootError?.code || selectedRun.lastObservedState) && (
+                <div style={{ border: "1px solid #243244", borderRadius: "6px", padding: "12px", marginBottom: "14px", background: "#0b111a" }}>
+                  <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 600, marginBottom: "8px" }}>State execution</div>
+                  {(selectedRun.statePath?.length ?? 0) > 0 && (
+                    <div style={{ color: "#93c5fd", fontSize: "12px", lineHeight: 1.5, overflowWrap: "anywhere" }}>
+                      {selectedRun.statePath!.map((item) => String(item.state ?? "unknown")).join(" → ")}
+                    </div>
+                  )}
+                  {selectedRun.lastObservedState != null && (
+                    <div style={{ color: "#94a3b8", fontSize: "11px", marginTop: "6px" }}>
+                      Last observed: {String(selectedRun.lastObservedState)}
+                    </div>
+                  )}
+                  {selectedRun.rootError?.code && (
+                    <div style={{ color: "#fca5a5", fontSize: "12px", marginTop: "8px" }}>
+                      Primary cause: {selectedRun.rootError.code} · {selectedRun.rootError.message}
+                    </div>
+                  )}
+                  {selectedRun.learningDelta && Object.keys(selectedRun.learningDelta).length > 0 && (
+                    <div style={{ color: "#86efac", fontSize: "11px", marginTop: "8px" }}>
+                      Learning delta: {Object.entries(selectedRun.learningDelta).map(([key, value]) => `${key}=${String(value)}`).join(" · ")}
+                    </div>
+                  )}
+                  {(selectedRun.transitionTelemetry?.length ?? 0) > 0 && (
+                    <div style={{ color: "#94a3b8", fontSize: "11px", marginTop: "8px" }}>
+                      Transition attempts: {selectedRun.transitionTelemetry!.length}
+                    </div>
+                  )}
+                </div>
+              )}
               <div style={{ border: "1px solid #222", borderRadius: "6px", padding: "12px", marginBottom: "14px", background: "#101010" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", marginBottom: "10px" }}>
                   <div>

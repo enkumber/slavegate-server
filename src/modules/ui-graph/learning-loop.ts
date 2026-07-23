@@ -22,6 +22,7 @@ export interface PromotionDecision {
   ready: boolean;
   autoPromotable: boolean;
   requiredSuccesses: number;
+  validationStage: "candidate" | "device_validated" | "cohort_validated" | "global_promoted";
   blockers: string[];
 }
 
@@ -56,8 +57,10 @@ export function candidateEnvironmentKey(context: UiGraphContext): string {
   return [
     context.appId,
     context.appVersion ?? "unknown",
+    context.androidVersion ?? "unknown",
     context.locale ?? "unknown",
     context.deviceClass ?? "unknown",
+    context.branchKey ?? "default",
   ].join("|");
 }
 
@@ -68,13 +71,29 @@ export function promotionDecision(input: {
   successCount: number;
   failureCount: number;
   stateVerified: boolean;
+  distinctDevices?: number;
+  distinctBranches?: number;
+  distinctEnvironments?: number;
+  recoveryCount?: number;
 }): PromotionDecision {
   const requiredSuccesses = 5;
-  // Repeated state-verified executions are the safety gate. Portable
-  // environment diversity is telemetry, never a cross-device prerequisite.
+  const distinctDevices = input.distinctDevices ?? 0;
+  const distinctBranches = input.distinctBranches ?? 0;
+  const distinctEnvironments = input.distinctEnvironments ?? 0;
+  const validationStage = input.successCount < requiredSuccesses || !input.stateVerified
+    ? "candidate"
+    : distinctDevices < 2
+      ? "device_validated"
+      : distinctBranches < 2 || distinctEnvironments < 2
+        ? "cohort_validated"
+        : "global_promoted";
   const blockers: string[] = [];
   if (input.successCount < requiredSuccesses) blockers.push("insufficient_successes");
   if (!input.stateVerified) blockers.push("destination_state_not_verified");
+  if (distinctDevices < 2) blockers.push("insufficient_device_coverage");
+  if (distinctBranches < 2) blockers.push("insufficient_branch_coverage");
+  if (distinctEnvironments < 2) blockers.push("insufficient_environment_coverage");
+  if ((input.recoveryCount ?? 0) > 0) blockers.push("recovery_observed_requires_clean_validation");
   // Automatic reuse is deliberately a clean 5/5 gate. A candidate with any
   // failed or unverified execution remains available for manual review, but
   // is never promoted into the shared fast path automatically.
@@ -83,9 +102,10 @@ export function promotionDecision(input: {
   if (input.type === "state") blockers.push("state_candidates_require_manual_review");
   if (input.type === "recovery_rule") blockers.push("recovery_rules_require_manual_materialization");
   return {
-    ready: blockers.filter((item) => !item.startsWith("manual_review") && !item.endsWith("require_manual_review") && item !== "recovery_rules_require_manual_materialization").length === 0,
+    ready: input.successCount >= requiredSuccesses && input.stateVerified,
     autoPromotable: blockers.length === 0,
     requiredSuccesses,
+    validationStage,
     blockers,
   };
 }
@@ -135,16 +155,54 @@ export class UiGraphLearningLoop {
       await client.query("BEGIN");
       await client.query(
         `INSERT INTO ui_graph_candidate_validations
-           (candidate_id, device_id, app_version, locale, device_class, success, state_verified, evidence)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+           (candidate_id, device_id, app_version, locale, device_class, success, state_verified, evidence,
+            android_version, app_build, branch_key, initial_state_key, final_state_key, recovery_count)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
         [input.candidateId, input.context.deviceId ?? null, input.context.appVersion ?? null, input.context.locale ?? null,
-          input.context.deviceClass ?? null, input.success, input.stateVerified, JSON.stringify(input.evidence ?? {})],
+          input.context.deviceClass ?? null, input.success, input.stateVerified, JSON.stringify(input.evidence ?? {}),
+          input.context.androidVersion ?? null, input.context.appBuild ?? null, input.context.branchKey ?? "default",
+          input.context.initialStateKey ?? null, input.context.finalStateKey ?? null,
+          Math.max(0, Number(input.context.recoveryCount ?? 0))],
+      );
+      await client.query(
+        `INSERT INTO ui_graph_candidate_coverage
+           (candidate_id, device_id, app_version, android_version, locale, device_class, branch_key,
+            initial_state_key, final_state_key, success_count, failure_count, recovery_count,
+            state_verified, last_evidence)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         ON CONFLICT (
+           candidate_id,
+           COALESCE(device_id, '00000000-0000-0000-0000-000000000000'::uuid),
+           COALESCE(app_version, ''), COALESCE(android_version, ''),
+           COALESCE(device_class, ''), branch_key
+         ) DO UPDATE SET
+           initial_state_key=COALESCE(EXCLUDED.initial_state_key, ui_graph_candidate_coverage.initial_state_key),
+           final_state_key=COALESCE(EXCLUDED.final_state_key, ui_graph_candidate_coverage.final_state_key),
+           success_count=ui_graph_candidate_coverage.success_count + EXCLUDED.success_count,
+           failure_count=ui_graph_candidate_coverage.failure_count + EXCLUDED.failure_count,
+           recovery_count=ui_graph_candidate_coverage.recovery_count + EXCLUDED.recovery_count,
+           state_verified=ui_graph_candidate_coverage.state_verified OR EXCLUDED.state_verified,
+           last_evidence=EXCLUDED.last_evidence,
+           last_observed_at=NOW()`,
+        [
+          input.candidateId, input.context.deviceId ?? null, input.context.appVersion ?? null,
+          input.context.androidVersion ?? null, input.context.locale ?? null, input.context.deviceClass ?? null,
+          input.context.branchKey ?? "default", input.context.initialStateKey ?? null,
+          input.context.finalStateKey ?? null, input.success && input.stateVerified ? 1 : 0,
+          input.success && input.stateVerified ? 0 : 1, Math.max(0, Number(input.context.recoveryCount ?? 0)),
+          input.success && input.stateVerified, JSON.stringify(input.evidence ?? {}),
+        ],
       );
       const updated = await client.query(
         `UPDATE ui_graph_learning_candidates c SET
            success_count = stats.success_count,
            failure_count = stats.failure_count,
            distinct_context_count = stats.distinct_context_count,
+           validation_stage = CASE
+             WHEN stats.success_count < 5 OR NOT stats.state_verified THEN 'candidate'
+             WHEN stats.distinct_devices < 2 THEN 'device_validated'
+             WHEN stats.distinct_branches < 2 OR stats.distinct_environments < 2 OR stats.recovery_count > 0 THEN 'cohort_validated'
+             ELSE 'global_promoted' END,
            confidence = LEAST(0.99, GREATEST(0.05,
              CASE WHEN stats.success_count + stats.failure_count = 0 THEN c.confidence
                   ELSE stats.success_count::double precision / (stats.success_count + stats.failure_count) END)),
@@ -160,6 +218,10 @@ export class UiGraphLearningLoop {
                   COUNT(*) FILTER (WHERE success AND state_verified)::int AS success_count,
                   COUNT(*) FILTER (WHERE NOT success OR NOT state_verified)::int AS failure_count,
                   COUNT(DISTINCT COALESCE(app_version,'unknown') || '|' || COALESCE(locale,'unknown') || '|' || COALESCE(device_class,'unknown'))::int AS distinct_context_count,
+                  COUNT(DISTINCT device_id) FILTER (WHERE success AND state_verified)::int AS distinct_devices,
+                  COUNT(DISTINCT COALESCE(branch_key,'default')) FILTER (WHERE success AND state_verified)::int AS distinct_branches,
+                  COUNT(DISTINCT COALESCE(app_version,'unknown') || '|' || COALESCE(android_version,'unknown') || '|' || COALESCE(device_class,'unknown')) FILTER (WHERE success AND state_verified)::int AS distinct_environments,
+                  COALESCE(SUM(recovery_count) FILTER (WHERE success AND state_verified),0)::int AS recovery_count,
                   BOOL_OR(success AND state_verified) AS state_verified
            FROM ui_graph_candidate_validations WHERE candidate_id = $1 GROUP BY candidate_id
          ) stats
@@ -189,6 +251,8 @@ export class UiGraphLearningLoop {
       }
       await client.query("COMMIT");
       const row = updatedCandidate;
+      const globalCoverage = row.validation_stage === "global_promoted";
+      const cohortCoverage = globalCoverage || row.validation_stage === "cohort_validated";
       return promotionDecision({
         type: row.candidate_type,
         discoveryMethod: row.discovery_method,
@@ -196,6 +260,10 @@ export class UiGraphLearningLoop {
         successCount: Number(row.success_count),
         failureCount: Number(row.failure_count),
         stateVerified: input.stateVerified,
+        distinctDevices: cohortCoverage ? 2 : row.validation_stage === "device_validated" ? 1 : 0,
+        distinctBranches: globalCoverage ? 2 : 1,
+        distinctEnvironments: globalCoverage ? 2 : 1,
+        recoveryCount: Number(input.context.recoveryCount ?? 0),
       });
     } catch (error) {
       await client.query("ROLLBACK");
@@ -217,16 +285,26 @@ export class UiGraphLearningLoop {
         return candidate.promoted_entity_id;
       }
       const validationStats = await client.query(
-        `SELECT BOOL_OR(success AND state_verified) AS state_verified FROM ui_graph_candidate_validations WHERE candidate_id = $1`,
+        `SELECT BOOL_OR(success AND state_verified) AS state_verified,
+                COUNT(DISTINCT device_id) FILTER (WHERE success AND state_verified)::int AS distinct_devices,
+                COUNT(DISTINCT COALESCE(branch_key,'default')) FILTER (WHERE success AND state_verified)::int AS distinct_branches,
+                COUNT(DISTINCT COALESCE(app_version,'unknown') || '|' || COALESCE(android_version,'unknown') || '|' || COALESCE(device_class,'unknown')) FILTER (WHERE success AND state_verified)::int AS distinct_environments,
+                COALESCE(SUM(recovery_count) FILTER (WHERE success AND state_verified),0)::int AS recovery_count
+           FROM ui_graph_candidate_validations WHERE candidate_id = $1`,
         [candidateId],
       );
+      const validation = validationStats.rows[0] ?? {};
       const decision = promotionDecision({
         type: candidate.candidate_type,
         discoveryMethod: candidate.discovery_method,
         safetyClass: candidate.safety_class,
         successCount: Number(candidate.success_count),
         failureCount: Number(candidate.failure_count),
-        stateVerified: Boolean(validationStats.rows[0]?.state_verified),
+        stateVerified: Boolean(validation.state_verified),
+        distinctDevices: Number(validation.distinct_devices ?? 0),
+        distinctBranches: Number(validation.distinct_branches ?? 0),
+        distinctEnvironments: Number(validation.distinct_environments ?? 0),
+        recoveryCount: Number(validation.recovery_count ?? 0),
       });
       if (!decision.ready) throw new Error(`UI_GRAPH_CANDIDATE_NOT_READY:${decision.blockers.join(",")}`);
       if (allowAutomatic && !decision.autoPromotable) throw new Error(`UI_GRAPH_CANDIDATE_MANUAL_REVIEW_REQUIRED:${decision.blockers.join(",")}`);
@@ -271,7 +349,7 @@ export class UiGraphLearningLoop {
       }
 
       await client.query(
-        `UPDATE ui_graph_learning_candidates SET status='promoted', promoted_entity_id=$2,
+        `UPDATE ui_graph_learning_candidates SET status='promoted', validation_stage='global_promoted', promoted_entity_id=$2,
            promoted_at=NOW(), updated_at=NOW() WHERE id=$1`,
         [candidateId, entityId],
       );

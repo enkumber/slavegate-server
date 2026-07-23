@@ -995,6 +995,12 @@ export interface WorkflowRun {
   feedback: WorkflowRunFeedback | null;
   timeline?: WorkflowRunTimelineStep[];
   stepCandidates?: WorkflowRunStepCandidate[];
+  rootError?: { code: string | null; message: string | null; details: Record<string, unknown> };
+  statePath?: Array<Record<string, unknown>>;
+  transitionTelemetry?: Array<Record<string, unknown>>;
+  lastObservedState?: unknown;
+  learningDelta?: Record<string, unknown>;
+  lastEvidence?: Record<string, unknown>;
 }
 
 // ─── API ──────────────────────────────────────────────────────────────────────

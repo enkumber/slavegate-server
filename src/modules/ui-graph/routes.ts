@@ -5,6 +5,8 @@ import { describeUiGraphRuntimeFlags } from "./config";
 import { uiGraphLearningLoop } from "./learning-loop";
 import { uiGraphRepository } from "./repository";
 import { materializeAllLegacyAppMaps } from "./materializer";
+import { evaluateCanaryGate, recordCanaryResult } from "./canary.service";
+import { persistStateSnapshot, replaySnapshotCorpus } from "./snapshot-replay.service";
 
 const router = Router();
 const MODES = new Set(["disabled", "shadow", "enforced"]);
@@ -115,14 +117,119 @@ router.post("/candidates/:id/validate", requireAdminAuth, async (req: Request, r
       appId: String(req.body?.appId ?? "unknown"),
       deviceId: typeof req.body?.deviceId === "string" ? req.body.deviceId : null,
       appVersion: typeof req.body?.appVersion === "string" ? req.body.appVersion : null,
+      appBuild: typeof req.body?.appBuild === "string" ? req.body.appBuild : null,
+      androidVersion: typeof req.body?.androidVersion === "string" ? req.body.androidVersion : null,
       locale: typeof req.body?.locale === "string" ? req.body.locale : null,
       deviceClass: typeof req.body?.deviceClass === "string" ? req.body.deviceClass : null,
+      branchKey: typeof req.body?.branchKey === "string" ? req.body.branchKey : "default",
+      initialStateKey: typeof req.body?.initialStateKey === "string" ? req.body.initialStateKey : null,
+      finalStateKey: typeof req.body?.finalStateKey === "string" ? req.body.finalStateKey : null,
+      recoveryCount: Number.isFinite(req.body?.recoveryCount) ? Math.max(0, req.body.recoveryCount) : 0,
     },
     success: req.body.success,
     stateVerified: req.body.stateVerified,
     evidence: req.body?.evidence && typeof req.body.evidence === "object" ? req.body.evidence : {},
   });
   res.json({ ok: true, data: { candidateId: req.params.id, decision } });
+});
+
+router.post("/snapshots", requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const data = await persistStateSnapshot({
+      appId: String(req.body?.appId ?? ""),
+      stateKey: String(req.body?.stateKey ?? ""),
+      uiTree: String(req.body?.uiTree ?? ""),
+      appVersion: typeof req.body?.appVersion === "string" ? req.body.appVersion : null,
+      androidVersion: typeof req.body?.androidVersion === "string" ? req.body.androidVersion : null,
+      locale: typeof req.body?.locale === "string" ? req.body.locale : null,
+      deviceClass: typeof req.body?.deviceClass === "string" ? req.body.deviceClass : null,
+      deviceId: typeof req.body?.deviceId === "string" ? req.body.deviceId : null,
+      workflowId: typeof req.body?.workflowId === "string" ? req.body.workflowId : null,
+      branchKey: typeof req.body?.branchKey === "string" ? req.body.branchKey : null,
+      source: req.body?.source,
+      metadata: req.body?.metadata && typeof req.body.metadata === "object" ? req.body.metadata : {},
+    });
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: (error as Error).message });
+  }
+});
+
+router.post("/snapshots/replay", requireAdminAuth, async (req: Request, res: Response) => {
+  if (!Array.isArray(req.body?.rules) || !req.body?.machine || typeof req.body.machine !== "object") {
+    return res.status(400).json({ ok: false, error: "rules and machine are required" });
+  }
+  const data = await replaySnapshotCorpus({
+    appId: String(req.body?.appId ?? ""),
+    rules: req.body.rules,
+    machine: req.body.machine,
+  });
+  res.status(data.failed > 0 ? 409 : 200).json({ ok: data.failed === 0, data });
+});
+
+router.post("/canary-runs", requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const data = await recordCanaryResult({
+      cohortId: String(req.body?.cohortId ?? ""),
+      cacheKey: String(req.body?.cacheKey ?? ""),
+      deviceId: String(req.body?.deviceId ?? ""),
+      workflowId: typeof req.body?.workflowId === "string" ? req.body.workflowId : null,
+      branchKey: typeof req.body?.branchKey === "string" ? req.body.branchKey : "default",
+      status: req.body?.status,
+      postconditionVerified: req.body?.postconditionVerified === true,
+      recoveryCount: Number(req.body?.recoveryCount ?? 0),
+      evidence: req.body?.evidence && typeof req.body.evidence === "object" ? req.body.evidence : {},
+    });
+    res.json({ ok: true, data });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: (error as Error).message });
+  }
+});
+
+router.get("/canary-cohorts", requireAdminAuth, async (_req: Request, res: Response) => {
+  const result = await getDb().query(
+    `SELECT c.*,
+            COUNT(r.id)::int AS run_count,
+            COUNT(r.id) FILTER (WHERE r.status='completed' AND r.postcondition_verified)::int AS verified_count,
+            COUNT(r.id) FILTER (WHERE r.status='failed')::int AS failed_count
+       FROM workflow_canary_cohorts c
+       LEFT JOIN workflow_canary_runs r ON r.cohort_id=c.id
+      GROUP BY c.id ORDER BY c.updated_at DESC`,
+  );
+  res.json({ ok: true, data: result.rows });
+});
+
+router.post("/canary-cohorts", requireAdminAuth, async (req: Request, res: Response) => {
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  const platform = typeof req.body?.platform === "string" ? req.body.platform.trim() : "";
+  if (!name || !platform) return res.status(400).json({ ok: false, error: "name and platform are required" });
+  const result = await getDb().query(
+    `INSERT INTO workflow_canary_cohorts
+       (name, platform, safety_classes, required_distinct_devices, required_distinct_branches, config)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (name) DO UPDATE SET
+       platform=EXCLUDED.platform, safety_classes=EXCLUDED.safety_classes,
+       required_distinct_devices=EXCLUDED.required_distinct_devices,
+       required_distinct_branches=EXCLUDED.required_distinct_branches,
+       config=EXCLUDED.config, updated_at=NOW()
+     RETURNING *`,
+    [
+      name, platform, JSON.stringify(Array.isArray(req.body?.safetyClasses) ? req.body.safetyClasses : ["read_only", "navigation"]),
+      Math.max(1, Number(req.body?.requiredDistinctDevices ?? 2)),
+      Math.max(1, Number(req.body?.requiredDistinctBranches ?? 2)),
+      JSON.stringify(req.body?.config && typeof req.body.config === "object" ? req.body.config : {}),
+    ],
+  );
+  res.json({ ok: true, data: result.rows[0] });
+});
+
+router.get("/canary-cohorts/:cohortId/gate/:cacheKey", requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const data = await evaluateCanaryGate(req.params.cacheKey, req.params.cohortId);
+    res.status(data.ready ? 200 : 409).json({ ok: data.ready, data });
+  } catch (error) {
+    res.status(404).json({ ok: false, error: (error as Error).message });
+  }
 });
 
 router.put("/flags/:scopeType/:scopeValue", requireAdminAuth, async (req: Request, res: Response) => {

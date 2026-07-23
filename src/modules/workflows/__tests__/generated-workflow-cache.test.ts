@@ -384,7 +384,7 @@ describe("generated workflow plan cache service", () => {
     expect(values).toEqual([row.cache_key, ["promoted", "candidate"]]);
   });
 
-  it("auto-promotes a successful candidate artifact and records learning metadata", async () => {
+  it("records successful artifact learning and applies the coverage promotion gate", async () => {
     const row = cacheRow({
       artifact_state: "promoted",
       source_metadata: {
@@ -410,7 +410,7 @@ describe("generated workflow plan cache service", () => {
     });
 
     expect(result?.artifactState).toBe("promoted");
-    const [sql, values] = query.mock.calls[0];
+    const [sql, values] = query.mock.calls[2];
     expect(sql).toContain("recordGeneratedPlanCacheOutcome");
     expect(sql).toContain("WHEN $2::int = 1");
     expect(sql).toContain("THEN 'promoted'");
@@ -425,6 +425,7 @@ describe("generated workflow plan cache service", () => {
       "44444444-4444-4444-8444-444444444444",
       5,
       5,
+      false,
     ]);
   });
 
@@ -454,7 +455,7 @@ describe("generated workflow plan cache service", () => {
     });
 
     expect(result?.artifactState).toBe("quarantined");
-    const [sql, values] = query.mock.calls[0];
+    const [sql, values] = query.mock.calls[2];
     expect(sql).toContain("WHEN $3::int = 1 AND artifact_state = 'promoted'");
     expect(sql).toContain("THEN 'quarantined'");
     expect(values[1]).toBe(0);

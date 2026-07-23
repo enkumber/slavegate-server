@@ -156,8 +156,20 @@ function rowToAgencyWorkflowRun(row: Record<string, unknown>): Record<string, un
       : null,
   };
   if (row.include_timeline === true) {
+    const checkpoint = normalizeJsonObject(row.workflow_checkpoint);
+    const checkpointVariables = normalizeJsonObject(checkpoint.variables);
     output.artifactState = row.artifact_state ?? null;
     output.workflowStatus = row.workflow_status ?? null;
+    output.rootError = {
+      code: row.root_error_code ?? row.task_root_error_code ?? null,
+      message: row.root_error_message ?? row.task_root_error_message ?? row.error ?? null,
+      details: row.root_error_details ?? row.task_root_error_details ?? {},
+    };
+    output.statePath = normalizeJsonArray(checkpointVariables._statePath);
+    output.transitionTelemetry = normalizeJsonArray(checkpointVariables._transitionTelemetry);
+    output.lastObservedState = checkpointVariables._lastObservedState ?? null;
+    output.learningDelta = normalizeJsonObject(checkpointVariables._learningDelta);
+    output.lastEvidence = normalizeJsonObject(checkpointVariables._stateReplaySnapshot);
     output.timeline = buildAgencyWorkflowTimeline(row);
     output.stepCandidates = normalizeJsonArray(row.step_candidates).map(rowToStepCandidate);
   }
@@ -1200,6 +1212,9 @@ function agencyWorkflowRunSelectSql(where: string): string {
                  w.total_steps AS workflow_total_steps,
                  w.checkpoint AS workflow_checkpoint,
                  w.error AS workflow_error,
+                 t.root_error_code AS task_root_error_code,
+                 t.root_error_message AS task_root_error_message,
+                 t.root_error_details AS task_root_error_details,
                  g.artifact_state,
                  g.workflow AS cached_workflow,
                  g.compiled_plan AS cached_compiled_plan

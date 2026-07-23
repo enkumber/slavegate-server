@@ -13,6 +13,31 @@ function collectActions(steps: WorkflowStep[], output: string[] = []): string[] 
   for (const step of steps) {
     if (step.type === "action") {
       output.push(step.action);
+      if (step.action === "observe_and_transition") {
+        const postcondition = step.params?.postcondition;
+        if (postcondition && typeof postcondition === "object" && !Array.isArray(postcondition)) {
+          const action = (postcondition as Record<string, unknown>).action;
+          if (typeof action === "string") output.push(action);
+        }
+      }
+      if (step.action === "run_state_machine") {
+        const transitions = step.params?.transitions;
+        if (transitions && typeof transitions === "object" && !Array.isArray(transitions)) {
+          for (const transition of Object.values(transitions as Record<string, unknown>)) {
+            if (!transition || typeof transition !== "object" || Array.isArray(transition)) continue;
+            const action = (transition as Record<string, unknown>).action;
+            if (typeof action === "string") output.push(action);
+            const postcondition = (transition as Record<string, unknown>).params;
+            if (postcondition && typeof postcondition === "object" && !Array.isArray(postcondition)) {
+              const nested = (postcondition as Record<string, unknown>).postcondition;
+              if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+                const nestedAction = (nested as Record<string, unknown>).action;
+                if (typeof nestedAction === "string") output.push(nestedAction);
+              }
+            }
+          }
+        }
+      }
       if (step.onFailureSteps) collectActions(step.onFailureSteps, output);
     } else if (step.type === "wait" && step.until) {
       output.push(step.until.action);

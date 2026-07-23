@@ -4,6 +4,7 @@ import type { ActionStep, WorkflowStep, WorkflowTemplate } from "../workflows/ty
 import { uiGraphLearningLoop } from "./learning-loop";
 import { uiGraphRepository } from "./repository";
 import type { UiGraphContext, UiSafetyClass } from "./types";
+import { persistStateSnapshot } from "./snapshot-replay.service";
 
 export interface EdgeLearningBinding {
   bindingId: string;
@@ -276,6 +277,27 @@ function evidenceFromVariables(variables: Record<string, unknown> | undefined): 
   });
 }
 
+function runtimeContext(
+  variables: Record<string, unknown> | undefined,
+  fallback: Partial<UiGraphContext>,
+): UiGraphContext {
+  const raw = object(variables?._runtimeContext);
+  return {
+    appId: String(raw.appId ?? fallback.appId ?? "android"),
+    appVersion: typeof raw.appVersion === "string" ? raw.appVersion : null,
+    appBuild: typeof raw.appBuild === "string" ? raw.appBuild : null,
+    androidVersion: typeof raw.androidVersion === "string" ? raw.androidVersion : null,
+    locale: typeof raw.locale === "string" ? raw.locale : null,
+    deviceClass: typeof raw.deviceClass === "string" ? raw.deviceClass : null,
+    deviceId: fallback.deviceId ?? null,
+    workflowId: fallback.workflowId ?? null,
+    branchKey: typeof raw.branchKey === "string" ? raw.branchKey : null,
+    initialStateKey: typeof raw.initialStateKey === "string" ? raw.initialStateKey : null,
+    finalStateKey: typeof variables?._lastObservedState === "string" ? variables._lastObservedState : null,
+    recoveryCount: finite(raw.recoveryCount) ? raw.recoveryCount : 0,
+  };
+}
+
 async function claimReceipt(
   workflowId: string,
   bindingIdValue: string,
@@ -389,6 +411,14 @@ export async function reconcileEdgeLearningStatus(input: {
   error?: string;
   variables?: Record<string, unknown>;
 }): Promise<void> {
+  const delta = {
+    reused: 0,
+    created: 0,
+    validated: 0,
+    promoted: 0,
+    degraded: 0,
+    snapshotsCaptured: 0,
+  };
   const bindings = bindingsFromVariables(input.variables);
   const byId = new Map(bindings.map((item) => [item.bindingId, item]));
   const successfulBindings = new Set<string>();
@@ -398,6 +428,7 @@ export async function reconcileEdgeLearningStatus(input: {
     if (!binding || reported.verificationStepId !== binding.verificationStepId) continue;
     successfulBindings.add(binding.bindingId);
     const candidateId = await candidateForEvidence(binding, input, reported);
+    delta.validated++;
     const evidence = {
       source: "edge_workflow_hybrid",
       workflowId: input.workflowId,
@@ -417,6 +448,124 @@ export async function reconcileEdgeLearningStatus(input: {
       checkpoint: reported.checkpoint,
       evidence,
     });
+  }
+
+  const transitionTelemetry = Array.isArray(input.variables?._transitionTelemetry)
+    ? input.variables?._transitionTelemetry as unknown[]
+    : [];
+  for (const raw of transitionTelemetry) {
+    const transition = object(raw);
+    if (transition.postconditionVerified !== true) continue;
+    const sourceState = typeof transition.sourceState === "string" ? transition.sourceState : "";
+    const targetState = typeof transition.targetState === "string" ? transition.targetState : "";
+    const action = typeof transition.action === "string" ? transition.action : "";
+    if (!sourceState || !targetState || !action) continue;
+    const transitionKey = `${sourceState}__${action}__${targetState}`;
+    const bindingKey = `transition:${transitionKey}:${Number(transition.iteration ?? 0)}`;
+    const context = runtimeContext(input.variables, {
+      appId: String(object(input.variables?._runtimeContext).appId ?? "android"),
+      deviceId: input.deviceId,
+      workflowId: input.workflowId,
+    });
+    context.branchKey = typeof transition.branchKey === "string" ? transition.branchKey : transitionKey;
+    context.initialStateKey = sourceState;
+    context.finalStateKey = targetState;
+    const states = await getDb().query(
+      `SELECT id, state_key FROM ui_graph_states WHERE app_id=$1 AND state_key = ANY($2::text[])`,
+      [context.appId, [sourceState, targetState]],
+    );
+    const stateIds = new Map(states.rows.map((row) => [String(row.state_key), String(row.id)]));
+    if (!stateIds.has(sourceState) || !stateIds.has(targetState)) {
+      for (const stateKey of [sourceState, targetState]) {
+        if (stateIds.has(stateKey)) continue;
+        await uiGraphLearningLoop.observe({
+          appId: context.appId,
+          type: "state",
+          payload: { stateKey, kind: "screen", observedFromStateMachine: true },
+          evidence: { workflowId: input.workflowId, transition },
+          context,
+          discoveryMethod: "ui_tree",
+          confidence: 0.75,
+          safetyClass: "read_only",
+        });
+        delta.created++;
+      }
+      continue;
+    }
+    const candidateId = await uiGraphLearningLoop.observe({
+      appId: context.appId,
+      type: "transition",
+      sourceStateId: stateIds.get(sourceState),
+      targetStateId: stateIds.get(targetState),
+      payload: {
+        transitionKey,
+        action: { action },
+        preconditions: { state: sourceState },
+        postconditions: { state: targetState },
+        cost: 1,
+      },
+      evidence: { workflowId: input.workflowId, telemetry: transition },
+      context,
+      discoveryMethod: "ui_tree",
+      confidence: 0.85,
+      safetyClass: "navigation",
+    });
+    const claimed = await claimReceipt(
+      input.workflowId,
+      bindingKey,
+      Number(transition.iteration ?? 0),
+      candidateId,
+      "success",
+      transition,
+    );
+    if (!claimed) {
+      delta.reused++;
+      continue;
+    }
+    delta.created++;
+    const decision = await uiGraphLearningLoop.validate({
+      candidateId,
+      context,
+      success: true,
+      stateVerified: true,
+      evidence: { workflowId: input.workflowId, transition },
+    });
+    delta.validated++;
+    const flags = await uiGraphRepository.resolveFlags(context);
+    if (flags.autoPromotion && decision.autoPromotable) {
+      await uiGraphLearningLoop.promote(
+        candidateId,
+        "edge_state_machine_auto_promotion",
+        "Cross-device and cross-branch state transition coverage verified",
+        true,
+      );
+      delta.promoted++;
+    }
+  }
+
+  const snapshot = object(input.variables?._stateReplaySnapshot);
+  if (typeof snapshot.uiTree === "string" && snapshot.uiTree.trim()
+      && typeof snapshot.stateKey === "string" && snapshot.stateKey.trim()) {
+    const context = runtimeContext(input.variables, {
+      appId: String(snapshot.appId ?? "android"),
+      deviceId: input.deviceId,
+      workflowId: input.workflowId,
+    });
+    await persistStateSnapshot({
+      appId: context.appId,
+      stateKey: snapshot.stateKey,
+      uiTree: snapshot.uiTree,
+      appVersion: context.appVersion,
+      androidVersion: context.androidVersion,
+      locale: context.locale,
+      deviceClass: context.deviceClass,
+      deviceId: input.deviceId,
+      workflowId: input.workflowId,
+      branchKey: typeof snapshot.branchKey === "string" ? snapshot.branchKey : context.branchKey,
+      source: "edge_workflow",
+      metadata: { status: input.status, uiTreeHash: snapshot.uiTreeHash ?? null },
+    });
+    delta.snapshotsCaptured++;
   }
 
   for (const binding of bindings) {
@@ -443,5 +592,7 @@ export async function reconcileEdgeLearningStatus(input: {
       checkpoint: binding.verifiedStepIndex,
       evidence,
     });
+    delta.validated++;
   }
+  if (input.variables) input.variables._learningDelta = delta;
 }

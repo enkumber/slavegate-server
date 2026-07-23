@@ -26,13 +26,17 @@ describe("UI graph learning policy", () => {
     expect(first).toBe(second);
   });
 
-  it("requires repeated validation but not multiple devices for VLM discoveries", () => {
+  it("requires repeated validation and cross-device/branch coverage", () => {
     const blocked = promotionDecision({ type: "selector", discoveryMethod: "vlm", safetyClass: "navigation", successCount: 4, failureCount: 0, stateVerified: true });
     expect(blocked.autoPromotable).toBe(false);
     expect(blocked.blockers).toContain("insufficient_successes");
-    const ready = promotionDecision({ type: "selector", discoveryMethod: "vlm", safetyClass: "navigation", successCount: 5, failureCount: 0, stateVerified: true });
+    const ready = promotionDecision({
+      type: "selector", discoveryMethod: "vlm", safetyClass: "navigation",
+      successCount: 5, failureCount: 0, stateVerified: true,
+      distinctDevices: 2, distinctBranches: 2, distinctEnvironments: 2,
+    });
     expect(ready.autoPromotable).toBe(true);
-    expect(ready.blockers).not.toContain("insufficient_distinct_contexts");
+    expect(ready.validationStage).toBe("global_promoted");
   });
 
   it("requires five clean validations for every automatically promoted selector", () => {
@@ -40,21 +44,55 @@ describe("UI graph learning policy", () => {
     expect(blocked.autoPromotable).toBe(false);
     expect(blocked.requiredSuccesses).toBe(5);
 
-    const ready = promotionDecision({ type: "selector", discoveryMethod: "ui_tree", safetyClass: "read_only", successCount: 5, failureCount: 0, stateVerified: true });
+    const ready = promotionDecision({
+      type: "selector", discoveryMethod: "ui_tree", safetyClass: "read_only",
+      successCount: 5, failureCount: 0, stateVerified: true,
+      distinctDevices: 2, distinctBranches: 2, distinctEnvironments: 2,
+    });
     expect(ready.autoPromotable).toBe(true);
   });
 
   it("never auto-promotes a candidate with a failed validation", () => {
-    const decision = promotionDecision({ type: "selector", discoveryMethod: "ui_tree", safetyClass: "navigation", successCount: 5, failureCount: 1, stateVerified: true });
+    const decision = promotionDecision({
+      type: "selector", discoveryMethod: "ui_tree", safetyClass: "navigation",
+      successCount: 5, failureCount: 1, stateVerified: true,
+      distinctDevices: 2, distinctBranches: 2, distinctEnvironments: 2,
+    });
     expect(decision.autoPromotable).toBe(false);
     expect(decision.ready).toBe(true);
     expect(decision.blockers).toContain("manual_review_required_after_failed_validation");
   });
 
   it("never auto-promotes mutating knowledge", () => {
-    const decision = promotionDecision({ type: "transition", discoveryMethod: "ui_tree", safetyClass: "mutating", successCount: 10, failureCount: 0, stateVerified: true });
+    const decision = promotionDecision({
+      type: "transition", discoveryMethod: "ui_tree", safetyClass: "mutating",
+      successCount: 10, failureCount: 0, stateVerified: true,
+      distinctDevices: 2, distinctBranches: 2, distinctEnvironments: 2,
+    });
     expect(decision.ready).toBe(true);
     expect(decision.autoPromotable).toBe(false);
     expect(decision.blockers).toContain("manual_review_required_for_safety_class");
+  });
+
+  it("keeps clean single-device knowledge at device_validated", () => {
+    const decision = promotionDecision({
+      type: "selector", discoveryMethod: "ui_tree", safetyClass: "navigation",
+      successCount: 5, failureCount: 0, stateVerified: true,
+      distinctDevices: 1, distinctBranches: 1, distinctEnvironments: 1,
+    });
+    expect(decision.ready).toBe(true);
+    expect(decision.autoPromotable).toBe(false);
+    expect(decision.validationStage).toBe("device_validated");
+    expect(decision.blockers).toContain("insufficient_device_coverage");
+  });
+
+  it("requires a clean run before global promotion after recovery", () => {
+    const decision = promotionDecision({
+      type: "transition", discoveryMethod: "ui_tree", safetyClass: "navigation",
+      successCount: 8, failureCount: 0, stateVerified: true,
+      distinctDevices: 2, distinctBranches: 2, distinctEnvironments: 2, recoveryCount: 1,
+    });
+    expect(decision.autoPromotable).toBe(false);
+    expect(decision.blockers).toContain("recovery_observed_requires_clean_validation");
   });
 });

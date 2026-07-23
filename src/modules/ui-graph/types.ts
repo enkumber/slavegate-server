@@ -10,6 +10,8 @@ export type TargetResolutionMethod = "direct" | "resource_id" | "content_descrip
 export interface UiGraphContext {
   appId: string;
   appVersion?: string | null;
+  appBuild?: string | null;
+  androidVersion?: string | null;
   locale?: string | null;
   deviceClass?: string | null;
   deviceId?: string | null;
@@ -19,6 +21,10 @@ export interface UiGraphContext {
   screenHeight?: number | null;
   currentStateId?: string | null;
   currentVariantId?: string | null;
+  branchKey?: string | null;
+  initialStateKey?: string | null;
+  finalStateKey?: string | null;
+  recoveryCount?: number | null;
 }
 
 export interface UiStateVariantDefinition {

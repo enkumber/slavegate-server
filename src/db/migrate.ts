@@ -44,6 +44,7 @@ function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("app_runtime_profiles") ||
     fileName.includes("edge_workflow_runtime_contract") ||
     fileName.includes("edge_workflow_learning_receipts") ||
+    fileName.includes("verified_ui_state_machine_runtime") ||
     fileName.includes("human_workflow_compiler_policy") ||
     fileName.includes("workflow_capability_catalog") ||
     fileName.includes("phone_network_incidents_and_audits");
