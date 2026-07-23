@@ -608,6 +608,40 @@ describe("task-runner generated_workflow routine", () => {
     });
   });
 
+  it("accepts authoritative edge completion that arrives after a provisional ACK timeout", async () => {
+    vi.useFakeTimers();
+    process.env.GENERATED_WORKFLOW_LATE_TERMINAL_GRACE_MS = "10000";
+    try {
+      const cached = cacheRecord();
+      let completed = false;
+      mockTaskDb(task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID }));
+      mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+      mocks.getWorkflow.mockImplementation(async () => completed
+        ? completedWorkflow({ ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS, screenState: "reddit_home_feed" })
+        : {
+            ...completedWorkflow(),
+            status: "failed",
+            currentStep: 0,
+            error: "Edge workflow did not acknowledge WORKFLOW_START within 20000ms",
+          });
+
+      const pending = executeTaskNow(TASK_ID);
+      await vi.advanceTimersByTimeAsync(2_001);
+      completed = true;
+      await vi.advanceTimersByTimeAsync(2_001);
+      const result = await pending;
+
+      expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ success: true });
+      expect(mocks.recordGeneratedPlanCacheOutcome).toHaveBeenCalledWith(expect.objectContaining({
+        success: true,
+      }));
+    } finally {
+      delete process.env.GENERATED_WORKFLOW_LATE_TERMINAL_GRACE_MS;
+      vi.useRealTimers();
+    }
+  });
+
   it("cancels a workflow that remains queued until the PNQ wait timeout", async () => {
     vi.useFakeTimers();
     try {

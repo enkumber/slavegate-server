@@ -147,6 +147,10 @@ const GENERATED_WORKFLOW_ACTIVE_WARN_MS = 180_000;
 const GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS = Number(
   process.env.GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS ?? GENERATED_WORKFLOW_ACTIVE_WARN_MS,
 );
+const GENERATED_WORKFLOW_LATE_TERMINAL_GRACE_MS = Number(
+  process.env.GENERATED_WORKFLOW_LATE_TERMINAL_GRACE_MS ?? 30_000,
+);
+const EDGE_WORKFLOW_ACK_TIMEOUT_ERROR_PREFIX = "Edge workflow did not acknowledge WORKFLOW_START";
 
 function zeroTokenUsage(): TaskResult["tokenUsage"] {
   return {
@@ -372,6 +376,7 @@ function checkpointVariables(workflow: WorkflowRecord | null): Record<string, un
 async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<WorkflowRecord> {
   const queuedAt = Date.now();
   let runningAt: number | null = null;
+  let lateTerminalGraceStartedAt: number | null = null;
   let queueCancellationLostRace = false;
   let latest: WorkflowRecord | null = null;
 
@@ -380,8 +385,25 @@ async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<Workfl
     if (!latest) {
       throw new Error(`Generated workflow ${workflowId} not found after dispatch`);
     }
-    if (latest.status === "completed" || latest.status === "failed" || latest.status === "cancelled") {
+    if (latest.status === "completed" || latest.status === "cancelled") {
       return latest;
+    }
+    if (latest.status === "failed") {
+      const isProvisionalAckTimeout = latest.error?.startsWith(EDGE_WORKFLOW_ACK_TIMEOUT_ERROR_PREFIX) === true;
+      if (!isProvisionalAckTimeout) return latest;
+
+      lateTerminalGraceStartedAt ??= Date.now();
+      if (Date.now() - lateTerminalGraceStartedAt >= GENERATED_WORKFLOW_LATE_TERMINAL_GRACE_MS) {
+        return latest;
+      }
+      // A WORKFLOW_START receipt can be lost while the authenticated device is
+      // already executing. Android terminal evidence is authoritative and may
+      // arrive after the short ACK watchdog. Keep the task attached to this
+      // workflow during a bounded grace period so a late completed checkpoint
+      // cannot be misclassified as an artifact failure and quarantine good
+      // knowledge.
+      await sleep(GENERATED_WORKFLOW_FINAL_POLL_INTERVAL_MS);
+      continue;
     }
 
     if (latest.status === "queued" && !queueCancellationLostRace) {
