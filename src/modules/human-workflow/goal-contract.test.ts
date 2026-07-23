@@ -108,4 +108,15 @@ describe("data-driven workflow goal contracts", () => {
     };
     expect(workflowGoalContractReason(workflow)).toContain("read_only");
   });
+
+  it("rejects malformed LLM goal contracts without throwing", () => {
+    const workflow = candidate();
+    workflow.goalContract = {
+      obligations: ["search", "extract"],
+      outputSchema: { required: ["label"] },
+    } as unknown as WorkflowGoalContract;
+
+    expect(() => workflowGoalContractReason(workflow)).not.toThrow();
+    expect(workflowGoalContractReason(workflow)).toContain("malformed");
+  });
 });

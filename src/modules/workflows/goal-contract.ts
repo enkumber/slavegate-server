@@ -146,9 +146,20 @@ export function workflowGoalContractReason(
   workflow: WorkflowTemplate,
   expectedContract?: WorkflowGoalContract | null,
 ): string | null {
-  const contract = expectedContract ?? workflow.goalContract;
-  if (!contract) return null;
-  if (expectedContract && JSON.stringify(workflow.goalContract) !== JSON.stringify(expectedContract)) {
+  const rawContract = expectedContract ?? workflow.goalContract;
+  if (!rawContract) return null;
+  const contract = parseWorkflowGoalContract(rawContract);
+  if (!contract) return "workflow.goalContract is malformed or does not use Goal Contract v1";
+  const parsedExpectedContract = expectedContract
+    ? parseWorkflowGoalContract(expectedContract)
+    : null;
+  if (expectedContract && !parsedExpectedContract) {
+    return "capability goal contract is malformed or does not use Goal Contract v1";
+  }
+  if (
+    parsedExpectedContract
+    && JSON.stringify(parseWorkflowGoalContract(workflow.goalContract)) !== JSON.stringify(parsedExpectedContract)
+  ) {
     return "workflow.goalContract does not match the capability contract selected from the catalog";
   }
   if (
