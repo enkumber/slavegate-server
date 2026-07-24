@@ -31,6 +31,7 @@ import {
 } from "./compiler-control-plane.service";
 import { workflowSegmentComposer } from "../workflow-segments/composer";
 import type { ComposedWorkflow } from "../workflow-segments/types";
+import { segmentBuildJobService, type SegmentBuildReason } from "../segment-builder/segment-build-job.service";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
@@ -102,7 +103,19 @@ export type HumanWorkflowCompileAccepted = {
   source: "llm";
 };
 
-export type HumanWorkflowCompileResult = HumanWorkflowCompileReady | HumanWorkflowCompileAccepted;
+export type HumanWorkflowSegmentBuildAccepted = {
+  status: "building_segment";
+  requestKey: string;
+  segmentBuildJobId: string;
+  retryAfterMs: number;
+  source: "agent";
+  reason: SegmentBuildReason;
+};
+
+export type HumanWorkflowCompileResult =
+  | HumanWorkflowCompileReady
+  | HumanWorkflowCompileAccepted
+  | HumanWorkflowSegmentBuildAccepted;
 
 export function computeHumanWorkflowRequestKey(deviceId: string, accountId: string | null | undefined, intent: string): string {
   const accountKey = accountId && accountId.trim().length > 0 ? accountId : "device";
@@ -501,12 +514,23 @@ export class HumanWorkflowCompilerService {
       controlPlane.retrievalPolicy,
     );
     if (!catalogContext.matchedCapabilityKey || !catalogContext.goalContract) {
-      throw Object.assign(new Error("No PostgreSQL capability and Goal Contract cover this intent"), {
-        status: 422,
-        code: "HUMAN_WORKFLOW_CAPABILITY_CONTRACT_REQUIRED",
-        retryable: true,
-        nextAction: "configure_capability",
+      const job = await segmentBuildJobService.createOrGet({
+        requestKey,
+        deviceId: input.deviceId,
+        accountId: input.accountId ?? null,
+        intent,
+        platform: target.account_platform,
+        reason: "capability_missing",
       });
+      segmentBuildJobService.dispatchInBackground(job);
+      return {
+        status: "building_segment",
+        requestKey,
+        segmentBuildJobId: job.id,
+        retryAfterMs: ASYNC_COMPILE_RETRY_AFTER_MS,
+        source: "agent",
+        reason: "capability_missing",
+      };
     }
     const composed = await workflowSegmentComposer.compose({
       capabilityKey: catalogContext.matchedCapabilityKey,
@@ -518,12 +542,24 @@ export class HumanWorkflowCompilerService {
     });
     if (composed) return readyFromComposition(composed, target);
     if (catalogContext.matchedCapabilityMetadata?.compositionEnabled === true) {
-      throw Object.assign(new Error("Capability requires a promoted PostgreSQL workflow composition"), {
-        status: 422,
-        code: "WORKFLOW_COMPOSITION_REQUIRED",
-        retryable: true,
-        nextAction: "promote_composition",
+      const job = await segmentBuildJobService.createOrGet({
+        requestKey,
+        deviceId: input.deviceId,
+        accountId: input.accountId ?? null,
+        intent,
+        platform: target.account_platform,
+        capabilityKey: catalogContext.matchedCapabilityKey,
+        reason: "composition_missing",
       });
+      segmentBuildJobService.dispatchInBackground(job);
+      return {
+        status: "building_segment",
+        requestKey,
+        segmentBuildJobId: job.id,
+        retryAfterMs: ASYNC_COMPILE_RETRY_AFTER_MS,
+        source: "agent",
+        reason: "composition_missing",
+      };
     }
 
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
@@ -565,6 +601,26 @@ export class HumanWorkflowCompilerService {
       return ready;
     }
 
+    const segmentJob = await segmentBuildJobService.createOrGet({
+      requestKey,
+      deviceId: input.deviceId,
+      accountId: input.accountId ?? null,
+      intent,
+      platform: target.account_platform,
+      capabilityKey: catalogContext.matchedCapabilityKey,
+      reason: "segment_missing",
+    });
+    segmentBuildJobService.dispatchInBackground(segmentJob);
+    return {
+      status: "building_segment",
+      requestKey,
+      segmentBuildJobId: segmentJob.id,
+      retryAfterMs: ASYNC_COMPILE_RETRY_AFTER_MS,
+      source: "agent",
+      reason: "segment_missing",
+    };
+
+    /*
     let existingJob = await humanWorkflowCompileJobService.getByRequestKey(requestKey);
     if (existingJob?.status === "ready" && existingJob.result) {
       const jobCacheKey = cacheKeyFromCompileJob(existingJob);
@@ -592,6 +648,7 @@ export class HumanWorkflowCompilerService {
       retryAfterMs: ASYNC_COMPILE_RETRY_AFTER_MS,
       source: "llm",
     };
+    */
   }
 
   async getCompileJob(id: string): Promise<HumanWorkflowCompileJobRecord | null> {

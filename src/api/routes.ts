@@ -183,7 +183,7 @@ function generatedWorkflowCacheResult(cacheKey?: string, requestKey?: string): "
   return requestKey && !cacheKey ? "canonical_hit" : "cache_hit";
 }
 
-async function queueHumanAgencyWorkflowRun(input: {
+export async function queueHumanAgencyWorkflowRun(input: {
   requestKey: string;
   cacheKey?: string;
   target: HumanWorkflowTarget;
@@ -900,7 +900,7 @@ router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
       accountId,
       intent,
     });
-    if (data.status === "compiling") {
+    if (data.status === "compiling" || data.status === "building_segment") {
       return res.status(202).json({ ok: true, data });
     }
     const { runtimeInputs: _privateRuntimeInputs, ...publicData } = data;
@@ -1231,13 +1231,18 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
         intent,
       });
       if (ready.status !== "ready") {
+        const pendingId = ready.status === "building_segment"
+          ? ready.segmentBuildJobId
+          : ready.compileJobId;
         return res.status(409).json({
           ok: false,
           code: "COMPILE_NOT_READY",
           error: "compiled workflow is not ready",
-          compileJobId: ready.compileJobId,
+          compileJobId: ready.status === "compiling" ? ready.compileJobId : undefined,
+          segmentBuildJobId: ready.status === "building_segment" ? ready.segmentBuildJobId : undefined,
           requestKey: useRequestKey,
-          nextAction: "poll_compile_job",
+          nextAction: ready.status === "building_segment" ? "poll_segment_build_job" : "poll_compile_job",
+          pendingId,
         });
       }
       compiled = ready;

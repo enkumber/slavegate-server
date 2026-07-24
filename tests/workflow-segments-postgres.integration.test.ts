@@ -56,6 +56,7 @@ describe("generic workflow segment PostgreSQL migration", () => {
       "099_db_authoritative_workflow_semantics.sql",
       "100_postgres_compiler_control_plane.sql",
       "101_generic_workflow_segments.sql",
+      "102_segment_builder_agent_jobs.sql",
     ].map((name) => fs.readFileSync(path.join(repoRoot, "src/db/migrations", name), "utf8"));
     for (const migration of migrations) {
       await pool.query(migration);
@@ -78,6 +79,22 @@ describe("generic workflow segment PostgreSQL migration", () => {
       "workflow_segment_coverage",
       "workflow_control_plane_events",
     ]));
+    const builderTables = await pool.query(
+      `SELECT table_name
+       FROM information_schema.tables
+       WHERE table_schema = current_schema()
+         AND table_name IN (
+           'segment_build_jobs',
+           'segment_build_job_events',
+           'segment_builder_dispatchers'
+         )
+       ORDER BY table_name`,
+    );
+    expect(builderTables.rows.map((row) => row.table_name)).toEqual([
+      "segment_build_job_events",
+      "segment_build_jobs",
+      "segment_builder_dispatchers",
+    ]);
 
     const migrationText = migrations.join("\n").toLowerCase();
     for (const forbidden of ["chrome", "reddit", "instagram", "google.com", "ciprianneculai"]) {

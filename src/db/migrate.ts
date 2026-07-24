@@ -50,6 +50,8 @@ function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("data_driven_goal_contracts") ||
     fileName.includes("db_authoritative_workflow_semantics") ||
     fileName.includes("postgres_compiler_control_plane") ||
+    fileName.includes("generic_workflow_segments") ||
+    fileName.includes("segment_builder_agent_jobs") ||
     fileName.includes("phone_network_incidents_and_audits");
 }
 

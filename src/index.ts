@@ -41,6 +41,8 @@ import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.serv
 import configRoutes, { seedSystemPrompts } from "./api/config-routes";
 import uiGraphRoutes from "./modules/ui-graph/routes";
 import { describeUiGraphRuntimeFlags } from "./modules/ui-graph/config";
+import segmentBuilderRoutes from "./modules/segment-builder/routes";
+import { ensureSegmentBuilderAgentToken } from "./modules/segment-builder/segment-build-job.service";
 
 const PORT = parseInt(process.env.PORT ?? "21211", 10);
 
@@ -62,6 +64,7 @@ async function bootstrap(): Promise<void> {
 
   // ─── Auto-migrate: ensure all schema + migrations are applied ─────────────
   await runMigrations();
+  await ensureSegmentBuilderAgentToken();
   console.log("[server] Migrations applied.");
   const uiGraphFlags = describeUiGraphRuntimeFlags();
   console.log(`[server] UI graph runtime mode=${uiGraphFlags.mode} selectorFirst=${uiGraphFlags.selectorFirst} graphRuntime=${uiGraphFlags.graphRuntime} aiRecovery=${uiGraphFlags.aiRecovery} candidateLearning=${uiGraphFlags.candidateLearning} autoPromotion=${uiGraphFlags.autoPromotion}.`);
@@ -177,6 +180,7 @@ async function bootstrap(): Promise<void> {
   }));
 
   app.use(express.json({ limit: "1mb" }));
+  app.use("/api/segment-builder", segmentBuilderRoutes);
   app.use("/api/device-tokens", deviceTokenRouter);
   app.use("/api", apiRouter);
   app.use("/api/workflow-runs", workflowRunRouter);
