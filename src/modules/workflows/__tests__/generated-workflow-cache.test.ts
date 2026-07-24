@@ -119,6 +119,8 @@ describe("generated workflow plan cache service", () => {
 
     await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97", {
       capabilityKey: "reddit_home_smoke",
+      portable: true,
+      portabilityScope: "global",
     });
 
     expect(query).toHaveBeenCalledTimes(4);
@@ -203,6 +205,8 @@ describe("generated workflow plan cache service", () => {
     await service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97", {
       capabilityKey: "reddit_account_health_scan",
       source: "test",
+      portable: true,
+      portabilityScope: "global",
     });
 
     const [, values] = query.mock.calls[1];

@@ -1,11 +1,6 @@
 import { getDb } from "../../db/client";
 import type { WorkflowGoalContract, WorkflowTemplate } from "../workflows/types";
-import { portableCapabilityTokens } from "./portable-capability";
 import { parseWorkflowGoalContract } from "../workflows/goal-contract";
-
-const MAX_CONTEXT_ARTIFACTS = 4;
-const MAX_CONTEXT_UI_ITEMS = 10;
-const MAX_CONTEXT_FAILURES = 4;
 
 export type CatalogSafetyClass =
   | "read_only"
@@ -14,6 +9,19 @@ export type CatalogSafetyClass =
   | "mutating"
   | "sensitive"
   | "destructive";
+
+export interface CatalogRetrievalPolicy {
+  maxContextArtifacts: number;
+  maxContextUiItems: number;
+  maxContextFailures: number;
+  maxRankedCapabilities: number;
+  maxArtifactRows: number;
+  maxFailedArtifactRows: number;
+  maxArtifactSteps: number;
+  artifactParamAllowlist: string[];
+  uiGraphSafetyAllowlist: CatalogSafetyClass[];
+  artifactSafetyAllowlist: Record<CatalogSafetyClass, CatalogSafetyClass[]>;
+}
 
 export interface WorkflowCapabilityRecord {
   capabilityKey: string;
@@ -75,79 +83,6 @@ function jsonObject(value: unknown): Record<string, unknown> {
   return {};
 }
 
-function normalizedPlatform(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-function capabilitySimilarity(queryTokens: string[], descriptorTokens: string[]): number {
-  if (queryTokens.length === 0 || descriptorTokens.length === 0) return 0;
-  const query = new Set(queryTokens);
-  const descriptor = new Set(descriptorTokens);
-  let shared = 0;
-  for (const token of query) {
-    if (descriptor.has(token)) shared += 1;
-  }
-  if (shared < 2) return 0;
-  const queryCoverage = shared / query.size;
-  const descriptorCoverage = shared / descriptor.size;
-  return (2 * queryCoverage * descriptorCoverage) / (queryCoverage + descriptorCoverage);
-}
-
-function capabilityDescriptorSets(capability: WorkflowCapabilityRecord): string[][] {
-  return [
-    capability.capabilityKey,
-    capability.description ?? "",
-    ...capability.aliases,
-  ]
-    .map(portableCapabilityTokens)
-    .filter((tokens) => tokens.length > 0);
-}
-
-export function rankWorkflowCapabilities(
-  intent: string,
-  platform: string,
-  capabilities: WorkflowCapabilityRecord[],
-): RankedWorkflowCapability[] {
-  const queryTokens = portableCapabilityTokens(intent);
-  const query = new Set(queryTokens);
-  const wantedPlatform = normalizedPlatform(platform);
-  return capabilities
-    .filter((capability) =>
-      capability.portabilityScope === "global"
-      && (normalizedPlatform(capability.platform) === wantedPlatform || normalizedPlatform(capability.platform) === "android")
-      && capability.requiredTerms.every((term) => portableCapabilityTokens(term).every((token) => query.has(token)))
-      && capability.forbiddenTerms.every((term) => portableCapabilityTokens(term).every((token) => !query.has(token)))
-    )
-    .map((capability) => ({
-      capability,
-      score: Math.max(0, ...capabilityDescriptorSets(capability).map((tokens) => capabilitySimilarity(queryTokens, tokens))),
-    }))
-    .filter(({ capability, score }) => score >= capability.minMatchScore)
-    .sort((a, b) => b.score - a.score || b.capability.updatedAt.localeCompare(a.capability.updatedAt));
-}
-
-export function selectUnambiguousCapability(
-  ranked: RankedWorkflowCapability[],
-): RankedWorkflowCapability | null {
-  const best = ranked[0];
-  if (!best) return null;
-  const runnerUp = ranked[1];
-  if (runnerUp && best.score - runnerUp.score < best.capability.ambiguityMargin) return null;
-  return best;
-}
-
-function safetyRank(value: unknown): number {
-  switch (value) {
-    case "read_only": return 0;
-    case "navigation": return 1;
-    case "standard": return 2;
-    case "mutating": return 3;
-    case "sensitive": return 4;
-    case "destructive": return 5;
-    default: return Number.POSITIVE_INFINITY;
-  }
-}
-
 function artifactSafety(row: Record<string, unknown>): string | null {
   const workflow = jsonObject(row.workflow);
   const compiledPlan = jsonObject(row.compiled_plan);
@@ -157,29 +92,23 @@ function artifactSafety(row: Record<string, unknown>): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function artifactAllowedByCapability(row: Record<string, unknown>, capability: WorkflowCapabilityRecord): boolean {
+function artifactAllowedByCapability(
+  row: Record<string, unknown>,
+  capability: WorkflowCapabilityRecord,
+  policy: CatalogRetrievalPolicy,
+): boolean {
   const safety = artifactSafety(row);
-  return safety !== null && safetyRank(safety) <= safetyRank(capability.safetyClass);
+  return safety !== null
+    && (policy.artifactSafetyAllowlist[capability.safetyClass] ?? []).includes(safety as CatalogSafetyClass);
 }
 
-const SAFE_PARAM_KEYS = new Set([
-  "action",
-  "contentDescription",
-  "key",
-  "packageName",
-  "resourceId",
-  "semanticId",
-  "target",
-  "uri",
-]);
-
-function compactStep(value: unknown): Record<string, unknown> | null {
+function compactStep(value: unknown, policy: CatalogRetrievalPolicy): Record<string, unknown> | null {
   const step = jsonObject(value);
   if (!step.id && !step.action && !step.type) return null;
   const params = jsonObject(step.params);
   const safeParams = Object.fromEntries(
     Object.entries(params).filter(([key, item]) =>
-      SAFE_PARAM_KEYS.has(key)
+      policy.artifactParamAllowlist.includes(key)
       && (typeof item === "string" || typeof item === "number" || typeof item === "boolean")
     ),
   );
@@ -192,11 +121,14 @@ function compactStep(value: unknown): Record<string, unknown> | null {
   };
 }
 
-function compactArtifact(row: Record<string, unknown>): Record<string, unknown> {
+function compactArtifact(row: Record<string, unknown>, policy: CatalogRetrievalPolicy): Record<string, unknown> {
   const workflow = jsonObject(row.workflow) as WorkflowTemplate & Record<string, unknown>;
   const sourceMetadata = jsonObject(row.source_metadata);
   const steps = Array.isArray(workflow.steps)
-    ? workflow.steps.map(compactStep).filter((step): step is Record<string, unknown> => !!step).slice(0, 16)
+    ? workflow.steps
+        .map((step) => compactStep(step, policy))
+        .filter((step): step is Record<string, unknown> => !!step)
+        .slice(0, policy.maxArtifactSteps)
     : [];
   return {
     capabilityKey: row.capability_key ?? sourceMetadata.capabilityKey ?? null,
@@ -278,23 +210,26 @@ export function formatCompilerRetrievalContext(context: CompilerRetrievalContext
 }
 
 export class CapabilityCatalogService {
-  async retrieve(intent: string, platform: string): Promise<CompilerRetrievalContext> {
+  async retrieve(
+    intent: string,
+    platform: string,
+    policy: CatalogRetrievalPolicy,
+  ): Promise<CompilerRetrievalContext> {
     const db = getDb();
     const capabilityRows = await db.query(
       `SELECT *
-       FROM workflow_capabilities
-       WHERE status = 'active'
-         AND portability_scope = 'global'
-         AND (LOWER(platform) = LOWER($1) OR LOWER(platform) = 'android')
-       ORDER BY updated_at DESC
+       FROM resolve_workflow_capabilities($1, $2)
        LIMIT 500`,
-      [platform],
+      [intent, platform],
     );
-    const ranked = rankWorkflowCapabilities(intent, platform, capabilityRows.rows.map(mapCapabilityRow));
-    const selected = selectUnambiguousCapability(ranked);
-    const related = ranked.slice(0, 5);
+    const ranked = capabilityRows.rows.map((row) => ({
+      capability: mapCapabilityRow(row),
+      score: Number(row.score),
+      selected: row.selected === true,
+    }));
+    const selected = ranked.find((entry) => entry.selected) ?? null;
+    const related = ranked.slice(0, policy.maxRankedCapabilities);
     const relatedKeys = related.map(({ capability }) => capability.capabilityKey);
-    const queryTokens = portableCapabilityTokens(intent);
 
     let artifactRows: Record<string, unknown>[] = [];
     if (relatedKeys.length > 0) {
@@ -312,8 +247,8 @@ export class CapabilityCatalogService {
              cache.source_metadata ->> 'safetyClass'
            ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive', 'destructive')
          ORDER BY binding.priority, cache.updated_at DESC
-         LIMIT 20`,
-        [relatedKeys],
+         LIMIT $2`,
+        [relatedKeys, policy.maxArtifactRows],
       );
       artifactRows = artifacts.rows;
     }
@@ -322,50 +257,15 @@ export class CapabilityCatalogService {
       ? artifactRows.find((row) =>
           row.capability_key === selected.capability.capabilityKey
           && row.role === "complete"
-          && artifactAllowedByCapability(row, selected.capability)
+          && artifactAllowedByCapability(row, selected.capability, policy)
         ) ?? null
       : null;
 
-    // Legacy promoted artifacts remain useful as partial context while the
-    // normalized catalog is populated organically.
-    const legacyRows = await db.query(
-      `SELECT *
-       FROM generated_workflow_plan_cache
-       WHERE artifact_state = 'promoted'
-         AND LOWER(platform) = LOWER($1)
-         AND COALESCE(source_metadata ->> 'portable', 'true') <> 'false'
-         AND COALESCE(source_metadata ->> 'portabilityScope', 'global') NOT IN ('device', 'account', 'contextual')
-       ORDER BY updated_at DESC
-       LIMIT 100`,
-      [platform],
-    );
-    const scoredLegacy = legacyRows.rows
-      .map((row) => {
-        const workflow = jsonObject(row.workflow);
-        const metadata = jsonObject(row.source_metadata);
-        const descriptors = [
-          metadata.capabilityKey,
-          metadata.intent,
-          workflow.intent,
-          workflow.id,
-          workflow.name,
-          workflow.description,
-        ].filter((value): value is string => typeof value === "string");
-        const score = Math.max(
-          0,
-          ...descriptors.map((value) => capabilitySimilarity(queryTokens, portableCapabilityTokens(value))),
-        );
-        return { row, score };
-      })
-      .filter(({ score }) => score >= 0.34)
-      .sort((a, b) => b.score - a.score)
-      .map(({ row }) => row);
-
-    const promotedArtifacts = [...artifactRows, ...scoredLegacy]
+    const promotedArtifacts = artifactRows
       .filter((row, index, all) => all.findIndex((candidate) => candidate.cache_key === row.cache_key) === index)
       .filter((row) => row.cache_key !== fullArtifact?.cache_key)
-      .slice(0, MAX_CONTEXT_ARTIFACTS)
-      .map(compactArtifact);
+      .slice(0, policy.maxContextArtifacts)
+      .map((row) => compactArtifact(row, policy));
 
     const appIds = relatedAppIds(platform, related);
     const [selectors, transitions, failures] = await Promise.all([
@@ -378,7 +278,7 @@ export class CapabilityCatalogService {
            AND selector.status = 'promoted'
          ORDER BY selector.confidence DESC, selector.priority
          LIMIT $2`,
-        [appIds, MAX_CONTEXT_UI_ITEMS],
+        [appIds, policy.maxContextUiItems],
       ),
       db.query(
         `SELECT app_id, transition_key, action, preconditions, postconditions,
@@ -386,10 +286,10 @@ export class CapabilityCatalogService {
          FROM ui_graph_transitions
          WHERE app_id = ANY($1::text[])
            AND status = 'promoted'
-           AND safety_class IN ('read_only', 'navigation')
+           AND safety_class = ANY($3::text[])
          ORDER BY confidence DESC, cost
          LIMIT $2`,
-        [appIds, MAX_CONTEXT_UI_ITEMS],
+        [appIds, policy.maxContextUiItems, policy.uiGraphSafetyAllowlist],
       ),
       db.query(
         `SELECT *
@@ -397,32 +297,18 @@ export class CapabilityCatalogService {
          WHERE artifact_state IN ('failed', 'quarantined')
            AND LOWER(platform) = LOWER($1)
          ORDER BY updated_at DESC
-         LIMIT 50`,
-        [platform],
+         LIMIT $2`,
+        [platform, policy.maxFailedArtifactRows],
       ),
     ]);
 
     const avoid = failures.rows
-      .map((row) => {
-        const workflow = jsonObject(row.workflow);
+      .filter((row) => {
         const metadata = jsonObject(row.source_metadata);
-        const descriptors = [
-          metadata.intent,
-          metadata.capabilityKey,
-          workflow.id,
-          workflow.name,
-          workflow.description,
-        ].filter((value): value is string => typeof value === "string");
-        const score = Math.max(
-          0,
-          ...descriptors.map((value) => capabilitySimilarity(queryTokens, portableCapabilityTokens(value))),
-        );
-        return { row, score };
+        return relatedKeys.includes(String(metadata.capabilityKey ?? ""));
       })
-      .filter(({ score }) => score >= 0.34)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, MAX_CONTEXT_FAILURES)
-      .map(({ row }) => compactFailure(row));
+      .slice(0, policy.maxContextFailures)
+      .map((row) => compactFailure(row));
 
     return {
       fullArtifactCacheKey: typeof fullArtifact?.cache_key === "string" ? fullArtifact.cache_key : null,

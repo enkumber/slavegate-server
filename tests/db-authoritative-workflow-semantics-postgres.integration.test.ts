@@ -36,6 +36,7 @@ describe("DB-authoritative AI workflow semantics migration", () => {
       "034_generated_workflow_request_key.sql",
       "035_generated_workflow_canonical_artifact.sql",
       "060_generated_workflow_artifact_lifecycle.sql",
+      "088_app_runtime_profiles.sql",
       "096_workflow_capability_catalog.sql",
     ]) {
       await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", migration), "utf8"));
@@ -48,13 +49,18 @@ describe("DB-authoritative AI workflow semantics migration", () => {
     await adminPool?.end();
   });
 
-  it("stores domain contracts and compiler policy idempotently in PostgreSQL", async () => {
-    const migration = fs.readFileSync(
-      path.join(repoRoot, "src/db/migrations/099_db_authoritative_workflow_semantics.sql"),
-      "utf8",
-    );
-    await pool.query(migration);
-    await pool.query(migration);
+  it("stores and resolves the complete compiler control plane idempotently in PostgreSQL", async () => {
+    for (const filename of [
+      "099_db_authoritative_workflow_semantics.sql",
+      "100_postgres_compiler_control_plane.sql",
+    ]) {
+      const migration = fs.readFileSync(
+        path.join(repoRoot, "src/db/migrations", filename),
+        "utf8",
+      );
+      await pool.query(migration);
+      await pool.query(migration);
+    }
 
     const capabilities = await pool.query(
       `SELECT capability_key, platform, safety_class, metadata->'goalContract' AS goal_contract
@@ -72,6 +78,38 @@ describe("DB-authoritative AI workflow semantics migration", () => {
     expect(policy.rows).toHaveLength(1);
     expect(policy.rows[0].content).toContain("supplied from PostgreSQL");
     expect(policy.rows[0].content).toContain("Never infer an application package");
+    expect(policy.rows[0].content).toContain("Never derive a Goal Contract");
+
+    const controlPlane = await pool.query(
+      `SELECT payload
+       FROM runtime_semantic_entries
+       WHERE namespace = 'compiler_control_plane' AND entry_key = 'human_workflow_v1'`,
+    );
+    expect(controlPlane.rows).toHaveLength(1);
+    expect(controlPlane.rows[0].payload).toMatchObject({
+      missingCapabilityPolicy: "fail_closed",
+      normalizationPolicy: "strict_reject",
+    });
+
+    const platform = await pool.query(
+      `SELECT * FROM resolve_human_workflow_platform($1)`,
+      ["deschide browserul chrome si mergi pe google.com"],
+    );
+    expect(platform.rows).toEqual([
+      expect.objectContaining({
+        app_id: "com.android.chrome",
+        package_name: "com.android.chrome",
+      }),
+    ]);
+
+    const resolved = await pool.query(
+      `SELECT capability_key, selected
+       FROM resolve_workflow_capabilities($1, $2)`,
+      ["deschide browserul chrome si mergi pe google.com", "com.android.chrome"],
+    );
+    expect(resolved.rows).toEqual([
+      { capability_key: "web_open_absolute_uri", selected: true },
+    ]);
 
     const semanticEntries = await pool.query(
       `SELECT namespace, COUNT(*)::int AS count
@@ -84,6 +122,7 @@ describe("DB-authoritative AI workflow semantics migration", () => {
       expect.objectContaining({ namespace: "incident_routing_rule" }),
       expect.objectContaining({ namespace: "tool_catalog" }),
       expect.objectContaining({ namespace: "vision_prompt" }),
+      expect.objectContaining({ namespace: "compiler_control_plane" }),
     ]));
   });
 });

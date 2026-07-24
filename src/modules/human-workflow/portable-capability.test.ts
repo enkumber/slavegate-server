@@ -3,9 +3,7 @@ import type { GeneratedWorkflowPlanCacheRecord } from "../workflows/workflow.ser
 import type { WorkflowTemplate } from "../workflows/types";
 import { compileGeneratedWorkflowTemplate } from "../workflows/workflow-validator";
 import {
-  derivePortableCapabilityKey,
   portableCapabilityMetadata,
-  resolvePortableCapabilityArtifact,
 } from "./portable-capability";
 
 function artifact(overrides: Partial<GeneratedWorkflowPlanCacheRecord> = {}): GeneratedWorkflowPlanCacheRecord {
@@ -45,22 +43,15 @@ function artifact(overrides: Partial<GeneratedWorkflowPlanCacheRecord> = {}): Ge
 }
 
 describe("portable workflow capability identity", () => {
-  it("keeps workflow-derived keys lexical and does not encode domain aliases", () => {
-    expect(derivePortableCapabilityKey({
-      id: "remote_support_enable_screen_sharing_trace_v1",
-      name: "ignored",
-    })).toBe("remote_support_enable_screen_sharing_trace");
-  });
-
   it("does not invent a capability identity when PostgreSQL did not provide one", () => {
     const record = artifact();
     expect(portableCapabilityMetadata(record.workflow, record.sourceMetadata)).toEqual({
-      portable: true,
-      portabilityScope: "global",
+      portable: false,
+      portabilityScope: "contextual",
     });
   });
 
-  it("resolves a promoted workflow across device/formulation boundaries before LLM", () => {
+  it("preserves only an explicit valid PostgreSQL capability identity", () => {
     const record = artifact({
       sourceMetadata: {
         capabilityKey: "remote_support_enable_screen_share",
@@ -69,52 +60,25 @@ describe("portable workflow capability identity", () => {
         portabilityScope: "global",
       },
     });
-    const match = resolvePortableCapabilityArtifact(
-      "pornește remote support screen share",
-      "android",
-      [record],
-    );
-    expect(match?.record.cacheKey).toBe(record.cacheKey);
-    expect(match?.capabilityKey).toBe("remote_support_enable_screen_share");
-    expect(match?.score).toBeGreaterThanOrEqual(0.62);
+    expect(portableCapabilityMetadata(record.workflow, record.sourceMetadata)).toEqual({
+      capabilityKey: "remote_support_enable_screen_share",
+      portable: true,
+      portabilityScope: "global",
+    });
   });
 
-  it("refuses legacy semantic fallback when the catalog identity is absent", () => {
-    const recorded = artifact({
-      workflow: {
-        ...artifact().workflow,
-        id: "rustdesk_enable_screen_sharing_trace_v1",
-        name: "Enable RustDesk screen sharing from verified UI trace",
-        description: "Verified launcher and accessibility trace with Ready final state.",
-      },
+  it("rejects malformed explicit capability identities instead of normalizing them", () => {
+    const record = artifact({
       sourceMetadata: {
-        intent: null,
-        safetyClass: "standard",
+        capabilityKey: "Remote Support / Screen Share",
+        portable: true,
+        portabilityScope: "global",
       },
     });
-    const match = resolvePortableCapabilityArtifact(
-      "pornește screen share RustDesk pe telefon",
-      "android",
-      [recorded],
-    );
-    expect(match).toBeNull();
-  });
-
-  it("fails closed when two capabilities are semantically ambiguous", () => {
-    const first = artifact({
-      cacheKey: "d".repeat(24),
-      sourceMetadata: { capabilityKey: "remote_support_enable_screen_share", portable: true },
+    expect(portableCapabilityMetadata(record.workflow, record.sourceMetadata)).toEqual({
+      portable: true,
+      portabilityScope: "global",
     });
-    const second = artifact({
-      cacheKey: "e".repeat(24),
-      sourceMetadata: { capabilityKey: "remote_support_start_screen_share", portable: true },
-      workflow: { ...artifact().workflow, id: "remote_support_start_screen_share_v1" },
-    });
-    expect(resolvePortableCapabilityArtifact(
-      "remote support screen share",
-      "android",
-      [first, second],
-    )).toBeNull();
   });
 
   it("rejects device/account-bound artifacts", () => {
@@ -124,10 +88,10 @@ describe("portable workflow capability identity", () => {
         portabilityScope: "device",
       },
     });
-    expect(resolvePortableCapabilityArtifact(
-      "enable remote support screen share",
-      "android",
-      [bound],
-    )).toBeNull();
+    expect(portableCapabilityMetadata(bound.workflow, bound.sourceMetadata)).toEqual({
+      capabilityKey: "remote_support_enable_screen_share",
+      portable: false,
+      portabilityScope: "contextual",
+    });
   });
 });

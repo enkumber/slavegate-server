@@ -3,65 +3,32 @@ import { getDb } from "../../db/client";
 import {
   CapabilityCatalogService,
   formatCompilerRetrievalContext,
-  rankWorkflowCapabilities,
-  selectUnambiguousCapability,
-  type WorkflowCapabilityRecord,
 } from "./capability-catalog.service";
 import type { WorkflowGoalContract } from "../workflows/types";
+
+const retrievalPolicy = {
+  maxContextArtifacts: 4,
+  maxContextUiItems: 10,
+  maxContextFailures: 4,
+  maxRankedCapabilities: 5,
+  maxArtifactRows: 20,
+  maxFailedArtifactRows: 50,
+  maxArtifactSteps: 16,
+  artifactParamAllowlist: ["target"],
+  uiGraphSafetyAllowlist: ["read_only", "navigation"] as const,
+  artifactSafetyAllowlist: {
+    read_only: ["read_only"],
+    navigation: ["read_only", "navigation"],
+    standard: ["read_only", "navigation", "standard"],
+    mutating: ["read_only", "navigation", "standard", "mutating"],
+    sensitive: ["read_only", "navigation", "standard", "mutating", "sensitive"],
+    destructive: ["read_only", "navigation", "standard", "mutating", "sensitive", "destructive"],
+  },
+};
 
 vi.mock("../../db/client", () => ({
   getDb: vi.fn(),
 }));
-
-function capability(overrides: Partial<WorkflowCapabilityRecord> = {}): WorkflowCapabilityRecord {
-  return {
-    capabilityKey: "remote_support_enable_screen_share",
-    platform: "android",
-    description: "Enable screen sharing for remote support",
-    aliases: [
-      "pornește screen share",
-      "te rog pornește screen sharing pe telefon",
-      "enable remote support",
-    ],
-    requiredTerms: [],
-    forbiddenTerms: [],
-    safetyClass: "standard",
-    portabilityScope: "global",
-    minMatchScore: 0.62,
-    ambiguityMargin: 0.12,
-    metadata: { appId: "remote_support" },
-    updatedAt: "2026-07-23T10:00:00.000Z",
-    ...overrides,
-  };
-}
-
-describe("workflow capability catalog ranking", () => {
-  it("maps alternate natural-language requests through database aliases", () => {
-    const ranked = rankWorkflowCapabilities(
-      "te rog pornește screen sharing pe telefon",
-      "android",
-      [capability()],
-    );
-    expect(ranked[0]?.capability.capabilityKey).toBe("remote_support_enable_screen_share");
-    expect(selectUnambiguousCapability(ranked)?.score).toBeGreaterThanOrEqual(0.62);
-  });
-
-  it("fails closed when the database catalog returns ambiguous capabilities", () => {
-    const ranked = rankWorkflowCapabilities(
-      "enable remote support screen share",
-      "android",
-      [
-        capability(),
-        capability({
-          capabilityKey: "remote_support_start_screen_share",
-          aliases: ["enable remote support screen share"],
-          updatedAt: "2026-07-23T10:01:00.000Z",
-        }),
-      ],
-    );
-    expect(selectUnambiguousCapability(ranked)).toBeNull();
-  });
-});
 
 describe("retrieval-before-LLM compiler context", () => {
   beforeEach(() => {
@@ -93,7 +60,7 @@ describe("retrieval-before-LLM compiler context", () => {
       ],
     };
     const query = vi.fn(async (sql: string) => {
-      if (sql.includes("FROM workflow_capabilities")) {
+      if (sql.includes("resolve_workflow_capabilities")) {
         return {
           rows: [{
             capability_key: "remote_support_enable_screen_share",
@@ -108,6 +75,8 @@ describe("retrieval-before-LLM compiler context", () => {
             ambiguity_margin: 0.12,
             metadata: { appId: "remote_support", goalContract },
             updated_at: new Date("2026-07-23T10:00:00.000Z"),
+            score: 0.91,
+            selected: true,
           }],
         };
       }
@@ -148,7 +117,10 @@ describe("retrieval-before-LLM compiler context", () => {
               description: "Rejected plan",
               steps: [{ action: "open_app", params: { packageName: "invalid.package" } }],
             },
-            source_metadata: { quarantineReason: "package not installed" },
+            source_metadata: {
+              capabilityKey: "remote_support_enable_screen_share",
+              quarantineReason: "package not installed",
+            },
           }],
         };
       }
@@ -159,6 +131,7 @@ describe("retrieval-before-LLM compiler context", () => {
     const context = await new CapabilityCatalogService().retrieve(
       "pornește screen share pentru remote support",
       "android",
+      retrievalPolicy as any,
     );
 
     expect(context).toMatchObject({

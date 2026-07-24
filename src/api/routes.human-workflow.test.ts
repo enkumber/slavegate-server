@@ -64,6 +64,9 @@ const mocks = vi.hoisted(() => ({
   capabilityCatalogService: {
     retrieve: vi.fn(),
   },
+  compilerControlPlaneService: {
+    load: vi.fn(),
+  },
 }));
 
 vi.mock("../db/client", () => ({
@@ -101,6 +104,13 @@ vi.mock("../modules/human-workflow/compile-job.service", () => ({
 vi.mock("../modules/human-workflow/capability-catalog.service", () => ({
   capabilityCatalogService: mocks.capabilityCatalogService,
   formatCompilerRetrievalContext: (context: unknown) => JSON.stringify(context),
+}));
+
+vi.mock("../modules/human-workflow/compiler-control-plane.service", () => ({
+  compilerControlPlaneError: (message: string) => Object.assign(new Error(message), { status: 503 }),
+  renderCompilerTemplate: (template: string, values: Record<string, string>) =>
+    template.replace(/\{\{([a-zA-Z0-9_]+)}}/g, (_match, key: string) => values[key] ?? ""),
+  loadHumanWorkflowCompilerControlPlane: mocks.compilerControlPlaneService.load,
 }));
 
 vi.mock("../ws/direct-ws.server", () => ({
@@ -505,6 +515,40 @@ describe("dashboard human workflow routes", () => {
         uiGraph: { selectors: [], transitions: [] },
         avoid: [],
       },
+    });
+    mocks.compilerControlPlaneService.load.mockResolvedValue({
+      version: "2026-07-24-postgres-authoritative-v1",
+      missingCapabilityPolicy: "fail_closed",
+      normalizationPolicy: "strict_reject",
+      promptKeys: {
+        compile: "compile",
+        repair: "repair",
+        compileSystem: "compileSystem",
+        repairSystem: "repairSystem",
+        policy: "policy",
+      },
+      llm: {
+        initialMaxTokens: 4096,
+        repairMaxTokens: 6144,
+        temperature: 0,
+        disableThinking: true,
+      },
+      safetyClassMap: {
+        read_only: "read_only",
+        navigation: "read_only",
+        standard: "standard",
+        mutating: "standard",
+        sensitive: "standard",
+        destructive: "destructive",
+      },
+      prompts: {
+        compile: "{{goal}} {{targetContext}} {{runtimeProfile}} {{retrievalContext}} {{toolCatalog}} {{compilerPolicy}}",
+        repair: "{{compilePrompt}} {{reason}} {{rejectedWorkflow}}",
+        compileSystem: "compile",
+        repairSystem: "repair",
+        policy: "policy",
+      },
+      toolCatalog: [{ id: "test" }],
     });
   });
 

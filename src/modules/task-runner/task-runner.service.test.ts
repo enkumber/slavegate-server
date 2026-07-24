@@ -378,7 +378,7 @@ describe("task-runner generated_workflow routine", () => {
     }));
   });
 
-  it("fails cached dashboard human workflows that only wake and unlock for a real task", async () => {
+  it("fails cached dashboard human workflows that do not satisfy their PostgreSQL Goal Contract", async () => {
     const cached = cacheRecord({
       sourceMetadata: {
         source: "dashboard_human",
@@ -391,6 +391,17 @@ describe("task-runner generated_workflow routine", () => {
       id: "step-01-wake-device",
       platform: "android",
       safetyClass: "standard",
+      goalContract: {
+        version: "1",
+        allowedEffects: ["none", "business_mutation"],
+        stages: [{
+          id: "perform_goal",
+          required: true,
+          minOccurrences: 1,
+          allowedActions: ["catalog_supplied_action"],
+          allowedEffects: ["business_mutation"],
+        }],
+      },
       steps: [
         { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
         { id: "unlock_device", type: "action", action: "unlock", params: {} },

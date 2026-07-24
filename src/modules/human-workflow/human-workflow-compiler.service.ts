@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { getDb } from "../../db/client";
 import { loadMap } from "../app-mapping/recorder.service";
-import { validateAppMapQuality, type AppMap, type AppMapQualityReport, type ElementDef } from "../app-mapping/schema";
+import { validateAppMapQuality, type AppMap, type AppMapQualityReport } from "../app-mapping/schema";
 import {
   buildGeneratedWorkflowAppMapCacheMetadata,
   compileGeneratedWorkflowTemplate,
@@ -18,47 +18,22 @@ import { humanWorkflowCompileJobService, type HumanWorkflowCompileJobRecord } fr
 import {
   normalizeCachedHumanWorkflowTemplate,
 } from "./human-workflow-normalization";
-import { listRuntimeProfiles, loadRuntimeProfile } from "../app-mapping/runtime-profile";
+import { loadRuntimeProfile } from "../app-mapping/runtime-profile";
 import {
   capabilityCatalogService,
   formatCompilerRetrievalContext,
-  type CatalogSafetyClass,
-  type CompilerRetrievalContext,
 } from "./capability-catalog.service";
-import { parseWorkflowGoalContract, workflowGoalContractReason } from "../workflows/goal-contract";
+import { workflowGoalContractReason } from "../workflows/goal-contract";
+import {
+  compilerControlPlaneError,
+  loadHumanWorkflowCompilerControlPlane,
+  renderCompilerTemplate,
+} from "./compiler-control-plane.service";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
 const MAX_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 120_000;
-const HUMAN_WORKFLOW_INITIAL_MAX_TOKENS = 4_096;
-const HUMAN_WORKFLOW_REPAIR_MAX_TOKENS = 6_144;
 const HUMAN_WORKFLOW_DEBUG_RESPONSE_MAX_CHARS = 100_000;
-const HUMAN_WORKFLOW_COMPILER_CACHE_VERSION = "2026-07-23-data-driven-goal-contract-v3";
-const HUMAN_WORKFLOW_COMPILER_POLICY_KEY = "human_workflow_compiler_policy";
-
-async function loadHumanWorkflowCompilerPolicy(): Promise<string> {
-  try {
-    const result = await getDb().query<{ content: string }>(
-      "SELECT content FROM system_prompts WHERE key = $1 LIMIT 1",
-      [HUMAN_WORKFLOW_COMPILER_POLICY_KEY],
-    );
-    const content = result.rows[0]?.content;
-    return typeof content === "string" ? content.trim() : "";
-  } catch {
-    return "";
-  }
-}
-
-async function availableRuntimeProfiles() {
-  try {
-    return await listRuntimeProfiles();
-  } catch {
-    // The runtime registry is optional while compiling in isolated/test
-    // environments. Never replace missing data with application-specific
-    // constants: retain the caller-provided generic app identifier instead.
-    return [];
-  }
-}
 
 export type HumanWorkflowSafetyClass = "read_only" | "standard" | "destructive";
 
@@ -127,37 +102,19 @@ export function computeHumanWorkflowRequestKey(deviceId: string, accountId: stri
 }
 
 async function humanWorkflowPackageName(platform: string): Promise<string> {
-  let direct = null;
-  try {
-    direct = await loadRuntimeProfile(platform);
-  } catch {
-    direct = null;
+  const profile = await loadRuntimeProfile(platform);
+  if (!profile) {
+    throw compilerControlPlaneError(`missing runtime profile ${platform}`);
   }
-  if (direct) return direct.packageName;
-  const profiles = await availableRuntimeProfiles();
-  const normalized = platform.trim().toLowerCase();
-  const match = profiles.find((profile) =>
-    typeof profile.appId === "string" && profile.appId.toLowerCase() === normalized ||
-    typeof profile.packageName === "string" && profile.packageName.toLowerCase() === normalized ||
-    typeof profile.appName === "string" && profile.appName.toLowerCase() === normalized
-  );
-  return match?.packageName ?? platform;
+  return profile.packageName;
 }
 
-async function inferHumanWorkflowPlatform(goal: string): Promise<string> {
-  const normalized = goal.toLowerCase();
-  const profiles = await availableRuntimeProfiles();
-  const match = profiles
-    .map((profile) => {
-      const labels = [profile.appId, profile.packageName, profile.appName]
-        .filter((value): value is string => typeof value === "string" && value.length > 0)
-        .map((value) => value.toLowerCase());
-      const score = labels.reduce((total, label) => total + (normalized.includes(label) ? label.length : 0), 0);
-      return { profile, score };
-    })
-    .filter(({ score }) => score > 0)
-    .sort((a, b) => b.score - a.score)[0]?.profile;
-  return match?.appId ?? "android";
+async function resolveHumanWorkflowPlatform(goal: string): Promise<string | null> {
+  const result = await getDb().query<{ app_id: string }>(
+    "SELECT app_id FROM resolve_human_workflow_platform($1)",
+    [goal],
+  );
+  return result.rows[0]?.app_id ?? null;
 }
 
 export function isAccountlessHumanWorkflowIntent(goal: string): boolean {
@@ -202,9 +159,11 @@ function humanWorkflowCacheCompilerVersion(cached: GeneratedWorkflowPlanCacheRec
   return typeof version === "string" && version.length > 0 ? version : null;
 }
 
-function humanWorkflowCacheUsable(cached: GeneratedWorkflowPlanCacheRecord, _intent: string): boolean {
-  if (cached.sourceMetadata?.source !== "dashboard_human") return true;
-  return humanWorkflowCacheCompilerVersion(cached) === HUMAN_WORKFLOW_COMPILER_CACHE_VERSION;
+function humanWorkflowCacheUsable(
+  cached: GeneratedWorkflowPlanCacheRecord,
+  compilerVersion: string,
+): boolean {
+  return humanWorkflowCacheCompilerVersion(cached) === compilerVersion;
 }
 
 function inferGeneratedWorkflowAppId(template: WorkflowTemplate): string | null {
@@ -230,40 +189,11 @@ function hydrateTemplatePlaceholders(value: unknown, replacements: Record<string
   return value;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-
-const INTRINSIC_ACTION_EFFECTS: Record<string, "none" | "observation" | "navigation"> = {
-  screen_wake: "none",
-  unlock: "none",
-  wait_for_idle: "none",
-  ui_tree_dump: "observation",
-  classify_ui_tree: "observation",
-  screenshot: "observation",
-  screenshot_for_vlm: "observation",
-  get_screen_state: "observation",
-  get_foreground_app: "observation",
-  open_app: "navigation",
-  close_app: "navigation",
-  press_key: "navigation",
-  keyevent: "navigation",
-  scroll: "navigation",
-  swipe: "navigation",
-};
-
 export function humanWorkflowUndercompiledReason(workflow: WorkflowTemplate, _intent: string): string | null {
   const steps = Array.isArray(workflow.steps) ? workflow.steps : [];
   if (steps.length === 0) return "workflow has no steps";
   const actionSteps = steps.filter((step) => step.type === "action");
   if (actionSteps.length === 0) return "workflow has no executable action steps";
-  const hasGoalAdvancingAction = actionSteps.some((step) => {
-    const effect = typeof step.effect === "string" ? step.effect : INTRINSIC_ACTION_EFFECTS[step.action ?? ""];
-    return effect !== "none" && effect !== "observation";
-  });
-  if (!hasGoalAdvancingAction) {
-    return "workflow contains only preparation or observation actions";
-  }
   return workflowGoalContractReason(workflow);
 }
 
@@ -272,9 +202,9 @@ function humanWorkflowPackageInventoryReason(
   expectedPackageName: string,
 ): string | null {
   for (const step of workflow.steps) {
-    if (step.type !== "action" || (step.action !== "open_app" && step.action !== "close_app")) continue;
-    const actual = typeof step.params?.packageName === "string" ? step.params.packageName.trim() : "";
-    if (!actual) return `${step.id} is missing a packageName from the runtime profile`;
+    if (step.type !== "action" || step.params?.packageName === undefined) continue;
+    const actual = typeof step.params.packageName === "string" ? step.params.packageName.trim() : "";
+    if (!actual) return `${step.id} has an invalid packageName`;
     if (actual !== expectedPackageName) {
       return `${step.id} packageName is not present in the selected PostgreSQL runtime profile`;
     }
@@ -296,373 +226,6 @@ export function assertHumanWorkflowMeaningful(
     retryable: true,
     nextAction: "retry_compile",
   });
-}
-
-function compactHumanWorkflowAppMapHints(appMap: AppMap | null, goal: string): string {
-  if (!appMap) return "No app map available; use UI-tree semantic targets.";
-  const goalTerms = new Set(
-    goal
-      .toLowerCase()
-      .replace(/[^a-z0-9_/\s]+/g, " ")
-      .split(/\s+/)
-      .filter((term) => term.length >= 3)
-  );
-  const scored: Array<{ score: number; pageId: string; elementId: string; element: ElementDef }> = [];
-  for (const [pageId, page] of Object.entries(appMap.pages)) {
-    for (const [elementId, element] of Object.entries(page.elements)) {
-      const label = [
-        elementId,
-        element.text,
-        element.contentDescription,
-        element.resourceId,
-        element.semanticId,
-      ].filter(Boolean).join(" ").toLowerCase();
-      let score = 0;
-      if (label.includes("tab") || label.includes("nav")) score += 1;
-      for (const term of goalTerms) {
-        if (label.includes(term.replace(/^\//, ""))) score += 3;
-      }
-      if (score > 0) scored.push({ score, pageId, elementId, element });
-    }
-  }
-  const hints = scored
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 6)
-    .map(({ pageId, elementId, element }) => {
-      const label = element.text || element.contentDescription || element.resourceId || element.semanticId || elementId;
-      return `${pageId}.${elementId}=${label}`;
-    });
-  return hints.length > 0
-    ? `Relevant app map selectors: ${hints.join("; ")}`
-    : `App map ${appMap.appName} has ${appMap.pageCount} pages; no goal-specific selector hints found.`;
-}
-
-function buildHumanWorkflowCompilePrompt(input: {
-  platform: string;
-  packageName: string;
-  goal: string;
-  target: HumanWorkflowTarget;
-  appMap: AppMap | null;
-  compilerPolicy: string;
-  retrievalContext: CompilerRetrievalContext;
-  safetyClass: HumanWorkflowSafetyClass;
-}): string {
-  const safetyClass = input.safetyClass;
-  return [
-    "Return JSON only. Generate one Phone Network WorkflowTemplate.",
-    `Goal: ${input.goal}`,
-    `Context: platform ${input.platform}, package ${input.packageName}, account ${input.target.account_username ? `@${input.target.account_username}` : "(none; device-management workflow)"}, preview compile only.`,
-    compactHumanWorkflowAppMapHints(input.appMap, input.goal),
-    "Required fields: id,name,platform,description,version,runtimeContract,steps,defaultVerificationStrategy,dataRetentionDays.",
-    "runtimeContract must be edge-workflow/v2. The complete workflow runs locally on Android.",
-    `platform must be exactly ${input.platform}.`,
-    "Every step needs id and type. Step types: action,wait,condition,loop,checkpoint.",
-    "All pauses, timeouts, retries, failure branches and decisions must be explicit in the workflow payload.",
-    `safetyClass must be exactly ${safetyClass}.`,
-    "Allowed actions are generic interpreter primitives only: screen_wake,unlock,open_app,close_app,intent_send,a11y_find_tap,observe_and_transition,run_state_machine,ocr_find_tap,tap,long_press,double_tap,swipe,scroll,type_text,set_focused_text,press_key,keyevent,ui_tree_dump,screenshot,screenshot_for_vlm,wait_for_idle,set_variable,classify_ui_tree,request_llm.",
-    "For asynchronous UI transitions, prefer observe_and_transition: declare an ordered selectors array and a mandatory postcondition; it polls, performs one UI action, then proves the target state.",
-    "For workflows with optional dialogs or multiple UI states, prefer run_state_machine: declare data-only resolver rules, goalStates and one transition per state. Never encode app knowledge in the primitive name or runtime.",
-    "workflow.goalContract is mandatory. If retrieval supplies one, copy it exactly. Otherwise derive a minimal contract from the user goal, then tag every action with goalStage and effect and satisfy its ordered stages, produced/consumed bindings, allowed actions/effects and required outputs.",
-    "Valid effect values are none, observation, navigation, ui_input, business_mutation, sensitive, destructive. Text entry may be ui_input when the catalog contract allows it; do not infer business mutation from the primitive name alone.",
-    "Dynamic values must use {{variable.path}} or {$bind:\"variable.path\"} in action params. Never replace a required runtime binding with a guessed static value.",
-    "Never use semantic_tap or an application-specific opcode. Selectors, packages, URLs, normalized coordinates and state rules must be explicit data from this prompt/App Map.",
-    "Use request_llm only when semantic reasoning or creative generation is genuinely required. It must declare prompt, targetVariable or saveOutputAs, timeoutMs, responseFormat, and success/failure branches.",
-    "Prefer selector-first navigation. Coordinates, when required, must be normalized and followed by an explicit state check.",
-    `Use params.packageName=${input.packageName} when the workflow explicitly opens the target app.`,
-    safetyClass === "read_only" ? "Do not include mutating actions." : "Include only mutations explicitly requested by the user.",
-    "RETRIEVED KNOWLEDGE RULES:",
-    "- Reuse promoted knowledge below when compatible; generate only missing steps.",
-    "- Treat previous failures as prohibitions, not as candidate instructions.",
-    "- Never copy credentials, private text, or unverified values from retrieved artifacts.",
-    "- If retrieved knowledge conflicts with the runtime App Map or safety policy, prefer the runtime data and fail closed.",
-    `Structured retrieval context from PostgreSQL:\n${formatCompilerRetrievalContext(input.retrievalContext)}`,
-    "checkpoint is type checkpoint, never an action.",
-    "defaultVerificationStrategy must be local_only. dataRetentionDays must be 7.",
-    "Do not emit workflow.intent. Emit outputSchema exactly as required by goalContract.",
-    input.compilerPolicy ? `Runtime compiler policy from PostgreSQL:\n${input.compilerPolicy}` : "",
-  ].filter(Boolean).join("\n");
-}
-
-function buildHumanWorkflowRepairPrompt(input: {
-  compilePrompt: string;
-  rejectedWorkflow: unknown;
-  reason: string;
-}): string {
-  return [
-    input.compilePrompt,
-    "",
-    "CORRECTIVE COMPILATION REQUIRED.",
-    `The previous candidate was rejected as invalid or undercompiled: ${input.reason}.`,
-    "Return a complete replacement workflow that performs the user's actual goal end to end.",
-    "Wake, unlock, waits, screen detection, UI dumps, and checkpoints are preparation/evidence only; they do not satisfy the goal.",
-    "Include the concrete app-opening, navigation, tapping, and text-entry actions needed by the goal.",
-    "Do not return or repeat a readiness-only workflow.",
-    `Rejected candidate: ${JSON.stringify(input.rejectedWorkflow)}`,
-  ].join("\n");
-}
-
-function compilerSafetyClass(
-  recommended: CatalogSafetyClass | null,
-): HumanWorkflowSafetyClass {
-  if (!recommended) return "standard";
-  if (recommended === "read_only" || recommended === "navigation") return "read_only";
-  if (recommended === "destructive") return "destructive";
-  return "standard";
-}
-
-function normalizeHumanWorkflowTemplateCandidate(
-  rawWorkflow: unknown,
-  input: {
-    platform: string;
-    packageName: string;
-    goal: string;
-    safetyClass?: HumanWorkflowSafetyClass;
-    goalContract?: WorkflowGoalContract | null;
-  }
-): unknown {
-  if (!isRecord(rawWorkflow)) return rawWorkflow;
-  const workflow: Record<string, unknown> = { ...rawWorkflow };
-  workflow.id = typeof workflow.id === "string" && workflow.id.trim()
-    ? workflow.id
-    : `human_${input.platform}_${crypto.createHash("sha1").update(input.goal).digest("hex").slice(0, 10)}`;
-  workflow.name = typeof workflow.name === "string" && workflow.name.trim() ? workflow.name : "Human workflow";
-  workflow.platform = input.platform;
-  workflow.description = typeof workflow.description === "string" && workflow.description.trim()
-    ? workflow.description
-    : input.goal;
-  workflow.version = typeof workflow.version === "string" && workflow.version.trim() ? workflow.version : "1.0.0";
-  workflow.runtimeContract = "edge-workflow/v2";
-  workflow.defaultVerificationStrategy = workflow.defaultVerificationStrategy === "local_with_screenshot"
-    ? "local_with_screenshot"
-    : "local_only";
-  workflow.safetyClass = input.safetyClass ?? (
-    workflow.safetyClass === "standard" || workflow.safetyClass === "destructive" || workflow.safetyClass === "read_only"
-      ? workflow.safetyClass
-      : "standard"
-  );
-  workflow.dataRetentionDays = typeof workflow.dataRetentionDays === "number" && workflow.dataRetentionDays >= 0
-    ? workflow.dataRetentionDays
-    : 7;
-  delete workflow.intent;
-  delete workflow.allowedRecoveryRequests;
-  if (input.goalContract) workflow.goalContract = input.goalContract;
-  const isReadOnly = workflow.safetyClass === "read_only";
-  workflow.recoveryPolicy = {
-    autonomy: "ai_autopilot",
-    maxAttemptsPerStep: isReadOnly ? 3 : 2,
-    maxAttemptsPerWorkflow: isReadOnly ? 6 : 4,
-    maxRecoveryActionsPerAttempt: isReadOnly ? 6 : 4,
-    allowedRecoveryRequests: [
-      "ai_recovery_workflow",
-      "refresh_screen_state",
-      "retry_current_step",
-      "return_to_anchor",
-      "dismiss_transient_ui",
-      "navigate_back_once",
-      "verify_anchor",
-    ],
-    requireStateVerification: true,
-    learnFromFailure: true,
-  };
-
-  if (!Array.isArray(workflow.steps) || workflow.steps.length === 0) {
-    workflow.steps = [
-      { id: "wake_screen", type: "action", action: "screen_wake", params: {} },
-      { id: "unlock_device", type: "action", action: "unlock", params: {} },
-    ];
-  }
-
-  if (Array.isArray(workflow.steps)) {
-    const normalizedSteps: unknown[] = [];
-    for (let index = 0; index < workflow.steps.length; index += 1) {
-      const step = workflow.steps[index];
-      if (!isRecord(step)) {
-        normalizedSteps.push(step);
-        continue;
-      }
-      const normalized: Record<string, unknown> = { ...step };
-      normalized.id = typeof normalized.id === "string" && normalized.id.trim() ? normalized.id : `step_${index + 1}`;
-      if (normalized.action === "checkpoint") {
-        normalized.type = "checkpoint";
-        delete normalized.action;
-      } else if (!normalized.type && typeof normalized.action === "string") {
-        normalized.type = "action";
-      }
-      if (
-        normalized.type === "action"
-        && typeof normalized.action === "string"
-        && typeof normalized.effect !== "string"
-        && INTRINSIC_ACTION_EFFECTS[normalized.action]
-      ) {
-        normalized.effect = INTRINSIC_ACTION_EFFECTS[normalized.action];
-      }
-      if (normalized.type === "action" && (normalized.action === "open_app" || normalized.action === "close_app")) {
-        const params = isRecord(normalized.params) ? { ...normalized.params } : {};
-        if (typeof params.packageName !== "string" || !params.packageName.trim()) {
-          params.packageName = typeof params.app_id === "string" ? params.app_id : input.packageName;
-        }
-        delete params.app_id;
-        normalized.params = params;
-      }
-      if (normalized.type === "action" && normalized.action === "open_app" && isRecord(normalized.params)) {
-        const params = { ...normalized.params };
-        if (typeof params.uri === "string" && params.uri.trim().length > 0) {
-          normalized.action = "intent_send";
-          normalized.id = normalized.id === `step_${index + 1}` ? `step_${index + 1}_intent_send` : normalized.id;
-          normalized.params = {
-            action: "android.intent.action.VIEW",
-            packageName: typeof params.packageName === "string" ? params.packageName : input.packageName,
-            uri: params.uri,
-          };
-        }
-      }
-      if (normalized.type === "checkpoint" && isRecord(normalized.params)) {
-        const reason = normalized.params.reason ?? normalized.params.label ?? normalized.params.expectedScreen;
-        if (typeof reason === "string" && !normalized.reason) normalized.reason = reason;
-        delete normalized.params;
-      }
-      if (normalized.type === "wait") {
-        normalizeHumanWorkflowWaitStep(normalized);
-      }
-      normalizedSteps.push(normalized);
-    }
-    workflow.steps = normalizedSteps;
-    workflow.steps = ensureHumanWorkflowPreambleSteps(
-      workflow.steps as unknown[],
-      input.goalContract ?? parseWorkflowGoalContract(workflow.goalContract),
-    );
-    const suppliedOutputSchema = isRecord(workflow.outputSchema) ? workflow.outputSchema : null;
-    const suppliedRequired = suppliedOutputSchema?.required;
-    const suppliedProperties = suppliedOutputSchema?.properties;
-    const suppliedOutputSchemaValid = Array.isArray(suppliedRequired)
-      && suppliedRequired.length > 0
-      && suppliedRequired.every((key) => typeof key === "string" && key.trim().length > 0)
-      && isRecord(suppliedProperties);
-    if (!suppliedOutputSchemaValid) delete workflow.outputSchema;
-    if (!isRecord(workflow.outputSchema)) {
-      const outputProperties: Record<string, { type: "boolean" | "string" | "number" | "object" | "array" | "null" }> = {};
-      const visit = (steps: unknown[]): void => {
-        for (const step of steps) {
-          if (!isRecord(step)) continue;
-          if (
-            step.type === "action"
-            && step.action === "classify_ui_tree"
-            && isRecord(step.params)
-            && isRecord(step.params.outputs)
-          ) {
-            for (const [key, rawRule] of Object.entries(step.params.outputs)) {
-              const rule = isRecord(rawRule) ? rawRule : {};
-              const sample = rule.trueValue ?? rule.value ?? rule.default;
-              const type = typeof sample === "boolean"
-                ? "boolean"
-                : typeof sample === "number"
-                  ? "number"
-                  : "string";
-              outputProperties[key] = { type };
-            }
-          }
-          if (step.type === "condition") {
-            if (Array.isArray(step.if_true)) visit(step.if_true);
-            if (Array.isArray(step.if_false)) visit(step.if_false);
-          }
-          if (step.type === "loop" && Array.isArray(step.steps)) visit(step.steps);
-        }
-      };
-      visit(workflow.steps as unknown[]);
-      for (const key of input.goalContract?.requiredOutputs ?? []) {
-        outputProperties[key] ??= { type: "string" };
-      }
-      const required = input.goalContract?.requiredOutputs?.length
-        ? input.goalContract.requiredOutputs
-        : Object.keys(outputProperties);
-      if (required.length > 0) {
-        workflow.outputSchema = { required, properties: outputProperties };
-      }
-    }
-    return workflow;
-  }
-  return workflow;
-}
-
-function numberFromUnknown(value: unknown): number | null {
-  if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
-  if (typeof value === "string" && value.trim().length > 0) {
-    const parsed = Number.parseInt(value, 10);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-  return null;
-}
-
-function normalizeHumanWorkflowWaitStep(step: Record<string, unknown>): void {
-  const params = isRecord(step.params) ? step.params : {};
-  if (typeof step.condition !== "string" && typeof params.condition === "string") {
-    step.condition = params.condition;
-  }
-  if (isRecord(step.duration)) {
-    delete step.params;
-    return;
-  }
-  const explicitDuration =
-    numberFromUnknown(step.duration) ??
-    numberFromUnknown(step.durationMs) ??
-    numberFromUnknown(step.timeoutMs) ??
-    numberFromUnknown(params.durationMs) ??
-    numberFromUnknown(params.timeoutMs) ??
-    numberFromUnknown(params.waitMs) ??
-    numberFromUnknown(params.ms);
-  if (explicitDuration !== null || typeof step.condition !== "string") {
-    const durationMs = explicitDuration ?? 1_000;
-    step.duration = { min: durationMs, max: durationMs, distribution: "uniform" };
-  }
-  delete step.params;
-}
-
-function ensureHumanWorkflowPreambleSteps(
-  steps: unknown[],
-  goalContract: WorkflowGoalContract | null,
-): unknown[] {
-  const hasAction = (action: string): boolean => steps.some((step) =>
-    isRecord(step) && step.type === "action" && step.action === action
-  );
-  const preambleStage = (action: string): string | null => {
-    if (!goalContract) return null;
-    if (!goalContract.allowedEffects.includes("none")) return null;
-    return goalContract.stages.find((stage) =>
-      stage.allowedActions.includes(action)
-      && (!stage.allowedEffects || stage.allowedEffects.includes("none"))
-    )?.id ?? null;
-  };
-  const normalized = [...steps];
-  if (!hasAction("screen_wake")) {
-    const goalStage = preambleStage("screen_wake");
-    if (goalContract && !goalStage) return normalized;
-    normalized.unshift({
-      id: "wake_screen",
-      type: "action",
-      action: "screen_wake",
-      params: {},
-      effect: "none",
-      ...(goalStage ? { goalStage } : {}),
-      timeoutMs: 10_000,
-    });
-  }
-  if (!hasAction("unlock")) {
-    const goalStage = preambleStage("unlock");
-    if (goalContract && !goalStage) return normalized;
-    const insertAt = normalized.findIndex((step) =>
-      !(isRecord(step) && step.type === "action" && step.action === "screen_wake")
-    );
-    normalized.splice(insertAt === -1 ? normalized.length : insertAt, 0, {
-      id: "unlock_device",
-      type: "action",
-      action: "unlock",
-      params: {},
-      effect: "none",
-      ...(goalStage ? { goalStage } : {}),
-      timeoutMs: 15_000,
-    });
-  }
-  return normalized;
 }
 
 async function loadGeneratedWorkflowCurrentAppMap(
@@ -697,6 +260,10 @@ function readyFromCache(
   const cachedIntent = typeof cached.sourceMetadata?.intent === "string" ? cached.sourceMetadata.intent : requestKey;
   const workflow = normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata);
   assertHumanWorkflowMeaningful(workflow, cachedIntent);
+  const safetyClass = cached.workflow.safetyClass ?? cached.compiledPlan.metadata.safetyClass;
+  if (safetyClass !== "read_only" && safetyClass !== "standard" && safetyClass !== "destructive") {
+    throw compilerControlPlaneError("cached workflow has no valid explicit safety class");
+  }
   return {
     status: "ready",
     requestKey,
@@ -704,7 +271,7 @@ function readyFromCache(
     cacheKey: cached.cacheKey,
     source,
     plan: humanWorkflowPlanPreview(workflow, cached.compiledPlan),
-    safetyClass: cached.workflow.safetyClass ?? cached.compiledPlan.metadata.safetyClass ?? "read_only",
+    safetyClass,
     platform: target.account_platform,
     target,
     llmBudget: cached.compiledPlan.llmBudget,
@@ -720,7 +287,15 @@ function cacheKeyFromCompileJob(job: HumanWorkflowCompileJobRecord): string | nu
 export class HumanWorkflowCompilerService {
   async resolveTarget(deviceId: string, accountId: string | null | undefined, intent?: string): Promise<HumanWorkflowTarget | null> {
     if (!accountId && intent && isAccountlessHumanWorkflowIntent(intent)) {
-      const platform = await inferHumanWorkflowPlatform(intent);
+      const platform = await resolveHumanWorkflowPlatform(intent);
+      if (!platform) {
+        throw Object.assign(new Error("No PostgreSQL runtime profile covers this intent"), {
+          status: 422,
+          code: "HUMAN_WORKFLOW_RUNTIME_PROFILE_REQUIRED",
+          retryable: true,
+          nextAction: "configure_runtime_profile",
+        });
+      }
       const result = await getDb().query(
         `SELECT id AS device_id, model AS device_model, friendly_name AS device_name
          FROM devices
@@ -760,8 +335,7 @@ export class HumanWorkflowCompilerService {
     if (row.account_device_id !== row.device_id) {
       throw Object.assign(new Error("Account is not bound to selected device"), { status: 400, code: "ACCOUNT_DEVICE_MISMATCH" });
     }
-    const inferredPlatform = intent ? await inferHumanWorkflowPlatform(intent) : "android";
-    const explicitPlatform = inferredPlatform === "android" ? null : inferredPlatform;
+    const explicitPlatform = intent ? await resolveHumanWorkflowPlatform(intent) : null;
     if (explicitPlatform && explicitPlatform !== String(row.account_platform).toLowerCase()) {
       return {
         device_id: row.device_id as string,
@@ -790,6 +364,7 @@ export class HumanWorkflowCompilerService {
     intent: string;
   }): Promise<HumanWorkflowCompileResult> {
     const intent = input.intent.trim();
+    const controlPlane = await loadHumanWorkflowCompilerControlPlane();
     const requestKey = computeHumanWorkflowRequestKey(input.deviceId, input.accountId, intent);
     const target = await this.resolveTarget(input.deviceId, input.accountId, intent);
     if (!target) {
@@ -797,12 +372,24 @@ export class HumanWorkflowCompilerService {
     }
 
     const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
-    if (cached && humanWorkflowCacheUsable(cached, intent)) return readyFromCache(cached, target, requestKey, "cache");
+    if (cached && humanWorkflowCacheUsable(cached, controlPlane.version)) return readyFromCache(cached, target, requestKey, "cache");
 
-    const catalogContext = await capabilityCatalogService.retrieve(intent, target.account_platform);
+    const catalogContext = await capabilityCatalogService.retrieve(
+      intent,
+      target.account_platform,
+      controlPlane.retrievalPolicy,
+    );
+    if (!catalogContext.matchedCapabilityKey || !catalogContext.goalContract) {
+      throw Object.assign(new Error("No PostgreSQL capability and Goal Contract cover this intent"), {
+        status: 422,
+        code: "HUMAN_WORKFLOW_CAPABILITY_CONTRACT_REQUIRED",
+        retryable: true,
+        nextAction: "configure_capability",
+      });
+    }
     if (catalogContext.fullArtifactCacheKey) {
       const catalogArtifact = await workflowService.getGeneratedPlanCache(catalogContext.fullArtifactCacheKey);
-      if (catalogArtifact && humanWorkflowCacheUsable(catalogArtifact, intent)) {
+      if (catalogArtifact && humanWorkflowCacheUsable(catalogArtifact, controlPlane.version)) {
         return readyFromCache(catalogArtifact, target, requestKey, "cache");
       }
     }
@@ -815,12 +402,18 @@ export class HumanWorkflowCompilerService {
         })
       : null;
     if (shortcutMatch) {
+      const shortcutSafetyClass = catalogContext.recommendedSafetyClass
+        ? controlPlane.safetyClassMap[catalogContext.recommendedSafetyClass]
+        : null;
+      if (!shortcutSafetyClass) {
+        throw compilerControlPlaneError("selected shortcut capability has no configured safety mapping");
+      }
       await shortcutRegistryService.recordHit(shortcutMatch.shortcut.id);
       const ready = await this.compileShortcut(shortcutMatch.shortcut.id, shortcutMatch.shortcut.key, shortcutMatch.shortcut.workflowTemplate, {
         requestKey,
         intent,
         target,
-      });
+      }, controlPlane.version, catalogContext.goalContract, shortcutSafetyClass);
       return ready;
     }
 
@@ -828,7 +421,7 @@ export class HumanWorkflowCompilerService {
     if (existingJob?.status === "ready" && existingJob.result) {
       const jobCacheKey = cacheKeyFromCompileJob(existingJob);
       const cachedJobArtifact = jobCacheKey ? await workflowService.getGeneratedPlanCache(jobCacheKey) : null;
-      if (cachedJobArtifact && humanWorkflowCacheUsable(cachedJobArtifact, intent)) {
+      if (cachedJobArtifact && humanWorkflowCacheUsable(cachedJobArtifact, controlPlane.version)) {
         return readyFromCache(cachedJobArtifact, target, requestKey, "cache");
       }
       const requeued = await humanWorkflowCompileJobService.requeueMissingArtifact(existingJob.id);
@@ -882,6 +475,9 @@ export class HumanWorkflowCompilerService {
     shortcutKey: string,
     rawTemplate: WorkflowTemplate,
     input: { requestKey: string; intent: string; target: HumanWorkflowTarget },
+    compilerVersion: string,
+    expectedContract: WorkflowGoalContract,
+    expectedSafetyClass: HumanWorkflowSafetyClass,
   ): Promise<HumanWorkflowCompileReady> {
     const platform = input.target.account_platform.toLowerCase();
     const packageName = await humanWorkflowPackageName(platform);
@@ -895,7 +491,13 @@ export class HumanWorkflowCompilerService {
       });
     }
     const template = validation.template;
-    assertHumanWorkflowMeaningful(template, input.intent);
+    if (template.safetyClass !== expectedSafetyClass) {
+      throw Object.assign(new Error("shortcut safetyClass does not match PostgreSQL capability policy"), {
+        status: 422,
+        code: "HUMAN_WORKFLOW_CONTROL_PLANE_MISMATCH",
+      });
+    }
+    assertHumanWorkflowMeaningful(template, input.intent, expectedContract);
     let compiledPlan = compileGeneratedWorkflowTemplate(template);
     compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
     await workflowService.saveTemplate(template);
@@ -903,7 +505,7 @@ export class HumanWorkflowCompilerService {
       artifactState: "promoted",
       sourceMetadata: {
         source: "dashboard_human",
-        compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
+        compilerCacheVersion: compilerVersion,
         shortcut: shortcutKey,
         shortcutId,
         intent: input.intent,
@@ -933,33 +535,57 @@ export class HumanWorkflowCompilerService {
     intent: string;
     target: HumanWorkflowTarget;
   }): Promise<HumanWorkflowCompileReady> {
+    const controlPlane = await loadHumanWorkflowCompilerControlPlane();
     const platform = input.target.account_platform;
-    const retrievalContext = await capabilityCatalogService.retrieve(input.intent, platform);
+    const retrievalContext = await capabilityCatalogService.retrieve(
+      input.intent,
+      platform,
+      controlPlane.retrievalPolicy,
+    );
+    if (!retrievalContext.matchedCapabilityKey || !retrievalContext.goalContract || !retrievalContext.recommendedSafetyClass) {
+      throw Object.assign(new Error("No PostgreSQL capability and Goal Contract cover this intent"), {
+        status: 422,
+        code: "HUMAN_WORKFLOW_CAPABILITY_CONTRACT_REQUIRED",
+        retryable: true,
+        nextAction: "configure_capability",
+      });
+    }
     if (retrievalContext.fullArtifactCacheKey) {
       const cached = await workflowService.getGeneratedPlanCache(retrievalContext.fullArtifactCacheKey);
-      if (cached && humanWorkflowCacheUsable(cached, input.intent)) {
+      if (cached && humanWorkflowCacheUsable(cached, controlPlane.version)) {
         return readyFromCache(cached, input.target, input.requestKey, "cache");
       }
     }
-    const safetyClass = compilerSafetyClass(retrievalContext.recommendedSafetyClass);
+    const safetyClass = controlPlane.safetyClassMap[retrievalContext.recommendedSafetyClass];
+    if (!safetyClass) throw compilerControlPlaneError("selected capability safety class has no configured mapping");
     const enforceRetrievedSafetyClass = safetyClass;
     const packageName = await humanWorkflowPackageName(platform);
-    const appMap = await loadMap(packageName);
-    const compilerPolicy = await loadHumanWorkflowCompilerPolicy();
-    const prompt = buildHumanWorkflowCompilePrompt({
-      platform,
-      packageName,
+    const runtimeProfile = await loadRuntimeProfile(platform);
+    if (!runtimeProfile) throw compilerControlPlaneError(`missing runtime profile ${platform}`);
+    const prompt = renderCompilerTemplate(controlPlane.prompts.compile, {
       goal: input.intent,
-      target: input.target,
-      appMap,
-      compilerPolicy,
-      retrievalContext,
-      safetyClass,
+      targetContext: JSON.stringify({
+        platform,
+        account: input.target.account_username,
+        deviceId: input.target.device_id,
+        previewCompileOnly: true,
+        safetyClass,
+      }),
+      runtimeProfile: JSON.stringify({
+        appId: runtimeProfile.appId,
+        appName: runtimeProfile.appName,
+        packageName: runtimeProfile.packageName,
+        safetyPolicy: runtimeProfile.safetyPolicy,
+        metadata: runtimeProfile.metadata,
+      }),
+      retrievalContext: formatCompilerRetrievalContext(retrievalContext),
+      toolCatalog: JSON.stringify(controlPlane.toolCatalog),
+      compilerPolicy: controlPlane.prompts.policy,
     });
 
     const llmDebug: HumanWorkflowLlmDebug = {
       sensitive: true,
-      compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
+      compilerCacheVersion: controlPlane.version,
       attempts: [],
     };
     const captureAttempt = (attempt: number, maxTokens: number) =>
@@ -978,50 +604,40 @@ export class HumanWorkflowCompilerService {
 
     try {
       let rawWorkflow = await llmJson<WorkflowTemplate>(prompt, undefined, {
-        max_tokens: HUMAN_WORKFLOW_INITIAL_MAX_TOKENS,
-        system: "You are a Phone Network workflow compiler. Return only valid WorkflowTemplate JSON. No reasoning.",
+        max_tokens: controlPlane.llm.initialMaxTokens,
+        system: controlPlane.prompts.compileSystem,
         timeoutMs: humanWorkflowAsyncCompileTimeoutMs(),
-        temperature: 0,
-        disableThinking: true,
-        onRawResponse: captureAttempt(1, HUMAN_WORKFLOW_INITIAL_MAX_TOKENS),
+        temperature: controlPlane.llm.temperature,
+        disableThinking: controlPlane.llm.disableThinking,
+        onRawResponse: captureAttempt(1, controlPlane.llm.initialMaxTokens),
       });
-      let normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, {
-        platform,
-        packageName,
-        goal: input.intent,
-        safetyClass: enforceRetrievedSafetyClass,
-        goalContract: retrievalContext.goalContract,
-      });
-      let validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
+      let validation = validateGeneratedWorkflowTemplate(rawWorkflow);
       let template = validation.template;
       const correctiveReason = template
-        ? retrievalContext.goalContract && !template.goalContract
+        ? template.platform !== platform
+          ? "workflow platform does not match the PostgreSQL runtime profile"
+          : template.safetyClass !== enforceRetrievedSafetyClass
+          ? "workflow safetyClass does not match the PostgreSQL compiler control plane"
+          : retrievalContext.goalContract && !template.goalContract
           ? "LLM-compiled human workflow is missing mandatory workflow.goalContract"
           : humanWorkflowPackageInventoryReason(template, packageName)
           ?? workflowGoalContractReason(template, retrievalContext.goalContract)
           ?? humanWorkflowUndercompiledReason(template, input.intent)
         : `workflow validation failed: ${validation.errors.join("; ")}`;
       if (correctiveReason) {
-        rawWorkflow = await llmJson<WorkflowTemplate>(buildHumanWorkflowRepairPrompt({
+        rawWorkflow = await llmJson<WorkflowTemplate>(renderCompilerTemplate(controlPlane.prompts.repair, {
           compilePrompt: prompt,
-          rejectedWorkflow: rawWorkflow,
+          rejectedWorkflow: JSON.stringify(rawWorkflow),
           reason: correctiveReason,
         }), undefined, {
-          max_tokens: HUMAN_WORKFLOW_REPAIR_MAX_TOKENS,
-          system: "You are a Phone Network workflow compiler repairing an undercompiled plan. Return only complete valid WorkflowTemplate JSON. No reasoning.",
+          max_tokens: controlPlane.llm.repairMaxTokens,
+          system: controlPlane.prompts.repairSystem,
           timeoutMs: humanWorkflowAsyncCompileTimeoutMs(),
-          temperature: 0,
-          disableThinking: true,
-          onRawResponse: captureAttempt(2, HUMAN_WORKFLOW_REPAIR_MAX_TOKENS),
+          temperature: controlPlane.llm.temperature,
+          disableThinking: controlPlane.llm.disableThinking,
+          onRawResponse: captureAttempt(2, controlPlane.llm.repairMaxTokens),
         });
-        normalizedWorkflow = normalizeHumanWorkflowTemplateCandidate(rawWorkflow, {
-          platform,
-          packageName,
-          goal: input.intent,
-          safetyClass: enforceRetrievedSafetyClass,
-          goalContract: retrievalContext.goalContract,
-        });
-        validation = validateGeneratedWorkflowTemplate(normalizedWorkflow);
+        validation = validateGeneratedWorkflowTemplate(rawWorkflow);
         if (!validation.template) {
           throw Object.assign(new Error("corrective workflow failed validation"), {
             status: 400,
@@ -1046,6 +662,14 @@ export class HumanWorkflowCompilerService {
           nextAction: "retry_compile",
         });
       }
+      if (template.platform !== platform || template.safetyClass !== enforceRetrievedSafetyClass) {
+        throw Object.assign(new Error("workflow does not match PostgreSQL platform/safety policy"), {
+          status: 422,
+          code: "HUMAN_WORKFLOW_CONTROL_PLANE_MISMATCH",
+          retryable: true,
+          nextAction: "retry_compile",
+        });
+      }
       const packageInventoryReason = humanWorkflowPackageInventoryReason(template, packageName);
       if (packageInventoryReason) {
         throw Object.assign(new Error(`workflow package inventory validation failed: ${packageInventoryReason}`), {
@@ -1060,7 +684,7 @@ export class HumanWorkflowCompilerService {
       compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
       await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, input.requestKey, {
         source: "dashboard_human",
-        compilerCacheVersion: HUMAN_WORKFLOW_COMPILER_CACHE_VERSION,
+        compilerCacheVersion: controlPlane.version,
         intent: input.intent,
         deviceId: input.target.device_id,
         accountId: input.target.account_id,
