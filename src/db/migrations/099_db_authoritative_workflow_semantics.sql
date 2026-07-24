@@ -145,6 +145,48 @@ ON CONFLICT (namespace, entry_key) DO UPDATE SET
   status = 'active',
   updated_at = NOW();
 
+INSERT INTO app_runtime_profiles (
+  app_id,
+  app_name,
+  package_name,
+  profile_version,
+  reset_recipe,
+  mapping_recipe,
+  safety_policy,
+  default_device_id,
+  metadata,
+  active
+)
+VALUES (
+  'com.android.chrome',
+  'Chrome',
+  'com.android.chrome',
+  1,
+  '[
+    {"id":"open_app","type":"open_app","params":{"packageName":"{{packageName}}"}},
+    {"id":"settle_home","type":"wait_for_idle","params":{"timeoutMs":2500},"delayAfterMs":750}
+  ]'::jsonb,
+  '[]'::jsonb,
+  '{
+    "mode":"read_only_navigation",
+    "allowedActions":["open_app","intent_send","wait_for_idle","a11y_find_tap","scroll","press_key"],
+    "blocked":["downloads","password_manager","settings_mutation"]
+  }'::jsonb,
+  NULL,
+  '{"configuredBy":"migration_099","operationalSource":"postgresql"}'::jsonb,
+  TRUE
+)
+ON CONFLICT (app_id) DO UPDATE SET
+  app_name = EXCLUDED.app_name,
+  package_name = EXCLUDED.package_name,
+  profile_version = GREATEST(app_runtime_profiles.profile_version, EXCLUDED.profile_version),
+  reset_recipe = EXCLUDED.reset_recipe,
+  mapping_recipe = EXCLUDED.mapping_recipe,
+  safety_policy = EXCLUDED.safety_policy,
+  metadata = app_runtime_profiles.metadata || EXCLUDED.metadata,
+  active = TRUE,
+  updated_at = NOW();
+
 INSERT INTO workflow_capabilities (
   capability_key,
   platform,
@@ -309,9 +351,17 @@ Compilation policy:
 - A condition step must provide check or expression and a non-empty if_true step array. Add if_false only when the catalog contract requires it.
 - Keep safetyClass, action effects and Goal Contract stages consistent.
 - type_text and set_focused_text are ui_input when the selected Goal Contract permits ui_input; they are not business mutations by primitive name alone.
-- For navigation to an absolute URI, use the runtime/catalog action and package data; never invent a package.
+- For navigation to an absolute http:// or https:// URI, use one intent_send action with android.intent.action.VIEW, the exact URI requested by the user, and the package from the selected runtime profile. Do not use address-bar selectors, a11y_find_tap, type_text, set_focused_text, press_key, or observe_and_transition unless matching promoted App Map evidence was supplied. Never invent a package, selector, verification target, or output.
+- When absolute-URI navigation is the entire goal and no promoted verification evidence was supplied, emit exactly four action steps and no wait/condition/checkpoint/verification steps: screen_wake and unlock in a required prepare stage with effect none, open_app(packageName) in a later navigation stage, then intent_send({"action":"android.intent.action.VIEW","uri":"https://...","packageName":"..."}) in a final navigation stage. The contract allowedEffects is ["none","navigation"]; omit requiredOutputs and omit the outputSchema field entirely.
 - For account-creation capabilities, use only stages, fields and authorized values declared by the selected catalog contract.
 - If promoted knowledge is insufficient to cover a required stage or output, fail closed with MISSING_PROMOTED_KNOWLEDGE.
+- When no catalog Goal Contract was retrieved, derive only Goal Contract v1 in this exact shape: {"version":"1","allowedEffects":["none","navigation"],"stages":[{"id":"stage_id","allowedActions":["primitive"],"allowedEffects":["none"],"after":["earlier_stage"]}],"requiredOutputs":["optionalOutput"]}. version, allowedEffects, stages[].id, and non-empty stages[].allowedActions are mandatory. outputSchema belongs to the workflow root, never inside goalContract.
+- The derived contract must contain every effect used by an action, and each stage must allow every action/effect assigned to it. If a verification action is added, declare observation globally and in its stage. Do not invent requiredOutputs or outputSchema properties when the user did not request a returned value; any declared required output must have a real runtime producer.
+- outputSchema is JSON Schema-shaped data: {"required":["name"],"properties":{"name":{"type":"string"}}}. Every goalContract.requiredOutputs entry must occur in required and properties.
+- Every variable declared by a Goal Contract stage.produces must be emitted by an action in that stage through step.saveOutputAs, params.outputVariable, or a classify_ui_tree params.outputs key. A descriptive prompt or targetVariable does not produce a runtime binding.
+- classify_ui_tree is deterministic and params.outputs must be an object keyed by produced variable name, never an array. Each value is a rule supplied by PostgreSQL/App Map knowledge and uses cases, regex, group, anyContains, allContains, noneContains, value, trueValue, falseValue, or default; never use prompt, responseFormat, targetVariable, or invented extraction semantics.
+- observe_and_transition params.postcondition is a deterministic predicate object: {"action":"ui_tree_dump","params":{},"outputPath":"uiTree","operator":"contains_ci","expected":"catalog-supplied evidence"}. operator must be truthy, falsy, equals, not_equals, contains, contains_ci, not_contains, not_contains_ci, exists, or missing.
+- Select a dynamic result only through a selector or binding produced by an earlier observation stage. A consumed variable must appear structurally as {"$bind":"variableName"} or {{variableName}} in that stage's params; the literal string "variableName" is not a binding. Never reuse an input-field selector as the result selector. If the supplied data cannot identify and verify the result, fail closed with MISSING_PROMOTED_KNOWLEDGE.
 $policy$
 )
 ON CONFLICT (key) DO UPDATE SET

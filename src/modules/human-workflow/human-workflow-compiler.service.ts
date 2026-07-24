@@ -25,7 +25,7 @@ import {
   type CatalogSafetyClass,
   type CompilerRetrievalContext,
 } from "./capability-catalog.service";
-import { workflowGoalContractReason } from "../workflows/goal-contract";
+import { parseWorkflowGoalContract, workflowGoalContractReason } from "../workflows/goal-contract";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
@@ -527,7 +527,18 @@ function normalizeHumanWorkflowTemplateCandidate(
       normalizedSteps.push(normalized);
     }
     workflow.steps = normalizedSteps;
-    workflow.steps = ensureHumanWorkflowPreambleSteps(workflow.steps as unknown[]);
+    workflow.steps = ensureHumanWorkflowPreambleSteps(
+      workflow.steps as unknown[],
+      input.goalContract ?? parseWorkflowGoalContract(workflow.goalContract),
+    );
+    const suppliedOutputSchema = isRecord(workflow.outputSchema) ? workflow.outputSchema : null;
+    const suppliedRequired = suppliedOutputSchema?.required;
+    const suppliedProperties = suppliedOutputSchema?.properties;
+    const suppliedOutputSchemaValid = Array.isArray(suppliedRequired)
+      && suppliedRequired.length > 0
+      && suppliedRequired.every((key) => typeof key === "string" && key.trim().length > 0)
+      && isRecord(suppliedProperties);
+    if (!suppliedOutputSchemaValid) delete workflow.outputSchema;
     if (!isRecord(workflow.outputSchema)) {
       const outputProperties: Record<string, { type: "boolean" | "string" | "number" | "object" | "array" | "null" }> = {};
       const visit = (steps: unknown[]): void => {
@@ -606,22 +617,38 @@ function normalizeHumanWorkflowWaitStep(step: Record<string, unknown>): void {
   delete step.params;
 }
 
-function ensureHumanWorkflowPreambleSteps(steps: unknown[]): unknown[] {
+function ensureHumanWorkflowPreambleSteps(
+  steps: unknown[],
+  goalContract: WorkflowGoalContract | null,
+): unknown[] {
   const hasAction = (action: string): boolean => steps.some((step) =>
     isRecord(step) && step.type === "action" && step.action === action
   );
+  const preambleStage = (action: string): string | null => {
+    if (!goalContract) return null;
+    if (!goalContract.allowedEffects.includes("none")) return null;
+    return goalContract.stages.find((stage) =>
+      stage.allowedActions.includes(action)
+      && (!stage.allowedEffects || stage.allowedEffects.includes("none"))
+    )?.id ?? null;
+  };
   const normalized = [...steps];
   if (!hasAction("screen_wake")) {
+    const goalStage = preambleStage("screen_wake");
+    if (goalContract && !goalStage) return normalized;
     normalized.unshift({
       id: "wake_screen",
       type: "action",
       action: "screen_wake",
       params: {},
       effect: "none",
+      ...(goalStage ? { goalStage } : {}),
       timeoutMs: 10_000,
     });
   }
   if (!hasAction("unlock")) {
+    const goalStage = preambleStage("unlock");
+    if (goalContract && !goalStage) return normalized;
     const insertAt = normalized.findIndex((step) =>
       !(isRecord(step) && step.type === "action" && step.action === "screen_wake")
     );
@@ -631,6 +658,7 @@ function ensureHumanWorkflowPreambleSteps(steps: unknown[]): unknown[] {
       action: "unlock",
       params: {},
       effect: "none",
+      ...(goalStage ? { goalStage } : {}),
       timeoutMs: 15_000,
     });
   }

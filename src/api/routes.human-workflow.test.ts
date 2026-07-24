@@ -1255,6 +1255,96 @@ describe("dashboard human workflow routes", () => {
     ]);
   });
 
+  it("does not inject preamble actions outside a catalog Goal Contract and removes an empty output schema", async () => {
+    const goalContract = {
+      version: "1" as const,
+      allowedEffects: ["navigation" as const],
+      stages: [
+        {
+          id: "open_app",
+          allowedActions: ["open_app"],
+          allowedEffects: ["navigation" as const],
+        },
+        {
+          id: "navigate_uri",
+          allowedActions: ["intent_send"],
+          allowedEffects: ["navigation" as const],
+          after: ["open_app"],
+        },
+      ],
+    };
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValueOnce(null);
+    mocks.shortcutRegistryService.lookupActiveShortcut.mockResolvedValueOnce(null);
+    mocks.compileJobService.createOrGet.mockResolvedValueOnce(compileJobRecord({
+      requestKey: requestKey(ASKREDDIT_NAV_INTENT),
+      intent: ASKREDDIT_NAV_INTENT,
+    }));
+    mocks.capabilityCatalogService.retrieve.mockResolvedValue({
+      fullArtifactCacheKey: null,
+      matchedCapabilityKey: "absolute_uri_navigation",
+      matchedCapabilityScore: 0.92,
+      recommendedSafetyClass: "navigation",
+      goalContract,
+      knowledge: {
+        promotedArtifacts: [],
+        uiGraph: { selectors: [], transitions: [] },
+        avoid: [],
+      },
+    });
+    mocks.llmJson.mockReset();
+    mocks.llmJson.mockResolvedValueOnce({
+      id: "workflow_reddit_uri_001",
+      name: "Open Reddit URI",
+      platform: "reddit",
+      description: "Open Reddit and navigate to a requested URI.",
+      version: "1.0.0",
+      safetyClass: "read_only",
+      goalContract,
+      outputSchema: {},
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 7,
+      steps: [
+        {
+          id: "open_reddit",
+          type: "action",
+          action: "open_app",
+          params: { packageName: "com.reddit.frontpage" },
+          effect: "navigation",
+          goalStage: "open_app",
+        },
+        {
+          id: "navigate_uri",
+          type: "action",
+          action: "intent_send",
+          params: {
+            action: "android.intent.action.VIEW",
+            uri: "https://www.reddit.com/r/AskReddit/",
+            packageName: "com.reddit.frontpage",
+          },
+          effect: "navigation",
+          goalStage: "navigate_uri",
+        },
+      ],
+    });
+
+    const response = await postJson("/api/workflows/human/compile", {
+      device_id: DEVICE_ID,
+      account_id: ACCOUNT_ID,
+      intent: ASKREDDIT_NAV_INTENT,
+    });
+
+    expect(response.status).toBe(202);
+    const runner = mocks.compileJobService.runInProcess.mock.calls[0][1] as () => Promise<unknown>;
+    await runner();
+
+    const savedTemplate = mocks.workflowService.saveExecutableGeneratedPlanCache.mock.calls[0][0];
+    expect(savedTemplate.steps.map((step: { action?: string }) => step.action).filter(Boolean)).toEqual([
+      "open_app",
+      "intent_send",
+    ]);
+    expect(savedTemplate.outputSchema).toBeUndefined();
+  });
+
   it("rejects android human workflows when the AI returns empty steps for a real task", async () => {
     const intent = "fa un cont gmail";
     const key = crypto.createHash("sha256").update(`${DEVICE_ID}:device:${intent}`).digest("hex").slice(0, 24);
