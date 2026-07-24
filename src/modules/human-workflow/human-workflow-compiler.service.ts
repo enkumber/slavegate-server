@@ -29,6 +29,8 @@ import {
   loadHumanWorkflowCompilerControlPlane,
   renderCompilerTemplate,
 } from "./compiler-control-plane.service";
+import { workflowSegmentComposer } from "../workflow-segments/composer";
+import type { ComposedWorkflow } from "../workflow-segments/types";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
@@ -53,7 +55,7 @@ export type HumanWorkflowCompileReady = {
   requestKey: string;
   cacheHit: boolean;
   cacheKey: string;
-  source: "cache" | "shortcut" | "llm";
+  source: "cache" | "shortcut" | "llm" | "composition";
   compileJobId?: string;
   plan: Record<string, unknown>;
   safetyClass: HumanWorkflowSafetyClass;
@@ -62,6 +64,15 @@ export type HumanWorkflowCompileReady = {
   llmBudget?: Record<string, unknown>;
   shortcutId?: string | null;
   llmDebug?: HumanWorkflowLlmDebug;
+  architecture?: "segments-v1";
+  compositionName?: string;
+  compositionVersion?: string;
+  compositionKey?: string;
+  executionKey?: string;
+  segmentKeys?: string[];
+  segmentRefs?: Array<{ segmentKey: string; segmentVersion: string }>;
+  runtimeInputs?: Record<string, unknown>;
+  publicRuntimeInputs?: Record<string, unknown>;
 };
 
 export interface HumanWorkflowLlmDebugAttempt {
@@ -298,6 +309,63 @@ function readyFromCache(
   };
 }
 
+async function readyFromComposition(
+  composed: ComposedWorkflow,
+  target: HumanWorkflowTarget,
+  artifactState: "candidate" | "promoted" = "promoted",
+): Promise<HumanWorkflowCompileReady> {
+  const compiledPlan = compileGeneratedWorkflowTemplate(composed.template);
+  let cached = await workflowService.getGeneratedPlanCache(compiledPlan.cacheKey);
+  if (!cached) {
+    const save = artifactState === "candidate"
+      ? workflowService.saveCandidateExecutableGeneratedPlanCache.bind(workflowService)
+      : workflowService.saveExecutableGeneratedPlanCache.bind(workflowService);
+    await save(
+      composed.template,
+      compiledPlan,
+      undefined,
+      {
+        source: "dashboard_human",
+        architecture: composed.architecture,
+        compositionName: composed.compositionName,
+        compositionVersion: composed.compositionVersion,
+        compositionKey: composed.compositionKey,
+        segmentKeys: composed.segmentKeys,
+        segmentRefs: composed.segmentRefs,
+        outputContractVersion: HUMAN_WORKFLOW_OUTPUT_CONTRACT_VERSION,
+        portabilityScope: "global",
+      },
+    );
+    cached = await workflowService.getGeneratedPlanCache(compiledPlan.cacheKey);
+  }
+  if (!cached) {
+    throw Object.assign(new Error("composed workflow artifact could not be persisted"), {
+      code: "WORKFLOW_COMPOSITION_PERSISTENCE_FAILED",
+    });
+  }
+  return {
+    status: "ready",
+    requestKey: composed.requestKey,
+    cacheHit: true,
+    cacheKey: cached.cacheKey,
+    source: "composition",
+    plan: humanWorkflowPlanPreview(composed.template, compiledPlan),
+    safetyClass: composed.template.safetyClass ?? "read_only",
+    platform: target.account_platform,
+    target,
+    llmBudget: compiledPlan.llmBudget,
+    architecture: composed.architecture,
+    compositionName: composed.compositionName,
+    compositionVersion: composed.compositionVersion,
+    compositionKey: composed.compositionKey,
+    executionKey: composed.executionKey,
+    segmentKeys: composed.segmentKeys,
+    segmentRefs: composed.segmentRefs,
+    runtimeInputs: composed.runtimeInputs,
+    publicRuntimeInputs: composed.publicRuntimeInputs,
+  };
+}
+
 function cacheKeyFromCompileJob(job: HumanWorkflowCompileJobRecord): string | null {
   if (typeof job.cacheKey === "string" && job.cacheKey.length > 0) return job.cacheKey;
   const resultCacheKey = job.result?.cacheKey;
@@ -378,6 +446,40 @@ export class HumanWorkflowCompilerService {
     };
   }
 
+  async compileCandidateComposition(input: {
+    compositionName: string;
+    compositionVersion: string;
+    deviceId: string;
+    accountId?: string | null;
+    intent: string;
+  }): Promise<HumanWorkflowCompileReady> {
+    const intent = input.intent.trim();
+    const requestKey = computeHumanWorkflowRequestKey(input.deviceId, input.accountId, intent);
+    const target = await this.resolveTarget(input.deviceId, input.accountId, intent);
+    if (!target) {
+      throw Object.assign(new Error("Device or account not found"), {
+        status: 400,
+        code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND",
+      });
+    }
+    const composed = await workflowSegmentComposer.composeCandidate({
+      compositionName: input.compositionName,
+      compositionVersion: input.compositionVersion,
+      platform: target.account_platform,
+      intent,
+      requestKey,
+      deviceId: input.deviceId,
+      accountId: input.accountId ?? null,
+    });
+    if (!composed) {
+      throw Object.assign(new Error("candidate workflow composition not found"), {
+        status: 404,
+        code: "WORKFLOW_COMPOSITION_CANDIDATE_NOT_FOUND",
+      });
+    }
+    return readyFromComposition(composed, target, "candidate");
+  }
+
   async compile(input: {
     deviceId: string;
     accountId?: string | null;
@@ -390,9 +492,6 @@ export class HumanWorkflowCompilerService {
     if (!target) {
       throw Object.assign(new Error("Device or account not found"), { status: 400, code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND" });
     }
-
-    const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
-    if (cached && humanWorkflowCacheUsable(cached, controlPlane.version)) return readyFromCache(cached, target, requestKey, "cache");
 
     const catalogContext = await capabilityCatalogService.retrieve(
       intent,
@@ -407,6 +506,29 @@ export class HumanWorkflowCompilerService {
         nextAction: "configure_capability",
       });
     }
+    if (catalogContext.matchedCapabilityMetadata?.compositionEnabled === true) {
+      const composed = await workflowSegmentComposer.compose({
+        capabilityKey: catalogContext.matchedCapabilityKey,
+        platform: target.account_platform,
+        intent,
+        requestKey,
+        deviceId: input.deviceId,
+        accountId: input.accountId ?? null,
+      });
+      if (composed) return readyFromComposition(composed, target);
+      throw Object.assign(new Error("Capability requires a promoted PostgreSQL workflow composition"), {
+        status: 422,
+        code: "WORKFLOW_COMPOSITION_REQUIRED",
+        retryable: true,
+        nextAction: "promote_composition",
+      });
+    }
+
+    const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
+    if (cached && humanWorkflowCacheUsable(cached, controlPlane.version)) {
+      return readyFromCache(cached, target, requestKey, "cache");
+    }
+
     if (catalogContext.fullArtifactCacheKey) {
       const catalogArtifact = await workflowService.getGeneratedPlanCache(catalogContext.fullArtifactCacheKey);
       if (

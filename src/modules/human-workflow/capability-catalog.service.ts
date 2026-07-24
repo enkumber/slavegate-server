@@ -49,6 +49,7 @@ export interface CompilerRetrievalContext {
   matchedCapabilityScore: number | null;
   recommendedSafetyClass: CatalogSafetyClass | null;
   goalContract: WorkflowGoalContract | null;
+  matchedCapabilityMetadata: Record<string, unknown> | null;
   knowledge: {
     promotedArtifacts: Array<Record<string, unknown>>;
     uiGraph: {
@@ -316,6 +317,7 @@ export class CapabilityCatalogService {
       matchedCapabilityScore: selected?.score ?? null,
       recommendedSafetyClass: selected?.capability.safetyClass ?? null,
       goalContract: parseWorkflowGoalContract(selected?.capability.metadata.goalContract),
+      matchedCapabilityMetadata: selected?.capability.metadata ?? null,
       knowledge: {
         promotedArtifacts,
         uiGraph: {

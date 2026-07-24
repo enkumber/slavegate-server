@@ -418,6 +418,30 @@ export class WorkflowService {
     }
   }
 
+  async saveCandidateExecutableGeneratedPlanCache(
+    template: WorkflowTemplate,
+    compiledPlan: GeneratedWorkflowCompiledPlan,
+    requestKey: string | undefined,
+    sourceMetadata: Record<string, unknown>
+  ): Promise<void> {
+    const db = getDb();
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      await this.saveTemplateWithDb(client, template);
+      await this.saveGeneratedPlanCacheWithDb(client, template, compiledPlan, requestKey, {
+        artifactState: "candidate",
+        sourceMetadata,
+      });
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
   private async saveGeneratedPlanCacheWithDb(
     db: Queryable,
     template: WorkflowTemplate,

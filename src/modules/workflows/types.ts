@@ -198,6 +198,8 @@ export interface WorkflowTemplate {
   safetyClass?: "read_only" | "standard";
   /** Structured output contract for read-only marketing workflows. */
   outputSchema?: WorkflowOutputSchema;
+  /** Relational success contract evaluated against runtime inputs and outputs. */
+  postconditionContract?: WorkflowPostconditionContract;
   /** Data-driven contract copied from the matched capability catalog entry. */
   goalContract?: WorkflowGoalContract;
   /** Recovery request types the runtime may ask for after deterministic failure. */
@@ -242,6 +244,38 @@ export interface WorkflowOutputSchema {
 
 export interface WorkflowOutputSchemaProperty {
   type: "boolean" | "string" | "number" | "object" | "array" | "null";
+}
+
+export type WorkflowPostconditionOperator =
+  | "equals"
+  | "not_equals"
+  | "truthy"
+  | "falsy"
+  | "exists"
+  | "missing"
+  | "contains"
+  | "matches_regex"
+  | "uri_equivalent";
+
+export interface WorkflowPostconditionValue {
+  path?: string;
+  value?: unknown;
+}
+
+export interface WorkflowPostconditionPredicate {
+  left: WorkflowPostconditionValue;
+  operator: WorkflowPostconditionOperator;
+  right?: WorkflowPostconditionValue;
+  options?: {
+    acceptedRedirects?: string[];
+    ignoreFragment?: boolean;
+    ignoreTrailingSlash?: boolean;
+  };
+}
+
+export interface WorkflowPostconditionContract {
+  version: "1";
+  all: WorkflowPostconditionPredicate[];
 }
 
 export type WorkflowInteractionEffect =

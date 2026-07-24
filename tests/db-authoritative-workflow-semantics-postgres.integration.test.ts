@@ -36,11 +36,23 @@ describe("DB-authoritative AI workflow semantics migration", () => {
       "034_generated_workflow_request_key.sql",
       "035_generated_workflow_canonical_artifact.sql",
       "060_generated_workflow_artifact_lifecycle.sql",
-      "088_app_runtime_profiles.sql",
       "096_workflow_capability_catalog.sql",
     ]) {
       await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", migration), "utf8"));
     }
+
+    await pool.query(`
+      CREATE TABLE app_runtime_profiles (
+        app_id TEXT PRIMARY KEY,
+        app_name TEXT NOT NULL,
+        package_name TEXT NOT NULL,
+        platform TEXT NOT NULL DEFAULT 'android',
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
   });
 
   afterAll(async () => {
@@ -49,7 +61,9 @@ describe("DB-authoritative AI workflow semantics migration", () => {
     await adminPool?.end();
   });
 
-  it("stores and resolves the complete compiler control plane idempotently in PostgreSQL", async () => {
+  it("installs schema and generic resolvers idempotently without seeding semantics", async () => {
+    const baselineCapabilities = Number((await pool.query("SELECT COUNT(*)::int AS count FROM workflow_capabilities")).rows[0].count);
+    const baselinePrompts = Number((await pool.query("SELECT COUNT(*)::int AS count FROM system_prompts")).rows[0].count);
     for (const filename of [
       "099_db_authoritative_workflow_semantics.sql",
       "100_postgres_compiler_control_plane.sql",
@@ -62,67 +76,59 @@ describe("DB-authoritative AI workflow semantics migration", () => {
       await pool.query(migration);
     }
 
-    const capabilities = await pool.query(
-      `SELECT capability_key, platform, safety_class, metadata->'goalContract' AS goal_contract
-       FROM workflow_capabilities
-       WHERE capability_key = ANY($1::text[])
-       ORDER BY capability_key`,
-      [["device_unlock", "reddit_account_health_scan"]],
-    );
-    expect(capabilities.rows).toHaveLength(2);
-    expect(capabilities.rows.every((row) => row.goal_contract?.version === "1")).toBe(true);
+    expect(Number((await pool.query("SELECT COUNT(*)::int AS count FROM workflow_capabilities")).rows[0].count))
+      .toBe(baselineCapabilities);
+    expect((await pool.query("SELECT * FROM runtime_semantic_entries")).rows).toHaveLength(0);
+    expect(Number((await pool.query("SELECT COUNT(*)::int AS count FROM system_prompts")).rows[0].count))
+      .toBe(baselinePrompts);
 
-    const policy = await pool.query(
-      `SELECT content FROM system_prompts WHERE key = 'human_workflow_compiler_policy'`,
+    await pool.query(
+      `INSERT INTO app_runtime_profiles (app_id, app_name, package_name, metadata)
+       VALUES ($1, $2, $3, $4::jsonb)`,
+      ["sample_app", "Sample Application", "org.example.sample", JSON.stringify({
+        compilerAliases: ["sample surface"],
+      })],
     );
-    expect(policy.rows).toHaveLength(1);
-    expect(policy.rows[0].content).toContain("supplied from PostgreSQL");
-    expect(policy.rows[0].content).toContain("Never infer an application package");
-    expect(policy.rows[0].content).toContain("Never derive a Goal Contract");
-
-    const controlPlane = await pool.query(
-      `SELECT payload
-       FROM runtime_semantic_entries
-       WHERE namespace = 'compiler_control_plane' AND entry_key = 'human_workflow_v1'`,
+    await pool.query(
+      `INSERT INTO workflow_capabilities (
+         capability_key, platform, description, aliases, required_terms,
+         safety_class, portability_scope, min_match_score, ambiguity_margin, metadata
+       )
+       VALUES ($1, $2, $3, $4::text[], $5::text[], 'read_only', 'global', 0.2, 0.05, $6::jsonb)`,
+      [
+        "inspect_sample_surface",
+        "sample_app",
+        "Inspect the sample surface",
+        ["inspect sample surface"],
+        ["inspect"],
+        JSON.stringify({ configuredLive: true }),
+      ],
     );
-    expect(controlPlane.rows).toHaveLength(1);
-    expect(controlPlane.rows[0].payload).toMatchObject({
-      missingCapabilityPolicy: "fail_closed",
-      normalizationPolicy: "strict_reject",
-    });
 
     const platform = await pool.query(
       `SELECT * FROM resolve_human_workflow_platform($1)`,
-      ["deschide browserul chrome si mergi pe google.com"],
+      ["inspect the sample surface"],
     );
     expect(platform.rows).toEqual([
       expect.objectContaining({
-        app_id: "com.android.chrome",
-        package_name: "com.android.chrome",
+        app_id: "sample_app",
+        package_name: "org.example.sample",
       }),
     ]);
 
     const resolved = await pool.query(
-      `SELECT capability_key, selected
+      `SELECT capability_key, selected, metadata
        FROM resolve_workflow_capabilities($1, $2)`,
-      ["deschide browserul chrome si mergi pe google.com", "com.android.chrome"],
+      ["inspect sample surface", "sample_app"],
     );
     expect(resolved.rows).toEqual([
-      { capability_key: "web_open_absolute_uri", selected: true },
+      {
+        capability_key: "inspect_sample_surface",
+        selected: true,
+        metadata: { configuredLive: true },
+      },
     ]);
 
-    const semanticEntries = await pool.query(
-      `SELECT namespace, COUNT(*)::int AS count
-       FROM runtime_semantic_entries
-       GROUP BY namespace
-       ORDER BY namespace`,
-    );
-    expect(semanticEntries.rows).toEqual(expect.arrayContaining([
-      expect.objectContaining({ namespace: "account_detection_rule" }),
-      expect.objectContaining({ namespace: "incident_routing_rule" }),
-      expect.objectContaining({ namespace: "tool_catalog" }),
-      expect.objectContaining({ namespace: "vision_prompt" }),
-      expect.objectContaining({ namespace: "compiler_control_plane" }),
-    ]));
+    expect((await pool.query("SELECT * FROM runtime_semantic_entries")).rows).toHaveLength(0);
   });
 });

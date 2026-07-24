@@ -87,7 +87,7 @@ describe("DB-authoritative workflow semantics", () => {
     }
   });
 
-  it("stores the complete compiler control plane and resolution policy in PostgreSQL", () => {
+  it("ships schema and generic lookup primitives without release-bound workflow semantics", () => {
     const semanticMigration = fs.readFileSync(
       path.join(__dirname, "..", "..", "db", "migrations", "099_db_authoritative_workflow_semantics.sql"),
       "utf8",
@@ -97,17 +97,40 @@ describe("DB-authoritative workflow semantics", () => {
       "utf8",
     );
 
-    expect(semanticMigration).toContain("INSERT INTO workflow_capabilities");
-    expect(semanticMigration).toContain("'goalContract'");
     expect(semanticMigration).toContain("runtime_semantic_entries");
-    expect(semanticMigration).toContain("'tool_catalog'");
+    expect(semanticMigration).not.toMatch(/\bINSERT\s+INTO\b/i);
+    expect(semanticMigration).not.toMatch(/\bUPDATE\b/i);
     expect(controlPlaneMigration).toContain("resolve_human_workflow_platform");
     expect(controlPlaneMigration).toContain("resolve_workflow_capabilities");
-    expect(controlPlaneMigration).toContain("'compiler_control_plane'");
-    expect(controlPlaneMigration).toContain('"normalizationPolicy":"strict_reject"');
-    expect(controlPlaneMigration).toContain('"missingCapabilityPolicy":"fail_closed"');
-    expect(controlPlaneMigration).toContain("'human_workflow_compile_template'");
-    expect(controlPlaneMigration).toContain("'human_workflow_repair_template'");
-    expect(controlPlaneMigration).toContain("Never derive a Goal Contract");
+    expect(controlPlaneMigration).toContain("compiler_tokens");
+    expect(controlPlaneMigration).not.toMatch(/\bINSERT\s+INTO\b/i);
+    expect(controlPlaneMigration).not.toMatch(/\bUPDATE\b/i);
+
+    const releaseMigrations = `${semanticMigration}\n${controlPlaneMigration}`.toLowerCase();
+    for (const forbidden of [
+      "com.android.chrome",
+      "google.com",
+      "reddit",
+      "instagram",
+      "human_workflow_compile_template",
+      "human_workflow_repair_template",
+      "compiler_control_plane",
+    ]) {
+      expect(releaseMigrations, forbidden).not.toContain(forbidden);
+    }
+  });
+
+  it("retires the legacy prompt compiler instead of keeping a second semantic path", () => {
+    for (const retiredFile of [
+      "planner.ts",
+      "prompt-builder.ts",
+      "validator.ts",
+      "model-routing.ts",
+    ]) {
+      expect(
+        fs.existsSync(path.join(serverRoot, "modules", "workflow-compiler", retiredFile)),
+        retiredFile,
+      ).toBe(false);
+    }
   });
 });

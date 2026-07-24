@@ -115,7 +115,7 @@ export interface HumanWorkflowCompileReadyResult {
   requestKey: string;
   cacheHit: boolean;
   cacheKey?: string;
-  source?: "cache" | "shortcut" | "llm";
+  source?: "cache" | "shortcut" | "llm" | "composition";
   plan: {
     templateId?: string;
     version?: string;
@@ -130,6 +130,14 @@ export interface HumanWorkflowCompileReadyResult {
   platform: string;
   target: HumanWorkflowTarget;
   llmBudget?: Record<string, unknown>;
+  architecture?: "segments-v1";
+  compositionName?: string;
+  compositionVersion?: string;
+  compositionKey?: string;
+  executionKey?: string;
+  segmentKeys?: string[];
+  segmentRefs?: Array<{ segmentKey: string; segmentVersion: string }>;
+  publicRuntimeInputs?: Record<string, unknown>;
 }
 
 export interface HumanWorkflowCompileCompilingResult {

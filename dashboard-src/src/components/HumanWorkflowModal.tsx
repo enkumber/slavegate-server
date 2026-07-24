@@ -279,6 +279,18 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
                   <Metric label="Platform" value={compileResult.platform} />
                   <Metric label="Request" value={compileResult.requestKey} />
                   {compileResult.source && <Metric label="Source" value={compileResult.source} />}
+                  {compileResult.architecture === "segments-v1" && (
+                    <>
+                      <Metric label="Composition" value={`${compileResult.compositionName ?? "-"}@${compileResult.compositionVersion ?? "-"}`} />
+                      <Metric label="Composition key" value={compileResult.compositionKey ?? "-"} />
+                      <Metric label="Execution key" value={compileResult.executionKey ?? "-"} />
+                      <Metric
+                        label="Segments"
+                        value={(compileResult.segmentRefs ?? []).map((item) => `${item.segmentKey}@${item.segmentVersion}`).join(", ") || "-"}
+                      />
+                      <Metric label="Runtime inputs" value={JSON.stringify(compileResult.publicRuntimeInputs ?? {})} />
+                    </>
+                  )}
                   {compileResult.safetyClass === "destructive" && (
                     <div style={{ marginTop: "10px", color: "#fca5a5", fontSize: "12px" }}>
                       Destructive plans cannot be launched from the dashboard.

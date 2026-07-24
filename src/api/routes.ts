@@ -91,6 +91,13 @@ import {
   readActiveOtaRelease,
 } from "../modules/ota/apk-release";
 import { incidentService, type IncidentStatus } from "../modules/incidents/incident.service";
+import { workflowSegmentControlPlaneService } from "../modules/workflow-segments/control-plane.service";
+import type {
+  SegmentInputResolver,
+  SegmentInputSchema,
+  WorkflowCompositionExecutionPolicy,
+  WorkflowCompositionNodeRecord,
+} from "../modules/workflow-segments/types";
 
 const router = Router();
 
@@ -183,6 +190,12 @@ async function queueHumanAgencyWorkflowRun(input: {
   intent: string;
   compiledBy?: unknown;
   allowCandidateArtifact?: boolean;
+  architecture?: "segments-v1";
+  compositionKey?: string;
+  executionKey?: string;
+  segmentKeys?: string[];
+  segmentRefs?: Array<{ segmentKey: string; segmentVersion: string }>;
+  runtimeInputs?: Record<string, unknown>;
 }): Promise<Record<string, unknown>> {
   const db = getDb();
   const client = await db.connect();
@@ -268,6 +281,11 @@ async function queueHumanAgencyWorkflowRun(input: {
       accountUsername: input.target.account_username,
       accountPlatform: input.target.account_platform,
       requestKey: input.requestKey,
+      architecture: input.architecture ?? null,
+      compositionKey: input.compositionKey ?? null,
+      executionKey: input.executionKey ?? null,
+      segmentKeys: input.segmentKeys ?? [],
+      runtimeInputs: input.runtimeInputs ?? {},
     };
     let runId = existingRun?.id;
     if (!runId) {
@@ -304,6 +322,15 @@ async function queueHumanAgencyWorkflowRun(input: {
       source: "dashboard_human",
       maxSelfHealingAttempts: 0,
     };
+    if (input.architecture === "segments-v1") {
+      taskParams.architecture = input.architecture;
+      taskParams.compositionKey = input.compositionKey;
+      taskParams.executionKey = input.executionKey;
+      taskParams.executionRequestKey = input.requestKey;
+      taskParams.segmentKeys = input.segmentKeys ?? [];
+      taskParams.segmentRefs = input.segmentRefs ?? [];
+      taskParams.variables = { inputs: input.runtimeInputs ?? {} };
+    }
     if (input.allowCandidateArtifact === true) taskParams.allowCandidateArtifact = true;
     const taskResult = await client.query<{ id: string }>(
       `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
@@ -876,7 +903,8 @@ router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
     if (data.status === "compiling") {
       return res.status(202).json({ ok: true, data });
     }
-    res.json({ ok: true, data });
+    const { runtimeInputs: _privateRuntimeInputs, ...publicData } = data;
+    res.json({ ok: true, data: publicData });
   } catch (err) {
     const typed = err as Error & {
       status?: number;
@@ -912,6 +940,197 @@ router.get("/workflows/human/compile-jobs/:id", requireAdminAuth, async (req, re
     res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
   }
 });
+
+router.post("/workflow-segments/versions", requireAdminAuth, async (req, res) => {
+  try {
+    const body = req.body as {
+      segmentKey: string;
+      version: string;
+      platform: string;
+      description?: string;
+      template: WorkflowTemplate;
+      inputSchema: SegmentInputSchema;
+      outputSchema?: WorkflowTemplate["outputSchema"];
+      postconditionContract?: WorkflowTemplate["postconditionContract"];
+      compatibility?: Record<string, unknown>;
+    };
+    const data = await workflowSegmentControlPlaneService.createSegmentVersion({
+      ...body,
+      actor: (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId ?? null,
+    });
+    res.status(201).json({ ok: true, data });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string; validationErrors?: string[] };
+    res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message, errors: typed.validationErrors });
+  }
+});
+
+router.post("/workflow-compositions/versions", requireAdminAuth, async (req, res) => {
+  try {
+    const body = req.body as {
+      compositionName: string;
+      version: string;
+      capabilityKey: string;
+      platform: string;
+      inputSchema: SegmentInputSchema;
+      outputSchema: NonNullable<WorkflowTemplate["outputSchema"]>;
+      inputResolver: SegmentInputResolver;
+      postconditionContract: NonNullable<WorkflowTemplate["postconditionContract"]>;
+      executionPolicy: WorkflowCompositionExecutionPolicy;
+      compatibility?: Record<string, unknown>;
+      nodes: WorkflowCompositionNodeRecord[];
+    };
+    const data = await workflowSegmentControlPlaneService.createCompositionVersion({
+      ...body,
+      actor: (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId ?? null,
+    });
+    res.status(201).json({ ok: true, data });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string };
+    res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
+  }
+});
+
+router.post("/workflow-compositions/:key/:version/canary/compile", requireAdminAuth, async (req, res) => {
+  try {
+    const { device_id, account_id, intent } = req.body as {
+      device_id?: unknown;
+      account_id?: unknown;
+      intent?: unknown;
+    };
+    if (typeof device_id !== "string" || !UUID_RE.test(device_id)) {
+      return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "device_id must be a UUID" });
+    }
+    if (typeof intent !== "string" || intent.trim().length === 0 || intent.trim().length > 2000) {
+      return res.status(400).json({ ok: false, code: "INTENT_INVALID", error: "intent must be between 1 and 2000 characters" });
+    }
+    const accountId = typeof account_id === "string" && UUID_RE.test(account_id) ? account_id : null;
+    if (account_id !== undefined && account_id !== null && !accountId) {
+      return res.status(400).json({ ok: false, code: "ACCOUNT_ID_INVALID", error: "account_id must be a UUID when provided" });
+    }
+    const data = await humanWorkflowCompilerService.compileCandidateComposition({
+      compositionName: req.params.key,
+      compositionVersion: req.params.version,
+      deviceId: device_id,
+      accountId,
+      intent,
+    });
+    const { runtimeInputs: _privateRuntimeInputs, ...publicData } = data;
+    res.json({ ok: true, data: publicData });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string; validationErrors?: string[] };
+    res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message, errors: typed.validationErrors });
+  }
+});
+
+router.post("/workflow-compositions/:key/:version/canary/run", requireAdminAuth, async (req, res) => {
+  try {
+    const { device_id, account_id, intent } = req.body as {
+      device_id?: unknown;
+      account_id?: unknown;
+      intent?: unknown;
+    };
+    if (typeof device_id !== "string" || !UUID_RE.test(device_id)) {
+      return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "device_id must be a UUID" });
+    }
+    if (typeof intent !== "string" || intent.trim().length === 0 || intent.trim().length > 2000) {
+      return res.status(400).json({ ok: false, code: "INTENT_INVALID", error: "intent must be between 1 and 2000 characters" });
+    }
+    const accountId = typeof account_id === "string" && UUID_RE.test(account_id) ? account_id : null;
+    if (account_id !== undefined && account_id !== null && !accountId) {
+      return res.status(400).json({ ok: false, code: "ACCOUNT_ID_INVALID", error: "account_id must be a UUID when provided" });
+    }
+    const compiled = await humanWorkflowCompilerService.compileCandidateComposition({
+      compositionName: req.params.key,
+      compositionVersion: req.params.version,
+      deviceId: device_id,
+      accountId,
+      intent,
+    });
+    const run = await queueHumanAgencyWorkflowRun({
+      requestKey: compiled.requestKey,
+      cacheKey: compiled.cacheKey,
+      target: compiled.target,
+      intent: intent.trim(),
+      compiledBy: (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId,
+      allowCandidateArtifact: true,
+      architecture: compiled.architecture,
+      compositionKey: compiled.compositionKey,
+      executionKey: compiled.executionKey,
+      segmentKeys: compiled.segmentKeys,
+      segmentRefs: compiled.segmentRefs,
+      runtimeInputs: compiled.runtimeInputs,
+    });
+    res.status(201).json({ ok: true, data: run });
+  } catch (err) {
+    const typed = err as Error & { status?: number; code?: string; validationErrors?: string[] };
+    res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message, errors: typed.validationErrors });
+  }
+});
+
+for (const entity of ["segments", "compositions"] as const) {
+  const entityType = entity === "segments" ? "segment" : "composition";
+  router.post(`/workflow-${entity}/:key/:version/validate`, requireAdminAuth, async (req, res) => {
+    try {
+      await workflowSegmentControlPlaneService.validate(
+        entityType,
+        req.params.key,
+        req.params.version,
+        (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId ?? null,
+      );
+      res.json({ ok: true, data: { status: "candidate" } });
+    } catch (err) {
+      const typed = err as Error & { status?: number; code?: string };
+      res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
+    }
+  });
+  router.post(`/workflow-${entity}/:key/:version/canary`, requireAdminAuth, async (req, res) => {
+    try {
+      await workflowSegmentControlPlaneService.recordCanary(
+        entityType,
+        req.params.key,
+        req.params.version,
+        (req.body?.evidence && typeof req.body.evidence === "object" ? req.body.evidence : {}) as Record<string, unknown>,
+        (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId ?? null,
+      );
+      res.json({ ok: true, data: { status: "candidate", canaryRecorded: true } });
+    } catch (err) {
+      const typed = err as Error & { status?: number; code?: string };
+      res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
+    }
+  });
+  router.post(`/workflow-${entity}/:key/:version/promote`, requireAdminAuth, async (req, res) => {
+    try {
+      await workflowSegmentControlPlaneService.promote(
+        entityType,
+        req.params.key,
+        req.params.version,
+        (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId ?? null,
+      );
+      res.json({ ok: true, data: { status: "promoted" } });
+    } catch (err) {
+      const typed = err as Error & { status?: number; code?: string };
+      res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
+    }
+  });
+  router.post(`/workflow-${entity}/:key/rollback`, requireAdminAuth, async (req, res) => {
+    try {
+      if (typeof req.body?.toVersion !== "string") {
+        return res.status(400).json({ ok: false, code: "ROLLBACK_VERSION_REQUIRED", error: "toVersion is required" });
+      }
+      await workflowSegmentControlPlaneService.rollback(
+        entityType,
+        req.params.key,
+        req.body.toVersion,
+        (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId ?? null,
+      );
+      res.json({ ok: true, data: { status: "promoted", version: req.body.toVersion } });
+    } catch (err) {
+      const typed = err as Error & { status?: number; code?: string };
+      res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
+    }
+  });
+}
 
 router.post("/workflows/human/compile-jobs/:id/retry", requireAdminAuth, async (req, res) => {
   try {
@@ -1038,6 +1257,12 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
       intent: intent.trim(),
       compiledBy: (req as any).dashboardUser?.sub ?? (req as any).dashboardUser?.userId ?? (req as any).authPrincipal?.userId,
       allowCandidateArtifact: compiled.source === "llm",
+      architecture: compiled.architecture,
+      compositionKey: compiled.compositionKey,
+      executionKey: compiled.executionKey,
+      segmentKeys: compiled.segmentKeys,
+      segmentRefs: compiled.segmentRefs,
+      runtimeInputs: compiled.runtimeInputs,
     });
     res.status(201).json({ ok: true, data: run });
   } catch (err) {

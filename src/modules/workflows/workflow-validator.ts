@@ -10,6 +10,8 @@ import type {
   WorkflowGoalContract,
   WorkflowInteractionEffect,
   WorkflowOutputSchema,
+  WorkflowPostconditionContract,
+  WorkflowPostconditionOperator,
   WorkflowRecoveryPolicy,
   WorkflowStep,
   WorkflowTemplate,
@@ -292,6 +294,18 @@ const GENERATED_WORKFLOW_RECOVERY_AUTONOMY = [
   "ai_autopilot",
 ] as const;
 
+const WORKFLOW_POSTCONDITION_OPERATORS: WorkflowPostconditionOperator[] = [
+  "equals",
+  "not_equals",
+  "truthy",
+  "falsy",
+  "exists",
+  "missing",
+  "contains",
+  "matches_regex",
+  "uri_equivalent",
+];
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -336,6 +350,53 @@ function validateGeneratedWorkflowOutputSchema(
   }
 
   return errors.length === 0 ? value as unknown as WorkflowOutputSchema : null;
+}
+
+function validateWorkflowPostconditionContract(
+  value: unknown,
+  path: string,
+  errors: string[],
+): WorkflowPostconditionContract | null {
+  if (!isRecord(value) || value.version !== "1" || !Array.isArray(value.all) || value.all.length === 0) {
+    errors.push(`${path} must be a version 1 contract with non-empty all[]`);
+    return null;
+  }
+  value.all.forEach((predicate, index) => {
+    const predicatePath = `${path}.all[${index}]`;
+    if (!isRecord(predicate) || !isRecord(predicate.left)) {
+      errors.push(`${predicatePath}.left must be a value reference`);
+      return;
+    }
+    if (!WORKFLOW_POSTCONDITION_OPERATORS.includes(predicate.operator as WorkflowPostconditionOperator)) {
+      errors.push(`${predicatePath}.operator is invalid`);
+    }
+    for (const [name, reference] of [["left", predicate.left], ["right", predicate.right]] as const) {
+      if (name === "right" && reference === undefined) continue;
+      if (!isRecord(reference)) {
+        errors.push(`${predicatePath}.${name} must be a value reference`);
+        continue;
+      }
+      const hasPath = typeof reference.path === "string" && reference.path.length > 0;
+      const hasValue = Object.prototype.hasOwnProperty.call(reference, "value");
+      if (hasPath === hasValue) errors.push(`${predicatePath}.${name} must contain exactly one of path or value`);
+      if (hasPath && !/^[a-zA-Z0-9_.-]+$/.test(String(reference.path))) {
+        errors.push(`${predicatePath}.${name}.path is invalid`);
+      }
+    }
+  });
+  return errors.some((error) => error.startsWith(path)) ? null : value as unknown as WorkflowPostconditionContract;
+}
+
+export function workflowPostconditionContractErrors(value: unknown): string[] {
+  const errors: string[] = [];
+  validateWorkflowPostconditionContract(value, "postconditionContract", errors);
+  return errors;
+}
+
+export function workflowOutputSchemaErrors(value: unknown): string[] {
+  const errors: string[] = [];
+  validateGeneratedWorkflowOutputSchema(value, "outputSchema", errors);
+  return errors;
 }
 
 function validateGeneratedWorkflowReadOnlySemantics(
@@ -543,10 +604,20 @@ function validateGeneratedWorkflowStepInput(
         const params = isRecord(step.params) ? step.params : {};
         const uri = typeof params.uri === "string" ? params.uri.trim() : "";
         const action = typeof params.action === "string" ? params.action.trim() : "";
-        if (!uri && !action) {
+        const uriBinding = isRecord(params.uri)
+          && Object.keys(params.uri).length === 1
+          && typeof params.uri.$bind === "string"
+          && params.uri.$bind.trim().length > 0;
+        const actionBinding = isRecord(params.action)
+          && Object.keys(params.action).length === 1
+          && typeof params.action.$bind === "string"
+          && params.action.$bind.trim().length > 0;
+        if (!uri && !action && !uriBinding && !actionBinding) {
           errors.push(`${path}.params.uri or params.action is required for intent_send actions`);
         } else if (
           !uri &&
+          !uriBinding &&
+          !actionBinding &&
           !GENERATED_WORKFLOW_ALLOWED_URI_LESS_INTENT_ACTIONS.includes(
             action as typeof GENERATED_WORKFLOW_ALLOWED_URI_LESS_INTENT_ACTIONS[number],
           )
@@ -795,6 +866,7 @@ export interface GeneratedWorkflowCompiledPlan {
     intent: string | null;
     safetyClass: "read_only" | "standard" | null;
     outputSchema: WorkflowOutputSchema | null;
+    postconditionContract: WorkflowPostconditionContract | null;
     goalContract: WorkflowGoalContract | null;
     allowedRecoveryRequests: string[];
     recoveryPolicy: WorkflowRecoveryPolicy | null;
@@ -871,6 +943,9 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
   if (candidate.outputSchema !== undefined) {
     validateGeneratedWorkflowOutputSchema(candidate.outputSchema, "workflow.outputSchema", errors);
   }
+  if (candidate.postconditionContract !== undefined) {
+    validateWorkflowPostconditionContract(candidate.postconditionContract, "workflow.postconditionContract", errors);
+  }
   if (candidate.goalContract !== undefined) {
     const parsedContract = parseWorkflowGoalContract(candidate.goalContract);
     if (!parsedContract) {
@@ -934,6 +1009,7 @@ export function summarizeGeneratedWorkflowTemplate(
     intent: template.intent ?? null,
     safetyClass: template.safetyClass ?? null,
     outputSchema: template.outputSchema ?? null,
+    postconditionContract: template.postconditionContract ?? null,
     goalContract: template.goalContract ?? null,
     allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
     recoveryPolicy: template.recoveryPolicy ?? null,
@@ -1003,6 +1079,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
     intent: template.intent ?? null,
     safetyClass: template.safetyClass ?? null,
     outputSchema: template.outputSchema ?? null,
+    postconditionContract: template.postconditionContract ?? null,
     goalContract: template.goalContract ?? null,
     allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
     recoveryPolicy: template.recoveryPolicy ?? null,
@@ -1022,6 +1099,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
       intent: template.intent ?? null,
       safetyClass: template.safetyClass ?? null,
       outputSchema: template.outputSchema ?? null,
+      postconditionContract: template.postconditionContract ?? null,
       goalContract: template.goalContract ?? null,
       allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
       recoveryPolicy: template.recoveryPolicy ?? null,

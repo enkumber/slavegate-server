@@ -40,6 +40,8 @@ import {
   reconcileSupersededTaskIncidents,
   recordExhaustedTaskIncident,
 } from "../incidents/incident.service";
+import { evaluatePostconditionContract } from "../workflow-segments/postcondition";
+import { shortKey } from "../workflow-segments/key-utils";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -572,6 +574,116 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
     });
   } catch (err) {
     console.error("[task-runner] generated workflow learning update failed:", err);
+  }
+  const executionKey = typeof task.params?.executionKey === "string" ? task.params.executionKey : null;
+  const executionRequestKey = typeof task.params?.executionRequestKey === "string"
+    ? task.params.executionRequestKey
+    : null;
+  if (
+    executionKey
+    && executionRequestKey
+    && /^[a-f0-9]{24}$/.test(executionKey)
+    && /^[a-f0-9]{24}$/.test(executionRequestKey)
+  ) {
+    try {
+      await getDb().query(
+        `UPDATE workflow_execution_bindings
+         SET status = $2,
+             postcondition_verified = $3,
+             result_evidence = $4::jsonb,
+             updated_at = NOW()
+         WHERE execution_key = $1 AND request_key = $5`,
+        [
+          executionKey,
+          result.success ? "completed" : "failed",
+          result.success,
+          JSON.stringify({
+            taskId: task.id,
+            workflowId: result.generatedWorkflow?.workflowId ?? null,
+            success: result.success,
+            failureCode: result.generatedWorkflow?.failureCode ?? null,
+          }),
+          executionRequestKey,
+        ],
+      );
+    } catch (err) {
+      console.error("[task-runner] workflow execution binding update failed:", err);
+    }
+  }
+  const segmentRefs = Array.isArray(task.params?.segmentRefs)
+    ? task.params.segmentRefs.filter((item): item is { segmentKey: string; segmentVersion: string } => (
+        !!item
+        && typeof item === "object"
+        && typeof (item as Record<string, unknown>).segmentKey === "string"
+        && typeof (item as Record<string, unknown>).segmentVersion === "string"
+      ))
+    : [];
+  if (segmentRefs.length === 0) return;
+  try {
+    const rawInputs = task.params?.variables
+      && typeof task.params.variables === "object"
+      && !Array.isArray(task.params.variables)
+      && (task.params.variables as Record<string, unknown>).inputs
+      && typeof (task.params.variables as Record<string, unknown>).inputs === "object"
+      ? (task.params.variables as Record<string, unknown>).inputs as Record<string, unknown>
+      : {};
+    const inputClass = shortKey("workflow-segment-input-class-v1", Object.fromEntries(
+      Object.entries(rawInputs).map(([key, value]) => [
+        key,
+        typeof value === "string" && /^https?:\/\//i.test(value)
+          ? "string:uri"
+          : Array.isArray(value)
+            ? "array"
+            : value === null
+              ? "null"
+              : typeof value,
+      ]),
+    ));
+    const generatedWorkflowEvidence = result.generatedWorkflow as (typeof result.generatedWorkflow & {
+      failureSegmentKey?: string;
+    });
+    const failureSegmentKey = typeof generatedWorkflowEvidence?.failureSegmentKey === "string"
+      ? generatedWorkflowEvidence.failureSegmentKey
+      : null;
+    for (const segment of segmentRefs) {
+      const attributedFailure = !result.success && failureSegmentKey === segment.segmentKey;
+      await getDb().query(
+        `INSERT INTO workflow_segment_coverage (
+           segment_key, segment_version, device_id, app_version, android_version, input_class,
+           success_count, failure_count, recovery_count, postcondition_verified, last_evidence
+         )
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+         ON CONFLICT (segment_key, segment_version, device_id, app_version, android_version, input_class)
+         DO UPDATE SET
+           success_count = workflow_segment_coverage.success_count + EXCLUDED.success_count,
+           failure_count = workflow_segment_coverage.failure_count + EXCLUDED.failure_count,
+           recovery_count = workflow_segment_coverage.recovery_count + EXCLUDED.recovery_count,
+           postcondition_verified = workflow_segment_coverage.postcondition_verified OR EXCLUDED.postcondition_verified,
+           last_evidence = EXCLUDED.last_evidence,
+           updated_at = NOW()`,
+        [
+          segment.segmentKey,
+          segment.segmentVersion,
+          task.device_id,
+          typeof task.params?.appVersion === "string" ? task.params.appVersion : "",
+          typeof task.params?.androidVersion === "string" ? task.params.androidVersion : "",
+          inputClass,
+          result.success ? 1 : 0,
+          attributedFailure ? 1 : 0,
+          result.success ? Number(result.generatedWorkflow?.selfHealing?.attempts ?? 0) : 0,
+          result.success,
+          JSON.stringify({
+            taskId: task.id,
+            workflowId: result.generatedWorkflow?.workflowId ?? null,
+            success: result.success,
+            attributedFailure,
+            failureCode: result.generatedWorkflow?.failureCode ?? null,
+          }),
+        ],
+      );
+    }
+  } catch (err) {
+    console.error("[task-runner] workflow segment coverage update failed:", err);
   }
 }
 
@@ -1470,6 +1582,30 @@ async function executeGeneratedWorkflowTask(
           failureCode: "HUMAN_WORKFLOW_OUTPUT_INVALID",
         },
       };
+    }
+
+    if (cached.workflow.postconditionContract) {
+      const postcondition = evaluatePostconditionContract(cached.workflow.postconditionContract, {
+        outputs: finalOutput,
+        inputs: suppliedVariables?.inputs ?? {},
+        variables: finalVariables,
+      });
+      if (!postcondition.ok) {
+        generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "output_invalid").inc();
+        return {
+          success: false,
+          stepsCompleted: finalWorkflow.currentStep,
+          totalSteps: finalWorkflow.totalSteps ?? cached.workflow.steps.length,
+          output: finalOutput,
+          tokenUsage: zeroTokenUsage(),
+          durationMs: Date.now() - startedAt,
+          failReason: `HUMAN_WORKFLOW_POSTCONDITION_FAILED: ${postcondition.failures.join("; ")}`,
+          generatedWorkflow: {
+            ...generatedWorkflowResult,
+            failureCode: "HUMAN_WORKFLOW_POSTCONDITION_FAILED",
+          },
+        };
+      }
     }
 
     return {
