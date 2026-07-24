@@ -3,6 +3,7 @@ import { accountsApi, type Account } from "../api/accounts";
 import {
   agencyApi,
   type AgencyWorkflowRun,
+  type HumanWorkflowCompileBuildingSegmentResult,
   type HumanWorkflowCompileCompilingResult,
   type HumanWorkflowCompileJobFailedResult,
   type HumanWorkflowCompileJobPendingResult,
@@ -22,7 +23,12 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
   const [accountId, setAccountId] = useState("");
   const [intent, setIntent] = useState("");
   const [compileResult, setCompileResult] = useState<HumanWorkflowCompileReadyResult | null>(null);
-  const [compileJob, setCompileJob] = useState<HumanWorkflowCompileCompilingResult | HumanWorkflowCompileJobPendingResult | null>(null);
+  const [compileJob, setCompileJob] = useState<
+    HumanWorkflowCompileCompilingResult
+    | HumanWorkflowCompileBuildingSegmentResult
+    | HumanWorkflowCompileJobPendingResult
+    | null
+  >(null);
   const [compileFailure, setCompileFailure] = useState<HumanWorkflowCompileJobFailedResult | null>(null);
   const [readyCompileJobId, setReadyCompileJobId] = useState<string | null>(null);
   const [runResult, setRunResult] = useState<HumanWorkflowRunResult | null>(null);
@@ -96,7 +102,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
       if (isCompileReady(data)) {
         setCompileResult(data);
       } else {
-        setReadyCompileJobId(data.compileJobId);
+        setReadyCompileJobId(data.status === "building_segment" ? null : data.compileJobId);
         setCompileJob(data);
       }
     } catch (err) {
@@ -125,16 +131,24 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
   };
 
   useEffect(() => {
-    if (!compileJob?.compileJobId) return;
+    if (!compileJob) return;
     let cancelled = false;
     const delayMs = pollingDelayMs(compileJob.retryAfterMs, 2_000);
     const timer = setTimeout(async () => {
       try {
-        const data = await agencyApi.humanWorkflow.getCompileJob(compileJob.compileJobId);
+        const data = compileJob.status === "building_segment"
+          ? await agencyApi.humanWorkflow.compile({
+              device_id: device.id,
+              account_id: accountId || undefined,
+              intent: intent.trim(),
+            })
+          : await agencyApi.humanWorkflow.getCompileJob(compileJob.compileJobId);
         if (cancelled) return;
-        if (data.status === "ready") {
+        if (isCompileReady(data)) {
           setCompileResult(data);
-          setReadyCompileJobId(data.compileJobId ?? compileJob.compileJobId);
+          setReadyCompileJobId(
+            compileJob.status === "building_segment" ? null : compileJob.compileJobId,
+          );
           setCompileJob(null);
           setCompileFailure(null);
         } else if (data.status === "failed") {
@@ -152,7 +166,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [compileJob]);
+  }, [accountId, compileJob, device.id, intent]);
 
   const run = async () => {
     if (!compileResult || compileResult.safetyClass === "destructive") return;
@@ -303,7 +317,12 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
                     <Badge label={compileJob.status} color="#f59e0b" />
                     <Badge label="polling" color="#60a5fa" />
                   </div>
-                  <Metric label="Job" value={compileJob.compileJobId} />
+                  <Metric
+                    label="Job"
+                    value={compileJob.status === "building_segment"
+                      ? compileJob.segmentBuildJobId
+                      : compileJob.compileJobId}
+                  />
                   <Metric label="Request" value={compileJob.requestKey} />
                 </>
               ) : compileFailure ? (
@@ -381,7 +400,11 @@ function EmptyText({ value }: { value: string }) {
   return <div style={{ color: "#64748b", fontSize: "12px", lineHeight: 1.5 }}>{value}</div>;
 }
 
-function isCompileReady(result: HumanWorkflowCompileResult): result is HumanWorkflowCompileReadyResult {
+function isCompileReady(
+  result: HumanWorkflowCompileResult
+    | HumanWorkflowCompileJobPendingResult
+    | HumanWorkflowCompileJobFailedResult,
+): result is HumanWorkflowCompileReadyResult {
   return result.status === undefined || result.status === "ready";
 }
 

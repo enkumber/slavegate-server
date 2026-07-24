@@ -148,9 +148,19 @@ export interface HumanWorkflowCompileCompilingResult {
   source: "llm";
 }
 
+export interface HumanWorkflowCompileBuildingSegmentResult {
+  status: "building_segment";
+  requestKey: string;
+  segmentBuildJobId: string;
+  retryAfterMs?: number;
+  source: "agent";
+  reason?: string;
+}
+
 export type HumanWorkflowCompileResult =
   | HumanWorkflowCompileReadyResult
-  | HumanWorkflowCompileCompilingResult;
+  | HumanWorkflowCompileCompilingResult
+  | HumanWorkflowCompileBuildingSegmentResult;
 
 export interface HumanWorkflowCompileJobPendingResult {
   status: "queued" | "running";
