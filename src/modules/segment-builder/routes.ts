@@ -13,6 +13,14 @@ const DISPATCHER_ID = "openclaw-segment-builder";
 const DISPATCHER_PORT = "18788";
 const DISPATCHER_PATH = "/hooks/phone-network-segment";
 
+function asyncRoute(
+  handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
+): (req: Request, res: Response, next: NextFunction) => void {
+  return (req, res, next) => {
+    void handler(req, res, next).catch(next);
+  };
+}
+
 function normalizedAddress(value: string | undefined): string {
   if (!value) return "";
   return value.startsWith("::ffff:") ? value.slice(7) : value;
@@ -49,7 +57,7 @@ router.use((req, res, next) => {
   void requireSegmentBuilder(req, res, next);
 });
 
-router.post("/dispatcher/register", async (req, res) => {
+router.post("/dispatcher/register", asyncRoute(async (req, res) => {
   const raw = typeof req.body?.callbackUrl === "string" ? req.body.callbackUrl.trim() : "";
   let callback: URL;
   try {
@@ -82,39 +90,39 @@ router.post("/dispatcher/register", async (req, res) => {
     registeredIp: remoteAddress,
   });
   res.json({ ok: true, data: dispatcher });
-});
+}));
 
-router.get("/jobs/:id", async (req, res) => {
+router.get("/jobs/:id", asyncRoute(async (req, res) => {
   if (!UUID_RE.test(req.params.id)) return res.status(400).json({ ok: false, error: "invalid job id" });
   const job = await segmentBuildJobService.reconcileCanary(req.params.id);
   if (!job) return res.status(404).json({ ok: false, error: "job not found" });
   res.json({ ok: true, data: job });
-});
+}));
 
-router.get("/jobs/:id/context", async (req, res) => {
+router.get("/jobs/:id/context", asyncRoute(async (req, res) => {
   if (!UUID_RE.test(req.params.id)) return res.status(400).json({ ok: false, error: "invalid job id" });
   const context = await segmentBuildJobService.context(req.params.id);
   if (!context) return res.status(404).json({ ok: false, error: "job not found" });
   res.json({ ok: true, data: context });
-});
+}));
 
-router.post("/jobs/:id/claim", async (req, res) => {
+router.post("/jobs/:id/claim", asyncRoute(async (req, res) => {
   const agentId = requestedAgentId(req, res);
   if (!agentId) return;
   const job = await segmentBuildJobService.claim(req.params.id, agentId);
   if (!job) return res.status(409).json({ ok: false, code: "SEGMENT_BUILD_JOB_NOT_CLAIMABLE", error: "job is not claimable" });
   res.json({ ok: true, data: job });
-});
+}));
 
-router.post("/jobs/:id/heartbeat", async (req, res) => {
+router.post("/jobs/:id/heartbeat", asyncRoute(async (req, res) => {
   const agentId = requestedAgentId(req, res);
   if (!agentId) return;
   const job = await segmentBuildJobService.heartbeat(req.params.id, agentId);
   if (!job) return res.status(409).json({ ok: false, error: "job lease is not active" });
   res.json({ ok: true, data: job });
-});
+}));
 
-router.post("/jobs/:id/candidate", async (req, res) => {
+router.post("/jobs/:id/candidate", asyncRoute(async (req, res) => {
   try {
     const agentId = requestedAgentId(req, res);
     if (!agentId) return;
@@ -134,9 +142,9 @@ router.post("/jobs/:id/candidate", async (req, res) => {
       errors: typed.validationErrors,
     });
   }
-});
+}));
 
-router.post("/jobs/:id/canary", async (req, res) => {
+router.post("/jobs/:id/canary", asyncRoute(async (req, res) => {
   try {
     const agentId = requestedAgentId(req, res);
     if (!agentId) return;
@@ -219,15 +227,15 @@ router.post("/jobs/:id/canary", async (req, res) => {
       errors: typed.validationErrors,
     });
   }
-});
+}));
 
-router.post("/jobs/:id/fail", async (req, res) => {
+router.post("/jobs/:id/fail", asyncRoute(async (req, res) => {
   const agentId = requestedAgentId(req, res);
   if (!agentId) return;
   const error = typeof req.body?.error === "string" ? req.body.error : "segment builder failed";
   const job = await segmentBuildJobService.fail(req.params.id, agentId, error, req.body?.blocked === true);
   if (!job) return res.status(409).json({ ok: false, error: "job cannot be failed" });
   res.json({ ok: true, data: job });
-});
+}));
 
 export default router;

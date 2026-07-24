@@ -201,7 +201,7 @@ export class SegmentBuildJobService {
     const db = getDb();
     const [device, capabilities, segments, compositions, semantics] = await Promise.all([
       db.query(
-        `SELECT id, name, model, android_version, agent_version, status
+        `SELECT id, friendly_name AS name, model, android_version, agent_version, status
          FROM devices WHERE id = $1`,
         [job.deviceId],
       ),

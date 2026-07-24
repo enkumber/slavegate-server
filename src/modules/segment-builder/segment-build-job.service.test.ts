@@ -32,6 +32,22 @@ vi.mock("../../db/client", () => ({
       if (text.includes("SELECT * FROM segment_build_jobs WHERE id = $1")) {
         return { rows: state.row.id === params[0] ? [{ ...state.row }] : [] };
       }
+      if (text.includes("friendly_name AS name")) {
+        return {
+          rows: [{
+            id: buildJob().deviceId,
+            name: "test-device",
+            model: "test-model",
+            android_version: "10",
+            agent_version: "4.0.76",
+            status: "online",
+          }],
+        };
+      }
+      if (text.includes("FROM workflow_capabilities")) return { rows: [] };
+      if (text.includes("FROM workflow_segment_versions")) return { rows: [] };
+      if (text.includes("FROM workflow_compositions c")) return { rows: [] };
+      if (text.includes("FROM runtime_semantic_entries")) return { rows: [] };
       throw new Error(`unexpected query: ${text}`);
     },
   }),
@@ -133,5 +149,17 @@ describe("SegmentBuildJobService dispatch", () => {
     const result = await new SegmentBuildJobService().claim(buildJob().id, "other-agent");
     expect(result).toBeNull();
     expect(state.queries).toEqual([]);
+  });
+
+  it("loads agent context from the canonical devices schema", async () => {
+    const context = await new SegmentBuildJobService().context(buildJob().id);
+
+    expect(context?.device).toMatchObject({
+      id: buildJob().deviceId,
+      name: "test-device",
+      agent_version: "4.0.76",
+    });
+    expect(state.queries.some((query) => query.includes("friendly_name AS name"))).toBe(true);
+    expect(state.queries.some((query) => /\bSELECT id, name, model\b/.test(query))).toBe(false);
   });
 });
