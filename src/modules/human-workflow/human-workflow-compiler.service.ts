@@ -34,6 +34,7 @@ const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
 const MAX_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 120_000;
 const HUMAN_WORKFLOW_DEBUG_RESPONSE_MAX_CHARS = 100_000;
+const HUMAN_WORKFLOW_OUTPUT_CONTRACT_VERSION = "required-v1";
 
 export type HumanWorkflowSafetyClass = "read_only" | "standard" | "destructive";
 
@@ -163,7 +164,26 @@ function humanWorkflowCacheUsable(
   cached: GeneratedWorkflowPlanCacheRecord,
   compilerVersion: string,
 ): boolean {
-  return humanWorkflowCacheCompilerVersion(cached) === compilerVersion;
+  return humanWorkflowCacheCompilerVersion(cached) === compilerVersion
+    && cached.sourceMetadata?.outputContractVersion === HUMAN_WORKFLOW_OUTPUT_CONTRACT_VERSION;
+}
+
+export function humanWorkflowArtifactMatchesIntent(
+  cached: GeneratedWorkflowPlanCacheRecord,
+  intent: string,
+): boolean {
+  const artifactIntent = cached.sourceMetadata?.intent;
+  return typeof artifactIntent === "string" && artifactIntent.trim() === intent.trim();
+}
+
+function assertHumanWorkflowOutputContract(template: WorkflowTemplate): void {
+  if ((template.outputSchema?.required?.length ?? 0) > 0) return;
+  throw Object.assign(new Error("dashboard human workflow requires at least one materialized output"), {
+    status: 422,
+    code: "HUMAN_WORKFLOW_OUTPUT_CONTRACT_REQUIRED",
+    retryable: true,
+    nextAction: "retry_compile",
+  });
 }
 
 function inferGeneratedWorkflowAppId(template: WorkflowTemplate): string | null {
@@ -389,7 +409,11 @@ export class HumanWorkflowCompilerService {
     }
     if (catalogContext.fullArtifactCacheKey) {
       const catalogArtifact = await workflowService.getGeneratedPlanCache(catalogContext.fullArtifactCacheKey);
-      if (catalogArtifact && humanWorkflowCacheUsable(catalogArtifact, controlPlane.version)) {
+      if (
+        catalogArtifact
+        && humanWorkflowCacheUsable(catalogArtifact, controlPlane.version)
+        && humanWorkflowArtifactMatchesIntent(catalogArtifact, intent)
+      ) {
         return readyFromCache(catalogArtifact, target, requestKey, "cache");
       }
     }
@@ -491,6 +515,7 @@ export class HumanWorkflowCompilerService {
       });
     }
     const template = validation.template;
+    assertHumanWorkflowOutputContract(template);
     if (template.safetyClass !== expectedSafetyClass) {
       throw Object.assign(new Error("shortcut safetyClass does not match PostgreSQL capability policy"), {
         status: 422,
@@ -506,6 +531,7 @@ export class HumanWorkflowCompilerService {
       sourceMetadata: {
         source: "dashboard_human",
         compilerCacheVersion: compilerVersion,
+        outputContractVersion: HUMAN_WORKFLOW_OUTPUT_CONTRACT_VERSION,
         shortcut: shortcutKey,
         shortcutId,
         intent: input.intent,
@@ -552,7 +578,11 @@ export class HumanWorkflowCompilerService {
     }
     if (retrievalContext.fullArtifactCacheKey) {
       const cached = await workflowService.getGeneratedPlanCache(retrievalContext.fullArtifactCacheKey);
-      if (cached && humanWorkflowCacheUsable(cached, controlPlane.version)) {
+      if (
+        cached
+        && humanWorkflowCacheUsable(cached, controlPlane.version)
+        && humanWorkflowArtifactMatchesIntent(cached, input.intent)
+      ) {
         return readyFromCache(cached, input.target, input.requestKey, "cache");
       }
     }
@@ -679,12 +709,14 @@ export class HumanWorkflowCompilerService {
         });
       }
       assertHumanWorkflowMeaningful(template, input.intent, retrievalContext.goalContract);
+      assertHumanWorkflowOutputContract(template);
       const resolvedSafetyClass = template.safetyClass ?? safetyClass;
       let compiledPlan = compileGeneratedWorkflowTemplate(template);
       compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
       await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, input.requestKey, {
         source: "dashboard_human",
         compilerCacheVersion: controlPlane.version,
+        outputContractVersion: HUMAN_WORKFLOW_OUTPUT_CONTRACT_VERSION,
         intent: input.intent,
         deviceId: input.target.device_id,
         accountId: input.target.account_id,

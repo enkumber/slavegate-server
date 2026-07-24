@@ -613,6 +613,61 @@ describe("task-runner generated_workflow routine", () => {
     });
   });
 
+  it("does not report completed when a dashboard workflow returns null required output", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "deschide browserul chrome si mergi pe ciprianneculai.com",
+        platform: "android",
+        outputContractVersion: "required-v1",
+      },
+    });
+    cached.workflow = {
+      ...cached.workflow,
+      id: "open_requested_url",
+      platform: "android",
+      intent: "deschide browserul chrome si mergi pe ciprianneculai.com",
+      outputSchema: {
+        required: ["navigationResult"],
+        properties: {
+          navigationResult: { type: "string" },
+        },
+      },
+      steps: [
+        {
+          type: "action",
+          id: "open_requested_url",
+          action: "intent_send",
+          params: {
+            action: "android.intent.action.VIEW",
+            uri: "https://ciprianneculai.com",
+            packageName: "com.android.chrome",
+            outputVariable: "navigationResult",
+          },
+          effect: "navigation",
+        },
+      ],
+    };
+    mockTaskDb(task({
+      requestKey: REQUEST_KEY,
+      deviceId: DEVICE_ID,
+      source: "dashboard_human",
+      intent: "deschide browserul chrome si mergi pe ciprianneculai.com",
+    }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow({ navigationResult: null }));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: false,
+      failReason: expect.stringContaining("HUMAN_WORKFLOW_OUTPUT_INVALID"),
+      generatedWorkflow: expect.objectContaining({
+        failureCode: "HUMAN_WORKFLOW_OUTPUT_INVALID",
+      }),
+    });
+  });
+
   it("accepts authoritative edge completion that arrives after a provisional ACK timeout", async () => {
     vi.useFakeTimers();
     process.env.GENERATED_WORKFLOW_LATE_TERMINAL_GRACE_MS = "10000";

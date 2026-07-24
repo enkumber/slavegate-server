@@ -212,11 +212,11 @@ VALUES (
     "name":"Send Android intent",
     "source":"device_job",
     "category":"navigation",
-    "description":"Send an Android intent whose action, uri and package are supplied by the selected PostgreSQL capability and runtime profile. The absolute target URL must be stored in params.uri; params.data is not part of this primitive contract.",
+    "description":"Send an Android intent whose action, data URI and package are supplied by the selected PostgreSQL capability and runtime profile.",
     "risk":"medium",
     "requiresDevice":true,
     "sideEffects":["foreground_app_change","external_navigation"],
-    "inputSchema":{"required":["action","uri","packageName"],"optional":["type","extras","flags"]},
+    "inputSchema":{"required":["action","data","packageName"],"optional":["type","extras","flags"]},
     "outputSchema":{"produces":["intent_status"]},
     "policy":{"readOnly":false,"mutating":true,"destructive":false,"externalAction":true},
     "availability":{"directWs":true,"edgeWorkflow":true,"serverRuntime":false},
@@ -318,12 +318,6 @@ The PostgreSQL compiler policy is:
 {{compilerPolicy}}
 
 Mandatory rules:
-- Return the WorkflowTemplate itself as the top-level JSON object. Never wrap it in {"workflow": ...}.
-- The top-level object must contain id, name, platform, description, version, runtimeContract, safetyClass, goalContract, steps, defaultVerificationStrategy and dataRetentionDays.
-- steps must be one flat, non-empty top-level array. Do not emit a top-level stages array and do not nest executable steps inside stage objects.
-- Each executable action belongs directly in top-level steps as {"type":"action","id":"...","action":"...","params":{},"effect":"...","goalStage":"..."}.
-- stages exist only inside the copied goalContract; goalContract stages describe policy and never contain executable steps.
-- Copy primitive parameter names exactly from inputSchema. For intent_send the absolute target is params.uri; never emit params.data.
 - Copy the selected Goal Contract exactly. Never derive, expand or replace it.
 - Set workflow.platform exactly to the selected runtime profile appId.
 - Use only actions present in the supplied primitive catalog and only packages, selectors, routes, states, transitions and outputs supplied by PostgreSQL.
@@ -343,7 +337,6 @@ $prompt$
 CORRECTIVE COMPILATION REQUIRED.
 Mechanical rejection reason: {{reason}}
 Return one complete replacement WorkflowTemplate JSON.
-Return the WorkflowTemplate itself as the top-level object, never {"workflow": ...}. Executable actions must be in one flat top-level steps array; stages may appear only inside the copied goalContract and must never contain executable steps. Copy primitive parameter names exactly; intent_send uses params.uri and never params.data.
 Use only the PostgreSQL contract, runtime profile, tool catalog and promoted knowledge already present above.
 Do not normalize, derive or add semantics. If the supplied data is insufficient, return {"compilerRefusal":{"code":"MISSING_PROMOTED_KNOWLEDGE"}}.
 Rejected candidate: {{rejectedWorkflow}}
@@ -375,7 +368,7 @@ INSERT INTO workflow_capabilities (
 VALUES (
   'web_open_absolute_uri',
   'android',
-  'Navigate the PostgreSQL-selected browser runtime directly to an absolute URI requested by the user.',
+  'Open the PostgreSQL-selected browser runtime and navigate to an absolute URI requested by the user.',
   ARRAY[
     'deschide browserul chrome si mergi pe google.com',
     'open chrome browser and go to google.com',
@@ -402,10 +395,16 @@ VALUES (
           'allowedEffects', jsonb_build_array('none')
         ),
         jsonb_build_object(
+          'id', 'open_browser',
+          'allowedActions', jsonb_build_array('open_app'),
+          'allowedEffects', jsonb_build_array('navigation'),
+          'after', jsonb_build_array('prepare_device')
+        ),
+        jsonb_build_object(
           'id', 'navigate_uri',
           'allowedActions', jsonb_build_array('intent_send'),
           'allowedEffects', jsonb_build_array('navigation'),
-          'after', jsonb_build_array('prepare_device')
+          'after', jsonb_build_array('open_browser')
         )
       )
     )
@@ -429,12 +428,7 @@ ON CONFLICT (capability_key) DO UPDATE SET
 -- failed. Replace the old permissive policy with explicit fail-closed text.
 UPDATE system_prompts
 SET content = regexp_replace(
-      regexp_replace(
-        content,
-        '- When absolute-URI navigation is the entire goal[^\n]*',
-        '- When absolute-URI navigation is the entire goal and no promoted verification evidence was supplied, emit exactly three action steps and no wait/condition/checkpoint/verification steps: screen_wake and unlock in the required prepare stage with effect none, then intent_send({"action":"android.intent.action.VIEW","uri":"https://...","packageName":"..."}) in the navigation stage. Do not emit open_app: some valid browser runtimes expose VIEW intents without a launcher intent. The contract allowedEffects is ["none","navigation"]; omit requiredOutputs and omit the outputSchema field entirely.',
-        'g'
-      ),
+      content,
       '- When no catalog Goal Contract was retrieved,[^\n]*',
       '- When no catalog Goal Contract was retrieved, fail closed with MISSING_CAPABILITY_CONTRACT. Never derive a Goal Contract.',
       'g'

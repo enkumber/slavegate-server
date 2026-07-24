@@ -218,6 +218,16 @@ async function queueHumanAgencyWorkflowRun(input: {
 
     const safetyClass = cachedHumanWorkflowSafetyClass(cached);
     assertHumanWorkflowMeaningful(cached.workflow as WorkflowTemplate, input.intent);
+    const artifactIntent = typeof (cached.source_metadata as Record<string, unknown> | undefined)?.intent === "string"
+      ? String((cached.source_metadata as Record<string, unknown>).intent).trim()
+      : "";
+    if (artifactIntent && artifactIntent !== input.intent.trim()) {
+      await client.query("ROLLBACK");
+      throw Object.assign(new Error("compiled workflow intent does not match the requested command"), {
+        status: 409,
+        code: "HUMAN_WORKFLOW_INTENT_MISMATCH",
+      });
+    }
 
     const existingRunResult = await client.query<{ id: string; task_id: string | null; status: string }>(
       `SELECT r.id, r.task_id, r.status
@@ -969,10 +979,14 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
     }
 
     const expectedRequestKey = computeHumanWorkflowRequestKey(device_id, accountId, intent);
-    // Accept requestKey from client without strict validation — allows cache-based runs
-    // where the cached requestKey may differ from a freshly computed one
-    // (e.g., whitespace differences, intent normalization).
-    const useRequestKey = typeof requestKey === "string" ? requestKey : expectedRequestKey;
+    if (typeof requestKey === "string" && requestKey !== expectedRequestKey) {
+      return res.status(409).json({
+        ok: false,
+        code: "REQUEST_KEY_MISMATCH",
+        error: "requestKey does not match device, account and intent",
+      });
+    }
+    const useRequestKey = expectedRequestKey;
 
     let compiled: HumanWorkflowCompileReady | null = null;
     if (typeof compileJobId === "string") {

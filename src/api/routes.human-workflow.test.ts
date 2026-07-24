@@ -147,6 +147,13 @@ function cachedPlan(overrides: Record<string, unknown> = {}) {
     canonicalWorkflowId: "dashboard_human_reddit_preview_v1",
     canonicalWorkflowVersion: "1.0.0",
     compiledPlanHash: "a".repeat(64),
+    sourceMetadata: {
+      source: "dashboard_human",
+      intent: INTENT,
+      compilerCacheVersion: "2026-07-24-postgres-authoritative-v1",
+      portable: false,
+      portabilityScope: "contextual",
+    },
     workflow: {
       id: "dashboard_human_reddit_preview_v1",
       version: "1.0.0",
@@ -185,6 +192,7 @@ function cachedPlanRow(overrides: Record<string, unknown> = {}) {
     canonical_workflow_id: cached.canonicalWorkflowId,
     canonical_workflow_version: cached.canonicalWorkflowVersion,
     compiled_plan_hash: cached.compiledPlanHash,
+    source_metadata: cached.sourceMetadata,
     workflow: cached.workflow,
     compiled_plan: cached.compiledPlan,
     ...overrides,
@@ -2597,16 +2605,7 @@ describe("dashboard human workflow routes", () => {
     expect(migration).toContain("UPDATE agency_workflow_runs r");
   });
 
-  it("accepts cached requestKey runs even when the requestKey differs from the freshly computed preview key", async () => {
-    mocks.client.query
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [cachedPlanRow()] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ id: RUN_ID }] })
-      .mockResolvedValueOnce({ rows: [{ id: TASK_ID }] })
-      .mockResolvedValueOnce({ rows: [] });
-
+  it("rejects a requestKey that does not belong to the requested intent", async () => {
     const response = await postJson("/api/workflows/human/run", {
       device_id: DEVICE_ID,
       account_id: ACCOUNT_ID,
@@ -2615,14 +2614,12 @@ describe("dashboard human workflow routes", () => {
       cacheKey: cacheKey(),
     });
 
-    expect(response.status).toBe(201);
-    expect(response.body.data).toMatchObject({
-      id: RUN_ID,
-      taskId: TASK_ID,
-      requestKey: "f".repeat(24),
-      cacheKey: cacheKey(),
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "REQUEST_KEY_MISMATCH",
     });
-    expect(mocks.db.connect).toHaveBeenCalled();
+    expect(mocks.db.connect).not.toHaveBeenCalled();
   });
 
   it("rejects run when cacheKey does not match the compiled preview", async () => {

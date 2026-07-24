@@ -368,6 +368,34 @@ function generatedWorkflowOutput(cached: GeneratedWorkflowPlanCacheRecord, varia
   return output;
 }
 
+function dashboardHumanOutputFailure(
+  cached: GeneratedWorkflowPlanCacheRecord,
+  output: Record<string, unknown>,
+): string | null {
+  if (
+    cached.sourceMetadata?.source !== "dashboard_human"
+    || cached.sourceMetadata?.outputContractVersion !== "required-v1"
+  ) return null;
+
+  const required = cached.workflow.outputSchema?.required ?? [];
+  if (required.length === 0) {
+    return "dashboard human workflow has no required output contract";
+  }
+
+  const missing = required.filter((key) => {
+    const value = output[key];
+    if (value === null || value === undefined) return true;
+    if (typeof value !== "string") return false;
+    const normalized = value.trim().toLowerCase();
+    if (key === "error" && normalized === "") return false;
+    return normalized === "" || normalized === "unknown" || normalized === "null";
+  });
+
+  return missing.length > 0
+    ? `dashboard human workflow did not materialize required outputs: ${missing.join(", ")}`
+    : null;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -1328,7 +1356,18 @@ async function executeGeneratedWorkflowTask(
   generatedWorkflowCacheLookups?.labels("task_runner", generatedWorkflowTaskCacheResult(cacheKey, requestKey)).inc();
 
   if (cached.sourceMetadata?.source === "dashboard_human") {
-    const intent = typeof cached.sourceMetadata.intent === "string" ? cached.sourceMetadata.intent : String(params.intent ?? requestKey ?? cacheKey);
+    const requestedIntent = typeof params.intent === "string" ? params.intent.trim() : "";
+    const artifactIntent = typeof cached.sourceMetadata.intent === "string" ? cached.sourceMetadata.intent.trim() : "";
+    if (requestedIntent && artifactIntent && requestedIntent !== artifactIntent) {
+      generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "dispatch_failed").inc();
+      return generatedWorkflowTaskFailure(
+        "HUMAN_WORKFLOW_INTENT_MISMATCH",
+        "cached workflow intent does not match the requested command",
+        startedAt,
+        cached,
+      );
+    }
+    const intent = artifactIntent;
     try {
       assertHumanWorkflowMeaningful(cached.workflow, intent);
     } catch (err) {
@@ -1412,6 +1451,24 @@ async function executeGeneratedWorkflowTask(
         durationMs: Date.now() - startedAt,
         failReason: finalWorkflow.error ?? `Generated workflow ended with status ${finalWorkflow.status}`,
         generatedWorkflow: generatedWorkflowResult,
+      };
+    }
+
+    const outputFailure = dashboardHumanOutputFailure(cached, finalOutput);
+    if (outputFailure) {
+      generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "output_invalid").inc();
+      return {
+        success: false,
+        stepsCompleted: finalWorkflow.currentStep,
+        totalSteps: finalWorkflow.totalSteps ?? cached.workflow.steps.length,
+        output: finalOutput,
+        tokenUsage: zeroTokenUsage(),
+        durationMs: Date.now() - startedAt,
+        failReason: `HUMAN_WORKFLOW_OUTPUT_INVALID: ${outputFailure}`,
+        generatedWorkflow: {
+          ...generatedWorkflowResult,
+          failureCode: "HUMAN_WORKFLOW_OUTPUT_INVALID",
+        },
       };
     }
 
