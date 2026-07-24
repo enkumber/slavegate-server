@@ -336,7 +336,9 @@ async function readyFromComposition(
         portabilityScope: "global",
       },
     );
-    cached = await workflowService.getGeneratedPlanCache(compiledPlan.cacheKey);
+    cached = await workflowService.getGeneratedPlanCache(compiledPlan.cacheKey, {
+      includeCandidate: artifactState === "candidate",
+    });
   }
   if (!cached) {
     throw Object.assign(new Error("composed workflow artifact could not be persisted"), {
@@ -506,16 +508,16 @@ export class HumanWorkflowCompilerService {
         nextAction: "configure_capability",
       });
     }
+    const composed = await workflowSegmentComposer.compose({
+      capabilityKey: catalogContext.matchedCapabilityKey,
+      platform: target.account_platform,
+      intent,
+      requestKey,
+      deviceId: input.deviceId,
+      accountId: input.accountId ?? null,
+    });
+    if (composed) return readyFromComposition(composed, target);
     if (catalogContext.matchedCapabilityMetadata?.compositionEnabled === true) {
-      const composed = await workflowSegmentComposer.compose({
-        capabilityKey: catalogContext.matchedCapabilityKey,
-        platform: target.account_platform,
-        intent,
-        requestKey,
-        deviceId: input.deviceId,
-        accountId: input.accountId ?? null,
-      });
-      if (composed) return readyFromComposition(composed, target);
       throw Object.assign(new Error("Capability requires a promoted PostgreSQL workflow composition"), {
         status: 422,
         code: "WORKFLOW_COMPOSITION_REQUIRED",
