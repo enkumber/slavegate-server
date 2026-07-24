@@ -53,6 +53,7 @@ describe("DB-authoritative AI workflow semantics migration", () => {
     for (const filename of [
       "099_db_authoritative_workflow_semantics.sql",
       "100_postgres_compiler_control_plane.sql",
+      "101_browser_direct_intent_contract.sql",
     ]) {
       const migration = fs.readFileSync(
         path.join(repoRoot, "src/db/migrations", filename),
@@ -79,6 +80,35 @@ describe("DB-authoritative AI workflow semantics migration", () => {
     expect(policy.rows[0].content).toContain("supplied from PostgreSQL");
     expect(policy.rows[0].content).toContain("Never infer an application package");
     expect(policy.rows[0].content).toContain("Never derive a Goal Contract");
+    expect(policy.rows[0].content).toContain("emit exactly three action steps");
+    expect(policy.rows[0].content).toContain("Do not emit open_app");
+
+    const browserCapability = await pool.query(
+      `SELECT metadata->'goalContract' AS goal_contract
+       FROM workflow_capabilities
+       WHERE capability_key = 'web_open_absolute_uri'`,
+    );
+    expect(browserCapability.rows).toHaveLength(1);
+    expect(browserCapability.rows[0].goal_contract.stages).toEqual([
+      expect.objectContaining({
+        id: "prepare_device",
+        allowedActions: ["screen_wake", "unlock"],
+      }),
+      expect.objectContaining({
+        id: "navigate_uri",
+        allowedActions: ["intent_send"],
+        after: ["prepare_device"],
+      }),
+    ]);
+
+    const intentSend = await pool.query(
+      `SELECT payload
+       FROM runtime_semantic_entries
+       WHERE namespace = 'tool_catalog' AND entry_key = 'intent_send'`,
+    );
+    expect(intentSend.rows[0].payload.inputSchema).toMatchObject({
+      required: ["action", "uri", "packageName"],
+    });
 
     const controlPlane = await pool.query(
       `SELECT payload
