@@ -31,7 +31,11 @@ import {
 } from "./compiler-control-plane.service";
 import { workflowSegmentComposer } from "../workflow-segments/composer";
 import type { ComposedWorkflow } from "../workflow-segments/types";
-import { segmentBuildJobService, type SegmentBuildReason } from "../segment-builder/segment-build-job.service";
+import {
+  segmentBuildJobService,
+  type SegmentBuildJob,
+  type SegmentBuildReason,
+} from "../segment-builder/segment-build-job.service";
 
 const ASYNC_COMPILE_RETRY_AFTER_MS = 2_000;
 const DEFAULT_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 90_000;
@@ -124,6 +128,14 @@ export function computeHumanWorkflowRequestKey(deviceId: string, accountId: stri
     .update(`${deviceId}:${accountKey}:${intent.trim()}`)
     .digest("hex")
     .slice(0, 24);
+}
+
+export function completedSegmentBuildCapabilityKey(
+  job: Pick<SegmentBuildJob, "status" | "result">,
+): string | null {
+  if (job.status !== "completed") return null;
+  const value = job.result.capabilityKey;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
 async function humanWorkflowPackageName(platform: string): Promise<string> {
@@ -522,6 +534,30 @@ export class HumanWorkflowCompilerService {
         platform: target.account_platform,
         reason: "capability_missing",
       });
+      if (job.status === "completed") {
+        const builtCapabilityKey = completedSegmentBuildCapabilityKey(job);
+        if (!builtCapabilityKey) {
+          throw Object.assign(new Error("completed segment-build job has no capability result"), {
+            status: 409,
+            code: "SEGMENT_BUILD_RESULT_MISSING",
+          });
+        }
+        const built = await workflowSegmentComposer.compose({
+          capabilityKey: builtCapabilityKey,
+          platform: target.account_platform,
+          intent,
+          requestKey,
+          deviceId: input.deviceId,
+          accountId: input.accountId ?? null,
+        });
+        if (!built) {
+          throw Object.assign(new Error("completed segment-build job has no promoted composition"), {
+            status: 409,
+            code: "SEGMENT_BUILD_COMPOSITION_MISSING",
+          });
+        }
+        return readyFromComposition(built, target);
+      }
       segmentBuildJobService.dispatchInBackground(job);
       return {
         status: "building_segment",

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { humanWorkflowArtifactMatchesIntent } from "./human-workflow-compiler.service";
+import {
+  completedSegmentBuildCapabilityKey,
+  humanWorkflowArtifactMatchesIntent,
+} from "./human-workflow-compiler.service";
 
 describe("human workflow artifact identity", () => {
   it("does not reuse a contextual artifact for a different requested intent", () => {
@@ -45,5 +48,25 @@ describe("human workflow artifact identity", () => {
     } as any;
 
     expect(humanWorkflowArtifactMatchesIntent(artifact, "different intent")).toBe(false);
+  });
+});
+
+describe("completed segment-build reconciliation", () => {
+  it("returns the promoted capability produced by a completed agent job", () => {
+    expect(completedSegmentBuildCapabilityKey({
+      status: "completed",
+      result: { capabilityKey: "observe_current_page_title" },
+    })).toBe("observe_current_page_title");
+  });
+
+  it("does not treat unfinished or malformed jobs as reusable results", () => {
+    expect(completedSegmentBuildCapabilityKey({
+      status: "building",
+      result: { capabilityKey: "observe_current_page_title" },
+    })).toBeNull();
+    expect(completedSegmentBuildCapabilityKey({
+      status: "completed",
+      result: {},
+    })).toBeNull();
   });
 });
