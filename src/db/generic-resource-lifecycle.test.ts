@@ -14,6 +14,11 @@ describe("generic DB-authoritative lifecycle", () => {
     path.join(__dirname, "migrations", bindingMigrationName),
     "utf8",
   );
+  const adoptionMigrationName = "108_adopt_configured_lifecycle_resources.sql";
+  const adoptionMigration = fs.readFileSync(
+    path.join(__dirname, "migrations", adoptionMigrationName),
+    "utf8",
+  );
   const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
   const runtime = [
     path.join(__dirname, "..", "modules", "dispatcher", "dispatcher.service.ts"),
@@ -36,6 +41,9 @@ describe("generic DB-authoritative lifecycle", () => {
     expect(migration).not.toMatch(/\bVALUES\s*\(\s*['"]/i);
     expect(bindingMigration).not.toMatch(/INSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions)/i);
     expect(bindingMigration).not.toMatch(/transition\.action_key\s*=\s*['"]/i);
+    expect(adoptionMigration).not.toMatch(/INSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions)/i);
+    expect(adoptionMigration).not.toMatch(/\b(?:queued|running|completed|failed|pending|promoted|candidate)\b/i);
+    expect(adoptionMigration).not.toMatch(/transition\.action_key\s*=\s*['"]/i);
   });
 
   it("removes the superseded task registry and uses generic dynamic bindings", () => {
@@ -50,6 +58,9 @@ describe("generic DB-authoritative lifecycle", () => {
     expect(bindingMigration).toContain("TG_RELID");
     expect(bindingMigration).toContain("configure_lifecycle_resource_binding");
     expect(bindingMigration).toContain("FOREIGN KEY (lifecycle_key, status)");
+    expect(adoptionMigration).toContain("metadata->>'resourceTable'");
+    expect(adoptionMigration).toContain("to_regclass");
+    expect(adoptionMigration).toContain("configure_lifecycle_resource_binding");
   });
 
   it("keeps dispatcher runtime policy off status literals and lists", () => {
@@ -67,5 +78,6 @@ describe("generic DB-authoritative lifecycle", () => {
   it("installs fail-closed", () => {
     expect(isFailClosedMigration(migrationName)).toBe(true);
     expect(isFailClosedMigration(bindingMigrationName)).toBe(true);
+    expect(isFailClosedMigration(adoptionMigrationName)).toBe(true);
   });
 });
