@@ -7,8 +7,7 @@ CREATE TABLE IF NOT EXISTS runtime_semantic_entries (
   namespace TEXT NOT NULL,
   entry_key TEXT NOT NULL,
   platform TEXT NOT NULL DEFAULT '*',
-  status TEXT NOT NULL DEFAULT 'active'
-    CHECK (status IN ('active', 'disabled', 'quarantined')),
+  status TEXT,
   priority INTEGER NOT NULL DEFAULT 0,
   payload JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

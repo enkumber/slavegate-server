@@ -77,6 +77,23 @@ BEGIN
       target_table,
       target_state_column
     );
+    EXECUTE format(
+      'UPDATE %s resource SET %I = initial.status ' ||
+      'FROM (' ||
+      '  SELECT status FROM lifecycle_state_definitions ' ||
+      '  WHERE lifecycle_key = $1 AND initial ' ||
+      '  ORDER BY sort_order, status LIMIT 1' ||
+      ') initial WHERE resource.%I IS NULL OR BTRIM(resource.%I::text) = ''''',
+      target_table,
+      target_state_column,
+      target_state_column,
+      target_state_column
+    ) USING configured.lifecycle_key;
+    EXECUTE format(
+      'ALTER TABLE %s ALTER COLUMN %I SET NOT NULL',
+      target_table,
+      target_state_column
+    );
 
     FOR constraint_row IN
       SELECT constraint_definition.conname

@@ -1,18 +1,7 @@
 -- Phase 1A generated workflow artifact lifecycle.
 
 ALTER TABLE generated_workflow_plan_cache
-  ADD COLUMN IF NOT EXISTS artifact_state TEXT NOT NULL DEFAULT 'candidate';
-
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'chk_generated_workflow_artifact_state'
-  ) THEN
-    ALTER TABLE generated_workflow_plan_cache
-      ADD CONSTRAINT chk_generated_workflow_artifact_state
-      CHECK (artifact_state IN ('candidate', 'promoted', 'failed', 'quarantined'));
-  END IF;
-END $$;
+  ADD COLUMN IF NOT EXISTS artifact_state TEXT;
 
 -- Existing rows predate artifact lifecycle gates, so keep them conservative.
 -- A separate audited allowlist/promotion step should mark known-good artifacts promoted.

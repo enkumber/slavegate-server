@@ -49,8 +49,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_selectors (
   dynamic BOOLEAN NOT NULL DEFAULT FALSE,
   confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5
     CHECK (confidence >= 0 AND confidence <= 1),
-  status TEXT NOT NULL DEFAULT 'candidate'
-    CHECK (status IN ('candidate', 'validating', 'promoted', 'degraded', 'quarantined', 'retired')),
+  status TEXT,
   app_version_pattern TEXT NULL,
   device_class TEXT NULL,
   success_count INT NOT NULL DEFAULT 0,
@@ -77,8 +76,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_transitions (
     CHECK (safety_class IN ('read_only', 'navigation', 'mutating', 'sensitive')),
   confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5
     CHECK (confidence >= 0 AND confidence <= 1),
-  status TEXT NOT NULL DEFAULT 'candidate'
-    CHECK (status IN ('candidate', 'validating', 'promoted', 'degraded', 'quarantined', 'retired')),
+  status TEXT,
   success_count INT NOT NULL DEFAULT 0,
   failure_count INT NOT NULL DEFAULT 0,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -130,8 +128,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_learning_candidates (
   candidate_key TEXT NOT NULL UNIQUE,
   app_id TEXT NOT NULL,
   candidate_type TEXT NOT NULL CHECK (candidate_type IN ('state', 'selector', 'transition', 'recovery_rule')),
-  status TEXT NOT NULL DEFAULT 'candidate'
-    CHECK (status IN ('observed', 'candidate', 'validating', 'promoted', 'degraded', 'quarantined', 'retired')),
+  status TEXT,
   source_state_id UUID NULL REFERENCES ui_graph_states(id) ON DELETE SET NULL,
   target_state_id UUID NULL REFERENCES ui_graph_states(id) ON DELETE SET NULL,
   payload JSONB NOT NULL,
@@ -204,7 +201,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_runtime_checkpoints (
   target_state_id UUID NULL REFERENCES ui_graph_states(id) ON DELETE SET NULL,
   current_state_id UUID NULL REFERENCES ui_graph_states(id) ON DELETE SET NULL,
   checkpoint JSONB NOT NULL,
-  status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed', 'aborted')),
+  status TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
