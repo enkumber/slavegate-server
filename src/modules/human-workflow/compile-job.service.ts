@@ -33,6 +33,14 @@ export interface HumanWorkflowCompileJobRecord {
   completedAt: string | null;
 }
 
+export interface HumanWorkflowCompileJobState {
+  initial: boolean;
+  terminal: boolean;
+  retryable: boolean;
+  administrative: boolean;
+  dispatchable: boolean;
+}
+
 const DEFAULT_STALE_RUNNING_JOB_MS = 150_000;
 const DEFAULT_COMPILE_TIMEOUT_MS = 120_000;
 
@@ -258,6 +266,27 @@ export class HumanWorkflowCompileJobService {
     if (result.rows.length === 0) return null;
     if (await isStaleCompileJob(result.rows[0])) return this.markStaleRunningFailed(result.rows[0].id as string);
     return rowToJob(result.rows[0]);
+  }
+
+  async state(job: Pick<HumanWorkflowCompileJobRecord, "id">): Promise<HumanWorkflowCompileJobState | null> {
+    const result = await getDb().query(
+      `SELECT definition.initial, definition.terminal, definition.retryable,
+              definition.administrative, definition.dispatchable
+         FROM human_workflow_compile_jobs compile_job
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = compile_job.lifecycle_key
+          AND definition.status = compile_job.status
+        WHERE compile_job.id = $1`,
+      [job.id],
+    );
+    const row = result.rows[0];
+    return row ? {
+      initial: row.initial === true,
+      terminal: row.terminal === true,
+      retryable: row.retryable === true,
+      administrative: row.administrative === true,
+      dispatchable: row.dispatchable === true,
+    } : null;
   }
 
   private async markStaleRunningFailed(id: string): Promise<HumanWorkflowCompileJobRecord> {

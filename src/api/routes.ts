@@ -96,7 +96,10 @@ import {
   type HumanWorkflowSafetyClass,
   type HumanWorkflowTarget,
 } from "../modules/human-workflow/human-workflow-compiler.service";
-import type { HumanWorkflowCompileJobRecord } from "../modules/human-workflow/compile-job.service";
+import {
+  humanWorkflowCompileJobService,
+  type HumanWorkflowCompileJobRecord,
+} from "../modules/human-workflow/compile-job.service";
 import { listJobExecutionEvents } from "../modules/observability/job-execution-events";
 import multer from "multer";
 import nodeFs from "fs/promises";
@@ -157,9 +160,10 @@ async function shortcutKeyForJob(job: HumanWorkflowCompileJobRecord): Promise<st
 }
 
 async function compileJobResponse(job: HumanWorkflowCompileJobRecord): Promise<Record<string, unknown>> {
-  const nextAction = job.status === "failed"
+  const state = await humanWorkflowCompileJobService.state(job);
+  const nextAction = state?.retryable
     ? "retry_compile"
-    : job.status === "queued" || job.status === "running"
+    : state && !state.terminal
       ? "poll_compile_job"
       : undefined;
   const llmDebug = job.result?.llmDebug as { attempts?: Array<{ provider?: string; model?: string }> } | undefined;
@@ -175,7 +179,7 @@ async function compileJobResponse(job: HumanWorkflowCompileJobRecord): Promise<R
     createdAt: job.createdAt,
     retryCount: job.retryCount,
     lastRetriedAt: job.lastRetriedAt,
-    retryable: job.status === "failed",
+    retryable: state?.retryable === true,
     nextAction,
     source: job.source,
     shortcutKey: await shortcutKeyForJob(job),
@@ -189,9 +193,11 @@ async function compileJobResponse(job: HumanWorkflowCompileJobRecord): Promise<R
     intentPreview: intentPreview(job.intent),
     debug: job.result?.llmDebug ?? null,
     debugHistory: job.result?.llmDebugHistory ?? [],
-    retryAfterMs: job.status === "queued" || job.status === "running" ? ASYNC_COMPILE_RETRY_AFTER_MS : undefined,
+    retryAfterMs: state && !state.terminal ? ASYNC_COMPILE_RETRY_AFTER_MS : undefined,
   };
-  if (job.status === "ready" && job.result) return { ...job.result, ...metadata };
+  if (state?.terminal && !state.retryable && !state.administrative && job.result) {
+    return { ...job.result, ...metadata };
+  }
   return metadata;
 }
 
@@ -1327,7 +1333,12 @@ router.post("/workflows/human/compile-jobs/:id/retry", requireAdminAuth, async (
     }
     const job = await humanWorkflowCompilerService.retryCompileJob(req.params.id);
     if (!job) return res.status(404).json({ ok: false, code: "COMPILE_JOB_NOT_FOUND", error: "compile job not found" });
-    const nextAction = job.status === "queued" || job.status === "running" ? "poll_compile_job" : job.status === "failed" ? "retry_compile" : undefined;
+    const state = await humanWorkflowCompileJobService.state(job);
+    const nextAction = state?.retryable
+      ? "retry_compile"
+      : state && !state.terminal
+        ? "poll_compile_job"
+        : undefined;
     res.json({
       ok: true,
       data: {
@@ -1335,7 +1346,7 @@ router.post("/workflows/human/compile-jobs/:id/retry", requireAdminAuth, async (
         compileJobId: job.id,
         requestKey: job.requestKey,
         retryCount: job.retryCount,
-        retryAfterMs: job.status === "queued" || job.status === "running" ? ASYNC_COMPILE_RETRY_AFTER_MS : undefined,
+        retryAfterMs: state && !state.terminal ? ASYNC_COMPILE_RETRY_AFTER_MS : undefined,
         nextAction,
       },
     });
@@ -1401,7 +1412,13 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
       if (!job || job.requestKey !== useRequestKey || job.deviceId !== device_id || job.accountId !== accountId) {
         return res.status(404).json({ ok: false, code: "COMPILE_JOB_NOT_FOUND", error: "compile job not found for request" });
       }
-      if (job.status !== "ready" || !job.result) {
+      const compileState = await humanWorkflowCompileJobService.state(job);
+      if (
+        !compileState?.terminal
+        || compileState.retryable
+        || compileState.administrative
+        || !job.result
+      ) {
         return res.status(409).json({
           ok: false,
           code: "COMPILE_NOT_READY",

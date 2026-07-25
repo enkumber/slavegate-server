@@ -54,18 +54,12 @@ describe("human workflow artifact identity", () => {
 describe("completed segment-build reconciliation", () => {
   it("returns the promoted capability produced by a completed agent job", () => {
     expect(completedSegmentBuildCapabilityKey({
-      status: "completed",
       result: { capabilityKey: "observe_current_page_title" },
     })).toBe("observe_current_page_title");
   });
 
-  it("does not treat unfinished or malformed jobs as reusable results", () => {
+  it("does not treat malformed job results as reusable results", () => {
     expect(completedSegmentBuildCapabilityKey({
-      status: "building",
-      result: { capabilityKey: "observe_current_page_title" },
-    })).toBeNull();
-    expect(completedSegmentBuildCapabilityKey({
-      status: "completed",
       result: {},
     })).toBeNull();
   });

@@ -496,6 +496,22 @@ export class SegmentBuildJobService {
     return result.rows[0] ? rowToJob(result.rows[0]) : null;
   }
 
+  async isSuccessful(job: Pick<SegmentBuildJob, "id">): Promise<boolean> {
+    const result = await getDb().query(
+      `SELECT definition.terminal, definition.retryable, definition.administrative
+         FROM segment_build_jobs build_job
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = build_job.lifecycle_key
+          AND definition.status = build_job.status
+        WHERE build_job.id = $1`,
+      [job.id],
+    );
+    const state = result.rows[0];
+    return state?.terminal === true
+      && state.retryable === false
+      && state.administrative === false;
+  }
+
   async dispatch(job: SegmentBuildJob): Promise<SegmentBuildJob> {
     const state = await getDb().query(
       `SELECT definition.initial, definition.terminal, definition.retryable,

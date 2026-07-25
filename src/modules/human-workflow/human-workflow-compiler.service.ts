@@ -131,9 +131,8 @@ export function computeHumanWorkflowRequestKey(deviceId: string, accountId: stri
 }
 
 export function completedSegmentBuildCapabilityKey(
-  job: Pick<SegmentBuildJob, "status" | "result">,
+  job: Pick<SegmentBuildJob, "result">,
 ): string | null {
-  if (job.status !== "completed") return null;
   const value = job.result.capabilityKey;
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
@@ -534,7 +533,7 @@ export class HumanWorkflowCompilerService {
         platform: target.account_platform,
         reason: "capability_missing",
       });
-      if (job.status === "completed") {
+      if (await segmentBuildJobService.isSuccessful(job)) {
         const builtCapabilityKey = completedSegmentBuildCapabilityKey(job);
         if (!builtCapabilityKey) {
           throw Object.assign(new Error("completed segment-build job has no capability result"), {
@@ -694,8 +693,8 @@ export class HumanWorkflowCompilerService {
   async retryCompileJob(id: string): Promise<HumanWorkflowCompileJobRecord | null> {
     const existing = await humanWorkflowCompileJobService.getById(id);
     if (!existing) return null;
-    if (existing.status === "queued" || existing.status === "running") return existing;
-    if (existing.status !== "failed") return existing;
+    const state = await humanWorkflowCompileJobService.state(existing);
+    if (!state?.terminal || !state.retryable) return existing;
 
     const target = await this.resolveTarget(existing.deviceId, existing.accountId, existing.intent);
     if (!target) {
