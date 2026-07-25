@@ -1670,11 +1670,14 @@ export class DeviceExecutionArbiter {
       const handle = operationRowToHandle(operation);
 
       if (!input.sent) {
-        const rejectedOperation = await updateOperationState(client, {
+        const rejectedOperation = await transitionOperationState(client, {
           operationKind: operation.operation_kind,
           operationId: operation.operation_id,
-          fromStates: ["registered", "dispatching"],
-          toState: "rejected",
+          selector: {
+            targetTerminal: false,
+            targetRetryable: true,
+            transitionAutomatic: true,
+          },
           metadata: input.metadata,
         }) ?? operation;
         await insertEvent(client, {
@@ -1717,11 +1720,10 @@ export class DeviceExecutionArbiter {
       }
 
       if (rootIsDispatched(root)) {
-        const dispatchedOperation = await updateOperationState(client, {
+        const dispatchedOperation = await transitionOperationState(client, {
           operationKind: operation.operation_kind,
           operationId: operation.operation_id,
-          fromStates: ["registered", "dispatching", "rejected"],
-          toState: "dispatched",
+          selector: { targetTerminal: false, targetDispatchable: true, transitionAutomatic: true },
           ownerGeneration: toNumber(root.owner_generation),
           wireHandle: encodeDeviceExecutionHandle(operationRowToHandle({ ...operation, owner_generation: root.owner_generation })),
           metadata: input.metadata,
@@ -1766,10 +1768,9 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      const dispatched = await updateRootState(client, {
+      const dispatched = await transitionRootState(client, {
         rootId: root.id,
-        fromStates: ["queued", "claimed"],
-        toState: "dispatched",
+        selector: { targetTerminal: false, targetDispatchable: true, transitionAutomatic: true },
         ownerGenerationIncrement: rootIsInitialPhase(root),
         metadata: input.metadata,
       });
@@ -1792,11 +1793,10 @@ export class DeviceExecutionArbiter {
           reason: "state_changed_before_dispatch",
         };
       }
-      const dispatchedOperation = await updateOperationState(client, {
+      const dispatchedOperation = await transitionOperationState(client, {
         operationKind: operation.operation_kind,
         operationId: operation.operation_id,
-        fromStates: ["registered", "dispatching", "rejected"],
-        toState: "dispatched",
+        selector: { targetTerminal: false, targetDispatchable: true, transitionAutomatic: true },
         ownerGeneration: toNumber(dispatched.owner_generation),
         wireHandle: encodeDeviceExecutionHandle(operationRowToHandle({ ...operation, owner_generation: dispatched.owner_generation })),
         metadata: {
@@ -1834,10 +1834,9 @@ export class DeviceExecutionArbiter {
       const next = await selectOldestQueuedRoot(client, input.deviceId);
       if (!next) return null;
 
-      const claimed = await updateRootState(client, {
+      const claimed = await transitionRootState(client, {
         rootId: next.id,
-        fromStates: ["queued"],
-        toState: "claimed",
+        selector: { targetTerminal: false, transitionAutomatic: true, transitionMarkStarted: true },
         ownerGenerationIncrement: true,
       });
       if (!claimed) return null;

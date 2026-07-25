@@ -215,6 +215,8 @@ class FakeClient {
       const selector = JSON.parse(selectorJson) as Record<string, unknown>;
       const toStatus = selector.targetManual === true
         ? "blocked"
+        : selector.transitionMarkStarted === true
+          ? "claimed"
         : selector.targetTerminal === true
           ? selector.targetAdministrative === true
             ? "cancelled"
