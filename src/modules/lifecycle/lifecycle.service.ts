@@ -154,6 +154,25 @@ export async function getResourceLifecycleKey(
   return typeof value === "string" ? value : null;
 }
 
+export async function getResourceLifecyclePolicy(
+  resourceTable: string,
+  stateColumn = "status",
+  db: LifecycleQueryable = getDb(),
+): Promise<Record<string, unknown>> {
+  const result = await db.query(
+    `SELECT policy
+       FROM lifecycle_resource_policies
+      WHERE resource_table = to_regclass($1)
+        AND state_column = $2::name`,
+    [resourceTable, stateColumn],
+  );
+  const policy = result.rows[0]?.policy;
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+    throw new Error("resource lifecycle operational policy is not configured");
+  }
+  return policy as Record<string, unknown>;
+}
+
 export async function listResourceLifecycleStates(
   resourceTable: string,
   stateColumn = "status",

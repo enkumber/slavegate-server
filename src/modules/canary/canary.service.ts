@@ -16,10 +16,15 @@
 
 import { getDb } from "../../db/client";
 import { alerting, AlertType } from "../observability/alerts";
+import {
+  getResourceLifecyclePolicy,
+  getResourceLifecycleState,
+  selectResourceLifecycleTransition,
+} from "../lifecycle/lifecycle.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type RolloutStatus = "observing" | "passed" | "failed" | "promoted" | "rolled_back";
+export type RolloutStatus = string;
 
 export interface CanaryRollout {
   id:              string;
@@ -37,8 +42,18 @@ export interface CanaryRollout {
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 export class CanaryService {
-  private readonly ERROR_RATE_THRESHOLD = 0.20;  // 20% failure → rollback
-  private readonly MIN_RUNS_FOR_DECISION = 3;    // Need at least 3 runs to decide
+  private async policy(): Promise<{ errorRateThreshold: number; minimumRuns: number; defaultObserveMinutes: number }> {
+    const raw = await getResourceLifecyclePolicy("canary_rollouts");
+    const errorRateThreshold = Number(raw.errorRateThreshold);
+    const minimumRuns = Number(raw.minimumRuns);
+    const defaultObserveMinutes = Number(raw.defaultObserveMinutes);
+    if (
+      !Number.isFinite(errorRateThreshold) || errorRateThreshold < 0 || errorRateThreshold > 1
+      || !Number.isInteger(minimumRuns) || minimumRuns < 1
+      || !Number.isFinite(defaultObserveMinutes) || defaultObserveMinutes <= 0
+    ) throw new Error("canary rollout operational policy is invalid");
+    return { errorRateThreshold, minimumRuns, defaultObserveMinutes };
+  }
 
   /**
    * Start canary observation for a new workflow template.
@@ -46,19 +61,25 @@ export class CanaryService {
    */
   async startRollout(
     templateId:     string,
-    observeMinutes: number = 120
+    observeMinutes?: number
   ): Promise<CanaryRollout | null> {
     const db = getDb();
 
     const canary = await db.query(
-      "SELECT id FROM devices WHERE is_canary = TRUE AND status = 'online' LIMIT 1"
+      `SELECT id FROM devices
+       WHERE is_canary = TRUE
+         AND lifecycle_state_matches('devices'::regclass, status, '{"dispatchable":true}'::jsonb)
+       LIMIT 1`
     );
     if (!canary.rows[0]) {
       console.warn("[canary] No online canary device — skipping canary rollout");
       return null;
     }
     const canaryDeviceId = canary.rows[0].id as string;
-    const observeUntil   = new Date(Date.now() + observeMinutes * 60_000).toISOString();
+    const policy = await this.policy();
+    const observeUntil = new Date(
+      Date.now() + (observeMinutes ?? policy.defaultObserveMinutes) * 60_000,
+    ).toISOString();
 
     const result = await db.query(
       `INSERT INTO canary_rollouts (template_id, canary_device_id, observe_until)
@@ -79,7 +100,12 @@ export class CanaryService {
       `UPDATE canary_rollouts
        SET total_runs  = total_runs + 1,
            failed_runs = failed_runs + $1
-       WHERE template_id = $2 AND status = 'observing'`,
+       WHERE template_id = $2
+         AND lifecycle_state_matches(
+           'canary_rollouts'::regclass,
+           status,
+           '{"dispatchable":true}'::jsonb
+         )`,
       [failed ? 1 : 0, templateId]
     );
   }
@@ -91,7 +117,12 @@ export class CanaryService {
   async processRollouts(): Promise<void> {
     const db = getDb();
     const rows = await db.query(
-      "SELECT * FROM canary_rollouts WHERE status = 'observing'"
+      `SELECT * FROM canary_rollouts
+       WHERE lifecycle_state_matches(
+         'canary_rollouts'::regclass,
+         status,
+         '{"dispatchable":true}'::jsonb
+       )`
     );
     for (const row of rows.rows) {
       await this.evaluateRollout(rowToRollout(row));
@@ -100,6 +131,7 @@ export class CanaryService {
 
   private async evaluateRollout(rollout: CanaryRollout): Promise<void> {
     const db = getDb();
+    const policy = await this.policy();
     const now = Date.now();
     const observeUntil = new Date(rollout.observeUntil).getTime();
 
@@ -108,13 +140,13 @@ export class CanaryService {
       : 0;
 
     // Immediate rollback if error rate too high with enough data
-    if (rollout.totalRuns >= this.MIN_RUNS_FOR_DECISION && errorRate >= this.ERROR_RATE_THRESHOLD) {
+    if (rollout.totalRuns >= policy.minimumRuns && errorRate >= policy.errorRateThreshold) {
       await this.rollback(rollout, errorRate);
       return;
     }
 
     // Auto-promote when observation window ends + error rate acceptable
-    if (now >= observeUntil && rollout.totalRuns >= this.MIN_RUNS_FOR_DECISION) {
+    if (now >= observeUntil && rollout.totalRuns >= policy.minimumRuns) {
       await this.promote(rollout, errorRate);
       return;
     }
@@ -122,10 +154,10 @@ export class CanaryService {
     // Edge case: window expired but not enough runs to decide.
     // Without this, rollout stays 'observing' forever (silent hang).
     // Conservative choice: auto-promote if no failures recorded, rollback if any.
-    if (now >= observeUntil && rollout.totalRuns < this.MIN_RUNS_FOR_DECISION) {
+    if (now >= observeUntil && rollout.totalRuns < policy.minimumRuns) {
       const windowMin = Math.round((now - new Date(rollout.createdAt).getTime()) / 60_000);
       if (rollout.failedRuns === 0) {
-        console.warn(`[canary] Rollout ${rollout.id}: window expired with only ${rollout.totalRuns} runs (min: ${this.MIN_RUNS_FOR_DECISION}) — auto-promoting (0 failures in ${windowMin}min)`);
+        console.warn(`[canary] Rollout ${rollout.id}: window expired with only ${rollout.totalRuns} runs (min: ${policy.minimumRuns}) — auto-promoting (0 failures in ${windowMin}min)`);
         await this.promote(rollout, 0);
       } else {
         console.warn(`[canary] Rollout ${rollout.id}: window expired with insufficient runs (${rollout.totalRuns}) and ${rollout.failedRuns} failures — rolling back`);
@@ -140,14 +172,21 @@ export class CanaryService {
     }
   }
 
-  private async promote(rollout: CanaryRollout, errorRate: number): Promise<void> {
+  private async promote(rollout: CanaryRollout, errorRate: number, manual = false): Promise<void> {
     const db = getDb();
-    // AND status = 'observing' guard prevents double-promote if processRollouts runs concurrently
+    const transition = await selectResourceLifecycleTransition(
+      "canary_rollouts",
+      rollout.status,
+      manual
+        ? { targetTerminal: true, targetRetryable: false, transitionManualAllowed: true, transitionMarkCompleted: true }
+        : { targetTerminal: true, targetRetryable: false, transitionAutomatic: true, transitionMarkCompleted: true },
+    );
+    if (!transition) throw new Error("canary success transition is not configured");
     const result = await db.query(
       `UPDATE canary_rollouts
-       SET status = 'promoted', error_rate = $1, promoted_at = NOW()
-       WHERE id = $2 AND status = 'observing'`,
-      [errorRate, rollout.id]
+       SET status = $3, error_rate = $1, promoted_at = NOW()
+       WHERE id = $2 AND status = $4`,
+      [errorRate, rollout.id, transition.toStatus, rollout.status]
     );
     if ((result.rowCount ?? 0) === 0) return; // already processed by concurrent call
     console.log(`[canary] Rollout ${rollout.id} PROMOTED (${Math.round(errorRate * 100)}% error rate)`);
@@ -155,17 +194,23 @@ export class CanaryService {
 
   private async rollback(rollout: CanaryRollout, errorRate: number): Promise<void> {
     const db = getDb();
-    // AND status = 'observing' guard prevents double-alert if processRollouts runs concurrently
+    const policy = await this.policy();
+    const transition = await selectResourceLifecycleTransition(
+      "canary_rollouts",
+      rollout.status,
+      { targetTerminal: true, targetRetryable: true, transitionAutomatic: true, transitionMarkCompleted: true },
+    );
+    if (!transition) throw new Error("canary rollback transition is not configured");
     const result = await db.query(
-      `UPDATE canary_rollouts SET status = 'rolled_back', error_rate = $1
-       WHERE id = $2 AND status = 'observing'`,
-      [errorRate, rollout.id]
+      `UPDATE canary_rollouts SET status = $3, error_rate = $1
+       WHERE id = $2 AND status = $4`,
+      [errorRate, rollout.id, transition.toStatus, rollout.status]
     );
     if ((result.rowCount ?? 0) === 0) return; // already processed by concurrent call
     await alerting.send(AlertType.OTA_FAILED, {
       deploymentId: rollout.id,
       deviceId:     rollout.canaryDeviceId,
-      error:        `Canary rollback: ${Math.round(errorRate * 100)}% error rate (threshold: ${this.ERROR_RATE_THRESHOLD * 100}%)`,
+      error:        `Canary rollback: ${Math.round(errorRate * 100)}% error rate (threshold: ${policy.errorRateThreshold * 100}%)`,
     });
     console.error(`[canary] Rollout ${rollout.id} ROLLED BACK (${Math.round(errorRate * 100)}% errors)`);
   }
@@ -184,7 +229,13 @@ export class CanaryService {
   async isInObservation(templateId: string): Promise<boolean> {
     const db = getDb();
     const row = await db.query(
-      "SELECT id FROM canary_rollouts WHERE template_id = $1 AND status = 'observing'",
+      `SELECT id FROM canary_rollouts
+       WHERE template_id = $1
+         AND lifecycle_state_matches(
+           'canary_rollouts'::regclass,
+           status,
+           '{"dispatchable":true}'::jsonb
+         )`,
       [templateId]
     );
     return row.rows.length > 0;
@@ -214,17 +265,18 @@ export class CanaryService {
 
   /**
    * Manually promote a rollout before the observation window ends.
-   * Requires status = 'observing'. Skips error rate check — admin override.
+   * Requires a configured dispatchable state. Skips the error-rate check.
    */
   async manualPromote(rolloutId: string, initiatedBy = "admin"): Promise<{ ok: boolean; error?: string }> {
     const db = getDb();
     const rollout = await this.getRollout(rolloutId);
     if (!rollout) return { ok: false, error: "Rollout not found" };
-    if (rollout.status !== "observing") {
+    const state = await getResourceLifecycleState("canary_rollouts", rollout.status);
+    if (!state?.dispatchable) {
       return { ok: false, error: `Cannot promote rollout with status '${rollout.status}'` };
     }
     const errorRate = rollout.totalRuns > 0 ? rollout.failedRuns / rollout.totalRuns : 0;
-    await this.promote(rollout, errorRate);
+    await this.promote(rollout, errorRate, true);
     console.log(`[canary] Rollout ${rolloutId} manually promoted by ${initiatedBy} (${Math.round(errorRate * 100)}% errors)`);
     return { ok: true };
   }
@@ -237,13 +289,20 @@ export class CanaryService {
     const db = getDb();
     const rollout = await this.getRollout(rolloutId);
     if (!rollout) return { ok: false, error: "Rollout not found" };
-    if (rollout.status === "promoted" || rollout.status === "rolled_back") {
+    const state = await getResourceLifecycleState("canary_rollouts", rollout.status);
+    if (state?.terminal) {
       return { ok: false, error: `Cannot rollback rollout with terminal status '${rollout.status}'` };
     }
     const errorRate = rollout.totalRuns > 0 ? rollout.failedRuns / rollout.totalRuns : 0;
+    const transition = await selectResourceLifecycleTransition(
+      "canary_rollouts",
+      rollout.status,
+      { targetTerminal: true, targetRetryable: true, transitionManualAllowed: true, transitionMarkCompleted: true },
+    );
+    if (!transition) return { ok: false, error: "Manual rollback transition is not configured" };
     await db.query(
-      `UPDATE canary_rollouts SET status = 'rolled_back', error_rate = $1 WHERE id = $2`,
-      [errorRate, rolloutId]
+      `UPDATE canary_rollouts SET status = $3, error_rate = $1 WHERE id = $2 AND status = $4`,
+      [errorRate, rolloutId, transition.toStatus, rollout.status],
     );
     await alerting.send(AlertType.OTA_FAILED, {
       deploymentId: rolloutId,

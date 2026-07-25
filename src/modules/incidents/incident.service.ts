@@ -1,6 +1,9 @@
 import { getDb } from "../../db/client";
+import {
+  getResourceLifecycleTransitionToState,
+} from "../lifecycle/lifecycle.service";
 
-export type IncidentStatus = "open" | "acknowledged" | "investigating" | "resolved" | "closed";
+export type IncidentStatus = string;
 
 interface TerminalTaskFailure {
   id: string;
@@ -34,8 +37,6 @@ interface IncidentRecoveryContext {
 }
 
 const SAFE_TIMEZONES = new Set(["Europe/Bucharest", "UTC"]);
-const INCIDENT_STATUSES = new Set<IncidentStatus>(["open", "acknowledged", "investigating", "resolved", "closed"]);
-
 function cleanText(value: unknown, max = 1000): string {
   return String(value ?? "Unknown failure").replace(/[\r\n\t]+/g, " ").slice(0, max);
 }
@@ -55,7 +56,11 @@ async function classifyFailure(reason: string): Promise<{
     `SELECT payload
        FROM runtime_semantic_entries
       WHERE namespace = 'incident_routing_rule'
-        AND status = 'active'
+        AND lifecycle_state_matches(
+          'runtime_semantic_entries'::regclass,
+          status,
+          '{"dispatchable":true}'::jsonb
+        )
       ORDER BY priority DESC, entry_key`,
   );
   for (const row of result.rows) {
@@ -124,13 +129,26 @@ export async function reconcileSupersededTaskIncidents(
   if (!context.intent || !task.account_id || !context.clientId) return 0;
   const resolved = await getDb().query<{ id: string }>(
     `UPDATE phone_network_incidents incident
-        SET status = 'resolved',
+        SET status = lifecycle_transition_target(
+              'phone_network_incidents'::regclass,
+              incident.status,
+              '{"targetTerminal":true,"targetRetryable":false,"automatic":true,"markCompleted":true}'::jsonb
+            ),
             resolved_at = NOW(),
             superseded_by_task_id = $1,
             updated_at = NOW()
        FROM tasks failed_task
       WHERE incident.task_id = failed_task.id
-        AND incident.status IN ('open', 'acknowledged', 'investigating')
+        AND NOT lifecycle_state_matches(
+              'phone_network_incidents'::regclass,
+              incident.status,
+              '{"terminal":true}'::jsonb
+            )
+        AND lifecycle_transition_target(
+              'phone_network_incidents'::regclass,
+              incident.status,
+              '{"targetTerminal":true,"targetRetryable":false,"automatic":true,"markCompleted":true}'::jsonb
+            ) IS NOT NULL
         AND incident.source_type = 'task'
         AND failed_task.id <> $1
         AND failed_task.device_id = $2
@@ -212,10 +230,14 @@ export async function recordExhaustedTaskIncident(
          $11, $12, 'kraken', $13, 'kraken', $14::jsonb
        )
        ON CONFLICT (incident_key) DO UPDATE SET
-         status = CASE
-           WHEN phone_network_incidents.status IN ('resolved', 'closed') THEN 'open'
-           ELSE phone_network_incidents.status
-         END,
+         status = COALESCE(
+           lifecycle_transition_target(
+             'phone_network_incidents'::regclass,
+             phone_network_incidents.status,
+             '{"targetInitial":true,"automatic":true,"clearCompleted":true}'::jsonb
+           ),
+           phone_network_incidents.status
+         ),
          category = EXCLUDED.category,
          severity = EXCLUDED.severity,
          error_code = EXCLUDED.error_code,
@@ -302,19 +324,28 @@ export async function updateIncidentStatus(input: {
   actor: string;
   note?: string;
 }): Promise<unknown | null> {
-  if (!INCIDENT_STATUSES.has(input.status)) throw new Error("Invalid incident status");
+  const current = await getDb().query(
+    `SELECT status FROM phone_network_incidents WHERE id = $1`,
+    [input.id],
+  );
+  if (!current.rows[0]) return null;
+  const transition = await getResourceLifecycleTransitionToState(
+    "phone_network_incidents",
+    current.rows[0].status,
+    input.status,
+  );
+  if (!transition) throw new Error("Requested incident lifecycle transition is not configured");
   const result = await getDb().query(
     `UPDATE phone_network_incidents SET
        status = $2,
-       acknowledged_at = CASE WHEN $2 IN ('acknowledged', 'investigating') THEN COALESCE(acknowledged_at, NOW()) ELSE acknowledged_at END,
-       resolved_at = CASE WHEN $2 IN ('resolved', 'closed') THEN NOW() ELSE NULL END,
+       acknowledged_at = CASE WHEN $3::boolean THEN COALESCE(acknowledged_at, NOW()) ELSE acknowledged_at END,
+       resolved_at = CASE WHEN $4::boolean THEN NOW() WHEN $5::boolean THEN NULL ELSE resolved_at END,
        updated_at = NOW()
      WHERE id = $1 RETURNING *`,
-    [input.id, input.status],
+    [input.id, input.status, transition.markStarted, transition.markCompleted, transition.clearCompleted],
   );
   if (!result.rows[0]) return null;
-  const eventType = input.status === "acknowledged" ? "acknowledged" : input.status;
-  await addEvent(input.id, eventType, input.actor, { note: cleanText(input.note ?? "", 2000) });
+  await addEvent(input.id, transition.actionKey, input.actor, { note: cleanText(input.note ?? "", 2000) });
   return result.rows[0];
 }
 
@@ -400,7 +431,12 @@ export async function getDailyAuditSnapshot(date: string, timezone = "Europe/Buc
       `SELECT 'promoted_without_clean_5_of_5' AS kind, 'high' AS severity,
               id::text AS subject_id, candidate_key, success_count, failure_count, safety_class
          FROM ui_graph_learning_candidates, ${windowSql} w
-        WHERE status = 'promoted' AND updated_at >= w.start_at AND updated_at < w.end_at
+        WHERE lifecycle_state_matches(
+                'ui_graph_learning_candidates'::regclass,
+                status,
+                '{"dispatchable":true}'::jsonb
+              )
+          AND updated_at >= w.start_at AND updated_at < w.end_at
           AND (success_count < 5 OR failure_count > 0 OR safety_class NOT IN ('read_only', 'navigation'))
        UNION ALL
        SELECT 'device_specific_candidate' AS kind, 'medium' AS severity,
@@ -470,18 +506,18 @@ export async function saveAuditRun(input: {
   date: string;
   timezone?: string;
   actor?: string;
-  status: "completed" | "failed";
+  status: string;
   summary?: Record<string, unknown>;
   findings?: Array<{
     findingKey: string;
     kind: string;
-    severity: "info" | "low" | "medium" | "high" | "critical";
+    severity: string;
     subjectType: string;
     subjectId?: string;
     summary: string;
     evidence?: Record<string, unknown>;
     recommendedAction?: string;
-    status?: "open" | "verified" | "dismissed" | "resolved";
+    status?: string;
   }>;
 }): Promise<{ id: string }> {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) throw new Error("date must use YYYY-MM-DD");
@@ -528,7 +564,7 @@ export async function saveAuditRun(input: {
         cleanText(finding.summary, 2000),
         JSON.stringify(finding.evidence ?? {}),
         finding.recommendedAction ? cleanText(finding.recommendedAction, 2000) : null,
-        finding.status ?? "open",
+        finding.status ?? null,
       ],
     );
   }
