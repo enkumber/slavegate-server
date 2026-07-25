@@ -311,7 +311,7 @@ describe("SegmentBuildJobService dispatch", () => {
 
   it("periodically redispatches an expired lease without a new compile request", async () => {
     state.row.status = "building";
-    state.row.claim_expires_at = new Date(Date.now() - 60_000).toISOString();
+    state.row.claim_expires_at = new Date(Date.now() - 60_000);
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 202 })));
 
     const redispatched = await new SegmentBuildJobService().sweepExpiredAgentLeases();

@@ -124,6 +124,12 @@ function assertAgentCandidate(value: Record<string, unknown>): AgentCandidate {
   return value as unknown as AgentCandidate;
 }
 
+function dbTimestamp(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
 function rowToJob(row: Record<string, unknown>): SegmentBuildJob {
   return {
     id: row.id as string,
@@ -140,13 +146,13 @@ function rowToJob(row: Record<string, unknown>): SegmentBuildJob {
     agentSessionKey: (row.agent_session_key as string | null) ?? null,
     dispatchAttempts: Number(row.dispatch_attempts ?? 0),
     lastDispatchError: (row.last_dispatch_error as string | null) ?? null,
-    claimExpiresAt: (row.claim_expires_at as string | null) ?? null,
+    claimExpiresAt: dbTimestamp(row.claim_expires_at),
     candidate: (row.candidate as Record<string, unknown> | null) ?? null,
     evidence: (row.evidence as Record<string, unknown> | null) ?? {},
     result: (row.result as Record<string, unknown> | null) ?? {},
     error: (row.error as string | null) ?? null,
-    createdAt: row.created_at as string,
-    updatedAt: row.updated_at as string,
+    createdAt: dbTimestamp(row.created_at) ?? "",
+    updatedAt: dbTimestamp(row.updated_at) ?? "",
   };
 }
 
