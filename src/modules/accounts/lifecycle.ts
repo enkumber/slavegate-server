@@ -19,18 +19,10 @@
 
 import { accountsService, type AccountStatus } from "./accounts.service";
 import { getDb } from "../../db/client";
-
-// ─── Transition map ───────────────────────────────────────────────────────────
-
-const ALLOWED_TRANSITIONS: Record<AccountStatus, AccountStatus[]> = {
-  created:      ["warming_up", "banned"],
-  warming_up:   ["active", "paused", "challenged", "banned"],
-  active:       ["paused", "rate_limited", "challenged", "banned"],
-  paused:       ["active", "banned"],
-  rate_limited: ["active", "paused", "banned"],
-  challenged:   ["active", "paused", "banned"],
-  banned:       [],  // terminal
-};
+import {
+  getResourceLifecycleTransitionToState,
+  selectResourceLifecycleTransition,
+} from "../lifecycle/lifecycle.service";
 
 export class AccountLifecycleManager {
 
@@ -48,8 +40,12 @@ export class AccountLifecycleManager {
     const account = await accountsService.get(accountId);
     if (!account) throw new Error(`Account not found: ${accountId}`);
 
-    const allowed = ALLOWED_TRANSITIONS[account.status] ?? [];
-    if (!allowed.includes(to)) {
+    const configured = await getResourceLifecycleTransitionToState(
+      "accounts",
+      account.status,
+      to,
+    );
+    if (!configured) {
       throw new Error(
         `Invalid transition ${account.status} → ${to} for account ${accountId}`
       );
@@ -67,7 +63,23 @@ export class AccountLifecycleManager {
    * @param cooldownMs  Default: 2 hours (platforms vary)
    */
   async startRateLimitCooldown(accountId: string, cooldownMs = 2 * 3600_000): Promise<void> {
-    await this.transition(accountId, "rate_limited", `Rate limited — cooldown ${Math.round(cooldownMs / 60_000)}min`);
+    const account = await accountsService.get(accountId);
+    if (!account) throw new Error(`Account not found: ${accountId}`);
+    const transition = await selectResourceLifecycleTransition(
+      "accounts",
+      account.status,
+      {
+        targetRetryable: true,
+        targetTerminal: false,
+        transitionAutomatic: true,
+      },
+    );
+    if (!transition) throw new Error("Account cooldown transition is not configured");
+    await this.transition(
+      accountId,
+      transition.toStatus,
+      `Rate limited — cooldown ${Math.round(cooldownMs / 60_000)}min`,
+    );
     // Persist expiry in DB — recoverable after server restart (no more setTimeout)
     const rateLimitUntil = new Date(Date.now() + cooldownMs);
     const db = getDb();
@@ -85,10 +97,21 @@ export class AccountLifecycleManager {
     const db = getDb();
     const result = await db.query(
       `UPDATE accounts
-       SET status = 'active', rate_limit_until = NULL, notes = 'Rate limit cooldown expired'
-       WHERE status = 'rate_limited'
+       SET status = lifecycle_transition_target(
+             'accounts'::regclass,
+             status,
+             '{"targetDispatchable":true,"automatic":true,"clearFailure":true}'::jsonb
+           ),
+           rate_limit_until = NULL,
+           notes = 'Rate limit cooldown expired'
+       WHERE lifecycle_state_matches('accounts'::regclass, status, '{"retryable":true}'::jsonb)
          AND rate_limit_until IS NOT NULL
          AND rate_limit_until < NOW()
+         AND lifecycle_transition_target(
+               'accounts'::regclass,
+               status,
+               '{"targetDispatchable":true,"automatic":true,"clearFailure":true}'::jsonb
+             ) IS NOT NULL
        RETURNING id`
     );
     const resumed = result.rowCount ?? 0;
@@ -114,12 +137,6 @@ export class AccountLifecycleManager {
     return accountsService.getWorkableAccounts(platform);
   }
 
-  /**
-   * Validate if transition is allowed without applying it.
-   */
-  canTransition(from: AccountStatus, to: AccountStatus): boolean {
-    return (ALLOWED_TRANSITIONS[from] ?? []).includes(to);
-  }
 }
 
 export const lifecycleManager = new AccountLifecycleManager();

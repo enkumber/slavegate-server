@@ -19,17 +19,13 @@ import { v4 as uuidv4 } from "uuid";
 import { accountBanned, accountChallenged } from "../observability/metrics";
 import { alerting } from "../observability/alerts";
 import { researchService } from "../research/research.service";
+import {
+  getResourceLifecycleTransitionToState,
+} from "../lifecycle/lifecycle.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export type AccountStatus =
-  | "created"       // Just added, no activity yet
-  | "warming_up"    // In warmup phase (0-14 days, conservative behavior)
-  | "active"        // Normal operation
-  | "paused"        // Temporarily suspended (manual or automated)
-  | "rate_limited"  // Hit rate limit — auto-resume after cooldown
-  | "challenged"    // Received challenge (CAPTCHA, phone verify) — needs attention
-  | "banned";       // Terminal — no further use
+export type AccountStatus = string;
 
 export interface Account {
   id:               string;
@@ -105,8 +101,8 @@ export class AccountsService {
 
     const result = await db.query(
       `INSERT INTO accounts
-         (id, platform, username, device_id, client_id, type, status, encryption_key_ref, simulated_timezone, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9)
+         (id, platform, username, device_id, client_id, type, encryption_key_ref, simulated_timezone, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         id,
@@ -197,9 +193,22 @@ export class AccountsService {
       stats.byStatus[row.status as AccountStatus] = (stats.byStatus[row.status as AccountStatus] ?? 0) + count;
       stats.byPlatform[row.platform] = (stats.byPlatform[row.platform] ?? 0) + count;
     }
-    stats.activeAccounts     = stats.byStatus["active"] ?? 0;
-    stats.bannedAccounts     = stats.byStatus["banned"] ?? 0;
-    stats.challengedAccounts = stats.byStatus["challenged"] ?? 0;
+    const capabilityCounts = await db.query(
+      `SELECT
+         COALESCE(SUM(counts.count) FILTER (WHERE state.dispatchable), 0)::int AS active,
+         COALESCE(SUM(counts.count) FILTER (WHERE state.terminal), 0)::int AS terminal,
+         COALESCE(SUM(counts.count) FILTER (WHERE state.manual AND NOT state.terminal), 0)::int AS manual
+       FROM lifecycle_resource_bindings binding
+       JOIN lifecycle_state_definitions state ON state.lifecycle_key = binding.lifecycle_key
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*)::int AS count FROM accounts account WHERE account.status = state.status
+       ) counts ON TRUE
+       WHERE binding.resource_table = 'accounts'::regclass
+         AND binding.state_column = 'status'::name`,
+    );
+    stats.activeAccounts = Number(capabilityCounts.rows[0]?.active ?? 0);
+    stats.bannedAccounts = Number(capabilityCounts.rows[0]?.terminal ?? 0);
+    stats.challengedAccounts = Number(capabilityCounts.rows[0]?.manual ?? 0);
     return stats;
   }
 
@@ -207,11 +216,11 @@ export class AccountsService {
 
   async updateStatus(id: string, status: AccountStatus, notes?: string): Promise<Account | null> {
     const db = getDb();
-    // "banned" is terminal — cannot transition out programmatically
     const account = await this.get(id);
     if (!account) return null;
-    if (account.status === "banned" && status !== "banned") {
-      throw new Error("Banned accounts cannot be reactivated — create a new account.");
+    if (account.status !== status) {
+      const transition = await getResourceLifecycleTransitionToState("accounts", account.status, status, "status", db);
+      if (!transition) throw new Error("Requested account lifecycle transition is not configured");
     }
     const result = await db.query(
       `UPDATE accounts SET status = $1, notes = COALESCE($2, notes) WHERE id = $3 RETURNING *`,
@@ -235,7 +244,14 @@ export class AccountsService {
       `UPDATE accounts
        SET session_count   = session_count + 1,
            last_active_at  = NOW(),
-           status          = CASE WHEN status = 'created' THEN 'warming_up' ELSE status END
+           status          = COALESCE(
+             lifecycle_transition_target(
+               'accounts'::regclass,
+               status,
+               '{"automatic":true,"markStarted":true}'::jsonb
+             ),
+             status
+           )
        WHERE id = $1`,
       [id]
     );
@@ -256,8 +272,20 @@ export class AccountsService {
   async flagChallenged(id: string, reason: string): Promise<void> {
     const db = getDb();
     const result = await db.query(
-      `UPDATE accounts SET status = 'challenged', notes = $1
-       WHERE id = $2 AND status NOT IN ('banned')
+      `UPDATE accounts
+       SET status = lifecycle_transition_target(
+             'accounts'::regclass,
+             status,
+             '{"targetManual":true,"targetTerminal":false,"automatic":true}'::jsonb
+           ),
+           notes = $1
+       WHERE id = $2
+         AND NOT lifecycle_state_matches('accounts'::regclass, status, '{"terminal":true}'::jsonb)
+         AND lifecycle_transition_target(
+               'accounts'::regclass,
+               status,
+               '{"targetManual":true,"targetTerminal":false,"automatic":true}'::jsonb
+             ) IS NOT NULL
        RETURNING platform`,
       [reason, id]
     );
@@ -275,7 +303,20 @@ export class AccountsService {
   async markBanned(id: string, reason: string): Promise<void> {
     const db = getDb();
     const result = await db.query(
-      "UPDATE accounts SET status = 'banned', notes = $1 WHERE id = $2 RETURNING platform",
+      `UPDATE accounts
+       SET status = lifecycle_transition_target(
+             'accounts'::regclass,
+             status,
+             '{"targetTerminal":true,"automatic":true}'::jsonb
+           ),
+           notes = $1
+       WHERE id = $2
+         AND lifecycle_transition_target(
+               'accounts'::regclass,
+               status,
+               '{"targetTerminal":true,"automatic":true}'::jsonb
+             ) IS NOT NULL
+       RETURNING platform`,
       [reason, id]
     );
     if ((result.rowCount ?? 0) > 0) {
@@ -296,7 +337,7 @@ export class AccountsService {
     const values = platform ? [platform] : [];
     const rows = await db.query(
       `SELECT * FROM accounts
-       WHERE status IN ('active', 'warming_up')
+       WHERE lifecycle_state_matches('accounts'::regclass, status, '{"dispatchable":true}'::jsonb)
        ${where}
        ORDER BY last_active_at ASC NULLS FIRST, created_at ASC`,
       values
@@ -312,8 +353,16 @@ export class AccountsService {
     const db = getDb();
     const result = await db.query(
       `UPDATE accounts
-       SET status = 'active'
-       WHERE status = 'warming_up'
+       SET status = lifecycle_transition_target(
+             'accounts'::regclass,
+             status,
+             '{"targetDispatchable":true,"automatic":true}'::jsonb
+           )
+       WHERE lifecycle_transition_target(
+               'accounts'::regclass,
+               status,
+               '{"targetDispatchable":true,"automatic":true}'::jsonb
+             ) IS NOT NULL
          AND created_at <= NOW() - INTERVAL '14 days'
        RETURNING id`
     );

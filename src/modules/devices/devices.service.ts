@@ -12,6 +12,7 @@ import type {
   UpdateDeviceRequest,
   PaginatedResponse,
 } from "../../../shared/protocol/api-types";
+import { getResourceLifecycleTransitionToState } from "../lifecycle/lifecycle.service";
 
 export class DevicesService {
   // ─── Queries ──────────────────────────────────────────────────────────────
@@ -48,7 +49,13 @@ export class DevicesService {
   async listDevicesByLocation(): Promise<Record<string, Device[]>> {
     const db = getDb();
     const rows = await db.query(
-      "SELECT * FROM devices WHERE status != 'maintenance' ORDER BY location_id NULLS LAST, friendly_name"
+      `SELECT * FROM devices
+       WHERE NOT lifecycle_state_matches(
+         'devices'::regclass,
+         status,
+         '{"administrative":true}'::jsonb
+       )
+       ORDER BY location_id NULLS LAST, friendly_name`
     );
     const grouped: Record<string, Device[]> = {};
     for (const row of rows.rows) {
@@ -80,7 +87,19 @@ export class DevicesService {
     if (req.friendlyName !== undefined) addField("friendly_name", req.friendlyName);
     if (req.locationId   !== undefined) addField("location_id",   req.locationId);
     if (req.isCanary     !== undefined) addField("is_canary",     req.isCanary);
-    if (req.status       !== undefined) addField("status",        req.status);
+    if (req.status !== undefined) {
+      const current = await this.getDevice(id);
+      if (!current) return null;
+      if (current.status !== req.status) {
+        const transition = await getResourceLifecycleTransitionToState(
+          "devices",
+          current.status,
+          req.status,
+        );
+        if (!transition) throw new Error("Requested device lifecycle transition is not configured");
+      }
+      addField("status", req.status);
+    }
 
     if (updates.length === 0) return this.getDevice(id);
 
@@ -123,9 +142,22 @@ export class DevicesService {
     const db = getDb();
     await db.query(
       `UPDATE devices
-       SET status = 'online', last_seen_at = NOW(), last_ip = $1
+       SET status = COALESCE(
+             lifecycle_transition_target(
+               'devices'::regclass,
+               status,
+               '{"targetDispatchable":true,"automatic":true,"markStarted":true}'::jsonb
+             ),
+             status
+           ),
+           last_seen_at = NOW(),
+           last_ip = $1
        WHERE id = $2
-         AND status NOT IN ('pending', 'maintenance')`,
+         AND NOT lifecycle_state_matches(
+               'devices'::regclass,
+               status,
+               '{"administrative":true}'::jsonb
+             )`,
       [ipAddress, deviceId]
     );
   }
@@ -133,21 +165,62 @@ export class DevicesService {
   async markOffline(deviceId: string): Promise<void> {
     const db = getDb();
     await db.query(
-      "UPDATE devices SET status = 'offline' WHERE id = $1 AND status = 'online'",
+      `UPDATE devices
+       SET status = lifecycle_transition_target(
+             'devices'::regclass,
+             status,
+             '{"targetRetryable":true,"automatic":true,"clearCompleted":true}'::jsonb
+           )
+       WHERE id = $1
+         AND lifecycle_state_matches('devices'::regclass, status, '{"dispatchable":true}'::jsonb)
+         AND lifecycle_transition_target(
+               'devices'::regclass,
+               status,
+               '{"targetRetryable":true,"automatic":true,"clearCompleted":true}'::jsonb
+             ) IS NOT NULL`,
       [deviceId]
     );
   }
 
   async markAllOffline(): Promise<void> {
     const db = getDb();
-    await db.query("UPDATE devices SET status = 'offline' WHERE status = 'online'");
+    await db.query(
+      `UPDATE devices
+       SET status = lifecycle_transition_target(
+             'devices'::regclass,
+             status,
+             '{"targetRetryable":true,"automatic":true,"clearCompleted":true}'::jsonb
+           )
+       WHERE lifecycle_state_matches('devices'::regclass, status, '{"dispatchable":true}'::jsonb)
+         AND lifecycle_transition_target(
+               'devices'::regclass,
+               status,
+               '{"targetRetryable":true,"automatic":true,"clearCompleted":true}'::jsonb
+             ) IS NOT NULL`,
+    );
     console.log("[devices] Startup: all devices marked offline — will go online at HELLO");
   }
 
   async updateHealth(deviceId: string, health: DeviceHealth): Promise<void> {
     const db = getDb();
     await db.query(
-      "UPDATE devices SET health = $1, last_seen_at = NOW(), status = CASE WHEN status IN ('approved', 'online', 'offline') THEN 'online' ELSE status END WHERE id = $2",
+      `UPDATE devices
+       SET health = $1,
+           last_seen_at = NOW(),
+           status = COALESCE(
+             lifecycle_transition_target(
+               'devices'::regclass,
+               status,
+               '{"targetDispatchable":true,"automatic":true,"markStarted":true}'::jsonb
+             ),
+             status
+           )
+       WHERE id = $2
+         AND NOT lifecycle_state_matches(
+               'devices'::regclass,
+               status,
+               '{"administrative":true}'::jsonb
+             )`,
       [JSON.stringify(health), deviceId]
     );
 

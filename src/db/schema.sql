@@ -16,8 +16,7 @@ CREATE TABLE IF NOT EXISTS devices (
   -- Locație fizică a device-ului (WiFi, IP nativ per locație)
   -- Format: "loc_a", "loc_b" etc. Constraint: max 1 cont per platformă per locație.
   location_id      TEXT,
-  status           TEXT        NOT NULL DEFAULT 'pending'
-                               CHECK (status IN ('pending','approved','online','offline','maintenance','revoked')),
+  status           TEXT        NOT NULL,
   last_seen_at     TIMESTAMPTZ,
   last_ip          INET,
   health           JSONB       DEFAULT '{}',
@@ -75,12 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_
 CREATE TABLE IF NOT EXISTS jobs (
   id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   device_id    UUID        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-  job_type     TEXT        NOT NULL
-                           CHECK (job_type IN (
-                             'tap','swipe','type_text','scroll','screenshot',
-                             'screen_record','open_app','close_app','ui_tree_dump',
-                             'pm_uninstall','reboot','ota_update'
-                           )),
+  job_type     TEXT        NOT NULL,
   params       JSONB       NOT NULL,
   status       TEXT        NOT NULL,
   output       JSONB,
@@ -146,8 +140,7 @@ CREATE TABLE IF NOT EXISTS ota_deployments (
   apk_signature     TEXT        NOT NULL,
   changelog         TEXT        NOT NULL DEFAULT '',
   canary_device_id  UUID        REFERENCES devices(id),  -- NULL = no canary phase
-  status            TEXT        NOT NULL DEFAULT 'staged'
-                                CHECK (status IN ('staged','canary','rolling','completed','failed','rolled_back')),
+  status            TEXT        NOT NULL,
   mandatory         BOOLEAN     NOT NULL DEFAULT FALSE,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -157,8 +150,7 @@ CREATE TABLE IF NOT EXISTS ota_deployments (
 CREATE TABLE IF NOT EXISTS ota_deployment_devices (
   deployment_id UUID        NOT NULL REFERENCES ota_deployments(id) ON DELETE CASCADE,
   device_id     UUID        NOT NULL REFERENCES devices(id),
-  status        TEXT        NOT NULL DEFAULT 'pending'
-                            CHECK (status IN ('pending','installing','success','failed','rolled_back')),
+  status        TEXT        NOT NULL,
   installed_at  TIMESTAMPTZ,
   PRIMARY KEY (deployment_id, device_id)
 );
@@ -171,11 +163,7 @@ CREATE TABLE IF NOT EXISTS workflow_templates (
   parser_version               TEXT,
   compatible_app_versions      TEXT[],
   data_retention_days          INT         NOT NULL DEFAULT 90,
-  default_verification_strategy TEXT       NOT NULL DEFAULT 'local_with_screenshot'
-                                           CHECK (default_verification_strategy IN (
-                                             'local_only', 'local_with_screenshot',
-                                             'full_cascade', 'vlm_required'
-                                           )),
+  default_verification_strategy TEXT       NOT NULL,
   created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -207,7 +195,7 @@ CREATE TABLE IF NOT EXISTS agency_workflow_run_admin_events (
   run_id          UUID NOT NULL,
   task_id         UUID,
   workflow_ids    UUID[] NOT NULL DEFAULT '{}',
-  action          TEXT NOT NULL CHECK (action IN ('admin_close')),
+  action          TEXT NOT NULL,
   actor_type      TEXT NOT NULL,
   actor_id        TEXT,
   reason          TEXT NOT NULL,
@@ -222,29 +210,19 @@ CREATE INDEX IF NOT EXISTS idx_agency_workflow_run_admin_events_run
 -- ─── Accounts — Phase 3 ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS accounts (
   id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  platform              TEXT        NOT NULL
-                                    CHECK (platform IN ('instagram','tiktok','reddit','twitter','facebook')),
+  platform              TEXT        NOT NULL,
   username              TEXT        NOT NULL,
   encryption_key_ref    TEXT,       -- Vault reference: "vault:accounts/{id}/creds" — NEVER plaintext
   -- credentials_encrypted NOT stored server-side — device encrypts, Vault holds key
   device_id             UUID        REFERENCES devices(id) ON DELETE SET NULL,
   -- No proxy_config — WiFi with native IP per physical location (v3)
-  status                TEXT        NOT NULL DEFAULT 'created'
-                                    CHECK (status IN (
-                                      'created',       -- just added
-                                      'warming_up',    -- 0-14 days conservative behavior
-                                      'active',        -- normal operation
-                                      'paused',        -- temporarily suspended
-                                      'rate_limited',  -- hit rate limit, auto-resume
-                                      'challenged',    -- CAPTCHA / phone verify needed
-                                      'banned'         -- terminal
-                                    )),
+  status                TEXT        NOT NULL,
   simulated_timezone    TEXT        NOT NULL DEFAULT 'Europe/Bucharest',
   session_count         INT         NOT NULL DEFAULT 0,
   total_actions         INT         NOT NULL DEFAULT 0,
   last_active_at        TIMESTAMPTZ,
   notes                 TEXT,       -- operator notes, ban reason, challenge details
-  rate_limit_until      TIMESTAMPTZ,-- non-null while status='rate_limited'; cron resets to 'active'
+  rate_limit_until      TIMESTAMPTZ,-- non-null while a configured cooldown is active
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (platform, username),
   -- Max 1 account per platform per device (enforced at DB + service layer)

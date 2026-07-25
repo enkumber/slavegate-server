@@ -1,6 +1,7 @@
 import { getDb } from "../../db/client";
 import { accountsService } from "./accounts.service";
 import { lifecycleManager } from "./lifecycle";
+import { resourceLifecycleStateMatches } from "../lifecycle/lifecycle.service";
 
 interface DetectionSignal {
   type: "banned" | "challenged" | "rate_limited";
@@ -80,7 +81,11 @@ export class BanDetector {
       `SELECT payload
        FROM runtime_semantic_entries
        WHERE namespace = 'account_detection_rule'
-         AND status = 'active'
+         AND lifecycle_state_matches(
+               'runtime_semantic_entries'::regclass,
+               status,
+               '{"dispatchable":true}'::jsonb
+             )
          AND (platform = $1 OR platform = '*')
        ORDER BY CASE WHEN platform = $1 THEN 0 ELSE 1 END, priority DESC, entry_key`,
       [platform.trim().toLowerCase()],
@@ -100,16 +105,18 @@ export class BanDetector {
 
   private async applySignal(accountId: string, signal: DetectionSignal): Promise<void> {
     const account = await accountsService.get(accountId);
-    if (!account || account.status === "banned") return;
+    if (!account || await resourceLifecycleStateMatches("accounts", account.status, { terminal: true })) return;
     if (signal.type === "banned") {
       await accountsService.markBanned(accountId, signal.reason);
       return;
     }
     if (signal.type === "challenged") {
-      if (account.status !== "challenged") await accountsService.flagChallenged(accountId, signal.reason);
+      if (!await resourceLifecycleStateMatches("accounts", account.status, { manual: true, terminal: false })) {
+        await accountsService.flagChallenged(accountId, signal.reason);
+      }
       return;
     }
-    if (account.status === "active" || account.status === "warming_up") {
+    if (await resourceLifecycleStateMatches("accounts", account.status, { dispatchable: true })) {
       const cooldownMs = (60 + Math.random() * 180) * 60_000;
       await lifecycleManager.startRateLimitCooldown(accountId, cooldownMs);
     }
