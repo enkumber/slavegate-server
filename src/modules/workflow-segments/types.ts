@@ -4,13 +4,7 @@ import type {
   WorkflowTemplate,
 } from "../workflows/types";
 
-export type SegmentLifecycle =
-  | "draft"
-  | "candidate"
-  | "promoted"
-  | "degraded"
-  | "quarantined"
-  | "retired";
+export type SegmentLifecycle = string;
 
 export interface SegmentInputSchemaProperty {
   type: "string" | "number" | "boolean" | "object" | "array";

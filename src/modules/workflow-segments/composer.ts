@@ -222,7 +222,11 @@ export class WorkflowSegmentComposer {
   }): Promise<ComposedWorkflow | null> {
     const composition = await this.repository.promotedComposition(input.capabilityKey, input.platform);
     if (!composition) return null;
-    const segments = await this.repository.segmentVersions(composition.nodes, ["promoted"]);
+    const segments = await this.repository.segmentVersions(composition.nodes, {
+      terminal: true,
+      retryable: false,
+      administrative: false,
+    });
     return this.composeResolved(composition, segments, input);
   }
 
@@ -238,10 +242,10 @@ export class WorkflowSegmentComposer {
     const composition = await this.repository.compositionVersion(
       input.compositionName,
       input.compositionVersion,
-      ["candidate"],
+      { terminal: false, dispatchable: true },
     );
     if (!composition) return null;
-    const segments = await this.repository.segmentVersions(composition.nodes, ["candidate", "promoted"]);
+    const segments = await this.repository.segmentVersions(composition.nodes, { dispatchable: true });
     return this.composeResolved(composition, segments, input);
   }
 

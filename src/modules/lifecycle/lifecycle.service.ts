@@ -316,11 +316,12 @@ export async function updateLifecycleStalePolicy(
 export async function configureResourceLifecycleBinding(
   resourceTable: string,
   lifecycleKey: string,
+  stateColumn = "status",
   db: LifecycleQueryable = getDb(),
 ): Promise<void> {
   await db.query(
-    "SELECT configure_lifecycle_resource_binding(to_regclass($1), $2)",
-    [resourceTable, lifecycleKey],
+    "SELECT configure_lifecycle_resource_binding(to_regclass($1), $2, $3::name)",
+    [resourceTable, lifecycleKey, stateColumn],
   );
 }
 

@@ -5,6 +5,37 @@ import type {
   WorkflowSegmentVersionRecord,
 } from "./types";
 
+export interface ResourceStateSelector {
+  terminal?: boolean;
+  retryable?: boolean;
+  administrative?: boolean;
+  dispatchable?: boolean;
+}
+
+function selectorValues(selector: ResourceStateSelector): Array<boolean | null> {
+  return [
+    selector.terminal ?? null,
+    selector.retryable ?? null,
+    selector.administrative ?? null,
+    selector.dispatchable ?? null,
+  ];
+}
+
+function lifecycleSelectorSql(stateExpression: string, offset: number): string {
+  return `EXISTS (
+    SELECT 1
+      FROM lifecycle_resource_bindings binding
+      JOIN lifecycle_state_definitions definition
+        ON definition.lifecycle_key = binding.lifecycle_key
+       AND definition.status = ${stateExpression}
+     WHERE binding.resource_table = to_regclass($${offset})
+       AND ($${offset + 1}::boolean IS NULL OR definition.terminal = $${offset + 1})
+       AND ($${offset + 2}::boolean IS NULL OR definition.retryable = $${offset + 2})
+       AND ($${offset + 3}::boolean IS NULL OR definition.administrative = $${offset + 3})
+       AND ($${offset + 4}::boolean IS NULL OR definition.dispatchable = $${offset + 4})
+  )`;
+}
+
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -78,11 +109,16 @@ export class WorkflowSegmentRepository {
       `SELECT *
        FROM workflow_compositions
        WHERE capability_key = $1
-         AND lifecycle_status = 'promoted'
+         AND ${lifecycleSelectorSql("lifecycle_status", 3)}
          AND (LOWER(platform) = LOWER($2) OR platform = '*')
        ORDER BY CASE WHEN LOWER(platform) = LOWER($2) THEN 0 ELSE 1 END, updated_at DESC
        LIMIT 1`,
-      [capabilityKey, platform],
+      [
+        capabilityKey,
+        platform,
+        "workflow_compositions",
+        ...selectorValues({ terminal: true, retryable: false, administrative: false }),
+      ],
     );
     const row = result.rows[0] as Record<string, unknown> | undefined;
     if (!row) return null;
@@ -99,7 +135,7 @@ export class WorkflowSegmentRepository {
   async compositionVersion(
     compositionName: string,
     version: string,
-    statuses: WorkflowCompositionRecord["status"][] = ["candidate"],
+    selector: ResourceStateSelector,
   ): Promise<WorkflowCompositionRecord | null> {
     const db = getDb();
     const result = await db.query(
@@ -107,9 +143,9 @@ export class WorkflowSegmentRepository {
        FROM workflow_compositions
        WHERE composition_name = $1
          AND version = $2
-         AND lifecycle_status = ANY($3::text[])
+         AND ${lifecycleSelectorSql("lifecycle_status", 3)}
        LIMIT 1`,
-      [compositionName, version, statuses],
+      [compositionName, version, "workflow_compositions", ...selectorValues(selector)],
     );
     const row = result.rows[0] as Record<string, unknown> | undefined;
     if (!row) return null;
@@ -125,7 +161,7 @@ export class WorkflowSegmentRepository {
 
   async segmentVersions(
     nodes: WorkflowCompositionNodeRecord[],
-    statuses: WorkflowSegmentVersionRecord["status"][] = ["promoted"],
+    selector: ResourceStateSelector,
   ): Promise<Map<string, WorkflowSegmentVersionRecord>> {
     if (nodes.length === 0) return new Map();
     const db = getDb();
@@ -138,8 +174,8 @@ export class WorkflowSegmentRepository {
       `SELECT *
        FROM workflow_segment_versions
        WHERE (segment_key, version) IN (${tuples.join(",")})
-         AND lifecycle_status = ANY($${values.length + 1}::text[])`,
-      [...values, statuses],
+         AND ${lifecycleSelectorSql("lifecycle_status", values.length + 1)}`,
+      [...values, "workflow_segment_versions", ...selectorValues(selector)],
     );
     return new Map(
       result.rows.map((row) => {

@@ -229,7 +229,7 @@ export class WorkflowSegmentControlPlaneService {
     if (!Array.isArray(input.nodes) || input.nodes.length === 0) {
       throw Object.assign(new Error("composition requires at least one node"), { status: 422, code: "COMPOSITION_NODES_REQUIRED" });
     }
-    const segments = await workflowSegmentRepository.segmentVersions(input.nodes, ["candidate", "promoted"]);
+    const segments = await workflowSegmentRepository.segmentVersions(input.nodes, { dispatchable: true });
     const requiredSegmentRefs = new Set(
       input.nodes.map((node) => `${node.segmentKey}@${node.segmentVersion}`),
     );

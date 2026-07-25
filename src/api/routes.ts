@@ -822,8 +822,14 @@ router.put("/lifecycle-bindings/:resourceTable", requireAdminAuth, async (req, r
     if (!lifecycleKey) {
       return res.status(400).json({ ok: false, error: "lifecycleKey is required" });
     }
-    await configureResourceLifecycleBinding(req.params.resourceTable, lifecycleKey);
-    res.json({ ok: true, data: { resourceTable: req.params.resourceTable, lifecycleKey } });
+    const stateColumn = typeof req.body?.stateColumn === "string"
+      ? req.body.stateColumn.trim()
+      : "status";
+    if (!/^[a-z_][a-z0-9_]*$/i.test(stateColumn)) {
+      return res.status(400).json({ ok: false, error: "stateColumn must be a SQL identifier" });
+    }
+    await configureResourceLifecycleBinding(req.params.resourceTable, lifecycleKey, stateColumn);
+    res.json({ ok: true, data: { resourceTable: req.params.resourceTable, lifecycleKey, stateColumn } });
   } catch (err) {
     res.status(400).json({ ok: false, error: (err as Error).message });
   }

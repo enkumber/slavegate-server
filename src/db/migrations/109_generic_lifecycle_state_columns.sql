@@ -1,65 +1,8 @@
--- Generic table-to-lifecycle binding and fail-closed initial-state assignment.
--- No lifecycle key, status, action, transition, or policy is seeded here.
-
-CREATE TABLE IF NOT EXISTS lifecycle_resource_bindings (
-  resource_table REGCLASS PRIMARY KEY,
-  lifecycle_key TEXT NOT NULL,
-  state_column NAME NOT NULL DEFAULT 'status',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- Extend generic lifecycle bindings to arbitrary state columns declared by
+-- PostgreSQL configuration. This migration contains mechanism only.
 
 ALTER TABLE lifecycle_resource_bindings
-  DROP CONSTRAINT IF EXISTS lifecycle_resource_bindings_lifecycle_key_key;
-
--- Recover bindings already present in upgraded databases by inspecting every
--- ordinary table that has both lifecycle_key and status columns. A table is
--- bound only when its persisted rows agree on exactly one non-empty key.
-DO $$
-DECLARE
-  resource RECORD;
-  discovered_key TEXT;
-  discovered_count BIGINT;
-BEGIN
-  FOR resource IN
-    SELECT table_class.oid AS table_oid
-      FROM pg_class table_class
-      JOIN pg_namespace namespace ON namespace.oid = table_class.relnamespace
-     WHERE table_class.relkind = 'r'
-       AND namespace.nspname = ANY(current_schemas(FALSE))
-       AND table_class.oid <> to_regclass('lifecycle_state_definitions')
-       AND table_class.oid <> to_regclass('lifecycle_transitions')
-       AND EXISTS (
-         SELECT 1 FROM pg_attribute attribute
-          WHERE attribute.attrelid = table_class.oid
-            AND attribute.attname = 'lifecycle_key'
-            AND attribute.attnum > 0
-            AND NOT attribute.attisdropped
-       )
-       AND EXISTS (
-         SELECT 1 FROM pg_attribute attribute
-          WHERE attribute.attrelid = table_class.oid
-            AND attribute.attname = 'status'
-            AND attribute.attnum > 0
-            AND NOT attribute.attisdropped
-       )
-  LOOP
-    EXECUTE format(
-      'SELECT MIN(lifecycle_key), COUNT(DISTINCT lifecycle_key) ' ||
-      'FROM %s WHERE NULLIF(BTRIM(lifecycle_key), '''') IS NOT NULL',
-      resource.table_oid::regclass
-    ) INTO discovered_key, discovered_count;
-
-    IF discovered_count = 1 THEN
-      INSERT INTO lifecycle_resource_bindings(resource_table, lifecycle_key)
-      VALUES (resource.table_oid, discovered_key)
-      ON CONFLICT (resource_table) DO UPDATE
-        SET lifecycle_key = EXCLUDED.lifecycle_key,
-            updated_at = NOW();
-    END IF;
-  END LOOP;
-END;
-$$;
+  ADD COLUMN IF NOT EXISTS state_column NAME NOT NULL DEFAULT 'status';
 
 CREATE OR REPLACE FUNCTION set_initial_resource_lifecycle_status()
 RETURNS TRIGGER
@@ -108,6 +51,8 @@ BEGIN
 END;
 $$;
 
+DROP FUNCTION IF EXISTS configure_lifecycle_resource_binding(REGCLASS, TEXT);
+
 CREATE OR REPLACE FUNCTION configure_lifecycle_resource_binding(
   target_table REGCLASS,
   target_lifecycle_key TEXT,
@@ -125,15 +70,14 @@ BEGIN
   END IF;
 
   IF NOT EXISTS (
-    SELECT 1
-      FROM lifecycle_state_definitions
+    SELECT 1 FROM lifecycle_state_definitions
      WHERE lifecycle_key = target_lifecycle_key
   ) THEN
     RAISE EXCEPTION 'lifecycle configuration does not exist';
   END IF;
+
   IF NOT EXISTS (
-    SELECT 1
-      FROM pg_attribute
+    SELECT 1 FROM pg_attribute
      WHERE attrelid = target_table
        AND attname = target_state_column
        AND attnum > 0
@@ -160,10 +104,8 @@ BEGIN
 
   constraint_name := format('lifecycle_status_fkey_%s', target_table::oid);
   IF NOT EXISTS (
-    SELECT 1
-      FROM pg_constraint
-     WHERE conrelid = target_table
-       AND conname = constraint_name
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = target_table AND conname = constraint_name
   ) THEN
     EXECUTE format(
       'ALTER TABLE %s ADD CONSTRAINT %I ' ||
@@ -183,20 +125,4 @@ BEGIN
 END;
 $$;
 
--- Install the generic trigger for every binding recovered above.
-DO $$
-DECLARE
-  binding RECORD;
-BEGIN
-  FOR binding IN
-    SELECT resource_table, lifecycle_key, state_column
-      FROM lifecycle_resource_bindings
-  LOOP
-    PERFORM configure_lifecycle_resource_binding(
-      binding.resource_table,
-      binding.lifecycle_key,
-      binding.state_column
-    );
-  END LOOP;
-END;
-$$;
+SELECT * FROM adopt_configured_lifecycle_resources();

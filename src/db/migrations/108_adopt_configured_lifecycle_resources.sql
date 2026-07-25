@@ -108,13 +108,10 @@ BEGIN
       RAISE EXCEPTION 'resource contains state values absent from its configured lifecycle';
     END IF;
 
-    IF target_state_column <> 'status'::NAME THEN
-      RAISE EXCEPTION 'configured lifecycle resource requires generic state-column support';
-    END IF;
-
     PERFORM configure_lifecycle_resource_binding(
       target_table,
-      configured.lifecycle_key
+      configured.lifecycle_key,
+      target_state_column
     );
 
     resource_table := target_table;
