@@ -2,23 +2,18 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { getDb } from "../../db/client";
 import { transitionWorkflow } from "../workflows/workflow-lifecycle.service";
 import {
+  getResourceLifecyclePolicy,
   getResourceLifecycleState,
   selectResourceLifecycleTransition,
 } from "../lifecycle/lifecycle.service";
 
-export type DeviceExecutionRootKind =
-  | "job"
-  | "batch"
-  | "edge_workflow"
-  | "server_workflow"
-  | "control"
-  | "unknown";
+export type DeviceExecutionRootKind = string;
 
 export type DeviceExecutionState = string;
 
-export type DeviceExecutionOperationKind = "job" | "batch" | "workflow" | "control" | "admin";
+export type DeviceExecutionOperationKind = string;
 export type DeviceExecutionOperationState = string;
-export type DeviceExecutionEgressLane = "device_execution" | "control" | "admin";
+export type DeviceExecutionEgressLane = string;
 
 export interface DeviceExecutionOperation {
   id: number;
@@ -55,17 +50,7 @@ export interface DeviceExecutionWireHandle {
   pnqOperationId: string;
 }
 
-export type DeviceExecutionBoundaryKind =
-  | "standalone_job"
-  | "edge_batch"
-  | "edge_workflow"
-  | "server_workflow_root"
-  | "server_workflow_batch_child"
-  | "generated_child"
-  | "self_healing_child"
-  | "prestep_child"
-  | "recovery_child"
-  | "control_egress";
+export type DeviceExecutionBoundaryKind = string;
 
 export interface DeviceExecutionBoundaryPolicy {
   rootKind: DeviceExecutionRootKind;
@@ -75,135 +60,6 @@ export interface DeviceExecutionBoundaryPolicy {
   egressLane: DeviceExecutionEgressLane;
   mayBypassDeviceQueue: boolean;
 }
-
-export const DEVICE_EXECUTION_BOUNDARY_MATRIX: Record<DeviceExecutionBoundaryKind, DeviceExecutionBoundaryPolicy> = {
-  standalone_job: {
-    rootKind: "job",
-    operationKind: "job",
-    retainsRootUntilTerminal: true,
-    requiresExistingRootHandle: false,
-    egressLane: "device_execution",
-    mayBypassDeviceQueue: false,
-  },
-  edge_batch: {
-    rootKind: "batch",
-    operationKind: "batch",
-    retainsRootUntilTerminal: true,
-    requiresExistingRootHandle: false,
-    egressLane: "device_execution",
-    mayBypassDeviceQueue: false,
-  },
-  edge_workflow: {
-    rootKind: "edge_workflow",
-    operationKind: "workflow",
-    retainsRootUntilTerminal: true,
-    requiresExistingRootHandle: false,
-    egressLane: "device_execution",
-    mayBypassDeviceQueue: false,
-  },
-  server_workflow_root: {
-    rootKind: "server_workflow",
-    operationKind: "workflow",
-    retainsRootUntilTerminal: true,
-    requiresExistingRootHandle: true,
-    egressLane: "device_execution",
-    mayBypassDeviceQueue: false,
-  },
-  server_workflow_batch_child: {
-    rootKind: "server_workflow",
-    operationKind: "batch",
-    retainsRootUntilTerminal: false,
-    requiresExistingRootHandle: true,
-    egressLane: "device_execution",
-    mayBypassDeviceQueue: false,
-  },
-  generated_child: {
-    rootKind: "server_workflow",
-    operationKind: "job",
-    retainsRootUntilTerminal: false,
-    requiresExistingRootHandle: true,
-    egressLane: "device_execution",
-    mayBypassDeviceQueue: false,
-  },
-  self_healing_child: {
-    rootKind: "server_workflow",
-    operationKind: "job",
-    retainsRootUntilTerminal: false,
-    requiresExistingRootHandle: true,
-    egressLane: "device_execution",
-    mayBypassDeviceQueue: false,
-  },
-  prestep_child: {
-    rootKind: "server_workflow",
-    operationKind: "job",
-    retainsRootUntilTerminal: false,
-    requiresExistingRootHandle: true,
-    egressLane: "device_execution",
-    mayBypassDeviceQueue: false,
-  },
-  recovery_child: {
-    rootKind: "server_workflow",
-    operationKind: "job",
-    retainsRootUntilTerminal: false,
-    requiresExistingRootHandle: true,
-    egressLane: "device_execution",
-    mayBypassDeviceQueue: false,
-  },
-  control_egress: {
-    rootKind: "control",
-    operationKind: "control",
-    retainsRootUntilTerminal: false,
-    requiresExistingRootHandle: false,
-    egressLane: "control",
-    mayBypassDeviceQueue: true,
-  },
-};
-
-export interface DeviceExecutionControlPolicy {
-  lane: "control";
-  audited: true;
-  mayBypassDeviceQueue: true;
-  mayCarryUiWork: false;
-  allowedKinds: readonly ["kill_switch", "auth_revoke", "workflow_cancel", "model_config_update", "ota_update"];
-}
-
-export interface DeviceExecutionAdminResolutionPolicy {
-  lane: "admin";
-  audited: true;
-  requiresAuthenticatedActor: true;
-  requiresReason: true;
-  terminalStates: readonly ["completed", "failed", "cancelled", "blocked"];
-}
-
-export interface DeviceExecutionMultiWorkerPolicy {
-  authority: "postgres";
-  ownershipToken: "root_id_device_id_owner_generation";
-  terminalCas: "device_root_generation";
-  websocketOwnership: "single_active_connection_observed";
-}
-
-export const DEVICE_EXECUTION_CONTROL_POLICY: DeviceExecutionControlPolicy = {
-  lane: "control",
-  audited: true,
-  mayBypassDeviceQueue: true,
-  mayCarryUiWork: false,
-  allowedKinds: ["kill_switch", "auth_revoke", "workflow_cancel", "model_config_update", "ota_update"],
-};
-
-export const DEVICE_EXECUTION_ADMIN_RESOLUTION_POLICY: DeviceExecutionAdminResolutionPolicy = {
-  lane: "admin",
-  audited: true,
-  requiresAuthenticatedActor: true,
-  requiresReason: true,
-  terminalStates: ["completed", "failed", "cancelled", "blocked"],
-};
-
-export const DEVICE_EXECUTION_MULTI_WORKER_POLICY: DeviceExecutionMultiWorkerPolicy = {
-  authority: "postgres",
-  ownershipToken: "root_id_device_id_owner_generation",
-  terminalCas: "device_root_generation",
-  websocketOwnership: "single_active_connection_observed",
-};
 
 export interface DeviceExecutionRoot {
   id: string;
@@ -349,6 +205,60 @@ interface DeviceExecutionOperationRow extends QueryResultRow {
   dispatching_at: Date | null;
   dispatched_at: Date | null;
   terminal_at: Date | null;
+}
+
+export async function getDeviceExecutionBoundaryPolicy(
+  boundary: string,
+  db: Queryable = getDb(),
+): Promise<DeviceExecutionBoundaryPolicy> {
+  const policy = await getResourceLifecyclePolicy("device_execution_roots", "state", db);
+  const boundaries = policy.boundaries;
+  if (!boundaries || typeof boundaries !== "object" || Array.isArray(boundaries)) {
+    throw new Error("device execution boundary policy is not configured");
+  }
+  const configured = (boundaries as Record<string, unknown>)[boundary];
+  if (!configured || typeof configured !== "object" || Array.isArray(configured)) {
+    throw new Error(`device execution boundary is not configured: ${boundary}`);
+  }
+  const value = configured as Record<string, unknown>;
+  if (
+    typeof value.rootKind !== "string" ||
+    typeof value.operationKind !== "string" ||
+    typeof value.retainsRootUntilTerminal !== "boolean" ||
+    typeof value.requiresExistingRootHandle !== "boolean" ||
+    typeof value.egressLane !== "string" ||
+    typeof value.mayBypassDeviceQueue !== "boolean"
+  ) {
+    throw new Error(`device execution boundary policy is invalid: ${boundary}`);
+  }
+  return {
+    rootKind: value.rootKind,
+    operationKind: value.operationKind,
+    retainsRootUntilTerminal: value.retainsRootUntilTerminal,
+    requiresExistingRootHandle: value.requiresExistingRootHandle,
+    egressLane: value.egressLane,
+    mayBypassDeviceQueue: value.mayBypassDeviceQueue,
+  };
+}
+
+async function getDeviceExecutionRootKindPolicy(
+  rootKind: string,
+  db: Queryable = getDb(),
+): Promise<{ operationKind: string; wireType: string | null }> {
+  const policy = await getResourceLifecyclePolicy("device_execution_roots", "state", db);
+  const rootKinds = policy.rootKinds;
+  if (!rootKinds || typeof rootKinds !== "object" || Array.isArray(rootKinds)) {
+    throw new Error("device execution root-kind policy is not configured");
+  }
+  const configured = (rootKinds as Record<string, unknown>)[rootKind];
+  if (!configured || typeof configured !== "object" || Array.isArray(configured)) {
+    throw new Error(`device execution root kind is not configured: ${rootKind}`);
+  }
+  const value = configured as Record<string, unknown>;
+  if (typeof value.operationKind !== "string" || !(typeof value.wireType === "string" || value.wireType === null)) {
+    throw new Error(`device execution root-kind policy is invalid: ${rootKind}`);
+  }
+  return { operationKind: value.operationKind, wireType: value.wireType };
 }
 
 interface SchemaValidationRow extends QueryResultRow {
@@ -608,11 +518,25 @@ export class DeviceExecutionArbiter {
   async recordControlEgress(input: {
     deviceId: string;
     operationId: string;
-    controlKind: DeviceExecutionControlPolicy["allowedKinds"][number];
+    controlKind: string;
     actor: string;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
     await this.withTransaction(async (client) => {
+      const policy = await getResourceLifecyclePolicy("device_execution_roots", "state", client);
+      const control = policy.control;
+      if (!control || typeof control !== "object" || Array.isArray(control)) {
+        throw new Error("device execution control policy is not configured");
+      }
+      const configured = control as Record<string, unknown>;
+      if (
+        !Array.isArray(configured.allowedKinds) ||
+        !configured.allowedKinds.every((value) => typeof value === "string") ||
+        !configured.allowedKinds.includes(input.controlKind) ||
+        typeof configured.mayBypassDeviceQueue !== "boolean"
+      ) {
+        throw new Error("device execution control kind is not authorized");
+      }
       await lockDevice(client, input.deviceId);
       await insertEvent(client, {
         deviceId: input.deviceId,
@@ -622,7 +546,7 @@ export class DeviceExecutionArbiter {
         metadata: {
           operationId: input.operationId,
           controlKind: input.controlKind,
-          queueBypass: true,
+          queueBypass: configured.mayBypassDeviceQueue,
           mayCarryUiWork: false,
           ...(input.metadata ?? {}),
         },
@@ -686,7 +610,7 @@ export class DeviceExecutionArbiter {
   async runStandaloneJobEgress(
     input: DeviceExecutionStandaloneJobEgressInput,
   ): Promise<DeviceExecutionStandaloneJobEgressResult> {
-    const boundary = input.boundary ? DEVICE_EXECUTION_BOUNDARY_MATRIX[input.boundary] : undefined;
+    const boundary = input.boundary ? await getDeviceExecutionBoundaryPolicy(input.boundary, this.dbProvider()) : undefined;
     const rootKind: DeviceExecutionRootKind = input.rootKind ?? boundary?.rootKind ?? "job";
     const operationKind: DeviceExecutionOperationKind = input.operationKind ?? boundary?.operationKind ?? "job";
     const actor = input.actor ?? "transport.g2";
@@ -1237,9 +1161,10 @@ export class DeviceExecutionArbiter {
   }
 
   async runObservedEgress(input: DeviceExecutionObservedEgressInput): Promise<DeviceExecutionObservedEgressResult> {
-    const boundary = input.boundary ? DEVICE_EXECUTION_BOUNDARY_MATRIX[input.boundary] : undefined;
+    const boundary = input.boundary ? await getDeviceExecutionBoundaryPolicy(input.boundary, this.dbProvider()) : undefined;
     const rootKind = input.rootKind ?? boundary?.rootKind ?? "job";
-    const operationKind = input.operationKind ?? boundary?.operationKind ?? rootKindToOperationKind(rootKind);
+    const rootKindPolicy = await getDeviceExecutionRootKindPolicy(rootKind, this.dbProvider());
+    const operationKind = input.operationKind ?? boundary?.operationKind ?? rootKindPolicy.operationKind;
     const requiresExistingRoot = boundary?.requiresExistingRootHandle === true;
     const actor = input.actor ?? "transport";
     const metadata = {
@@ -1595,6 +1520,7 @@ export class DeviceExecutionArbiter {
     metadata?: Record<string, unknown>;
   }): Promise<DeviceExecutionTransitionResult> {
     const rootKind = input.rootKind ?? "job";
+    const rootKindPolicy = await getDeviceExecutionRootKindPolicy(rootKind, this.dbProvider());
     return this.withTransaction(async (client) => {
       await lockDevice(client, input.deviceId);
 
@@ -1605,7 +1531,7 @@ export class DeviceExecutionArbiter {
         const existingOperation = input.externalId
           ? await upsertOperation(client, {
               root: existing,
-              operationKind: rootKindToOperationKind(rootKind),
+              operationKind: rootKindPolicy.operationKind,
               operationId: input.externalId,
               egressLane: "device_execution",
               wireType: null,
@@ -1656,7 +1582,7 @@ export class DeviceExecutionArbiter {
       const operation = input.externalId
         ? await upsertOperation(client, {
             root,
-            operationKind: rootKindToOperationKind(rootKind),
+            operationKind: rootKindPolicy.operationKind,
             operationId: input.externalId,
             egressLane: "device_execution",
             wireType: null,
@@ -1697,6 +1623,7 @@ export class DeviceExecutionArbiter {
     metadata?: Record<string, unknown>;
   }): Promise<DeviceExecutionTransitionResult> {
     const rootKind = input.rootKind ?? "job";
+    const rootKindPolicy = await getDeviceExecutionRootKindPolicy(rootKind, this.dbProvider());
     return this.withTransaction(async (client) => {
       await lockDevice(client, input.deviceId);
       let root = await selectRootByExternalId(client, rootKind, input.externalId, true);
@@ -1739,10 +1666,10 @@ export class DeviceExecutionArbiter {
 
       const operation = await upsertOperation(client, {
         root,
-        operationKind: rootKindToOperationKind(rootKind),
+        operationKind: rootKindPolicy.operationKind,
         operationId: input.externalId,
         egressLane: "device_execution",
-        wireType: rootKindToWireType(rootKind),
+        wireType: rootKindPolicy.wireType,
         metadata: {
           ...(input.metadata ?? {}),
           rootKind,
@@ -1954,7 +1881,8 @@ export class DeviceExecutionArbiter {
     metadata?: Record<string, unknown>;
   }): Promise<DeviceExecutionTransitionResult> {
     const rootKind = input.rootKind ?? input.handle?.rootKind ?? "job";
-    const operationKind = input.handle?.operationKind ?? rootKindToOperationKind(rootKind);
+    const rootKindPolicy = await getDeviceExecutionRootKindPolicy(rootKind, this.dbProvider());
+    const operationKind = input.handle?.operationKind ?? rootKindPolicy.operationKind;
     const operationId = input.handle?.operationId ?? input.externalId;
     return this.withTransaction(async (client) => {
       await lockDevice(client, input.deviceId);
@@ -2060,8 +1988,8 @@ export class DeviceExecutionArbiter {
       const operationBoundary = typeof operation?.metadata?.boundary === "string"
         ? operation.metadata.boundary as DeviceExecutionBoundaryKind
         : null;
-      const operationPolicy = operationBoundary && operationBoundary in DEVICE_EXECUTION_BOUNDARY_MATRIX
-        ? DEVICE_EXECUTION_BOUNDARY_MATRIX[operationBoundary]
+      const operationPolicy = operationBoundary
+        ? await getDeviceExecutionBoundaryPolicy(operationBoundary, client)
         : null;
       const isServerWorkflowChild = root.root_kind === "server_workflow" &&
         operation !== null &&
@@ -2120,7 +2048,7 @@ export class DeviceExecutionArbiter {
               operationId,
               targetState: terminalState,
               egressLane: "device_execution",
-              wireType: rootKindToWireType(rootKind),
+              wireType: rootKindPolicy.wireType,
               metadata: input.metadata ?? {},
             })
           : null;
@@ -2820,7 +2748,8 @@ export class DeviceExecutionArbiter {
   }): Promise<DeviceExecutionTransitionResult> {
     const toState = input.state ?? "blocked";
     const rootKind = input.rootKind ?? input.handle?.rootKind ?? "job";
-    const operationKind = input.handle?.operationKind ?? rootKindToOperationKind(rootKind);
+    const rootKindPolicy = await getDeviceExecutionRootKindPolicy(rootKind, this.dbProvider());
+    const operationKind = input.handle?.operationKind ?? rootKindPolicy.operationKind;
     const operationId = input.handle?.operationId ?? input.externalId;
     return this.withTransaction(async (client) => {
       await lockDevice(client, input.deviceId);
@@ -3573,8 +3502,14 @@ async function insertRoot(
 ): Promise<DeviceExecutionRootRow> {
   const result = await client.query<DeviceExecutionRootRow>(
     `INSERT INTO device_execution_roots
-       (device_id, root_kind, external_id, request_key, metadata)
-     VALUES ($1, $2, $3, $4, $5::jsonb)
+       (device_id, root_kind, external_id, request_key, observe_mode, metadata)
+     SELECT $1, $2, $3, $4,
+            (policy.policy->>'observeMode')::boolean,
+            $5::jsonb
+       FROM lifecycle_resource_policies policy
+      WHERE policy.resource_table = 'device_execution_roots'::regclass
+        AND policy.state_column = 'state'::name
+        AND jsonb_typeof(policy.policy->'observeMode') = 'boolean'
      RETURNING *`,
     [
       input.deviceId,
@@ -3584,6 +3519,9 @@ async function insertRoot(
       JSON.stringify(input.metadata),
     ]
   );
+  if (!result.rows[0]) {
+    throw new Error("device execution root operational policy is not configured");
+  }
   return result.rows[0];
 }
 
@@ -4058,7 +3996,6 @@ export function decodeDeviceExecutionHandle(value: unknown): DeviceExecutionHand
     return null;
   }
 
-  if (!isRootKind(record.pnqRootKind) || !isOperationKind(record.pnqOperationKind)) return null;
   return {
     rootId: record.pnqRootId,
     deviceId: record.pnqDeviceId,
@@ -4125,28 +4062,6 @@ function deviceExecutionHandlesEqual(left: DeviceExecutionHandle, right: DeviceE
     left.operationId === right.operationId;
 }
 
-function rootKindToOperationKind(rootKind: DeviceExecutionRootKind): DeviceExecutionOperationKind {
-  if (rootKind === "batch") return "batch";
-  if (rootKind === "edge_workflow" || rootKind === "server_workflow") return "workflow";
-  if (rootKind === "control") return "control";
-  return "job";
-}
-
-function rootKindToWireType(rootKind: DeviceExecutionRootKind): string | null {
-  if (rootKind === "job") return "JOB";
-  if (rootKind === "batch") return "BATCH_START";
-  if (rootKind === "edge_workflow" || rootKind === "server_workflow") return "WORKFLOW_START";
-  if (rootKind === "control") return "CONTROL";
-  return null;
-}
-
-function isRootKind(value: string): value is DeviceExecutionRootKind {
-  return ["job", "batch", "edge_workflow", "server_workflow", "control", "unknown"].includes(value);
-}
-
-function isOperationKind(value: string): value is DeviceExecutionOperationKind {
-  return ["job", "batch", "workflow", "control", "admin"].includes(value);
-}
 
 function parseStringArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String);

@@ -15,7 +15,7 @@ import type {
   DeviceExecutionRootKind,
   DeviceExecutionStandaloneJobEgressResult,
 } from "../modules/device-execution";
-import { DEVICE_EXECUTION_BOUNDARY_MATRIX, encodeDeviceExecutionHandle } from "../modules/device-execution";
+import { encodeDeviceExecutionHandle, getDeviceExecutionBoundaryPolicy } from "../modules/device-execution";
 import { isDeviceExecutionEnforced } from "../modules/device-execution/device-execution-authority";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
 import { promoteReplayedEdgeWorkflowToRunning } from "../modules/workflows/edge-workflow-lifecycle.service";
@@ -185,7 +185,7 @@ export async function sendDeviceExecutionJobToDevice(
     const sent = sendJobToDevice(deviceId, payload);
     return { decision: sent ? "dispatched" : "offline", root: null, operation: undefined, handle: undefined, sent, queued: false };
   }
-  const boundaryPolicy = options.boundary ? DEVICE_EXECUTION_BOUNDARY_MATRIX[options.boundary] : undefined;
+  const boundaryPolicy = options.boundary ? await getDeviceExecutionBoundaryPolicy(options.boundary) : undefined;
   const effectiveRootKind = boundaryPolicy?.requiresExistingRootHandle ? boundaryPolicy.rootKind : (options.rootKind ?? boundaryPolicy?.rootKind ?? "job");
   const rootExternalId = options.rootExternalId ?? payload.jobId;
   const replayEnvelope: DeviceExecutionJobReplayEnvelopeV1 = {
@@ -576,8 +576,6 @@ export function isJobReplayEnvelope(
     envelope.operationKind === "job" &&
     envelope.operationId === identity.operationId &&
     typeof envelope.boundary === "string" &&
-    envelope.boundary in DEVICE_EXECUTION_BOUNDARY_MATRIX &&
-    DEVICE_EXECUTION_BOUNDARY_MATRIX[envelope.boundary as DeviceExecutionBoundaryKind].rootKind === envelope.rootKind &&
     !!envelope.payload &&
     typeof envelope.payload === "object" &&
     envelope.payload.jobId === identity.operationId &&

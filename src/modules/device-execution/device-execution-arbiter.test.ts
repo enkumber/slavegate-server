@@ -6,7 +6,7 @@ import {
   DeviceExecutionSchemaError,
   decodeDeviceExecutionHandle,
   encodeDeviceExecutionHandle,
-  DEVICE_EXECUTION_BOUNDARY_MATRIX,
+  getDeviceExecutionBoundaryPolicy,
   type DeviceExecutionRootKind,
   type DeviceExecutionOperationKind,
   type DeviceExecutionOperationState,
@@ -15,6 +15,19 @@ import {
 
 const DEVICE_A = "11111111-1111-4111-8111-111111111111";
 const DEVICE_B = "22222222-2222-4222-8222-222222222222";
+
+const boundaryFixture = {
+  standalone_job: { rootKind: "job", operationKind: "job", retainsRootUntilTerminal: true, requiresExistingRootHandle: false, egressLane: "device_execution", mayBypassDeviceQueue: false },
+  edge_batch: { rootKind: "batch", operationKind: "batch", retainsRootUntilTerminal: true, requiresExistingRootHandle: false, egressLane: "device_execution", mayBypassDeviceQueue: false },
+  edge_workflow: { rootKind: "edge_workflow", operationKind: "workflow", retainsRootUntilTerminal: true, requiresExistingRootHandle: false, egressLane: "device_execution", mayBypassDeviceQueue: false },
+  server_workflow_root: { rootKind: "server_workflow", operationKind: "workflow", retainsRootUntilTerminal: true, requiresExistingRootHandle: true, egressLane: "device_execution", mayBypassDeviceQueue: false },
+  server_workflow_batch_child: { rootKind: "server_workflow", operationKind: "batch", retainsRootUntilTerminal: false, requiresExistingRootHandle: true, egressLane: "device_execution", mayBypassDeviceQueue: false },
+  generated_child: { rootKind: "server_workflow", operationKind: "job", retainsRootUntilTerminal: false, requiresExistingRootHandle: true, egressLane: "device_execution", mayBypassDeviceQueue: false },
+  self_healing_child: { rootKind: "server_workflow", operationKind: "job", retainsRootUntilTerminal: false, requiresExistingRootHandle: true, egressLane: "device_execution", mayBypassDeviceQueue: false },
+  prestep_child: { rootKind: "server_workflow", operationKind: "job", retainsRootUntilTerminal: false, requiresExistingRootHandle: true, egressLane: "device_execution", mayBypassDeviceQueue: false },
+  recovery_child: { rootKind: "server_workflow", operationKind: "job", retainsRootUntilTerminal: false, requiresExistingRootHandle: true, egressLane: "device_execution", mayBypassDeviceQueue: false },
+  control_egress: { rootKind: "control", operationKind: "control", retainsRootUntilTerminal: false, requiresExistingRootHandle: false, egressLane: "control", mayBypassDeviceQueue: true },
+};
 
 interface RootRow {
   id: string;
@@ -148,6 +161,29 @@ class FakeClient {
       return { rows: [], rowCount: 0 };
     }
     if (normalized.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 0 };
+
+    if (normalized.startsWith("SELECT policy FROM lifecycle_resource_policies")) {
+      return {
+        rows: [{
+          policy: {
+            observeMode: true,
+            boundaries: boundaryFixture,
+            rootKinds: {
+              job: { operationKind: "job", wireType: "JOB" },
+              batch: { operationKind: "batch", wireType: "BATCH_START" },
+              edge_workflow: { operationKind: "workflow", wireType: "WORKFLOW_START" },
+              server_workflow: { operationKind: "workflow", wireType: "WORKFLOW_START" },
+              control: { operationKind: "control", wireType: "CONTROL" },
+            },
+            control: {
+              allowedKinds: ["kill_switch", "auth_revoke", "workflow_cancel", "model_config_update", "ota_update"],
+              mayBypassDeviceQueue: true,
+            },
+          },
+        }],
+        rowCount: 1,
+      };
+    }
 
     if (normalized.startsWith("SELECT state.lifecycle_key, state.status") &&
         normalized.includes("FROM lifecycle_resource_bindings binding")) {
@@ -1578,17 +1614,18 @@ describe("DeviceExecutionArbiter observe mode", () => {
     expect(client.release).toHaveBeenCalledOnce();
   });
 
-  it("documents root boundary, control, and child policies without enabling enforcement", () => {
-    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.standalone_job).toMatchObject({
+  it("loads root boundary, control, and child policies from PostgreSQL", async () => {
+    const client = new FakeClient();
+    await expect(getDeviceExecutionBoundaryPolicy("standalone_job", client as any)).resolves.toMatchObject({
       rootKind: "job",
       retainsRootUntilTerminal: true,
       mayBypassDeviceQueue: false,
     });
-    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.generated_child).toMatchObject({
+    await expect(getDeviceExecutionBoundaryPolicy("generated_child", client as any)).resolves.toMatchObject({
       requiresExistingRootHandle: true,
       egressLane: "device_execution",
     });
-    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.control_egress).toMatchObject({
+    await expect(getDeviceExecutionBoundaryPolicy("control_egress", client as any)).resolves.toMatchObject({
       rootKind: "control",
       egressLane: "control",
       mayBypassDeviceQueue: true,
