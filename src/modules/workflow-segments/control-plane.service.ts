@@ -1,4 +1,9 @@
 import { getDb } from "../../db/client";
+import {
+  lifecycleTransitionSelectorPredicate,
+  serializeLifecycleTransitionSelector,
+  type LifecycleTransitionSelector,
+} from "../lifecycle/lifecycle.service";
 import type { WorkflowTemplate } from "../workflows/types";
 import {
   validateGeneratedWorkflowTemplate,
@@ -25,6 +30,90 @@ type EntityType = "segment" | "composition";
 type Queryable = {
   query: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
 };
+
+function resourceSpec(entityType: EntityType): {
+  table: string;
+  keyColumn: string;
+} {
+  return entityType === "segment"
+    ? { table: "workflow_segment_versions", keyColumn: "segment_key" }
+    : { table: "workflow_compositions", keyColumn: "composition_name" };
+}
+
+async function initialResourceState(table: string, db: Queryable): Promise<string> {
+  const result = await db.query(
+    `SELECT definition.status
+       FROM lifecycle_resource_bindings binding
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = binding.lifecycle_key
+      WHERE binding.resource_table = to_regclass($1)
+        AND definition.initial
+      ORDER BY definition.sort_order, definition.status
+      LIMIT 1`,
+    [table],
+  );
+  const value = result.rows[0]?.status;
+  if (typeof value !== "string") {
+    throw Object.assign(new Error("resource lifecycle has no configured initial state"), {
+      status: 503,
+      code: "CONTROL_PLANE_LIFECYCLE_UNCONFIGURED",
+    });
+  }
+  return value;
+}
+
+async function transitionVersion(
+  entityType: EntityType,
+  key: string,
+  version: string,
+  selector: LifecycleTransitionSelector,
+  db: Queryable,
+): Promise<{ action: string; fromStatus: string; toStatus: string } | null> {
+  const { table, keyColumn } = resourceSpec(entityType);
+  const predicate = lifecycleTransitionSelectorPredicate("transition", "target", "$3");
+  const result = await db.query(
+    `WITH selected AS (
+       SELECT resource.ctid,
+              resource.lifecycle_status AS from_status,
+              transition.action_key,
+              transition.to_status
+         FROM ${table} resource
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass($4)
+          AND binding.lifecycle_key = resource.lifecycle_key
+         JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = resource.lifecycle_key
+          AND transition.from_status = resource.lifecycle_status
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+        WHERE resource.${keyColumn} = $1
+          AND resource.version = $2
+          AND ${predicate}
+        ORDER BY transition.action_key
+        LIMIT 1
+        FOR UPDATE OF resource
+     ),
+     updated AS (
+       UPDATE ${table} resource
+          SET lifecycle_status = selected.to_status,
+              updated_at = NOW()
+         FROM selected
+        WHERE resource.ctid = selected.ctid
+       RETURNING selected.action_key, selected.from_status, selected.to_status
+     )
+     SELECT * FROM updated`,
+    [key, version, serializeLifecycleTransitionSelector(selector), table],
+  );
+  const row = result.rows[0];
+  return row
+    ? {
+        action: String(row.action_key),
+        fromStatus: String(row.from_status),
+        toStatus: String(row.to_status),
+      }
+    : null;
+}
 
 function assertSafeKey(value: string, name: string): void {
   if (!/^[a-z0-9]+(?:_[a-z0-9]+)*$/.test(value)) {
@@ -112,7 +201,7 @@ export class WorkflowSegmentControlPlaneService {
     postconditionContract?: WorkflowSegmentVersionRecord["postconditionContract"];
     compatibility?: Record<string, unknown>;
     actor?: string | null;
-  }): Promise<{ segmentKey: string; version: string; fingerprint: string; status: "draft" }> {
+  }): Promise<{ segmentKey: string; version: string; fingerprint: string; status: string }> {
     assertSafeKey(input.segmentKey, "segmentKey");
     assertVersion(input.version);
     assertObjectSchema(input.inputSchema);
@@ -135,11 +224,13 @@ export class WorkflowSegmentControlPlaneService {
         validationErrors: validation.errors,
       });
     }
+    const db = getDb();
+    const initialStatus = await initialResourceState("workflow_segment_versions", db);
     const candidate: WorkflowSegmentVersionRecord = {
       segmentKey: input.segmentKey,
       version: input.version,
       platform: input.platform,
-      status: "draft",
+      status: initialStatus,
       template: validation.template,
       inputSchema: input.inputSchema,
       outputSchema: input.outputSchema ?? null,
@@ -148,7 +239,6 @@ export class WorkflowSegmentControlPlaneService {
       fingerprint: "",
     };
     candidate.fingerprint = computeSegmentFingerprint(candidate);
-    const db = getDb();
     const client = await db.connect();
     try {
       await client.query("BEGIN");
@@ -162,9 +252,9 @@ export class WorkflowSegmentControlPlaneService {
       );
       await client.query(
         `INSERT INTO workflow_segment_versions
-           (segment_key, version, platform, lifecycle_status, template, input_schema,
+           (segment_key, version, platform, template, input_schema,
             output_schema, postcondition_contract, compatibility, fingerprint)
-         VALUES ($1,$2,$3,'draft',$4::jsonb,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9)`,
+         VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7::jsonb,$8::jsonb,$9)`,
         [
           input.segmentKey,
           input.version,
@@ -181,8 +271,8 @@ export class WorkflowSegmentControlPlaneService {
         entityType: "segment",
         entityKey: input.segmentKey,
         entityVersion: input.version,
-        action: "create",
-        toStatus: "draft",
+        action: initialStatus,
+        toStatus: initialStatus,
         actor: input.actor,
       }, client);
       await client.query("COMMIT");
@@ -192,7 +282,7 @@ export class WorkflowSegmentControlPlaneService {
     } finally {
       client.release();
     }
-    return { segmentKey: input.segmentKey, version: input.version, fingerprint: candidate.fingerprint, status: "draft" };
+    return { segmentKey: input.segmentKey, version: input.version, fingerprint: candidate.fingerprint, status: initialStatus };
   }
 
   async createCompositionVersion(input: {
@@ -208,7 +298,7 @@ export class WorkflowSegmentControlPlaneService {
     compatibility?: Record<string, unknown>;
     nodes: WorkflowCompositionNodeRecord[];
     actor?: string | null;
-  }): Promise<{ compositionName: string; version: string; compositionKey: string; status: "draft" }> {
+  }): Promise<{ compositionName: string; version: string; compositionKey: string; status: string }> {
     assertSafeKey(input.compositionName, "compositionName");
     assertSafeKey(input.capabilityKey, "capabilityKey");
     assertVersion(input.version);
@@ -239,13 +329,14 @@ export class WorkflowSegmentControlPlaneService {
         code: "COMPOSITION_SEGMENT_NOT_PROMOTED",
       });
     }
+    const initialStatus = await initialResourceState("workflow_compositions", getDb());
     const composition: WorkflowCompositionRecord = {
       compositionName: input.compositionName,
       version: input.version,
       compositionKey: "",
       capabilityKey: input.capabilityKey,
       platform: input.platform,
-      status: "draft",
+      status: initialStatus,
       inputSchema: input.inputSchema,
       outputSchema: input.outputSchema,
       inputResolver: input.inputResolver,
@@ -262,9 +353,9 @@ export class WorkflowSegmentControlPlaneService {
       await client.query("BEGIN");
       await client.query(
         `INSERT INTO workflow_compositions
-          (composition_name, version, composition_key, capability_key, platform, lifecycle_status,
+          (composition_name, version, composition_key, capability_key, platform,
             input_schema, output_schema, input_resolver, postcondition_contract, execution_policy, compatibility)
-         VALUES ($1,$2,$3,$4,$5,'draft',$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11::jsonb)`,
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,$11::jsonb)`,
         [
           composition.compositionName,
           composition.version,
@@ -302,8 +393,8 @@ export class WorkflowSegmentControlPlaneService {
         entityType: "composition",
         entityKey: composition.compositionName,
         entityVersion: composition.version,
-        action: "create",
-        toStatus: "draft",
+        action: initialStatus,
+        toStatus: initialStatus,
         actor: input.actor,
         evidence: { compositionKey: composition.compositionKey },
       }, client);
@@ -318,31 +409,30 @@ export class WorkflowSegmentControlPlaneService {
       compositionName: composition.compositionName,
       version: composition.version,
       compositionKey: composition.compositionKey,
-      status: "draft",
+      status: initialStatus,
     };
   }
 
   async validate(entityType: EntityType, key: string, version: string, actor?: string | null): Promise<void> {
-    const table = entityType === "segment" ? "workflow_segment_versions" : "workflow_compositions";
-    const keyColumn = entityType === "segment" ? "segment_key" : "composition_name";
     const db = getDb();
-    const result = await db.query(
-      `UPDATE ${table}
-       SET lifecycle_status = 'candidate', updated_at = NOW()
-       WHERE ${keyColumn} = $1 AND version = $2 AND lifecycle_status = 'draft'
-       RETURNING lifecycle_status`,
-      [key, version],
-    );
-    if (result.rows.length === 0) {
-      throw Object.assign(new Error("draft entity version not found"), { status: 404, code: "CONTROL_PLANE_DRAFT_NOT_FOUND" });
+    const transition = await transitionVersion(entityType, key, version, {
+      targetTerminal: false,
+      targetDispatchable: true,
+      transitionExternalAllowed: true,
+    }, db);
+    if (!transition) {
+      throw Object.assign(new Error("entity version has no configured validation transition"), {
+        status: 409,
+        code: "CONTROL_PLANE_TRANSITION_UNAVAILABLE",
+      });
     }
     await recordEvent({
       entityType,
       entityKey: key,
       entityVersion: version,
-      action: "validate",
-      fromStatus: "draft",
-      toStatus: "candidate",
+      action: transition.action,
+      fromStatus: transition.fromStatus,
+      toStatus: transition.toStatus,
       actor,
     });
   }
@@ -365,11 +455,21 @@ export class WorkflowSegmentControlPlaneService {
         code: "CONTROL_PLANE_CANARY_EVIDENCE_INVALID",
       });
     }
-    const table = entityType === "segment" ? "workflow_segment_versions" : "workflow_compositions";
-    const keyColumn = entityType === "segment" ? "segment_key" : "composition_name";
+    const { table, keyColumn } = resourceSpec(entityType);
     const result = await getDb().query(
-      `SELECT 1 FROM ${table} WHERE ${keyColumn} = $1 AND version = $2 AND lifecycle_status = 'candidate'`,
-      [key, version],
+      `SELECT resource.lifecycle_status
+         FROM ${table} resource
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass($3)
+          AND binding.lifecycle_key = resource.lifecycle_key
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = resource.lifecycle_key
+          AND definition.status = resource.lifecycle_status
+        WHERE resource.${keyColumn} = $1
+          AND resource.version = $2
+          AND NOT definition.terminal
+          AND definition.dispatchable`,
+      [key, version, table],
     );
     if (result.rows.length === 0) {
       throw Object.assign(new Error("candidate entity version not found"), { status: 404, code: "CONTROL_PLANE_CANDIDATE_NOT_FOUND" });
@@ -377,8 +477,16 @@ export class WorkflowSegmentControlPlaneService {
     const execution = await getDb().query(
       `SELECT composition_name, composition_version, segment_refs
        FROM workflow_execution_bindings
+       JOIN lifecycle_resource_bindings binding
+         ON binding.resource_table = to_regclass('workflow_execution_bindings')
+        AND binding.lifecycle_key = workflow_execution_bindings.lifecycle_key
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = workflow_execution_bindings.lifecycle_key
+        AND definition.status = workflow_execution_bindings.status
        WHERE execution_key = $1
-         AND status = 'completed'
+         AND definition.terminal
+         AND NOT definition.retryable
+         AND NOT definition.administrative
          AND postcondition_verified = TRUE
        ORDER BY updated_at DESC
        LIMIT 1`,
@@ -423,24 +531,27 @@ export class WorkflowSegmentControlPlaneService {
       entityType,
       entityKey: key,
       entityVersion: version,
-      action: "canary",
-      fromStatus: "candidate",
-      toStatus: "candidate",
+      action: String(result.rows[0].lifecycle_status),
+      fromStatus: String(result.rows[0].lifecycle_status),
+      toStatus: String(result.rows[0].lifecycle_status),
       actor,
       evidence,
     });
   }
 
   async promote(entityType: EntityType, key: string, version: string, actor?: string | null): Promise<void> {
-    const table = entityType === "segment" ? "workflow_segment_versions" : "workflow_compositions";
-    const keyColumn = entityType === "segment" ? "segment_key" : "composition_name";
+    const { table, keyColumn } = resourceSpec(entityType);
     const db = getDb();
     const client = await db.connect();
     try {
       await client.query("BEGIN");
       const canary = await client.query(
         `SELECT 1 FROM workflow_control_plane_events
-         WHERE entity_type = $1 AND entity_key = $2 AND entity_version = $3 AND action = 'canary'
+         WHERE entity_type = $1
+           AND entity_key = $2
+           AND entity_version = $3
+           AND evidence ->> 'passed' = 'true'
+           AND evidence ->> 'postconditionVerified' = 'true'
          LIMIT 1`,
         [entityType, key, version],
       );
@@ -452,10 +563,19 @@ export class WorkflowSegmentControlPlaneService {
       }
       const target = await client.query(
         `SELECT *
-         FROM ${table}
-         WHERE ${keyColumn} = $1 AND version = $2 AND lifecycle_status = 'candidate'
-         FOR UPDATE`,
-        [key, version],
+           FROM ${table} resource
+           JOIN lifecycle_resource_bindings binding
+             ON binding.resource_table = to_regclass($3)
+            AND binding.lifecycle_key = resource.lifecycle_key
+           JOIN lifecycle_state_definitions definition
+             ON definition.lifecycle_key = resource.lifecycle_key
+            AND definition.status = resource.lifecycle_status
+          WHERE resource.${keyColumn} = $1
+            AND resource.version = $2
+            AND NOT definition.terminal
+            AND definition.dispatchable
+          FOR UPDATE OF resource`,
+        [key, version, table],
       );
       if (target.rows.length === 0) {
         throw Object.assign(new Error("candidate entity version not found"), {
@@ -463,33 +583,42 @@ export class WorkflowSegmentControlPlaneService {
           code: "CONTROL_PLANE_CANDIDATE_NOT_FOUND",
         });
       }
-      if (entityType === "segment") {
-        await client.query(
-          `UPDATE workflow_segment_versions
-           SET lifecycle_status = 'degraded', updated_at = NOW()
-           WHERE segment_key = $1
-             AND platform = $2
-             AND lifecycle_status = 'promoted'`,
-          [key, target.rows[0].platform],
-        );
-      } else {
-        await client.query(
-          `UPDATE workflow_compositions
-           SET lifecycle_status = 'degraded', updated_at = NOW()
-           WHERE capability_key = $1
-             AND platform = $2
-             AND lifecycle_status = 'promoted'`,
-          [target.rows[0].capability_key, target.rows[0].platform],
+      const siblingColumn = entityType === "segment" ? "segment_key" : "capability_key";
+      const siblingValue = entityType === "segment" ? key : target.rows[0].capability_key;
+      const siblings = await client.query(
+        `SELECT resource.${keyColumn} AS entity_key, resource.version
+           FROM ${table} resource
+           JOIN lifecycle_state_definitions definition
+             ON definition.lifecycle_key = resource.lifecycle_key
+            AND definition.status = resource.lifecycle_status
+          WHERE resource.${siblingColumn} = $1
+            AND resource.platform = $2
+            AND definition.terminal
+            AND NOT definition.retryable
+            AND NOT definition.administrative
+            AND NOT (resource.${keyColumn} = $3 AND resource.version = $4)`,
+        [siblingValue, target.rows[0].platform, key, version],
+      );
+      for (const sibling of siblings.rows) {
+        await transitionVersion(
+          entityType,
+          String(sibling.entity_key),
+          String(sibling.version),
+          {
+            targetTerminal: true,
+            targetRetryable: true,
+            transitionAutomatic: true,
+          },
+          client,
         );
       }
-      const promoted = await client.query(
-        `UPDATE ${table}
-         SET lifecycle_status = 'promoted', updated_at = NOW()
-         WHERE ${keyColumn} = $1 AND version = $2 AND lifecycle_status = 'candidate'
-         RETURNING 1`,
-        [key, version],
-      );
-      if (promoted.rows.length === 0) {
+      const promoted = await transitionVersion(entityType, key, version, {
+        targetTerminal: true,
+        targetRetryable: false,
+        targetAdministrative: false,
+        transitionExternalAllowed: true,
+      }, client);
+      if (!promoted) {
         throw Object.assign(new Error("candidate entity version not found"), {
           status: 404,
           code: "CONTROL_PLANE_CANDIDATE_NOT_FOUND",
@@ -499,9 +628,9 @@ export class WorkflowSegmentControlPlaneService {
         entityType,
         entityKey: key,
         entityVersion: version,
-        action: "promote",
-        fromStatus: "candidate",
-        toStatus: "promoted",
+        action: promoted.action,
+        fromStatus: promoted.fromStatus,
+        toStatus: promoted.toStatus,
         actor,
       }, client);
       await client.query("COMMIT");
@@ -514,20 +643,29 @@ export class WorkflowSegmentControlPlaneService {
   }
 
   async rollback(entityType: EntityType, key: string, toVersion: string, actor?: string | null): Promise<void> {
-    const table = entityType === "segment" ? "workflow_segment_versions" : "workflow_compositions";
-    const keyColumn = entityType === "segment" ? "segment_key" : "composition_name";
+    const { table, keyColumn } = resourceSpec(entityType);
     const db = getDb();
     const client = await db.connect();
     try {
       await client.query("BEGIN");
       const rollbackTarget = await client.query(
         `SELECT *
-         FROM ${table}
-         WHERE ${keyColumn} = $1
-           AND version = $2
-           AND lifecycle_status IN ('candidate','degraded')
-         FOR UPDATE`,
-        [key, toVersion],
+           FROM ${table} resource
+           JOIN lifecycle_resource_bindings binding
+             ON binding.resource_table = to_regclass($3)
+            AND binding.lifecycle_key = resource.lifecycle_key
+           JOIN lifecycle_state_definitions definition
+             ON definition.lifecycle_key = resource.lifecycle_key
+            AND definition.status = resource.lifecycle_status
+          WHERE resource.${keyColumn} = $1
+            AND resource.version = $2
+            AND definition.dispatchable
+            AND (
+              NOT definition.terminal
+              OR definition.retryable
+            )
+          FOR UPDATE OF resource`,
+        [key, toVersion, table],
       );
       if (rollbackTarget.rows.length === 0) {
         throw Object.assign(new Error("rollback target not found"), {
@@ -535,40 +673,51 @@ export class WorkflowSegmentControlPlaneService {
           code: "CONTROL_PLANE_ROLLBACK_TARGET_NOT_FOUND",
         });
       }
-      if (entityType === "segment") {
-        await client.query(
-          `UPDATE workflow_segment_versions
-           SET lifecycle_status = 'degraded', updated_at = NOW()
-           WHERE segment_key = $1
-             AND platform = $2
-             AND lifecycle_status = 'promoted'`,
-          [key, rollbackTarget.rows[0].platform],
-        );
-      } else {
-        await client.query(
-          `UPDATE workflow_compositions
-           SET lifecycle_status = 'degraded', updated_at = NOW()
-           WHERE capability_key = $1
-             AND platform = $2
-             AND lifecycle_status = 'promoted'`,
-          [rollbackTarget.rows[0].capability_key, rollbackTarget.rows[0].platform],
+      const siblingColumn = entityType === "segment" ? "segment_key" : "capability_key";
+      const siblingValue = entityType === "segment" ? key : rollbackTarget.rows[0].capability_key;
+      const siblings = await client.query(
+        `SELECT resource.${keyColumn} AS entity_key, resource.version
+           FROM ${table} resource
+           JOIN lifecycle_state_definitions definition
+             ON definition.lifecycle_key = resource.lifecycle_key
+            AND definition.status = resource.lifecycle_status
+          WHERE resource.${siblingColumn} = $1
+            AND resource.platform = $2
+            AND definition.terminal
+            AND NOT definition.retryable
+            AND NOT definition.administrative
+            AND NOT (resource.${keyColumn} = $3 AND resource.version = $4)`,
+        [siblingValue, rollbackTarget.rows[0].platform, key, toVersion],
+      );
+      for (const sibling of siblings.rows) {
+        await transitionVersion(
+          entityType,
+          String(sibling.entity_key),
+          String(sibling.version),
+          {
+            targetTerminal: true,
+            targetRetryable: true,
+            transitionAutomatic: true,
+          },
+          client,
         );
       }
-      const target = await client.query(
-        `UPDATE ${table} SET lifecycle_status = 'promoted', updated_at = NOW()
-         WHERE ${keyColumn} = $1 AND version = $2 AND lifecycle_status IN ('candidate','degraded')
-         RETURNING 1`,
-        [key, toVersion],
-      );
-      if (target.rows.length === 0) {
+      const target = await transitionVersion(entityType, key, toVersion, {
+        targetTerminal: true,
+        targetRetryable: false,
+        targetAdministrative: false,
+        transitionExternalAllowed: true,
+      }, client);
+      if (!target) {
         throw Object.assign(new Error("rollback target not found"), { status: 404, code: "CONTROL_PLANE_ROLLBACK_TARGET_NOT_FOUND" });
       }
       await recordEvent({
         entityType,
         entityKey: key,
         entityVersion: toVersion,
-        action: "rollback",
-        toStatus: "promoted",
+        action: target.action,
+        fromStatus: target.fromStatus,
+        toStatus: target.toStatus,
         actor,
       }, client);
       await client.query("COMMIT");
