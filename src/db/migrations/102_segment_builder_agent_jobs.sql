@@ -11,24 +11,9 @@ CREATE TABLE IF NOT EXISTS segment_build_jobs (
   intent TEXT NOT NULL CHECK (length(intent) BETWEEN 1 AND 2000),
   platform TEXT NOT NULL,
   capability_key TEXT NULL,
-  reason TEXT NOT NULL CHECK (reason IN (
-    'capability_missing',
-    'composition_missing',
-    'segment_missing'
-  )),
-  status TEXT NOT NULL DEFAULT 'pending_agent' CHECK (status IN (
-    'pending_agent',
-    'dispatched',
-    'claimed',
-    'building',
-    'candidate_ready',
-    'canary_running',
-    'completed',
-    'failed',
-    'blocked',
-    'cancelled'
-  )),
-  assigned_agent TEXT NOT NULL DEFAULT 'segment-builder',
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL,
+  assigned_agent TEXT NOT NULL,
   agent_session_key TEXT NULL,
   dispatch_attempts INTEGER NOT NULL DEFAULT 0 CHECK (dispatch_attempts >= 0),
   last_dispatch_error TEXT NULL,
@@ -43,10 +28,6 @@ CREATE TABLE IF NOT EXISTS segment_build_jobs (
   completed_at TIMESTAMPTZ NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_segment_build_jobs_active_request
-  ON segment_build_jobs(request_key)
-  WHERE status NOT IN ('completed', 'failed', 'cancelled');
 
 CREATE INDEX IF NOT EXISTS idx_segment_build_jobs_status
   ON segment_build_jobs(status, updated_at);

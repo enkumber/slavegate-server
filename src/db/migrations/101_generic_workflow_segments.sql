@@ -6,8 +6,7 @@ CREATE TABLE IF NOT EXISTS workflow_segments (
   segment_key TEXT PRIMARY KEY
     CHECK (segment_key ~ '^[a-z0-9]+(_[a-z0-9]+)*$'),
   description TEXT NULL,
-  status TEXT NOT NULL DEFAULT 'active'
-    CHECK (status IN ('active', 'retired')),
+  status TEXT NOT NULL,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -17,8 +16,7 @@ CREATE TABLE IF NOT EXISTS workflow_segment_versions (
   segment_key TEXT NOT NULL REFERENCES workflow_segments(segment_key) ON DELETE CASCADE,
   version TEXT NOT NULL,
   platform TEXT NOT NULL,
-  lifecycle_status TEXT NOT NULL DEFAULT 'draft'
-    CHECK (lifecycle_status IN ('draft', 'candidate', 'promoted', 'degraded', 'quarantined', 'retired')),
+  lifecycle_status TEXT NOT NULL,
   template JSONB NOT NULL,
   input_schema JSONB NOT NULL,
   output_schema JSONB NULL,
@@ -30,10 +28,6 @@ CREATE TABLE IF NOT EXISTS workflow_segment_versions (
   PRIMARY KEY (segment_key, version)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_segment_promoted_version
-  ON workflow_segment_versions(segment_key, platform)
-  WHERE lifecycle_status = 'promoted';
-
 CREATE TABLE IF NOT EXISTS workflow_compositions (
   composition_name TEXT NOT NULL
     CHECK (composition_name ~ '^[a-z0-9]+(_[a-z0-9]+)*$'),
@@ -42,8 +36,7 @@ CREATE TABLE IF NOT EXISTS workflow_compositions (
     CHECK (composition_key ~ '^[a-f0-9]{24}$'),
   capability_key TEXT NOT NULL REFERENCES workflow_capabilities(capability_key) ON DELETE RESTRICT,
   platform TEXT NOT NULL,
-  lifecycle_status TEXT NOT NULL DEFAULT 'draft'
-    CHECK (lifecycle_status IN ('draft', 'candidate', 'promoted', 'degraded', 'quarantined', 'retired')),
+  lifecycle_status TEXT NOT NULL,
   input_schema JSONB NOT NULL,
   output_schema JSONB NOT NULL,
   input_resolver JSONB NOT NULL,
@@ -55,10 +48,6 @@ CREATE TABLE IF NOT EXISTS workflow_compositions (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (composition_name, version)
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_composition_promoted_capability
-  ON workflow_compositions(capability_key, platform)
-  WHERE lifecycle_status = 'promoted';
 
 CREATE TABLE IF NOT EXISTS workflow_composition_nodes (
   composition_name TEXT NOT NULL,
@@ -92,8 +81,7 @@ CREATE TABLE IF NOT EXISTS workflow_execution_bindings (
   account_id UUID NULL,
   intent TEXT NOT NULL,
   runtime_inputs JSONB NOT NULL,
-  status TEXT NOT NULL DEFAULT 'resolved'
-    CHECK (status IN ('resolved', 'queued', 'running', 'completed', 'failed', 'expired')),
+  status TEXT NOT NULL,
   postcondition_verified BOOLEAN NOT NULL DEFAULT FALSE,
   result_evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

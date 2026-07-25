@@ -27,6 +27,16 @@ const rules = [
     pattern: /\bINSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions)\b/gi,
   },
   {
+    id: "migration-semantic-state-default",
+    scope: (path) => path.includes("/src/db/migrations/"),
+    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state)\b[^,;\n]*\bDEFAULT\s+["'][A-Za-z][A-Za-z0-9_-]*["']/gi,
+  },
+  {
+    id: "migration-product-policy-seed",
+    scope: (path) => path.includes("/src/db/migrations/"),
+    pattern: /\bINSERT\s+INTO\s+(?:runtime_semantic_entries|workflow_capabilities|workflow_capability_artifacts|job_status_definitions|task_status_definitions|workflow_status_definitions|agency_workflow_run_status_definitions|research_job_status_definitions)\b/gi,
+  },
+  {
     id: "runtime-status-name-branch",
     scope: (path) => !path.includes("/src/db/migrations/"),
     pattern: /\b(?:status|state|lifecycleStatus|lifecycle_status|candidateState|candidate_state|promotionState|promotion_state|libraryState|library_state)\s*(?:===|!==|==|!=)\s*["'][A-Za-z][A-Za-z0-9_-]*["']/g,
@@ -40,6 +50,11 @@ const rules = [
     id: "runtime-status-literal-union",
     scope: (path) => /\.(?:ts|tsx)$/.test(path),
     pattern: /\b(?:status|state|lifecycleStatus|candidateState|promotionState|libraryState)\??\s*:\s*["'][A-Za-z][A-Za-z0-9_-]*["'](?:\s*\|\s*["'][A-Za-z][A-Za-z0-9_-]*["'])+/g,
+  },
+  {
+    id: "runtime-lifecycle-key-literal",
+    scope: (path) => !path.includes("/src/db/migrations/") && /\.(?:ts|tsx|kt)$/.test(path),
+    pattern: /\b(?:lifecycleKey|lifecycle_key|actionKey|action_key)\s*[:=]\s*["'][A-Za-z][A-Za-z0-9_.:-]*["']/g,
   },
   {
     id: "android-status-name",
