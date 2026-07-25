@@ -15,7 +15,11 @@ export async function resolveVisionPrompt(
     `SELECT entry_key, payload
        FROM runtime_semantic_entries
       WHERE namespace = 'vision_prompt'
-        AND status = 'active'
+        AND lifecycle_state_matches(
+          'runtime_semantic_entries'::regclass,
+          status,
+          '{"dispatchable":true}'::jsonb
+        )
         AND platform = '*'
         AND entry_key = ANY($1::text[])
       ORDER BY CASE WHEN entry_key = $2 THEN 0 ELSE 1 END, priority DESC

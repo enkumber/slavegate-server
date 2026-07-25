@@ -62,7 +62,12 @@ export async function listToolCatalog(filters: {
   const result = await getDb().query(
     `SELECT entry_key, payload
      FROM runtime_semantic_entries
-     WHERE namespace = 'tool_catalog' AND status = 'active'
+     WHERE namespace = 'tool_catalog'
+       AND lifecycle_state_matches(
+         'runtime_semantic_entries'::regclass,
+         status,
+         '{"dispatchable":true}'::jsonb
+       )
      ORDER BY priority ASC, entry_key ASC`,
   );
   return (result?.rows ?? [])

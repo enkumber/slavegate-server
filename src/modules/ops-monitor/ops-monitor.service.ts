@@ -232,7 +232,11 @@ async function collectDeviceMetrics(db: any): Promise<DeviceMetrics[]> {
       last_seen_at,
       EXTRACT(EPOCH FROM (NOW() - last_seen_at)) / 60 as minutes_offline
     FROM devices
-    WHERE status != 'revoked'
+    WHERE NOT lifecycle_state_matches(
+      'devices'::regclass,
+      status,
+      '{"terminal":true}'::jsonb
+    )
   `);
   
   return result.rows.map((row: any) => ({
@@ -240,7 +244,7 @@ async function collectDeviceMetrics(db: any): Promise<DeviceMetrics[]> {
     friendly_name: row.friendly_name || 'Unknown',
     status: row.status,
     last_seen_at: row.last_seen_at,
-    minutes_offline: row.status === 'online' ? 0 : Math.round(parseFloat(row.minutes_offline) || 0),
+    minutes_offline: row.minutes_offline === null ? 0 : Math.round(parseFloat(row.minutes_offline) || 0),
     needs_attention: false,
   }));
 }
@@ -254,7 +258,11 @@ async function collectAccountMetrics(db: any, lookbackHours: number): Promise<Ac
       platform,
       flags
     FROM accounts
-    WHERE status != 'banned'
+    WHERE NOT lifecycle_state_matches(
+      'accounts'::regclass,
+      status,
+      '{"terminal":true}'::jsonb
+    )
   `);
   
   // TODO: Cross-reference with execution_logs for rate_limit_hits and app_crashes
@@ -325,7 +333,11 @@ async function updateDeviceHealthCheck(db: any): Promise<void> {
   await db.query(`
     UPDATE devices
     SET flags = flags || '{"last_health_check": "${new Date().toISOString()}"}'::jsonb
-    WHERE status != 'revoked'
+    WHERE NOT lifecycle_state_matches(
+      'devices'::regclass,
+      status,
+      '{"terminal":true}'::jsonb
+    )
   `);
 }
 
@@ -355,7 +367,12 @@ async function createSkillUpdateJob(db: any, app: string, metrics: UIMetrics): P
   // Check if there's already a pending job for this app
   const existing = await db.query(`
     SELECT id FROM skill_update_jobs
-    WHERE app = $1 AND status = 'pending'
+    WHERE app = $1
+      AND lifecycle_state_matches(
+        'skill_update_jobs'::regclass,
+        status,
+        '{"initial":true}'::jsonb
+      )
     LIMIT 1
   `, [app]);
   
@@ -365,8 +382,8 @@ async function createSkillUpdateJob(db: any, app: string, metrics: UIMetrics): P
   }
   
   await db.query(`
-    INSERT INTO skill_update_jobs (app, elements, failure_data, status)
-    VALUES ($1, $2, $3, 'pending')
+    INSERT INTO skill_update_jobs (app, elements, failure_data)
+    VALUES ($1, $2, $3)
   `, [
     app,
     JSON.stringify([]), // Elements to update will be determined by Skill Updater

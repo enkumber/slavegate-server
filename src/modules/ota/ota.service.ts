@@ -75,7 +75,12 @@ export class OtaService {
     let deviceIds = req.deviceIds;
     if (!deviceIds || deviceIds.length === 0) {
       const devicesResult = await db.query(
-        "SELECT id FROM devices WHERE status IN ('approved', 'online')"
+        `SELECT id FROM devices
+         WHERE lifecycle_state_matches(
+           'devices'::regclass,
+           status,
+           '{"dispatchable":true}'::jsonb
+         )`
       );
       deviceIds = devicesResult.rows.map((r: Record<string, string>) => r.id);
     }
@@ -86,8 +91,8 @@ export class OtaService {
     for (const deviceId of deviceIds) {
       // Record deployment in ota_deployments
       await db.query(
-        `INSERT INTO ota_deployments (release_id, device_id, mandatory, status)
-         VALUES ($1, $2, $3, 'dispatched')
+        `INSERT INTO ota_deployments (release_id, device_id, mandatory)
+         VALUES ($1, $2, $3)
          ON CONFLICT (release_id, device_id) DO NOTHING`,
         [req.releaseId, deviceId, req.mandatory ?? false]
       );

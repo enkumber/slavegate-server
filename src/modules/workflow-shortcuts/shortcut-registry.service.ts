@@ -70,7 +70,12 @@ export class ShortcutRegistryService {
     const result = await getDb().query(
       `SELECT *
        FROM workflow_shortcuts
-       WHERE platform = $1 AND status = 'active'
+       WHERE platform = $1
+         AND lifecycle_state_matches(
+           'workflow_shortcuts'::regclass,
+           status,
+           '{"dispatchable":true}'::jsonb
+         )
        ORDER BY priority ASC, updated_at DESC, key ASC`,
       [platform],
     );
