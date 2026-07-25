@@ -60,12 +60,12 @@ export class AuthService {
 
     const result = await db.query(
       `INSERT INTO devices
-         (imei, public_key_pem, friendly_name, model, android_version, agent_version, last_ip, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+         (imei, public_key_pem, friendly_name, model, android_version, agent_version, last_ip)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (imei) WHERE imei IS NOT NULL
        DO UPDATE SET
          public_key_pem  = EXCLUDED.public_key_pem,
-         status          = 'pending',
+         status          = NULL,
          agent_version   = EXCLUDED.agent_version,
          last_ip         = EXCLUDED.last_ip,
          last_seen_at    = NOW()
@@ -203,7 +203,13 @@ export class AuthService {
 
   async approveDevice(deviceId: string, friendlyName?: string): Promise<boolean> {
     const db = getDb();
-    const updates: string[] = ["status = 'approved'"];
+    const updates: string[] = [
+      `status = lifecycle_transition_target(
+         'devices'::regclass,
+         status,
+         '{"targetDispatchable":true,"manualAllowed":true}'::jsonb
+       )`,
+    ];
     const values: unknown[] = [deviceId];
 
     if (friendlyName) {
@@ -212,7 +218,16 @@ export class AuthService {
     }
 
     const result = await db.query(
-      `UPDATE devices SET ${updates.join(", ")} WHERE id = $1 AND status = 'pending' RETURNING id`,
+      `UPDATE devices
+       SET ${updates.join(", ")}
+       WHERE id = $1
+         AND lifecycle_state_matches('devices'::regclass, status, '{"initial":true}'::jsonb)
+         AND lifecycle_transition_target(
+               'devices'::regclass,
+               status,
+               '{"targetDispatchable":true,"manualAllowed":true}'::jsonb
+             ) IS NOT NULL
+       RETURNING id`,
       values
     );
     return (result.rowCount ?? 0) > 0;
@@ -222,7 +237,21 @@ export class AuthService {
 
   async revokeDevice(deviceId: string): Promise<void> {
     const db = getDb();
-    await db.query("UPDATE devices SET status = 'revoked' WHERE id = $1", [deviceId]);
+    await db.query(
+      `UPDATE devices
+       SET status = lifecycle_transition_target(
+         'devices'::regclass,
+         status,
+         '{"targetTerminal":true,"manualAllowed":true}'::jsonb
+       )
+       WHERE id = $1
+         AND lifecycle_transition_target(
+               'devices'::regclass,
+               status,
+               '{"targetTerminal":true,"manualAllowed":true}'::jsonb
+             ) IS NOT NULL`,
+      [deviceId],
+    );
   }
 }
 

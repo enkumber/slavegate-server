@@ -74,8 +74,7 @@ async function dispatchAndAwaitRefresh(
 }
 
 export function a11yTapSucceeded(result: any): boolean {
-  return result?.status === "completed"
-    && result?.output?.found === true
+  return result?.output?.found === true
     && result?.output?.error == null;
 }
 
@@ -560,7 +559,7 @@ router.post("/start", async (req: Request, res: Response) => {
 
     res.json({
       ok: true,
-      status: "started",
+      accepted: true,
       appId,
       deviceId: deviceId.slice(0, 8) + "...",
     });
@@ -571,16 +570,16 @@ router.post("/start", async (req: Request, res: Response) => {
 
 // ─── GET /status — Get recorder status ───────────────────────────────────────
 
-router.get("/status", (_req: Request, res: Response) => {
-  const state = getRecorderState();
+router.get("/status", async (_req: Request, res: Response) => {
+  const state = await getRecorderState();
   res.json({ ok: true, ...state });
 });
 
 // ─── POST /stop — Stop the recorder ──────────────────────────────────────────
 
-router.post("/stop", (_req: Request, res: Response) => {
-  stopRecording();
-  res.json({ ok: true, status: "stopping" });
+router.post("/stop", async (_req: Request, res: Response) => {
+  await stopRecording();
+  res.json({ ok: true, ...(await getRecorderState()) });
 });
 
 // ─── GET / — List all app maps ───────────────────────────────────────────────

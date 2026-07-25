@@ -77,7 +77,7 @@ export interface ElementDef {
 
 // ─── Recorder State ──────────────────────────────────────────────────────────
 
-export type RecorderStatus = "idle" | "running" | "stopping" | "error";
+export type RecorderStatus = string | null;
 
 export interface RecorderState {
   status: RecorderStatus;
@@ -91,7 +91,7 @@ export interface RecorderState {
   totalElements: number;
   /** BFS queue remaining */
   queueRemaining: number;
-  /** Error message if status === "error" */
+  /** Error message recorded for the current lifecycle state. */
   error?: string;
   /** Started at */
   startedAt?: string;

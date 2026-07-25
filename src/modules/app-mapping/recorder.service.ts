@@ -28,6 +28,10 @@ import type {
   UiTreeNode,
   ExplorationEntry,
 } from "./schema";
+import {
+  getResourceLifecycleState,
+  selectResourceLifecycleTransition,
+} from "../lifecycle/lifecycle.service";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -41,7 +45,8 @@ const APP_MAP_SEED_DIR = path.resolve(process.cwd(), "seeds", "app-maps");
 
 // ─── State (module-level singleton) ────────────────────────────────────────
 
-let recorderState: RecorderState = { status: "idle", appId: "", deviceId: "", pagesFound: 0, elementsExplored: 0, totalElements: 0, queueRemaining: 0 };
+let recorderState: RecorderState = { status: null, appId: "", deviceId: "", pagesFound: 0, elementsExplored: 0, totalElements: 0, queueRemaining: 0 };
+let recordingId: string | null = null;
 
 const pageHashMap = new Map<string, string>(); // hash → pageId
 const bfsQueue: ExplorationEntry[] = [];
@@ -57,8 +62,61 @@ function resetState(): void {
   activeDeviceId = null;
 }
 
-export function getRecorderState(): RecorderState {
+export async function getRecorderState(): Promise<RecorderState> {
+  if (recordingId) {
+    const result = await getDb().query(
+      `SELECT lifecycle_status, progress, error, started_at
+       FROM app_mapping_recordings
+       WHERE id = $1`,
+      [recordingId],
+    );
+    const row = result.rows[0];
+    if (row) {
+      recorderState = {
+        ...recorderState,
+        ...(row.progress ?? {}),
+        status: row.lifecycle_status,
+        error: row.error ?? undefined,
+        startedAt: row.started_at instanceof Date ? row.started_at.toISOString() : row.started_at ?? undefined,
+      };
+    }
+  }
   return { ...recorderState };
+}
+
+async function transitionRecording(
+  selector: Parameters<typeof selectResourceLifecycleTransition>[2],
+  changes: Record<string, unknown> = {},
+): Promise<void> {
+  if (!recordingId || !recorderState.status) throw new Error("No durable app-mapping recording is active");
+  const transition = await selectResourceLifecycleTransition(
+    "app_mapping_recordings",
+    recorderState.status,
+    selector,
+    "lifecycle_status",
+  );
+  if (!transition) throw new Error("App-mapping lifecycle transition is not configured");
+  const next = await getDb().query(
+    `UPDATE app_mapping_recordings
+     SET lifecycle_status = $2,
+         progress = $3,
+         error = $4,
+         started_at = CASE WHEN $5::boolean THEN COALESCE(started_at, NOW()) ELSE started_at END,
+         completed_at = CASE WHEN $6::boolean THEN NOW() WHEN $7::boolean THEN NULL ELSE completed_at END,
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING lifecycle_status`,
+    [
+      recordingId,
+      transition.toStatus,
+      JSON.stringify({ ...recorderState, ...changes }),
+      changes.error ?? null,
+      transition.markStarted,
+      transition.markCompleted,
+      transition.clearCompleted,
+    ],
+  );
+  recorderState = { ...recorderState, ...changes, status: next.rows[0].lifecycle_status };
 }
 
 // ─── Job Helpers ─────────────────────────────────────────────────────────────
@@ -238,8 +296,13 @@ function findOrCreatePage(
 // ─── Main BFS Loop ───────────────────────────────────────────────────────────
 
 export async function startRecording(deviceId: string, appId: string, appName?: string): Promise<void> {
-  if (recorderState.status === "running") {
-    throw new Error("Recorder already running");
+  if (recordingId && recorderState.status) {
+    const current = await getResourceLifecycleState(
+      "app_mapping_recordings",
+      recorderState.status,
+      "lifecycle_status",
+    );
+    if (current && !current.terminal) throw new Error("Recorder already running");
   }
 
   if (!isDeviceOnline(deviceId)) {
@@ -262,8 +325,15 @@ export async function startRecording(deviceId: string, appId: string, appName?: 
     transitionCount: 0,
   };
 
+  const inserted = await getDb().query(
+    `INSERT INTO app_mapping_recordings(app_id, device_id, progress)
+     VALUES ($1, $2, $3)
+     RETURNING id, lifecycle_status`,
+    [appId, deviceId, JSON.stringify({ appId, deviceId })],
+  );
+  recordingId = inserted.rows[0].id;
   recorderState = {
-    status: "running",
+    status: inserted.rows[0].lifecycle_status,
     appId,
     deviceId,
     pagesFound: 0,
@@ -273,6 +343,7 @@ export async function startRecording(deviceId: string, appId: string, appName?: 
     startedAt: new Date().toISOString(),
   };
 
+  await transitionRecording({ targetDispatchable: true, transitionMarkStarted: true });
   const deviceLabel = deviceId.slice(0, 8);
   console.log(`[app-mapping] Starting mapping for ${appId} on device ${deviceLabel}**`);
 
@@ -324,15 +395,17 @@ export async function startRecording(deviceId: string, appId: string, appName?: 
       await saveMap(currentMap);
     }
 
-    recorderState.status = stopRequested ? "idle" : "idle";
+    await transitionRecording({ targetTerminal: true, targetRetryable: false, transitionMarkCompleted: true });
     activeDeviceId = null;
     console.log(
       `[app-mapping] Done: ${recorderState.pagesFound} pages, ${recorderState.elementsExplored} elements explored`,
     );
   } catch (err: any) {
     console.error(`[app-mapping] Recording failed: ${err.message}`);
-    recorderState.status = "error";
-    recorderState.error = err.message;
+    await transitionRecording(
+      { targetTerminal: true, targetRetryable: true, transitionMarkCompleted: true },
+      { error: err.message },
+    );
     activeDeviceId = null;
   }
 }
@@ -406,10 +479,16 @@ async function exploreElement(deviceId: string, entry: ExplorationEntry, explora
 
 // ─── Stop ────────────────────────────────────────────────────────────────────
 
-export function stopRecording(): void {
-  if (recorderState.status !== "running") return;
+export async function stopRecording(): Promise<void> {
+  if (!recordingId || !recorderState.status) return;
+  const current = await getResourceLifecycleState(
+    "app_mapping_recordings",
+    recorderState.status,
+    "lifecycle_status",
+  );
+  if (!current || !current.dispatchable) return;
   stopRequested = true;
-  recorderState.status = "stopping";
+  await transitionRecording({ targetManual: true, targetTerminal: false, transitionManualAllowed: true });
   console.log(`[app-mapping] Stop requested`);
 }
 
