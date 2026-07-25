@@ -228,6 +228,21 @@ export interface DeviceHealth {
     networkQuality: "excellent" | "good" | "poor" | "none";
     activeApp?: string;
     agentVersion: string;
+    lifecycleTelemetry?: DeviceLifecycleTelemetry;
+}
+export interface DeviceLifecycleTelemetry {
+    processGeneration: number;
+    processStartedAt: number;
+    lastEvent: string;
+    lastEventDetail?: string | null;
+    lastEventAt: number;
+    previousExitInference: string;
+    unexpectedProcessRestartCount: number;
+    crashCount: number;
+    lastCrashStack?: string | null;
+    recoveryAlarmCount: number;
+    lastRecoverySource?: string | null;
+    batteryOptimizationExempt: boolean;
 }
 export type JobStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "timeout";
 export type JobType = "tap" | "swipe" | "long_press" | "type_text" | "scroll" | "screenshot" | "screenshot_for_vlm" | "screen_record" | "open_app" | "open_app_fresh" | "close_app" | "ui_tree_dump" | "press_key" | "screen_wake" | "screen_off" | "unlock" | "get_screen_state" | "get_clipboard" | "set_clipboard" | "wait_for_idle" | "file_push" | "file_delete" | "pm_uninstall" | "reboot" | "ota_update" | "skill_tap" | "a11y_find_tap" | "ocr_find_tap";

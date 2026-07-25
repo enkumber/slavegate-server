@@ -287,6 +287,22 @@ export interface DeviceHealth {
   networkQuality: "excellent" | "good" | "poor" | "none";
   activeApp?: string;
   agentVersion: string;
+  lifecycleTelemetry?: DeviceLifecycleTelemetry;
+}
+
+export interface DeviceLifecycleTelemetry {
+  processGeneration: number;
+  processStartedAt: number;
+  lastEvent: string;
+  lastEventDetail?: string | null;
+  lastEventAt: number;
+  previousExitInference: string;
+  unexpectedProcessRestartCount: number;
+  crashCount: number;
+  lastCrashStack?: string | null;
+  recoveryAlarmCount: number;
+  lastRecoverySource?: string | null;
+  batteryOptimizationExempt: boolean;
 }
 
 export type JobStatus =

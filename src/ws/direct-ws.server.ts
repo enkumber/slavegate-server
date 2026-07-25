@@ -1725,6 +1725,7 @@ export class DirectWsServer {
       networkQuality:    (msg.networkQuality as DeviceHealth["networkQuality"]) ?? "none",
       activeApp:         msg.foregroundApp as string | undefined,
       agentVersion:      (msg.agentVersion as string) ?? "unknown",
+      lifecycleTelemetry: sanitizeLifecycleTelemetry(msg.lifecycleTelemetry),
     };
 
     try {
@@ -2080,4 +2081,30 @@ function parseAgentVersion(version: string): number {
   const minor = parseInt(parts[1] || "0", 10);
   const patch = parseInt(parts[2] || "0", 10);
   return major * 10000 + minor * 100 + patch;
+}
+export function sanitizeLifecycleTelemetry(value: unknown): DeviceHealth["lifecycleTelemetry"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const number = (key: string): number => {
+    const candidate = Number(input[key]);
+    return Number.isFinite(candidate) && candidate >= 0 ? candidate : 0;
+  };
+  const text = (key: string, max = 2_000): string | null => {
+    const candidate = input[key];
+    return typeof candidate === "string" ? candidate.slice(0, max) : null;
+  };
+  return {
+    processGeneration: number("processGeneration"),
+    processStartedAt: number("processStartedAt"),
+    lastEvent: text("lastEvent", 120) ?? "unknown",
+    lastEventDetail: text("lastEventDetail"),
+    lastEventAt: number("lastEventAt"),
+    previousExitInference: text("previousExitInference", 160) ?? "unknown",
+    unexpectedProcessRestartCount: number("unexpectedProcessRestartCount"),
+    crashCount: number("crashCount"),
+    lastCrashStack: text("lastCrashStack"),
+    recoveryAlarmCount: number("recoveryAlarmCount"),
+    lastRecoverySource: text("lastRecoverySource", 160),
+    batteryOptimizationExempt: input.batteryOptimizationExempt === true,
+  };
 }

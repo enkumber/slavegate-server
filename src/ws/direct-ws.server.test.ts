@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { DirectWsServer, mergeWorkflowStatusVariables, otaTerminalStatusFromAuthenticatedVersion, resolveDirectWsResultHandle, setWorkflowJobResultResolverForTest } from "./direct-ws.server";
+import { DirectWsServer, mergeWorkflowStatusVariables, otaTerminalStatusFromAuthenticatedVersion, resolveDirectWsResultHandle, sanitizeLifecycleTelemetry, setWorkflowJobResultResolverForTest } from "./direct-ws.server";
 import { deviceExecutionArbiter, setDeviceExecutionAuthorityForTest, type DeviceExecutionHandle } from "../modules/device-execution";
 import { pnqV2RuntimeService } from "../modules/device-execution/pnq-v2-runtime.service";
 import { setPnqV2RuntimeConfigForTest } from "../modules/device-execution/pnq-v2-runtime-config";
@@ -30,6 +30,52 @@ afterEach(() => {
   setPnqV2RuntimeConfigForTest(null);
   setWorkflowJobResultResolverForTest(null);
   vi.restoreAllMocks();
+});
+
+describe("sanitizeLifecycleTelemetry", () => {
+  it("preserves bounded operational lifecycle evidence", () => {
+    expect(sanitizeLifecycleTelemetry({
+      processGeneration: 7,
+      processStartedAt: 1234,
+      lastEvent: "recovery_alarm",
+      lastEventDetail: "periodic_watchdog",
+      lastEventAt: 2345,
+      previousExitInference: "process_recreated_without_clean_shutdown",
+      unexpectedProcessRestartCount: 2,
+      crashCount: 1,
+      lastCrashStack: "stack",
+      recoveryAlarmCount: 3,
+      lastRecoverySource: "task_removed",
+      batteryOptimizationExempt: true,
+      secretPayload: "must not be persisted",
+    })).toEqual({
+      processGeneration: 7,
+      processStartedAt: 1234,
+      lastEvent: "recovery_alarm",
+      lastEventDetail: "periodic_watchdog",
+      lastEventAt: 2345,
+      previousExitInference: "process_recreated_without_clean_shutdown",
+      unexpectedProcessRestartCount: 2,
+      crashCount: 1,
+      lastCrashStack: "stack",
+      recoveryAlarmCount: 3,
+      lastRecoverySource: "task_removed",
+      batteryOptimizationExempt: true,
+    });
+  });
+
+  it("rejects non-objects and normalizes malformed fields", () => {
+    expect(sanitizeLifecycleTelemetry("bad")).toBeUndefined();
+    expect(sanitizeLifecycleTelemetry({
+      processGeneration: -10,
+      lastEvent: 42,
+      batteryOptimizationExempt: "yes",
+    })).toMatchObject({
+      processGeneration: 0,
+      lastEvent: "unknown",
+      batteryOptimizationExempt: false,
+    });
+  });
 });
 
 describe("mergeWorkflowStatusVariables", () => {
