@@ -13,6 +13,7 @@
  */
 
 import { getDb } from "../../db/client";
+import { transitionWorkflowExecutionBinding } from "../workflow-segments/execution-lifecycle.service";
 import { isDeviceOnline } from "../../transport/transport";
 import { llmJson } from "../../utils/llm";
 import {
@@ -602,25 +603,24 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
     && /^[a-f0-9]{24}$/.test(executionRequestKey)
   ) {
     try {
-      await getDb().query(
-        `UPDATE workflow_execution_bindings
-         SET status = $2,
-             postcondition_verified = $3,
-             result_evidence = $4::jsonb,
-             updated_at = NOW()
-         WHERE execution_key = $1 AND request_key = $5`,
-        [
-          executionKey,
-          result.success ? "completed" : "failed",
-          result.success,
-          JSON.stringify({
+      await transitionWorkflowExecutionBinding(
+        executionRequestKey,
+        {
+          targetTerminal: true,
+          targetRetryable: !result.success,
+          targetAdministrative: false,
+          transitionAutomatic: true,
+        },
+        {
+          postconditionVerified: result.success,
+          resultEvidence: {
             taskId: task.id,
             workflowId: result.generatedWorkflow?.workflowId ?? null,
             success: result.success,
             failureCode: result.generatedWorkflow?.failureCode ?? null,
-          }),
-          executionRequestKey,
-        ],
+            executionKey,
+          },
+        },
       );
     } catch (err) {
       console.error("[task-runner] workflow execution binding update failed:", err);

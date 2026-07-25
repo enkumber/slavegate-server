@@ -48,7 +48,7 @@ vi.mock("../../db/client", () => {
       if (
         text.includes("SELECT j.id")
         && text.includes("JOIN agency_workflow_runs")
-        && text.includes("d.status <> 'online'")
+        && text.includes("NOT d_state.dispatchable")
       ) {
         return {
           rows: state.offlineCanary
@@ -217,13 +217,15 @@ vi.mock("../../db/client", () => {
           run_id: canary.runId,
           task_id: canary.taskId,
           workflow_id: null,
-          run_status: canary.runStatus,
+          execution_request_key: canary.executionKey,
           device_status: canary.deviceStatus,
+          run_initial: canary.runStatus === "queued",
+          device_dispatchable: canary.deviceStatus === "online",
         }],
       };
     }
-    if (text.includes("SELECT status FROM tasks")) {
-      return { rows: canary ? [{ status: canary.taskStatus }] : [] };
+    if (text.includes("SELECT definition.initial") && text.includes("FROM tasks task")) {
+      return { rows: canary ? [{ initial: canary.taskStatus === "queued" }] : [] };
     }
     if (text.includes("UPDATE tasks")) {
       if (canary?.taskStatus === "queued") canary.taskStatus = "failed";
@@ -236,13 +238,10 @@ vi.mock("../../db/client", () => {
     if (text.includes("UPDATE workflow_execution_bindings")) {
       return { rows: [], rowCount: 1 };
     }
-    if (
-      text.includes("UPDATE segment_build_jobs")
-      && text.includes("offlineCanaryTimeout")
-    ) {
+    if (text.includes("WITH locked AS (") && text.includes("UPDATE segment_build_jobs job")) {
       if (canary?.buildStatus !== "canary_running") return { rows: [] };
       canary.buildStatus = "failed";
-      return { rows: [{ id: buildJob().id }], rowCount: 1 };
+      return { rows: [{ ...state.row, status: "failed" }], rowCount: 1 };
     }
     if (text.includes("INSERT INTO segment_build_job_events")) return { rows: [], rowCount: 1 };
     throw new Error(`unexpected transaction query: ${text} ${JSON.stringify(params)}`);
@@ -421,7 +420,7 @@ describe("SegmentBuildJobService dispatch", () => {
     });
     expect(state.txQueries).toContain("BEGIN");
     expect(state.txQueries).toContain("COMMIT");
-    expect(state.txQueries.some((query) => query.includes("SEGMENT_BUILD_CANARY_DEVICE_OFFLINE_TIMEOUT"))).toBe(true);
+    expect(state.txQueries.some((query) => query.includes("UPDATE workflow_execution_bindings"))).toBe(true);
     expect(state.txQueries.some((query) => query.includes("canary_expired_offline"))).toBe(true);
   });
 

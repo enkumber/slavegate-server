@@ -1,6 +1,8 @@
 import crypto from "crypto";
+import type { PoolClient } from "pg";
 import { getDb } from "../../db/client";
 import { workflowSegmentControlPlaneService } from "../workflow-segments/control-plane.service";
+import { transitionWorkflowExecutionBinding } from "../workflow-segments/execution-lifecycle.service";
 import type {
   SegmentInputResolver,
   SegmentInputSchema,
@@ -179,6 +181,7 @@ async function transitionSegmentBuildJob(
   patch: SegmentBuildTransitionPatch = {},
   extraPredicate = "TRUE",
   extraParams: unknown[] = [],
+  client?: PoolClient,
 ): Promise<SegmentBuildJob | null> {
   const patchIndex = extraParams.length + 2;
   const selectorIndex = extraParams.length + 3;
@@ -187,7 +190,7 @@ async function transitionSegmentBuildJob(
     "target",
     `$${selectorIndex}`,
   );
-  const result = await getDb().query(
+  const result = await (client ?? getDb()).query(
     `WITH locked AS (
        SELECT job.*
          FROM segment_build_jobs job
@@ -648,15 +651,29 @@ export class SegmentBuildJobService {
     const candidates = await getDb().query(
       `SELECT j.id
        FROM segment_build_jobs j
+       JOIN lifecycle_state_definitions j_state
+         ON j_state.lifecycle_key = j.lifecycle_key
+        AND j_state.status = j.status
        JOIN agency_workflow_runs r
          ON r.id::text = j.result ->> 'canaryRunId'
+       JOIN lifecycle_state_definitions r_state
+         ON r_state.lifecycle_key = r.lifecycle_key
+        AND r_state.status = r.status
        JOIN devices d ON d.id = j.device_id
+       JOIN lifecycle_resource_bindings d_binding
+         ON d_binding.resource_table = to_regclass('devices')
+       JOIN lifecycle_state_definitions d_state
+         ON d_state.lifecycle_key = d_binding.lifecycle_key
+        AND d_state.status = d.status
        LEFT JOIN tasks t ON t.id = r.task_id
-       WHERE j.status = 'canary_running'
-         AND r.status = 'queued'
+       LEFT JOIN lifecycle_state_definitions t_state
+         ON t_state.lifecycle_key = t.lifecycle_key
+        AND t_state.status = t.status
+       WHERE NOT j_state.terminal
+         AND r_state.initial
          AND r.created_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')
-         AND d.status <> 'online'
-         AND (t.id IS NULL OR t.status = 'queued')
+         AND NOT d_state.dispatchable
+         AND (t.id IS NULL OR t_state.initial)
        ORDER BY r.created_at ASC
        LIMIT $2`,
       [
@@ -675,25 +692,40 @@ export class SegmentBuildJobService {
              j.id,
              j.device_id,
              j.result ->> 'executionKey' AS execution_key,
+             execution_binding.request_key AS execution_request_key,
              r.id AS run_id,
              r.task_id,
              r.workflow_id,
-             r.status AS run_status,
-             d.status AS device_status
+             d.status AS device_status,
+             r_state.initial AS run_initial,
+             d_state.dispatchable AS device_dispatchable
            FROM segment_build_jobs j
+           JOIN lifecycle_state_definitions j_state
+             ON j_state.lifecycle_key = j.lifecycle_key
+            AND j_state.status = j.status
            JOIN agency_workflow_runs r
              ON r.id::text = j.result ->> 'canaryRunId'
+           JOIN lifecycle_state_definitions r_state
+             ON r_state.lifecycle_key = r.lifecycle_key
+            AND r_state.status = r.status
            JOIN devices d ON d.id = j.device_id
+           LEFT JOIN workflow_execution_bindings execution_binding
+             ON execution_binding.execution_key = j.result ->> 'executionKey'
+           JOIN lifecycle_resource_bindings d_binding
+             ON d_binding.resource_table = to_regclass('devices')
+           JOIN lifecycle_state_definitions d_state
+             ON d_state.lifecycle_key = d_binding.lifecycle_key
+            AND d_state.status = d.status
            WHERE j.id = $1
-             AND j.status = 'canary_running'
+             AND NOT j_state.terminal
            FOR UPDATE OF j, r`,
           [candidate.id],
         );
         const row = locked.rows[0] as Record<string, unknown> | undefined;
         if (
           !row
-          || row.run_status !== "queued"
-          || row.device_status === "online"
+          || row.run_initial !== true
+          || row.device_dispatchable === true
         ) {
           await client.query("ROLLBACK");
           continue;
@@ -701,10 +733,16 @@ export class SegmentBuildJobService {
         const taskId = typeof row.task_id === "string" ? row.task_id : null;
         if (taskId) {
           const task = await client.query(
-            `SELECT status FROM tasks WHERE id = $1 FOR UPDATE`,
+            `SELECT definition.initial
+               FROM tasks task
+               JOIN lifecycle_state_definitions definition
+                 ON definition.lifecycle_key = task.lifecycle_key
+                AND definition.status = task.status
+              WHERE task.id = $1
+              FOR UPDATE OF task`,
             [taskId],
           );
-          if (task.rows[0]?.status !== "queued") {
+          if (task.rows[0]?.initial !== true) {
             await client.query("ROLLBACK");
             continue;
           }
@@ -739,40 +777,54 @@ export class SegmentBuildJobService {
           transitionClearFailure: false,
         }, { error: reason }, client);
         if (executionKey) {
-          await client.query(
-            `UPDATE workflow_execution_bindings
-             SET status = 'failed',
-                 postcondition_verified = FALSE,
-                 result_evidence = result_evidence || jsonb_build_object(
-                   'failureCode', 'SEGMENT_BUILD_CANARY_DEVICE_OFFLINE_TIMEOUT',
-                   'runId', $2::text,
-                   'deviceStatus', $3::text
-                 ),
-                 updated_at = NOW()
-             WHERE execution_key = $1
-               AND status IN ('resolved','queued')`,
-            [executionKey, runId, String(row.device_status)],
+          const executionRequestKey = typeof row.execution_request_key === "string"
+            ? row.execution_request_key
+            : null;
+          if (executionRequestKey) {
+          await transitionWorkflowExecutionBinding(
+            executionRequestKey,
+            {
+              targetTerminal: true,
+              targetRetryable: true,
+              targetAdministrative: false,
+              transitionAutomatic: true,
+            },
+            {
+              postconditionVerified: false,
+              resultEvidence: {
+                failureCode: "SEGMENT_BUILD_CANARY_DEVICE_OFFLINE_TIMEOUT",
+                runId,
+                deviceStatus: String(row.device_status),
+              },
+            },
+            client,
           );
+          }
         }
-        const build = await client.query(
-          `UPDATE segment_build_jobs
-           SET status = 'failed',
-               error = $2,
-               evidence = evidence || jsonb_build_object(
-                 'offlineCanaryTimeout', jsonb_build_object(
-                   'runId', $3::text,
-                   'taskId', $4::text,
-                   'deviceStatus', $5::text
-                 )
-               ),
-               claim_expires_at = NULL,
-               completed_at = NOW(),
-               updated_at = NOW()
-           WHERE id = $1 AND status = 'canary_running'
-           RETURNING id`,
-          [candidate.id, reason, runId, taskId, String(row.device_status)],
+        const build = await transitionSegmentBuildJob(
+          String(candidate.id),
+          {
+            targetTerminal: true,
+            targetRetryable: true,
+            targetAdministrative: false,
+            transitionAutomatic: true,
+            transitionMarkCompleted: true,
+          },
+          {
+            error: reason,
+            evidencePatch: {
+              offlineCanaryTimeout: {
+                runId,
+                taskId,
+                deviceStatus: String(row.device_status),
+              },
+            },
+          },
+          "TRUE",
+          [],
+          client,
         );
-        if (build.rows.length === 0) {
+        if (!build) {
           await client.query("ROLLBACK");
           continue;
         }

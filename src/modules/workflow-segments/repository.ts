@@ -198,9 +198,9 @@ export class WorkflowSegmentRepository {
     await getDb().query(
       `INSERT INTO workflow_execution_bindings (
          request_key, execution_key, composition_name, composition_version, composition_key,
-         segment_refs, device_id, account_id, intent, runtime_inputs, status
+         segment_refs, device_id, account_id, intent, runtime_inputs
        )
-       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,'resolved')
+       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb)
        ON CONFLICT (request_key) DO UPDATE SET
          execution_key = EXCLUDED.execution_key,
          composition_name = EXCLUDED.composition_name,
@@ -211,7 +211,14 @@ export class WorkflowSegmentRepository {
          account_id = EXCLUDED.account_id,
          intent = EXCLUDED.intent,
          runtime_inputs = EXCLUDED.runtime_inputs,
-         status = 'resolved',
+         status = (
+           SELECT definition.status
+             FROM lifecycle_state_definitions definition
+            WHERE definition.lifecycle_key = EXCLUDED.lifecycle_key
+              AND definition.initial
+            ORDER BY definition.sort_order, definition.status
+            LIMIT 1
+         ),
          updated_at = NOW()`,
       [
         input.requestKey,
