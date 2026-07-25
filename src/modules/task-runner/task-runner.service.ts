@@ -198,6 +198,25 @@ function rootFailureFromResult(result: TaskRunnerResult): RootFailure | null {
   };
 }
 
+async function persistSuccessfulTaskResult(
+  taskId: string,
+  resultJson: Record<string, unknown>,
+): Promise<void> {
+  await getDb().query(
+    `UPDATE tasks
+     SET status = 'completed',
+         completed_at = NOW(),
+         updated_at = NOW(),
+         result = $2,
+         error = NULL,
+         root_error_code = NULL,
+         root_error_message = NULL,
+         root_error_details = '{}'::jsonb
+     WHERE id = $1`,
+    [taskId, JSON.stringify(resultJson)],
+  );
+}
+
 function isCompiledWorkflow(value: unknown): value is CompiledWorkflow {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const workflow = value as Partial<CompiledWorkflow>;
@@ -1197,11 +1216,7 @@ async function executeTask(task: TaskRow): Promise<void> {
     
     // Update task status
     if (result.success) {
-      await db.query(`
-        UPDATE tasks 
-        SET status = 'completed', completed_at = NOW(), result = $2
-        WHERE id = $1
-      `, [taskId, JSON.stringify(resultJson)]);
+      await persistSuccessfulTaskResult(taskId, resultJson);
       await completeAgencyWorkflowRun(task, result);
       if (task.routine !== GENERATED_WORKFLOW_ROUTINE) {
         await recordGeneratedWorkflowLearning(task, result);
@@ -1687,31 +1702,35 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
         taskResult = legacyRoutineRequiresWorkflow(task);
     }
     
-    const status = taskResult.success ? "completed" : "failed";
     const rootFailure = rootFailureFromResult(taskResult);
-    await db.query(
-      `UPDATE tasks SET status = $1, completed_at = NOW(), result = $2, error = $3,
-         root_error_code=$5, root_error_message=$6, root_error_details=$7
-       WHERE id = $4`,
-      [
-        status,
-        JSON.stringify({
-          stepsCompleted: taskResult.stepsCompleted,
-          totalSteps: taskResult.totalSteps,
-          tokenUsage: taskResult.tokenUsage,
-          durationMs: taskResult.durationMs,
-          failedStep: taskResult.failedStep,
-          output: taskResult.output,
-          generatedWorkflow: taskResult.generatedWorkflow,
-          rootFailure,
-        }),
-        taskResult.success ? null : taskResult.failReason ?? "Unknown error",
-        taskId,
-        rootFailure?.code ?? null,
-        rootFailure?.message ?? null,
-        JSON.stringify(rootFailure?.details ?? {}),
-      ]
-    );
+    const resultJson = {
+      stepsCompleted: taskResult.stepsCompleted,
+      totalSteps: taskResult.totalSteps,
+      tokenUsage: taskResult.tokenUsage,
+      durationMs: taskResult.durationMs,
+      failedStep: taskResult.failedStep,
+      output: taskResult.output,
+      generatedWorkflow: taskResult.generatedWorkflow,
+      rootFailure,
+    };
+    if (taskResult.success) {
+      await persistSuccessfulTaskResult(taskId, resultJson);
+    } else {
+      await db.query(
+        `UPDATE tasks SET status = 'failed', completed_at = NOW(), updated_at = NOW(),
+           result = $2, error = $3,
+           root_error_code = $4, root_error_message = $5, root_error_details = $6
+         WHERE id = $1`,
+        [
+          taskId,
+          JSON.stringify(resultJson),
+          taskResult.failReason ?? "Unknown error",
+          rootFailure?.code ?? null,
+          rootFailure?.message ?? null,
+          JSON.stringify(rootFailure?.details ?? {}),
+        ],
+      );
+    }
     await completeAgencyWorkflowRun(task, taskResult);
     if (task.routine !== GENERATED_WORKFLOW_ROUTINE) {
       await recordGeneratedWorkflowLearning(task, taskResult);

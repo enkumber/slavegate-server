@@ -376,6 +376,12 @@ describe("task-runner generated_workflow routine", () => {
       taskId: TASK_ID,
       status: "completed",
     }));
+    expect(mocks.dbQuery).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /status = 'completed'[\s\S]*error = NULL[\s\S]*root_error_code = NULL[\s\S]*root_error_message = NULL[\s\S]*root_error_details = '\{\}'::jsonb/,
+      ),
+      [TASK_ID, expect.any(String)],
+    );
   });
 
   it("fails cached dashboard human workflows that do not satisfy their PostgreSQL Goal Contract", async () => {
