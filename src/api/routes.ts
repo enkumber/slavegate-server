@@ -17,6 +17,11 @@ import {
   listJobStatusDefinitions,
   transitionJobManually,
 } from "../modules/dispatcher/job-lifecycle.service";
+import {
+  listLifecycleStates,
+  listLifecycleTransitions,
+  updateLifecycleStalePolicy,
+} from "../modules/lifecycle/lifecycle.service";
 import { authService } from "../modules/auth/auth.service";
 import { directWsServer } from "../ws/direct-ws.server";
 
@@ -781,6 +786,50 @@ router.get("/jobs", async (req, res) => {
 
 router.get("/jobs/status-definitions", async (_req, res) => {
   res.json({ ok: true, data: await listJobStatusDefinitions() });
+});
+
+router.get("/lifecycle/:lifecycleKey", requireAdminAuth, async (req, res) => {
+  const [states, transitions] = await Promise.all([
+    listLifecycleStates(req.params.lifecycleKey),
+    listLifecycleTransitions(req.params.lifecycleKey),
+  ]);
+  if (states.length === 0) {
+    return res.status(404).json({ ok: false, error: "Lifecycle not found" });
+  }
+  res.json({ ok: true, data: { states, transitions } });
+});
+
+router.patch("/lifecycle/:lifecycleKey/states/:status/stale-policy", requireAdminAuth, async (req, res) => {
+  try {
+    const staleAfterMs = req.body?.staleAfterMs;
+    const staleActionKey = req.body?.staleActionKey;
+    const validNullPolicy = staleAfterMs === null && staleActionKey === null;
+    const validActivePolicy = Number.isSafeInteger(staleAfterMs)
+      && staleAfterMs > 0
+      && typeof staleActionKey === "string"
+      && staleActionKey.trim().length > 0;
+    if (!validNullPolicy && !validActivePolicy) {
+      return res.status(400).json({
+        ok: false,
+        error: "staleAfterMs and staleActionKey must both be null, or a positive integer and non-empty action key",
+      });
+    }
+
+    const updated = await updateLifecycleStalePolicy(
+      req.params.lifecycleKey,
+      req.params.status,
+      { staleAfterMs, staleActionKey },
+    );
+    if (!updated) {
+      return res.status(409).json({
+        ok: false,
+        error: "Lifecycle state not found or stale action is not an automatic transition from this state",
+      });
+    }
+    res.json({ ok: true, data: updated });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
 });
 
 router.get("/jobs/:id", async (req, res) => {

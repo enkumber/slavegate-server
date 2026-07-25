@@ -34,6 +34,11 @@ export interface LifecycleTransition {
   metadata: Record<string, unknown>;
 }
 
+export interface LifecycleStalePolicyUpdate {
+  staleAfterMs: number | null;
+  staleActionKey: string | null;
+}
+
 export const lifecycleKeys = {
   task: "task",
   dispatcherJob: "dispatcher_job",
@@ -143,4 +148,48 @@ export async function listLifecycleTransitions(
     [lifecycleKey],
   );
   return result.rows.map(rowToTransition);
+}
+
+export async function updateLifecycleStalePolicy(
+  lifecycleKey: string,
+  status: string,
+  policy: LifecycleStalePolicyUpdate,
+  db: LifecycleQueryable = getDb(),
+): Promise<LifecycleStateDefinition | null> {
+  const staleAfterMs = policy.staleAfterMs;
+  const staleActionKey = policy.staleActionKey?.trim() || null;
+
+  if (
+    (staleAfterMs === null) !== (staleActionKey === null)
+    || (staleAfterMs !== null && (!Number.isSafeInteger(staleAfterMs) || staleAfterMs <= 0))
+  ) {
+    throw new Error(
+      "staleAfterMs and staleActionKey must both be null, or a positive integer and non-empty action key",
+    );
+  }
+
+  const result = await db.query(
+    `UPDATE lifecycle_state_definitions state
+        SET stale_after_ms = $3,
+            stale_action_key = $4,
+            updated_at = NOW()
+      WHERE state.lifecycle_key = $1
+        AND state.status = $2
+        AND (
+          ($3::bigint IS NULL AND $4::text IS NULL)
+          OR EXISTS (
+            SELECT 1
+              FROM lifecycle_transitions transition
+             WHERE transition.lifecycle_key = state.lifecycle_key
+               AND transition.from_status = state.status
+               AND transition.action_key = $4
+               AND transition.automatic
+          )
+        )
+      RETURNING lifecycle_key, status, initial, terminal, retryable, administrative,
+                dispatchable, manual, stale_after_ms, stale_action_key, description, metadata`,
+    [lifecycleKey, status, staleAfterMs, staleActionKey],
+  );
+
+  return result.rows[0] ? rowToState(result.rows[0]) : null;
 }
