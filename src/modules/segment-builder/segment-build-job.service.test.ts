@@ -198,6 +198,7 @@ vi.mock("../../db/client", () => {
       if (text.includes("FROM workflow_segment_versions")) return { rows: [] };
       if (text.includes("FROM workflow_compositions c")) return { rows: [] };
       if (text.includes("FROM runtime_semantic_entries")) return { rows: [] };
+      if (text.includes("FROM lifecycle_resource_bindings binding")) return { rows: [] };
       throw new Error(`unexpected query: ${text}`);
   };
   const transactionQuery = async (text: string, params: unknown[] = []) => {

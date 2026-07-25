@@ -163,6 +163,72 @@ async function event(jobId: string, eventType: string, actor: string, payload: R
   );
 }
 
+async function resourceVersionIsSuccessful(
+  table: string,
+  keyColumn: string,
+  key: string,
+  version: string,
+): Promise<boolean> {
+  const result = await getDb().query(
+    `SELECT definition.terminal
+            AND NOT definition.retryable
+            AND NOT definition.administrative AS successful
+       FROM ${table} resource
+       JOIN lifecycle_resource_bindings binding
+         ON binding.resource_table = to_regclass($3)
+        AND binding.lifecycle_key = resource.lifecycle_key
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = resource.lifecycle_key
+        AND definition.status = resource.lifecycle_status
+      WHERE resource.${keyColumn} = $1
+        AND resource.version = $2`,
+    [key, version, table],
+  );
+  return result.rows[0]?.successful === true;
+}
+
+async function activateCapability(capabilityKey: string): Promise<void> {
+  const selector = serializeLifecycleTransitionSelector({
+    targetDispatchable: true,
+    targetAdministrative: false,
+    transitionAutomatic: true,
+  });
+  const predicate = lifecycleTransitionSelectorPredicate("transition", "target", "$2");
+  await getDb().query(
+    `WITH selected AS (
+       SELECT capability.capability_key, current.dispatchable AS current_dispatchable,
+              transition.to_status
+         FROM workflow_capabilities capability
+         JOIN lifecycle_state_definitions current
+           ON current.lifecycle_key = capability.lifecycle_key
+          AND current.status = capability.status
+         LEFT JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = capability.lifecycle_key
+          AND transition.from_status = capability.status
+         LEFT JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+          AND ${predicate}
+        WHERE capability.capability_key = $1
+        ORDER BY transition.action_key
+        LIMIT 1
+        FOR UPDATE OF capability
+     )
+     UPDATE workflow_capabilities capability
+        SET status = CASE
+              WHEN selected.current_dispatchable THEN capability.status
+              ELSE selected.to_status
+            END,
+            metadata = (capability.metadata - 'buildJobId')
+              || jsonb_build_object('managedBy', 'segment-builder'),
+            updated_at = NOW()
+       FROM selected
+      WHERE capability.capability_key = selected.capability_key
+        AND (selected.current_dispatchable OR selected.to_status IS NOT NULL)`,
+    [capabilityKey, selector],
+  );
+}
+
 interface SegmentBuildTransitionPatch {
   assignedAgent?: string;
   agentSessionKey?: string;
@@ -340,7 +406,7 @@ export class SegmentBuildJobService {
     const job = await this.get(id);
     if (!job) return null;
     const db = getDb();
-    const [device, capabilities, segments, compositions, semantics] = await Promise.all([
+    const [device, capabilities, segments, compositions, semantics, lifecycleDefinitions] = await Promise.all([
       db.query(
         `SELECT id, friendly_name AS name, model, android_version, agent_version, status
          FROM devices WHERE id = $1`,
@@ -350,7 +416,13 @@ export class SegmentBuildJobService {
         `SELECT capability_key, platform, description, aliases, required_terms,
                 forbidden_terms, safety_class, portability_scope, status, metadata
          FROM workflow_capabilities
-         WHERE status IN ('active','degraded')
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('workflow_capabilities')
+          AND binding.lifecycle_key = workflow_capabilities.lifecycle_key
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = workflow_capabilities.lifecycle_key
+          AND definition.status = workflow_capabilities.status
+         WHERE definition.dispatchable
            AND (LOWER(platform) = LOWER($1) OR platform = '*')
          ORDER BY updated_at DESC
          LIMIT 100`,
@@ -360,7 +432,13 @@ export class SegmentBuildJobService {
         `SELECT segment_key, version, platform, lifecycle_status, template,
                 input_schema, output_schema, postcondition_contract, compatibility
          FROM workflow_segment_versions
-         WHERE lifecycle_status IN ('promoted','candidate')
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('workflow_segment_versions')
+          AND binding.lifecycle_key = workflow_segment_versions.lifecycle_key
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = workflow_segment_versions.lifecycle_key
+          AND definition.status = workflow_segment_versions.lifecycle_status
+         WHERE definition.dispatchable
            AND (LOWER(platform) = LOWER($1) OR platform = '*')
          ORDER BY segment_key, updated_at DESC
          LIMIT 200`,
@@ -385,7 +463,13 @@ export class SegmentBuildJobService {
          LEFT JOIN workflow_composition_nodes n
            ON n.composition_name = c.composition_name
           AND n.composition_version = c.version
-         WHERE c.lifecycle_status IN ('promoted','candidate')
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('workflow_compositions')
+          AND binding.lifecycle_key = c.lifecycle_key
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = c.lifecycle_key
+          AND definition.status = c.lifecycle_status
+         WHERE definition.dispatchable
            AND (LOWER(c.platform) = LOWER($1) OR c.platform = '*')
          GROUP BY c.composition_name, c.version
          ORDER BY c.updated_at DESC
@@ -395,11 +479,33 @@ export class SegmentBuildJobService {
       db.query(
         `SELECT namespace, entry_key, platform, priority, payload
          FROM runtime_semantic_entries
-         WHERE status = 'active'
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('runtime_semantic_entries')
+          AND binding.lifecycle_key = runtime_semantic_entries.lifecycle_key
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = runtime_semantic_entries.lifecycle_key
+          AND definition.status = runtime_semantic_entries.status
+         WHERE definition.dispatchable
            AND (LOWER(platform) = LOWER($1) OR platform = '*')
          ORDER BY namespace, priority DESC, entry_key
          LIMIT 300`,
         [job.platform],
+      ),
+      db.query(
+        `SELECT binding.resource_table::text AS resource_table,
+                definition.status, definition.initial, definition.terminal,
+                definition.retryable, definition.administrative,
+                definition.dispatchable, definition.manual, definition.metadata
+           FROM lifecycle_resource_bindings binding
+           JOIN lifecycle_state_definitions definition
+             ON definition.lifecycle_key = binding.lifecycle_key
+          WHERE binding.resource_table = ANY(ARRAY[
+            to_regclass('workflow_capabilities'),
+            to_regclass('workflow_segment_versions'),
+            to_regclass('workflow_compositions'),
+            to_regclass('runtime_semantic_entries')
+          ])
+          ORDER BY binding.resource_table::text, definition.sort_order, definition.status`,
       ),
     ]);
     return {
@@ -409,12 +515,7 @@ export class SegmentBuildJobService {
       segments: segments.rows,
       compositions: compositions.rows,
       semantics: semantics.rows,
-      constraints: {
-        autonomousSafetyClasses: ["read_only", "navigation"],
-        candidateLifecycle: ["draft", "candidate", "canary", "promoted"],
-        runtimeContract: "edge-workflow/v2",
-        concreteRuntimeValuesForbiddenInReusableTemplates: true,
-      },
+      lifecycleDefinitions: lifecycleDefinitions.rows,
     };
   }
 
@@ -1198,13 +1299,12 @@ export class SegmentBuildJobService {
       runtimeEvidence: execution.result_evidence ?? {},
     };
     for (const ref of segmentRefs) {
-      const lifecycle = await getDb().query(
-        `SELECT lifecycle_status
-         FROM workflow_segment_versions
-         WHERE segment_key = $1 AND version = $2`,
-        [ref.segmentKey, ref.segmentVersion],
-      );
-      if (lifecycle.rows[0]?.lifecycle_status === "promoted") continue;
+      if (await resourceVersionIsSuccessful(
+        "workflow_segment_versions",
+        "segment_key",
+        ref.segmentKey,
+        ref.segmentVersion,
+      )) continue;
       await workflowSegmentControlPlaneService.recordCanary(
         "segment",
         ref.segmentKey,
@@ -1219,13 +1319,12 @@ export class SegmentBuildJobService {
         "phone-network-kernel",
       );
     }
-    const compositionLifecycle = await getDb().query(
-      `SELECT lifecycle_status
-       FROM workflow_compositions
-       WHERE composition_name = $1 AND version = $2`,
-      [compositionName, compositionVersion],
-    );
-    if (compositionLifecycle.rows[0]?.lifecycle_status !== "promoted") {
+    if (!await resourceVersionIsSuccessful(
+      "workflow_compositions",
+      "composition_name",
+      compositionName,
+      compositionVersion,
+    )) {
     await workflowSegmentControlPlaneService.recordCanary(
       "composition",
       compositionName,
@@ -1240,14 +1339,7 @@ export class SegmentBuildJobService {
       "phone-network-kernel",
     );
     }
-    await getDb().query(
-      `UPDATE workflow_capabilities
-       SET status = 'active',
-           metadata = (metadata - 'buildJobId') || '{"managedBy":"segment-builder"}'::jsonb,
-           updated_at = NOW()
-       WHERE capability_key = $1`,
-      [capabilityKey],
-    );
+    await activateCapability(capabilityKey);
     const completed = await transitionSegmentBuildJob(id, {
       targetTerminal: true,
       targetRetryable: false,
