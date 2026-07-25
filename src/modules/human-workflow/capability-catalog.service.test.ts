@@ -107,7 +107,7 @@ describe("retrieval-before-LLM compiler context", () => {
         };
       }
       if (sql.includes("FROM ui_graph_transitions")) return { rows: [] };
-      if (sql.includes("artifact_state IN ('failed', 'quarantined')")) {
+      if (sql.includes("definition.retryable OR definition.administrative")) {
         return {
           rows: [{
             canonical_workflow_id: "bad_remote_support_v1",

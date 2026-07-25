@@ -1,15 +1,7 @@
 import { getDb } from "../../db/client";
 
-export type CompilerKnowledgeType =
-  | "rule"
-  | "positive_example"
-  | "negative_example"
-  | "anti_pattern"
-  | "app_map_hint"
-  | "success_criteria"
-  | "repair_note";
-
-export type CompilerKnowledgeRisk = "low" | "medium" | "high";
+export type CompilerKnowledgeType = string;
+export type CompilerKnowledgeRisk = string;
 
 export interface CompilerKnowledgeEntry {
   id: string;
@@ -21,7 +13,7 @@ export interface CompilerKnowledgeEntry {
   guidance: string[];
   risk: CompilerKnowledgeRisk;
   source: string;
-  status: "active";
+  status: string;
   policy: Record<string, unknown>;
   evidence: Record<string, unknown>;
   notes: string[];
@@ -31,14 +23,14 @@ function toEntry(entryKey: string, payload: Record<string, unknown>): CompilerKn
   return {
     id: String(payload.id ?? entryKey),
     title: String(payload.title ?? entryKey),
-    type: String(payload.type ?? "rule") as CompilerKnowledgeType,
-    domain: String(payload.domain ?? "generic"),
+    type: String(payload.type ?? ""),
+    domain: String(payload.domain ?? ""),
     appliesTo: Array.isArray(payload.appliesTo) ? payload.appliesTo.map(String) : [],
     summary: String(payload.summary ?? ""),
     guidance: Array.isArray(payload.guidance) ? payload.guidance.map(String) : [],
-    risk: String(payload.risk ?? "high") as CompilerKnowledgeRisk,
-    source: String(payload.source ?? "database"),
-    status: "active",
+    risk: String(payload.risk ?? ""),
+    source: String(payload.source ?? ""),
+    status: String(payload.status ?? ""),
     policy: payload.policy && typeof payload.policy === "object" && !Array.isArray(payload.policy)
       ? payload.policy as Record<string, unknown>
       : {},
@@ -57,8 +49,15 @@ export async function listCompilerKnowledge(filters: {
 }): Promise<CompilerKnowledgeEntry[]> {
   const result = await getDb().query(
     `SELECT entry_key, payload
-     FROM runtime_semantic_entries
-     WHERE namespace = 'compiler_knowledge' AND status = 'active'
+     FROM runtime_semantic_entries entry
+     JOIN lifecycle_resource_bindings binding
+       ON binding.resource_table = to_regclass('runtime_semantic_entries')
+      AND binding.lifecycle_key = entry.lifecycle_key
+     JOIN lifecycle_state_definitions definition
+       ON definition.lifecycle_key = entry.lifecycle_key
+      AND definition.status = entry.status
+     WHERE namespace = 'compiler_knowledge'
+       AND definition.dispatchable
      ORDER BY priority ASC, entry_key ASC`,
   );
   return (result?.rows ?? [])

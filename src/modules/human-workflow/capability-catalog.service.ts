@@ -2,13 +2,7 @@ import { getDb } from "../../db/client";
 import type { WorkflowGoalContract, WorkflowTemplate } from "../workflows/types";
 import { parseWorkflowGoalContract } from "../workflows/goal-contract";
 
-export type CatalogSafetyClass =
-  | "read_only"
-  | "navigation"
-  | "standard"
-  | "mutating"
-  | "sensitive"
-  | "destructive";
+export type CatalogSafetyClass = string;
 
 export interface CatalogRetrievalPolicy {
   maxContextArtifacts: number;
@@ -31,7 +25,7 @@ export interface WorkflowCapabilityRecord {
   requiredTerms: string[];
   forbiddenTerms: string[];
   safetyClass: CatalogSafetyClass;
-  portabilityScope: "global" | "contextual" | "device" | "account";
+  portabilityScope: string;
   minMatchScore: number;
   ambiguityMargin: number;
   metadata: Record<string, unknown>;
@@ -234,22 +228,37 @@ export class CapabilityCatalogService {
 
     let artifactRows: Record<string, unknown>[] = [];
     if (relatedKeys.length > 0) {
+      const allowedArtifactSafetyClasses = [
+        ...new Set(Object.values(policy.artifactSafetyAllowlist).flat()),
+      ];
       const artifacts = await db.query(
         `SELECT binding.capability_key, binding.role, binding.coverage, binding.priority,
                 cache.*
          FROM workflow_capability_artifacts binding
          JOIN generated_workflow_plan_cache cache ON cache.cache_key = binding.cache_key
+         JOIN lifecycle_resource_bindings binding_lifecycle
+           ON binding_lifecycle.resource_table = to_regclass('workflow_capability_artifacts')
+          AND binding_lifecycle.lifecycle_key = binding.lifecycle_key
+         JOIN lifecycle_state_definitions binding_state
+           ON binding_state.lifecycle_key = binding.lifecycle_key
+          AND binding_state.status = binding.status
+         JOIN lifecycle_resource_bindings cache_lifecycle
+           ON cache_lifecycle.resource_table = to_regclass('generated_workflow_plan_cache')
+          AND cache_lifecycle.lifecycle_key = cache.lifecycle_key
+         JOIN lifecycle_state_definitions cache_state
+           ON cache_state.lifecycle_key = cache.lifecycle_key
+          AND cache_state.status = cache.artifact_state
          WHERE binding.capability_key = ANY($1::text[])
-           AND binding.status = 'active'
-           AND cache.artifact_state = 'promoted'
+           AND binding_state.dispatchable
+           AND cache_state.dispatchable
            AND COALESCE(
              cache.compiled_plan #>> '{metadata,safetyClass}',
              cache.workflow ->> 'safetyClass',
              cache.source_metadata ->> 'safetyClass'
-           ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive', 'destructive')
+           ) = ANY($3::text[])
          ORDER BY binding.priority, cache.updated_at DESC
          LIMIT $2`,
-        [relatedKeys, policy.maxArtifactRows],
+        [relatedKeys, policy.maxArtifactRows, allowedArtifactSafetyClasses],
       );
       artifactRows = artifacts.rows;
     }
@@ -275,8 +284,16 @@ export class CapabilityCatalogService {
                 selector.selector, selector.confidence
          FROM ui_graph_selectors selector
          JOIN ui_graph_states s ON s.id = selector.state_id
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('ui_graph_selectors')
+          AND binding.lifecycle_key = selector.lifecycle_key
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = selector.lifecycle_key
+          AND definition.status = selector.status
          WHERE s.app_id = ANY($1::text[])
-           AND selector.status = 'promoted'
+           AND definition.terminal
+           AND NOT definition.retryable
+           AND NOT definition.administrative
          ORDER BY selector.confidence DESC, selector.priority
          LIMIT $2`,
         [appIds, policy.maxContextUiItems],
@@ -285,8 +302,16 @@ export class CapabilityCatalogService {
         `SELECT app_id, transition_key, action, preconditions, postconditions,
                 safety_class, confidence
          FROM ui_graph_transitions
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('ui_graph_transitions')
+          AND binding.lifecycle_key = ui_graph_transitions.lifecycle_key
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = ui_graph_transitions.lifecycle_key
+          AND definition.status = ui_graph_transitions.status
          WHERE app_id = ANY($1::text[])
-           AND status = 'promoted'
+           AND definition.terminal
+           AND NOT definition.retryable
+           AND NOT definition.administrative
            AND safety_class = ANY($3::text[])
          ORDER BY confidence DESC, cost
          LIMIT $2`,
@@ -295,7 +320,13 @@ export class CapabilityCatalogService {
       db.query(
         `SELECT *
          FROM generated_workflow_plan_cache
-         WHERE artifact_state IN ('failed', 'quarantined')
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('generated_workflow_plan_cache')
+          AND binding.lifecycle_key = generated_workflow_plan_cache.lifecycle_key
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = generated_workflow_plan_cache.lifecycle_key
+          AND definition.status = generated_workflow_plan_cache.artifact_state
+         WHERE (definition.retryable OR definition.administrative)
            AND LOWER(platform) = LOWER($1)
          ORDER BY updated_at DESC
          LIMIT $2`,

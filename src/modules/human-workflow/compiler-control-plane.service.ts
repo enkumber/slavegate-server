@@ -73,10 +73,16 @@ export async function loadHumanWorkflowCompilerControlPlane(): Promise<HumanWork
   const db = getDb();
   const control = await db.query<{ payload: Record<string, unknown> }>(
     `SELECT payload
-       FROM runtime_semantic_entries
+       FROM runtime_semantic_entries entry
+       JOIN lifecycle_resource_bindings binding
+         ON binding.resource_table = to_regclass('runtime_semantic_entries')
+        AND binding.lifecycle_key = entry.lifecycle_key
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = entry.lifecycle_key
+        AND definition.status = entry.status
       WHERE namespace = 'compiler_control_plane'
         AND entry_key = 'human_workflow_v1'
-        AND status = 'active'
+        AND definition.dispatchable
       LIMIT 1`,
   );
   const payload = control.rows[0]?.payload;
@@ -115,9 +121,15 @@ export async function loadHumanWorkflowCompilerControlPlane(): Promise<HumanWork
     ),
     db.query<{ payload: Record<string, unknown> }>(
       `SELECT payload
-         FROM runtime_semantic_entries
+         FROM runtime_semantic_entries entry
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('runtime_semantic_entries')
+          AND binding.lifecycle_key = entry.lifecycle_key
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = entry.lifecycle_key
+          AND definition.status = entry.status
         WHERE namespace = 'tool_catalog'
-          AND status = 'active'
+          AND definition.dispatchable
         ORDER BY priority DESC, entry_key`,
     ),
   ]);
