@@ -4489,8 +4489,11 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
         `SELECT DISTINCT j.id, j.status, j.created_at, j.started_at
          FROM jobs j
          JOIN job_execution_events e ON e.job_id = j.id
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = j.lifecycle_key
+          AND state.status = j.status
          WHERE e.workflow_id = ANY($1::uuid[])
-           AND j.status IN ('pending', 'running')
+           AND NOT state.terminal
          ORDER BY j.created_at ASC`,
         [workflowIds],
       )

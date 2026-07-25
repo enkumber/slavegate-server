@@ -82,8 +82,7 @@ CREATE TABLE IF NOT EXISTS jobs (
                              'pm_uninstall','reboot','ota_update'
                            )),
   params       JSONB       NOT NULL,
-  status       TEXT        NOT NULL DEFAULT 'pending'
-                           CHECK (status IN ('pending','running','completed','failed','cancelled','timeout')),
+  status       TEXT        NOT NULL,
   output       JSONB,
   error        TEXT,
   duration_ms  INTEGER,
@@ -187,8 +186,7 @@ CREATE TABLE IF NOT EXISTS workflows (
   template_id  TEXT        REFERENCES workflow_templates(id),
   account_id   UUID,       -- FK to accounts added in Phase 3 migration
   device_id    UUID        REFERENCES devices(id) ON DELETE SET NULL,
-  status       TEXT        NOT NULL DEFAULT 'queued'
-                           CHECK (status IN ('queued','running','paused','completed','failed','cancelled')),
+  status       TEXT        NOT NULL,
   current_step INT         NOT NULL DEFAULT 0,
   total_steps  INT,
   checkpoint   JSONB       NOT NULL DEFAULT '{}',

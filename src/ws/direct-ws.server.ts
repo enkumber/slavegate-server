@@ -45,6 +45,7 @@ import { pnqV2RuntimeService, runPnqV2ShadowSideEffect } from "../modules/device
 import { isPnqV2ShadowRuntimeEnabled } from "../modules/device-execution/pnq-v2-runtime-config";
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
 import { recordJobExecutionEventDetached } from "../modules/observability/job-execution-events";
+import { transitionJob } from "../modules/dispatcher/job-lifecycle.service";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -1477,12 +1478,13 @@ export class DirectWsServer {
     const jobId = typeof msg.jobId === "string" ? msg.jobId : "";
     if (!jobId) return;
     if (eventType === "agent_job_started") {
-      await getDb().query(
-        `UPDATE jobs
-         SET status = 'running', started_at = COALESCE(started_at, NOW())
-         WHERE id = $1 AND device_id = $2 AND status IN ('pending', 'queued')`,
-        [jobId, conn.deviceId],
-      ).catch((err) => console.warn(`[direct-ws] JOB_STARTED persistence failed: ${(err as Error).message}`));
+      const claimed = await transitionJob(jobId, "claim", {}, getDb(), conn.deviceId).catch((err) => {
+        console.warn(`[direct-ws] JOB_STARTED persistence failed: ${(err as Error).message}`);
+        return null;
+      });
+      if (!claimed) {
+        console.warn(`[direct-ws] JOB_STARTED rejected for ${jobId.slice(0, 8)} on device ${conn.deviceId.slice(0, 8)}`);
+      }
     }
     recordJobExecutionEventDetached({
       jobId,

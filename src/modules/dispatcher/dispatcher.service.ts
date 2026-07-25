@@ -21,6 +21,12 @@ import type { JobType, JobParams, JobDispatchPayload } from "../../../shared/pro
 import type { Job, DispatchJobRequest } from "../../../shared/protocol/api-types";
 import { v4 as uuidv4 } from "uuid";
 import { recordJobExecutionEventDetached } from "../observability/job-execution-events";
+import {
+  expireStaleJobs,
+  transitionJob,
+  transitionJobFromExternalStatus,
+} from "./job-lifecycle.service";
+import { getLifecycleTransition, lifecycleKeys } from "../lifecycle/lifecycle.service";
 
 // ─── Whitelist ─────────────────────────────────────────────────────────────────
 // DO NOT add generic shell commands here. Extend only with explicit approval.
@@ -167,8 +173,8 @@ export class DispatcherService {
     const db = getDb();
     const jobId = uuidv4();
     await db.query(
-      `INSERT INTO jobs (id, device_id, job_type, params, status, timeout_ms)
-       VALUES ($1, $2, $3, $4, 'pending', $5)`,
+      `INSERT INTO jobs (id, device_id, job_type, params, timeout_ms)
+       VALUES ($1, $2, $3, $4, $5)`,
       [jobId, req.deviceId, req.type, JSON.stringify(req.params), timeoutMs]
     );
     recordJobExecutionEventDetached({
@@ -243,8 +249,15 @@ export class DispatcherService {
     const enforceTimeout = async () => {
       try {
         const job = await this.getJob(jobId);
-        if (job && (job.status === "running" || job.status === "pending")) {
+        if (job) {
           const db = getDb();
+          const expiryTransition = await getLifecycleTransition(
+            lifecycleKeys.dispatcherJob,
+            job.status,
+            "expire",
+            db,
+          );
+          if (!expiryTransition?.automatic) return;
 
           // A server-workflow child can remain durably queued behind another
           // PNQ root for longer than its execution timeout.  Its execution
@@ -280,13 +293,11 @@ export class DispatcherService {
             }
           }
 
+          const expired = await transitionJob(jobId, "expire", {}, db);
+          if (!expired) return;
           await db.query(
-            `UPDATE jobs SET status = 'timeout', completed_at = NOW() WHERE id = $1`,
-            [jobId]
-          );
-          await db.query(
-            "UPDATE command_log SET result_status = 'timeout' WHERE job_id = $1",
-            [jobId]
+            "UPDATE command_log SET result_status = $1 WHERE job_id = $2",
+            [expired.status, jobId]
           );
           recordJobExecutionEventDetached({
             jobId,
@@ -346,22 +357,15 @@ export class DispatcherService {
       ? new Date(completedAt.getTime() - payload.durationMs)
       : null;
 
-    await db.query(
-      `UPDATE jobs
-       SET status = $1, output = $2, error = $3, duration_ms = $4::integer,
-           completed_at = $5,
-           started_at = COALESCE(started_at, $6)
-       WHERE id = $7`,
-      [
-        payload.status,
-        payload.output ? JSON.stringify(payload.output) : null,
-        payload.error ?? null,
-        payload.durationMs,
-        completedAt,
-        startedAt,
-        payload.jobId,
-      ]
-    );
+    const transitioned = await transitionJobFromExternalStatus(payload.jobId, payload.status, {
+      output: payload.output ?? null,
+      error: payload.error ?? null,
+      durationMs: payload.durationMs,
+      startedAt,
+    }, db, payload.deviceId);
+    if (!transitioned) {
+      throw new Error(`DB lifecycle rejected external job transition to '${payload.status}'`);
+    }
 
     // Update audit log with final result status.
     // command_log is append-mostly — this single UPDATE per job (dispatch → completion)
@@ -369,7 +373,7 @@ export class DispatcherService {
     // a second INSERT with event_type='result' instead.
     await db.query(
       "UPDATE command_log SET result_status = $1 WHERE job_id = $2",
-      [payload.status, payload.jobId]
+      [transitioned.status, payload.jobId]
     );
     recordJobExecutionEventDetached({
       jobId: payload.jobId,
@@ -377,7 +381,7 @@ export class DispatcherService {
       source: "dispatcher",
       eventType: "job_result_persisted",
       details: {
-        status: payload.status,
+        status: transitioned.status,
         durationMs: payload.durationMs,
         error: payload.error ?? null,
         authority: payload.authority ?? null,
@@ -390,7 +394,7 @@ export class DispatcherService {
       deviceId: payload.deviceId,
       rootKind: "job" as const,
       externalId: payload.jobId,
-      status: payload.status,
+      status: transitioned.status,
       actor: "dispatcher_result",
       reason: payload.error ?? payload.status,
       metadata: {
@@ -442,14 +446,7 @@ export class DispatcherService {
   }
 
   async cancelJob(jobId: string): Promise<boolean> {
-    const db = getDb();
-    const result = await db.query(
-      `UPDATE jobs SET status = 'cancelled', completed_at = NOW()
-       WHERE id = $1 AND status IN ('pending')
-       RETURNING id, device_id`,
-      [jobId]
-    );
-    const row = result.rows[0] as { id: string; device_id: string } | undefined;
+    const row = await transitionJob(jobId, "cancel");
     if (!row) return false;
     await deviceExecutionArbiter.observeTerminal({
       deviceId: row.device_id,
@@ -460,6 +457,24 @@ export class DispatcherService {
       reason: "queued_job_cancelled",
     });
     return true;
+  }
+
+  async sweepStaleJobs(): Promise<{ expiredCount: number; jobIds: string[] }> {
+    const expired = await expireStaleJobs();
+    for (const row of expired) {
+      await getDb().query(
+        "UPDATE command_log SET result_status = $1 WHERE job_id = $2",
+        [row.status, row.id],
+      );
+      recordJobExecutionEventDetached({
+        jobId: row.id,
+        deviceId: row.device_id,
+        source: "dispatcher",
+        eventType: "dispatcher_timeout",
+        details: { authority: "db_lifecycle_stale_policy" },
+      });
+    }
+    return { expiredCount: expired.length, jobIds: expired.map((row) => row.id) };
   }
 
   async close(): Promise<void> {

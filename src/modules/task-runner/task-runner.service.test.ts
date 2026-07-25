@@ -377,8 +377,8 @@ describe("task-runner generated_workflow routine", () => {
       status: "completed",
     }));
     expect(mocks.dbQuery).toHaveBeenCalledWith(
-      expect.stringContaining("task_status_transitions transition"),
-      [TASK_ID, "succeed", expect.any(String)],
+      expect.stringContaining("lifecycle_transitions transition"),
+      [TASK_ID, "succeed", expect.any(String), "task"],
     );
   });
 

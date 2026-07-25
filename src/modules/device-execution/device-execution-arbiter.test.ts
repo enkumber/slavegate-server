@@ -1435,7 +1435,9 @@ describe("DeviceExecutionArbiter observe mode", () => {
       if (normalized === "BEGIN" || normalized === "COMMIT" || normalized === "ROLLBACK") {
         return { rows: [], rowCount: 0 };
       }
-      expect(normalized).toContain("jobs.status NOT IN ('completed', 'failed', 'timeout', 'cancelled')");
+      expect(normalized).toContain("JOIN lifecycle_state_definitions job_state");
+      expect(normalized).toContain("NOT job_state.terminal");
+      expect(normalized).not.toContain("jobs.status NOT IN");
       expect(normalized).toContain("jobs.completed_at IS NULL");
       expect(normalized).toContain("jobs.started_at IS NOT NULL");
       expect(normalized).toContain("workflows.status NOT IN ('completed', 'failed', 'cancelled')");

@@ -2975,9 +2975,12 @@ export class DeviceExecutionArbiter {
               SELECT 1
               FROM command_log commands
               JOIN jobs jobs ON jobs.id = commands.job_id
+              JOIN lifecycle_state_definitions job_state
+                ON job_state.lifecycle_key = jobs.lifecycle_key
+               AND job_state.status = jobs.status
               WHERE commands.command_raw LIKE ('workflow:' || roots.external_id || ' step:%')
                 AND (
-                  jobs.status NOT IN ('completed', 'failed', 'timeout', 'cancelled')
+                  NOT job_state.terminal
                   OR jobs.completed_at IS NULL
                   OR (
                     jobs.started_at IS NOT NULL
@@ -3120,11 +3123,14 @@ export class DeviceExecutionArbiter {
                   AND EXISTS (
                     SELECT 1
                     FROM jobs child_job
+                    JOIN lifecycle_state_definitions child_job_state
+                      ON child_job_state.lifecycle_key = child_job.lifecycle_key
+                     AND child_job_state.status = child_job.status
                     JOIN command_log child_command
                       ON child_command.job_id = child_job.id
                     WHERE child_job.id::text = child.operation_id
                       AND child_job.device_id = roots.device_id
-                      AND child_job.status IN ('completed', 'failed', 'timeout', 'cancelled')
+                      AND child_job_state.terminal
                       AND child_job.completed_at IS NOT NULL
                       AND child_job.completed_at <= NOW() - INTERVAL '5 minutes'
                       AND child_command.command_raw LIKE ('workflow:' || roots.external_id || ' step:%')
@@ -3135,9 +3141,12 @@ export class DeviceExecutionArbiter {
               SELECT 1
               FROM command_log commands
               JOIN jobs jobs ON jobs.id = commands.job_id
+              JOIN lifecycle_state_definitions job_state
+                ON job_state.lifecycle_key = jobs.lifecycle_key
+               AND job_state.status = jobs.status
               WHERE commands.command_raw LIKE ('workflow:' || roots.external_id || ' step:%')
                 AND (jobs.device_id IS DISTINCT FROM roots.device_id
-                     OR jobs.status NOT IN ('completed', 'failed', 'timeout', 'cancelled')
+                     OR NOT job_state.terminal
                      OR jobs.completed_at IS NULL)
             )
           FOR UPDATE OF roots, workflows, root_operation

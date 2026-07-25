@@ -54,6 +54,7 @@ export function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("segment_builder_agent_jobs") ||
     fileName.includes("task_status_contract") ||
     fileName.includes("task_lifecycle_db_authoritative") ||
+    fileName.includes("generic_resource_lifecycle") ||
     fileName.includes("phone_network_incidents_and_audits");
 }
 

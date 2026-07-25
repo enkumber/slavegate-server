@@ -1,5 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { getDb } from "../../db/client";
+import {
+  lifecycleKeys,
+  listLifecycleStates,
+  getLifecycleState,
+} from "../lifecycle/lifecycle.service";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
 
@@ -37,33 +42,41 @@ function rowToDefinition(row: Record<string, unknown>): TaskStatusDefinition {
 }
 
 export async function getStatusDefinition(status: string, db: Queryable = getDb()): Promise<TaskStatusDefinition | null> {
-  const result = await db.query(
-    `SELECT status, terminal, retryable, administrative, dispatchable, manual, description
-       FROM task_status_definitions
-      WHERE status = $1`,
-    [status],
-  );
-  return result.rows[0] ? rowToDefinition(result.rows[0]) : null;
+  const definition = await getLifecycleState(lifecycleKeys.task, status, db);
+  return definition ? {
+    status: definition.status,
+    terminal: definition.terminal,
+    retryable: definition.retryable,
+    administrative: definition.administrative,
+    dispatchable: definition.dispatchable,
+    manual: definition.manual,
+    description: definition.description,
+  } : null;
 }
 
 export async function listStatusDefinitions(db: Queryable = getDb()): Promise<TaskStatusDefinition[]> {
-  const result = await db.query(
-    `SELECT status, terminal, retryable, administrative, dispatchable, manual, description
-       FROM task_status_definitions
-      ORDER BY sort_order, status`,
-  );
-  return result.rows.map(rowToDefinition);
+  const definitions = await listLifecycleStates(lifecycleKeys.task, db);
+  return definitions.map((definition) => ({
+    status: definition.status,
+    terminal: definition.terminal,
+    retryable: definition.retryable,
+    administrative: definition.administrative,
+    dispatchable: definition.dispatchable,
+    manual: definition.manual,
+    description: definition.description,
+  }));
 }
 
 export async function isTransitionAllowed(from: string, to: string, db: Queryable = getDb()): Promise<boolean> {
   const result = await db.query<{ allowed: boolean }>(
     `SELECT EXISTS (
        SELECT 1
-         FROM task_status_transitions transition
-        WHERE transition.from_status = $1
-          AND transition.to_status = $2
+         FROM lifecycle_transitions transition
+        WHERE transition.lifecycle_key = $1
+          AND transition.from_status = $2
+          AND transition.to_status = $3
      ) AS allowed`,
-    [from, to],
+    [lifecycleKeys.task, from, to],
   );
   return result.rows[0]?.allowed === true;
 }
@@ -72,11 +85,14 @@ export async function getAllowedTransitions(from: string, db: Queryable = getDb(
   const result = await db.query(
     `SELECT target.status, target.terminal, target.retryable, target.administrative,
             target.dispatchable, target.manual, target.description
-       FROM task_status_transitions transition
-       JOIN task_status_definitions target ON target.status = transition.to_status
-      WHERE transition.from_status = $1
+       FROM lifecycle_transitions transition
+       JOIN lifecycle_state_definitions target
+         ON target.lifecycle_key = transition.lifecycle_key
+        AND target.status = transition.to_status
+      WHERE transition.lifecycle_key = $1
+        AND transition.from_status = $2
       ORDER BY target.sort_order, target.status`,
-    [from],
+    [lifecycleKeys.task, from],
   );
   return result.rows.map(rowToDefinition);
 }
@@ -91,10 +107,12 @@ export async function transitionTask<T extends Record<string, unknown> = Record<
     `WITH selected AS (
        SELECT t.id, transition.*
          FROM tasks t
-         JOIN task_status_transitions transition
-           ON transition.from_status = t.status
+         JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = t.lifecycle_key
+          AND transition.from_status = t.status
           AND transition.action_key = $2
         WHERE t.id = $1
+          AND t.lifecycle_key = $4
         FOR UPDATE OF t
      )
      UPDATE tasks
@@ -135,7 +153,7 @@ export async function transitionTask<T extends Record<string, unknown> = Record<
        FROM selected
       WHERE tasks.id = selected.id
       RETURNING tasks.*`,
-    [taskId, action, JSON.stringify(patch)],
+    [taskId, action, JSON.stringify(patch), lifecycleKeys.task],
   );
   return (result.rows[0] as T | undefined) ?? null;
 }
@@ -149,19 +167,22 @@ export async function transitionTaskManually<T extends Record<string, unknown> =
     `WITH selected AS (
        SELECT transition.action_key
          FROM tasks t
-         JOIN task_status_transitions transition
-           ON transition.from_status = t.status
+         JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = t.lifecycle_key
+          AND transition.from_status = t.status
           AND transition.to_status = $2
           AND transition.manual_allowed
-         JOIN task_status_definitions target
-           ON target.status = transition.to_status
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
           AND target.manual
         WHERE t.id = $1
+          AND t.lifecycle_key = $3
         ORDER BY transition.action_key
         LIMIT 1
      )
      SELECT selected.action_key FROM selected`,
-    [taskId, targetStatus],
+    [taskId, targetStatus, lifecycleKeys.task],
   );
   const action = result.rows[0]?.action_key;
   if (typeof action !== "string") return null;
@@ -176,11 +197,15 @@ export async function retryConfiguredTasks(
     WITH candidates AS (
       SELECT t.id, t.status AS from_status
         FROM tasks t
-        JOIN task_status_definitions state ON state.status = t.status
-        JOIN task_status_transitions transition
-          ON transition.from_status = t.status
+        JOIN lifecycle_state_definitions state
+          ON state.lifecycle_key = t.lifecycle_key
+         AND state.status = t.status
+        JOIN lifecycle_transitions transition
+          ON transition.lifecycle_key = t.lifecycle_key
+         AND transition.from_status = t.status
          AND transition.action_key = $1
-       WHERE state.retryable
+       WHERE t.lifecycle_key = $2
+         AND state.retryable
        FOR UPDATE OF t SKIP LOCKED
     ),
     updated AS (
@@ -194,14 +219,15 @@ export async function retryConfiguredTasks(
              root_error_details = CASE WHEN transition.clear_failure THEN '{}'::jsonb ELSE t.root_error_details END,
              updated_at = NOW()
         FROM candidates
-        JOIN task_status_transitions transition
-          ON transition.from_status = candidates.from_status
+        JOIN lifecycle_transitions transition
+          ON transition.lifecycle_key = $2
+         AND transition.from_status = candidates.from_status
          AND transition.action_key = $1
        WHERE t.id = candidates.id
        RETURNING t.id
     )
     SELECT COUNT(*)::int AS count FROM updated
-  `, [action]);
+  `, [action, lifecycleKeys.task]);
   return Number(result.rows[0]?.count ?? 0);
 }
 
@@ -215,9 +241,12 @@ export async function getConfiguredRetryStats(
       COUNT(*) FILTER (WHERE COALESCE(t.retry_count, 0) < $1)::int AS retryable,
       COUNT(*) FILTER (WHERE COALESCE(t.retry_count, 0) >= $1)::int AS exhausted
       FROM tasks t
-      JOIN task_status_definitions state ON state.status = t.status
-     WHERE state.retryable
-  `, [maxRetries]);
+      JOIN lifecycle_state_definitions state
+        ON state.lifecycle_key = t.lifecycle_key
+       AND state.status = t.status
+     WHERE t.lifecycle_key = $2
+       AND state.retryable
+  `, [maxRetries, lifecycleKeys.task]);
   return {
     totalFailed: Number(result.rows[0]?.total ?? 0),
     retryableCount: Number(result.rows[0]?.retryable ?? 0),

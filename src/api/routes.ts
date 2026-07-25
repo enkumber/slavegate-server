@@ -13,6 +13,10 @@ import crypto from "crypto";
 import { requireAdminAuth, requireApiGateAuth, signJwt, verifyJwt } from "./auth.middleware";
 import { devicesService } from "../modules/devices/devices.service";
 import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
+import {
+  listJobStatusDefinitions,
+  transitionJobManually,
+} from "../modules/dispatcher/job-lifecycle.service";
 import { authService } from "../modules/auth/auth.service";
 import { directWsServer } from "../ws/direct-ws.server";
 
@@ -775,6 +779,10 @@ router.get("/jobs", async (req, res) => {
   res.json({ ok: true, data: result });
 });
 
+router.get("/jobs/status-definitions", async (_req, res) => {
+  res.json({ ok: true, data: await listJobStatusDefinitions() });
+});
+
 router.get("/jobs/:id", async (req, res) => {
   const job = await dispatcherService.getJob(req.params.id);
   if (!job) return res.status(404).json({ ok: false, error: "Not found" });
@@ -788,6 +796,16 @@ router.get("/jobs/:id/events", requireAdminAuth, async (req, res) => {
   const job = await dispatcherService.getJob(req.params.id);
   if (!job) return res.status(404).json({ ok: false, error: "Not found" });
   res.json({ ok: true, data: await listJobExecutionEvents(req.params.id) });
+});
+
+router.patch("/jobs/:id", requireAdminAuth, async (req, res) => {
+  const status = typeof req.body?.status === "string" ? req.body.status : "";
+  if (!status) return res.status(400).json({ ok: false, error: "status required" });
+  const updated = await transitionJobManually(req.params.id, status);
+  if (!updated) {
+    return res.status(409).json({ ok: false, error: "Job status transition is not allowed" });
+  }
+  res.json({ ok: true, data: { id: updated.id, status: updated.status } });
 });
 
 router.post("/jobs", async (req, res) => {

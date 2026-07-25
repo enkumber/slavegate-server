@@ -282,6 +282,21 @@ async function bootstrap(): Promise<void> {
   segmentBuildJobService.sweepRecovery().catch(err =>
     console.error("[segment-builder] startup recovery sweep error:", (err as Error).message)
   );
+  const dispatcherLifecycleTimer = setInterval(() => {
+    dispatcherService.sweepStaleJobs()
+      .then((summary) => {
+        if (summary.expiredCount > 0) {
+          console.warn(`[dispatcher] lifecycle sweep expired=${summary.expiredCount}`);
+        }
+      })
+      .catch(err =>
+        console.error("[dispatcher] lifecycle sweep error:", (err as Error).message)
+      );
+  }, 30_000);
+  dispatcherLifecycleTimer.unref();
+  dispatcherService.sweepStaleJobs().catch(err =>
+    console.error("[dispatcher] startup lifecycle sweep error:", (err as Error).message)
+  );
   if (isPnqV2ShadowRuntimeEnabled()) {
     pnqV2RuntimeService.startPeriodicSweep();
   }
@@ -320,6 +335,7 @@ async function bootstrap(): Promise<void> {
     httpServer.close();
     if (queueSweepTimer) clearInterval(queueSweepTimer);
     clearInterval(segmentBuilderRecoveryTimer);
+    clearInterval(dispatcherLifecycleTimer);
     if (isPnqV2ShadowRuntimeEnabled()) {
       await pnqV2RuntimeService.close();
     }
