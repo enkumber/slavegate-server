@@ -198,6 +198,10 @@ function completedWorkflow(variables: Record<string, unknown> = REDDIT_ACCOUNT_H
     accountId: ACCOUNT_ID,
     deviceId: DEVICE_ID,
     status: "completed",
+    lifecycleTerminal: true,
+    lifecycleRetryable: false,
+    lifecycleAdministrative: false,
+    lifecycleDispatchable: false,
     currentStep: 2,
     totalSteps: 2,
     checkpoint: {
@@ -234,6 +238,10 @@ function failedWorkflow(error = "RECOVERY_BUDGET_EXCEEDED") {
   return {
     ...completedWorkflow({}),
     status: "failed",
+    lifecycleTerminal: true,
+    lifecycleRetryable: true,
+    lifecycleAdministrative: false,
+    lifecycleDispatchable: false,
     currentStep: 1,
     totalSteps: 3,
     error,
@@ -262,11 +270,19 @@ function task(params: Record<string, unknown>, overrides: Partial<TaskRow> = {})
 }
 
 function mockTaskDb(row: TaskRow, platform = "reddit") {
-  mocks.dbQuery
-    .mockResolvedValue({ rows: [], rowCount: 0 })
-    .mockResolvedValueOnce({ rows: [row] })
-    .mockResolvedValueOnce({ rows: [{ platform, client_id: CLIENT_ID }] })
-    .mockResolvedValueOnce({ rows: [{ ...row, status: "running" }], rowCount: 1 });
+  mocks.dbQuery.mockImplementation(async (sql: string) => {
+    const normalized = sql.replace(/\s+/g, " ").trim();
+    if (normalized.startsWith("SELECT id, account_id, device_id, routine, params, scheduled_time, status FROM tasks")) {
+      return { rows: [row], rowCount: 1 };
+    }
+    if (normalized.startsWith("SELECT platform, client_id FROM accounts")) {
+      return { rows: [{ platform, client_id: CLIENT_ID }], rowCount: 1 };
+    }
+    if (normalized.includes("UPDATE tasks") && normalized.includes("lifecycle_transitions transition")) {
+      return { rows: [{ ...row, status: "runtime-selected" }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
 }
 
 describe("task-runner generated_workflow routine", () => {
@@ -299,7 +315,6 @@ describe("task-runner generated_workflow routine", () => {
     mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
 
     const result = await executeTaskNow(TASK_ID);
-
     expect(result).toMatchObject({
       success: true,
       stepsCompleted: 2,
@@ -378,7 +393,17 @@ describe("task-runner generated_workflow routine", () => {
     }));
     expect(mocks.dbQuery).toHaveBeenCalledWith(
       expect.stringContaining("lifecycle_transitions transition"),
-      [TASK_ID, "succeed", expect.any(String), "task"],
+      [
+        TASK_ID,
+        JSON.stringify({
+          targetTerminal: true,
+          targetRetryable: false,
+          targetAdministrative: false,
+          transitionMarkCompleted: true,
+          transitionClearFailure: true,
+        }),
+        expect.any(String),
+      ],
     );
   });
 
@@ -716,6 +741,10 @@ describe("task-runner generated_workflow routine", () => {
       mocks.getWorkflow.mockImplementation(async () => ({
         ...completedWorkflow(),
         status: cancelled ? "cancelled" : "queued",
+        lifecycleTerminal: cancelled,
+        lifecycleRetryable: false,
+        lifecycleAdministrative: cancelled,
+        lifecycleDispatchable: !cancelled,
         currentStep: 0,
         completedAt: cancelled ? new Date().toISOString() : null,
       }));
@@ -749,6 +778,10 @@ describe("task-runner generated_workflow routine", () => {
       mocks.getWorkflow.mockImplementation(async () => ({
         ...completedWorkflow(),
         status: queuePumpWon ? "completed" : "queued",
+        lifecycleTerminal: queuePumpWon,
+        lifecycleRetryable: false,
+        lifecycleAdministrative: false,
+        lifecycleDispatchable: !queuePumpWon,
         currentStep: queuePumpWon ? 2 : 0,
       }));
       mocks.cancelPersistedWorkflowSafely.mockImplementation(async () => {
@@ -1293,10 +1326,7 @@ describe("task-runner compiled_workflow routine", () => {
       { compiledWorkflow, compileLlmCalls: 0, disableTaskRetry: true },
       { account_id: null, routine: "compiled_workflow" },
     );
-    mocks.dbQuery
-      .mockResolvedValueOnce({ rows: [row] })
-      .mockResolvedValueOnce({ rows: [{ ...row, status: "running" }], rowCount: 1 })
-      .mockResolvedValue({ rows: [] });
+    mockTaskDb(row, "android");
     mocks.compiledWorkflowToEdgeTemplate.mockResolvedValueOnce({
       id: compiledWorkflow.id,
       name: compiledWorkflow.name,
@@ -1317,6 +1347,10 @@ describe("task-runner compiled_workflow routine", () => {
     mocks.getWorkflow.mockResolvedValueOnce({
       id: WORKFLOW_ID,
       status: "completed",
+      lifecycleTerminal: true,
+      lifecycleRetryable: false,
+      lifecycleAdministrative: false,
+      lifecycleDispatchable: false,
       currentStep: 1,
       totalSteps: 1,
       checkpoint: { variables: { observed: true } },

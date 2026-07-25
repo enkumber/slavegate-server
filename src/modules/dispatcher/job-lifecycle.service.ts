@@ -1,8 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { getDb } from "../../db/client";
 import {
-  lifecycleKeys,
-  listLifecycleStates,
+  lifecycleTransitionSelectorPredicate,
+  listResourceLifecycleStates,
+  serializeLifecycleTransitionSelector,
+  type LifecycleTransitionSelector,
   type LifecycleStateDefinition,
 } from "../lifecycle/lifecycle.service";
 
@@ -24,28 +26,45 @@ export interface JobLifecycleRow extends Record<string, unknown> {
 export async function listJobStatusDefinitions(
   db: Queryable = getDb(),
 ): Promise<LifecycleStateDefinition[]> {
-  return listLifecycleStates(lifecycleKeys.dispatcherJob, db);
+  return listResourceLifecycleStates("jobs", db);
 }
 
 export async function transitionJob(
   jobId: string,
-  actionKey: string,
+  selector: LifecycleTransitionSelector,
   patch: JobLifecyclePatch = {},
   db: Queryable = getDb(),
   expectedDeviceId: string | null = null,
 ): Promise<JobLifecycleRow | null> {
+  const selectorPredicate = lifecycleTransitionSelectorPredicate("transition", "target", "$2");
   const result = await db.query(
-    `WITH selected AS (
-       SELECT j.id, transition.*
+    `WITH locked AS (
+       SELECT j.*
          FROM jobs j
+        WHERE j.id = $1
+          AND ($4::uuid IS NULL OR j.device_id = $4::uuid)
+        FOR UPDATE
+     ),
+     candidates AS (
+       SELECT DISTINCT j.id, transition.to_status, transition.mark_started,
+              transition.mark_completed, transition.clear_completed,
+              transition.clear_failure, transition.reset_retry
+         FROM locked j
          JOIN lifecycle_transitions transition
            ON transition.lifecycle_key = j.lifecycle_key
           AND transition.from_status = j.status
-          AND transition.action_key = $2
-        WHERE j.id = $1
-          AND j.lifecycle_key = $4
-          AND ($5::uuid IS NULL OR j.device_id = $5::uuid)
-        FOR UPDATE OF j
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+        WHERE ${selectorPredicate}
+     ),
+     selected AS (
+       SELECT ranked.*
+         FROM (
+           SELECT candidates.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+             FROM candidates
+         ) ranked
+        WHERE ranked.candidate_count = 1
      )
      UPDATE jobs
         SET status = selected.to_status,
@@ -72,7 +91,7 @@ export async function transitionJob(
        FROM selected
       WHERE jobs.id = selected.id
       RETURNING jobs.*`,
-    [jobId, actionKey, JSON.stringify(serializePatch(patch)), lifecycleKeys.dispatcherJob, expectedDeviceId],
+    [jobId, serializeLifecycleTransitionSelector(selector), JSON.stringify(serializePatch(patch)), expectedDeviceId],
   );
   return (result.rows[0] as JobLifecycleRow | undefined) ?? null;
 }
@@ -94,8 +113,7 @@ export async function transitionJobFromExternalStatus(
           AND transition.to_status = $2
           AND transition.external_allowed
         WHERE j.id = $1
-          AND j.lifecycle_key = $4
-          AND ($5::uuid IS NULL OR j.device_id = $5::uuid)
+          AND ($4::uuid IS NULL OR j.device_id = $4::uuid)
         ORDER BY transition.action_key
         LIMIT 1
         FOR UPDATE OF j
@@ -125,7 +143,7 @@ export async function transitionJobFromExternalStatus(
        FROM selected
       WHERE jobs.id = selected.id
       RETURNING jobs.*`,
-    [jobId, targetStatus, JSON.stringify(serializePatch(patch)), lifecycleKeys.dispatcherJob, expectedDeviceId],
+    [jobId, targetStatus, JSON.stringify(serializePatch(patch)), expectedDeviceId],
   );
   return (result.rows[0] as JobLifecycleRow | undefined) ?? null;
 }
@@ -149,7 +167,6 @@ export async function transitionJobManually(
           AND target.status = transition.to_status
           AND target.manual
         WHERE j.id = $1
-          AND j.lifecycle_key = $3
         ORDER BY transition.action_key
         LIMIT 1
         FOR UPDATE OF j
@@ -166,7 +183,7 @@ export async function transitionJobManually(
        FROM selected
       WHERE jobs.id = selected.id
       RETURNING jobs.*`,
-    [jobId, targetStatus, lifecycleKeys.dispatcherJob],
+    [jobId, targetStatus],
   );
   return (result.rows[0] as JobLifecycleRow | undefined) ?? null;
 }
@@ -186,8 +203,7 @@ export async function expireStaleJobs(
           AND transition.from_status = j.status
           AND transition.action_key = state.stale_action_key
           AND transition.automatic
-        WHERE j.lifecycle_key = $1
-          AND state.stale_after_ms IS NOT NULL
+        WHERE state.stale_after_ms IS NOT NULL
           AND j.created_at + (state.stale_after_ms * INTERVAL '1 millisecond') <= NOW()
         FOR UPDATE OF j SKIP LOCKED
      )
@@ -198,9 +214,45 @@ export async function expireStaleJobs(
        FROM candidates
       WHERE jobs.id = candidates.id
       RETURNING jobs.*`,
-    [lifecycleKeys.dispatcherJob],
   );
   return result.rows as JobLifecycleRow[];
+}
+
+export async function transitionJobByConfiguredStalePolicy(
+  jobId: string,
+  db: Queryable = getDb(),
+): Promise<JobLifecycleRow | null> {
+  const result = await db.query(
+    `WITH selected AS (
+       SELECT j.id, transition.*
+         FROM jobs j
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = j.lifecycle_key
+          AND state.status = j.status
+         JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = j.lifecycle_key
+          AND transition.from_status = j.status
+          AND transition.action_key = state.stale_action_key
+          AND transition.automatic
+        WHERE j.id = $1
+          AND state.stale_action_key IS NOT NULL
+        FOR UPDATE OF j
+     )
+     UPDATE jobs
+        SET status = selected.to_status,
+            started_at = CASE WHEN selected.mark_started THEN COALESCE(jobs.started_at, NOW()) ELSE jobs.started_at END,
+            completed_at = CASE
+              WHEN selected.mark_completed THEN NOW()
+              WHEN selected.clear_completed THEN NULL
+              ELSE jobs.completed_at
+            END,
+            error = CASE WHEN selected.clear_failure THEN NULL ELSE jobs.error END
+       FROM selected
+      WHERE jobs.id = selected.id
+      RETURNING jobs.*`,
+    [jobId],
+  );
+  return (result.rows[0] as JobLifecycleRow | undefined) ?? null;
 }
 
 function serializePatch(patch: JobLifecyclePatch): Record<string, unknown> {

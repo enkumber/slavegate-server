@@ -13,7 +13,6 @@
  */
 
 import { getDb } from "../../db/client";
-import { lifecycleKeys } from "../lifecycle/lifecycle.service";
 import { transitionResearchJob } from "./research-lifecycle.service";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -21,7 +20,7 @@ import { transitionResearchJob } from "./research-lifecycle.service";
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export type ResearchJobType = 'research_profile' | 'research_hashtag' | 'research_followers';
-export type ResearchJobStatus = 'pending' | 'scheduled' | 'running' | 'completed' | 'failed';
+export type ResearchJobStatus = string;
 
 export interface ResearchJob {
   id: string;
@@ -212,7 +211,12 @@ class ResearchService {
    * Called by Kraken when assigning work.
    */
   async scheduleJob(jobId: string, deviceId: string): Promise<void> {
-    await transitionResearchJob(jobId, "schedule", { deviceId, scheduledAtNow: true });
+    await transitionResearchJob(jobId, {
+      targetTerminal: false,
+      targetInitial: false,
+      transitionMarkStarted: false,
+      transitionAutomatic: false,
+    }, { deviceId, scheduledAtNow: true });
     
     console.log(`[research] Scheduled job ${jobId} on device ${deviceId.slice(0, 8)}`);
   }
@@ -222,7 +226,12 @@ class ResearchService {
    * Called by Hydra when execution starts.
    */
   async startJob(jobId: string): Promise<void> {
-    await transitionResearchJob(jobId, "start");
+    await transitionResearchJob(jobId, {
+      targetTerminal: false,
+      targetInitial: false,
+      transitionMarkStarted: true,
+      transitionAutomatic: false,
+    });
     
     console.log(`[research] Started job ${jobId}`);
   }
@@ -242,7 +251,13 @@ class ResearchService {
       SELECT job_type, input FROM research_jobs WHERE id = $1
     `, [jobId]);
 
-    await transitionResearchJob(jobId, "succeed", {
+    await transitionResearchJob(jobId, {
+      targetTerminal: true,
+      targetRetryable: false,
+      targetAdministrative: false,
+      transitionMarkCompleted: true,
+      transitionClearFailure: true,
+    }, {
       output,
       expiresAt: new Date(Date.now() + this.DEFAULT_CACHE_DAYS * 24 * 60 * 60 * 1000).toISOString(),
       error: null,
@@ -296,7 +311,13 @@ class ResearchService {
    * Called by Hydra when research fails.
    */
   async failJob(jobId: string, error: string): Promise<void> {
-    await transitionResearchJob(jobId, "fail", { error });
+    await transitionResearchJob(jobId, {
+      targetTerminal: true,
+      targetRetryable: true,
+      targetAdministrative: false,
+      transitionMarkCompleted: true,
+      transitionClearFailure: false,
+    }, { error });
     
     console.log(`[research] Failed job ${jobId}: ${error}`);
   }
@@ -360,8 +381,7 @@ class ResearchService {
          AND transition.from_status = job.status
          AND transition.action_key = state.stale_action_key
          AND transition.automatic
-        WHERE job.lifecycle_key = $1
-          AND state.stale_after_ms IS NOT NULL
+        WHERE state.stale_after_ms IS NOT NULL
           AND COALESCE(job.started_at, job.scheduled_at, job.created_at)
                 + state.stale_after_ms * INTERVAL '1 millisecond' <= NOW()
         FOR UPDATE OF job SKIP LOCKED
@@ -376,7 +396,7 @@ class ResearchService {
       FROM candidates
       WHERE job.id = candidates.id
       RETURNING job.id
-    `, [lifecycleKeys.researchJob]);
+    `);
     const count = result.rowCount ?? 0;
     if (count > 0) {
       console.log(`[research] Reset ${count} stuck jobs`);
@@ -392,14 +412,16 @@ class ResearchService {
     
     const result = await db.query(`
       SELECT state.status, COUNT(job.id) as count
-      FROM lifecycle_state_definitions state
+      FROM lifecycle_resource_bindings binding
+      JOIN lifecycle_state_definitions state
+        ON state.lifecycle_key = binding.lifecycle_key
       LEFT JOIN research_jobs job
         ON job.lifecycle_key = state.lifecycle_key
        AND job.status = state.status
-      WHERE state.lifecycle_key = $1
+      WHERE binding.resource_table = to_regclass($1)
       GROUP BY state.status, state.sort_order
       ORDER BY state.sort_order, state.status
-    `, [lifecycleKeys.researchJob]);
+    `, ["research_jobs"]);
     
     const stats: Record<string, number> = {};
     

@@ -1,9 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { getDb } from "../../db/client";
 import {
-  lifecycleKeys,
-  listLifecycleStates,
-  getLifecycleState,
+  lifecycleTransitionSelectorPredicate,
+  listResourceLifecycleStates,
+  serializeLifecycleTransitionSelector,
+  type LifecycleTransitionSelector,
 } from "../lifecycle/lifecycle.service";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
@@ -17,8 +18,6 @@ export interface TaskStatusDefinition {
   manual: boolean;
   description: string | null;
 }
-
-export type TaskLifecycleAction = string;
 
 export interface TaskTransitionPatch {
   result?: Record<string, unknown>;
@@ -42,20 +41,21 @@ function rowToDefinition(row: Record<string, unknown>): TaskStatusDefinition {
 }
 
 export async function getStatusDefinition(status: string, db: Queryable = getDb()): Promise<TaskStatusDefinition | null> {
-  const definition = await getLifecycleState(lifecycleKeys.task, status, db);
-  return definition ? {
-    status: definition.status,
-    terminal: definition.terminal,
-    retryable: definition.retryable,
-    administrative: definition.administrative,
-    dispatchable: definition.dispatchable,
-    manual: definition.manual,
-    description: definition.description,
-  } : null;
+  const result = await db.query(
+    `SELECT state.status, state.terminal, state.retryable, state.administrative,
+            state.dispatchable, state.manual, state.description
+       FROM lifecycle_resource_bindings binding
+       JOIN lifecycle_state_definitions state
+         ON state.lifecycle_key = binding.lifecycle_key
+      WHERE binding.resource_table = to_regclass($1)
+        AND state.status = $2`,
+    ["tasks", status],
+  );
+  return result.rows[0] ? rowToDefinition(result.rows[0]) : null;
 }
 
 export async function listStatusDefinitions(db: Queryable = getDb()): Promise<TaskStatusDefinition[]> {
-  const definitions = await listLifecycleStates(lifecycleKeys.task, db);
+  const definitions = await listResourceLifecycleStates("tasks", db);
   return definitions.map((definition) => ({
     status: definition.status,
     terminal: definition.terminal,
@@ -71,12 +71,14 @@ export async function isTransitionAllowed(from: string, to: string, db: Queryabl
   const result = await db.query<{ allowed: boolean }>(
     `SELECT EXISTS (
        SELECT 1
-         FROM lifecycle_transitions transition
-        WHERE transition.lifecycle_key = $1
+         FROM lifecycle_resource_bindings binding
+         JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = binding.lifecycle_key
+        WHERE binding.resource_table = to_regclass($1)
           AND transition.from_status = $2
           AND transition.to_status = $3
      ) AS allowed`,
-    [lifecycleKeys.task, from, to],
+    ["tasks", from, to],
   );
   return result.rows[0]?.allowed === true;
 }
@@ -86,34 +88,53 @@ export async function getAllowedTransitions(from: string, db: Queryable = getDb(
     `SELECT target.status, target.terminal, target.retryable, target.administrative,
             target.dispatchable, target.manual, target.description
        FROM lifecycle_transitions transition
+       JOIN lifecycle_resource_bindings binding
+         ON binding.lifecycle_key = transition.lifecycle_key
        JOIN lifecycle_state_definitions target
          ON target.lifecycle_key = transition.lifecycle_key
         AND target.status = transition.to_status
-      WHERE transition.lifecycle_key = $1
+      WHERE binding.resource_table = to_regclass($1)
         AND transition.from_status = $2
       ORDER BY target.sort_order, target.status`,
-    [lifecycleKeys.task, from],
+    ["tasks", from],
   );
   return result.rows.map(rowToDefinition);
 }
 
 export async function transitionTask<T extends Record<string, unknown> = Record<string, unknown>>(
   taskId: string,
-  action: TaskLifecycleAction,
+  selector: LifecycleTransitionSelector,
   patch: TaskTransitionPatch = {},
   db: Queryable = getDb(),
 ): Promise<T | null> {
+  const selectorPredicate = lifecycleTransitionSelectorPredicate("transition", "target", "$2");
   const result = await db.query(
-    `WITH selected AS (
-       SELECT t.id, transition.*
+    `WITH locked AS (
+       SELECT t.*
          FROM tasks t
+        WHERE t.id = $1
+        FOR UPDATE
+     ),
+     candidates AS (
+       SELECT DISTINCT t.id, transition.to_status, transition.mark_started,
+              transition.mark_completed, transition.clear_completed,
+              transition.clear_failure, transition.reset_retry
+         FROM locked t
          JOIN lifecycle_transitions transition
            ON transition.lifecycle_key = t.lifecycle_key
           AND transition.from_status = t.status
-          AND transition.action_key = $2
-        WHERE t.id = $1
-          AND t.lifecycle_key = $4
-        FOR UPDATE OF t
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+        WHERE ${selectorPredicate}
+     ),
+     selected AS (
+       SELECT ranked.*
+         FROM (
+           SELECT candidates.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+             FROM candidates
+         ) ranked
+        WHERE ranked.candidate_count = 1
      )
      UPDATE tasks
         SET status = selected.to_status,
@@ -153,7 +174,7 @@ export async function transitionTask<T extends Record<string, unknown> = Record<
        FROM selected
       WHERE tasks.id = selected.id
       RETURNING tasks.*`,
-    [taskId, action, JSON.stringify(patch), lifecycleKeys.task],
+    [taskId, serializeLifecycleTransitionSelector(selector), JSON.stringify(patch)],
   );
   return (result.rows[0] as T | undefined) ?? null;
 }
@@ -165,7 +186,7 @@ export async function transitionTaskManually<T extends Record<string, unknown> =
 ): Promise<T | null> {
   const result = await db.query(
     `WITH selected AS (
-       SELECT transition.action_key
+       SELECT t.id, transition.*
          FROM tasks t
          JOIN lifecycle_transitions transition
            ON transition.lifecycle_key = t.lifecycle_key
@@ -177,57 +198,86 @@ export async function transitionTaskManually<T extends Record<string, unknown> =
           AND target.status = transition.to_status
           AND target.manual
         WHERE t.id = $1
-          AND t.lifecycle_key = $3
         ORDER BY transition.action_key
         LIMIT 1
+     ),
+     updated AS (
+       UPDATE tasks
+          SET status = selected.to_status,
+              started_at = CASE WHEN selected.mark_started THEN COALESCE(tasks.started_at, NOW()) ELSE tasks.started_at END,
+              completed_at = CASE
+                WHEN selected.mark_completed THEN NOW()
+                WHEN selected.clear_completed THEN NULL
+                ELSE tasks.completed_at
+              END,
+              error = CASE WHEN selected.clear_failure THEN NULL ELSE tasks.error END,
+              root_error_code = CASE WHEN selected.clear_failure THEN NULL ELSE tasks.root_error_code END,
+              root_error_message = CASE WHEN selected.clear_failure THEN NULL ELSE tasks.root_error_message END,
+              root_error_details = CASE WHEN selected.clear_failure THEN '{}'::jsonb ELSE tasks.root_error_details END,
+              updated_at = NOW()
+         FROM selected
+        WHERE tasks.id = selected.id
+        RETURNING tasks.*
      )
-     SELECT selected.action_key FROM selected`,
-    [taskId, targetStatus, lifecycleKeys.task],
+     SELECT * FROM updated`,
+    [taskId, targetStatus],
   );
-  const action = result.rows[0]?.action_key;
-  if (typeof action !== "string") return null;
-  return transitionTask<T>(taskId, action as TaskLifecycleAction, {}, db);
+  return (result.rows[0] as T | undefined) ?? null;
 }
 
 export async function retryConfiguredTasks(
-  action: TaskLifecycleAction = "retry",
   db: Queryable = getDb(),
 ): Promise<number> {
   const result = await db.query(`
-    WITH candidates AS (
-      SELECT t.id, t.status AS from_status
+    WITH locked AS (
+      SELECT t.*
         FROM tasks t
+       FOR UPDATE SKIP LOCKED
+    ),
+    eligible AS (
+      SELECT DISTINCT t.id, transition.to_status, transition.reset_retry,
+             transition.clear_completed, transition.clear_failure
+        FROM locked t
         JOIN lifecycle_state_definitions state
           ON state.lifecycle_key = t.lifecycle_key
          AND state.status = t.status
         JOIN lifecycle_transitions transition
           ON transition.lifecycle_key = t.lifecycle_key
          AND transition.from_status = t.status
-         AND transition.action_key = $1
-       WHERE t.lifecycle_key = $2
-         AND state.retryable
-       FOR UPDATE OF t SKIP LOCKED
+         AND transition.reset_retry
+         AND transition.clear_completed
+         AND transition.clear_failure
+        JOIN lifecycle_state_definitions target
+          ON target.lifecycle_key = transition.lifecycle_key
+         AND target.status = transition.to_status
+         AND target.initial
+         AND target.dispatchable
+       WHERE state.retryable
+    ),
+    candidates AS (
+      SELECT ranked.*
+        FROM (
+          SELECT eligible.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+            FROM eligible
+        ) ranked
+       WHERE ranked.candidate_count = 1
     ),
     updated AS (
       UPDATE tasks t
-         SET status = transition.to_status,
-             retry_count = CASE WHEN transition.reset_retry THEN 0 ELSE t.retry_count END,
-             completed_at = CASE WHEN transition.clear_completed THEN NULL ELSE t.completed_at END,
-             error = CASE WHEN transition.clear_failure THEN NULL ELSE t.error END,
-             root_error_code = CASE WHEN transition.clear_failure THEN NULL ELSE t.root_error_code END,
-             root_error_message = CASE WHEN transition.clear_failure THEN NULL ELSE t.root_error_message END,
-             root_error_details = CASE WHEN transition.clear_failure THEN '{}'::jsonb ELSE t.root_error_details END,
+         SET status = candidates.to_status,
+             retry_count = CASE WHEN candidates.reset_retry THEN 0 ELSE t.retry_count END,
+             completed_at = CASE WHEN candidates.clear_completed THEN NULL ELSE t.completed_at END,
+             error = CASE WHEN candidates.clear_failure THEN NULL ELSE t.error END,
+             root_error_code = CASE WHEN candidates.clear_failure THEN NULL ELSE t.root_error_code END,
+             root_error_message = CASE WHEN candidates.clear_failure THEN NULL ELSE t.root_error_message END,
+             root_error_details = CASE WHEN candidates.clear_failure THEN '{}'::jsonb ELSE t.root_error_details END,
              updated_at = NOW()
         FROM candidates
-        JOIN lifecycle_transitions transition
-          ON transition.lifecycle_key = $2
-         AND transition.from_status = candidates.from_status
-         AND transition.action_key = $1
        WHERE t.id = candidates.id
        RETURNING t.id
     )
     SELECT COUNT(*)::int AS count FROM updated
-  `, [action, lifecycleKeys.task]);
+  `);
   return Number(result.rows[0]?.count ?? 0);
 }
 
@@ -241,12 +291,17 @@ export async function getConfiguredRetryStats(
       COUNT(*) FILTER (WHERE COALESCE(t.retry_count, 0) < $1)::int AS retryable,
       COUNT(*) FILTER (WHERE COALESCE(t.retry_count, 0) >= $1)::int AS exhausted
       FROM tasks t
-      JOIN lifecycle_state_definitions state
+     JOIN lifecycle_state_definitions state
         ON state.lifecycle_key = t.lifecycle_key
        AND state.status = t.status
-     WHERE t.lifecycle_key = $2
-       AND state.retryable
-  `, [maxRetries, lifecycleKeys.task]);
+     WHERE state.retryable
+       AND EXISTS (
+         SELECT 1
+           FROM lifecycle_resource_bindings binding
+          WHERE binding.resource_table = to_regclass($2)
+            AND binding.lifecycle_key = t.lifecycle_key
+       )
+  `, [maxRetries, "tasks"]);
   return {
     totalFailed: Number(result.rows[0]?.total ?? 0),
     retryableCount: Number(result.rows[0]?.retryable ?? 0),

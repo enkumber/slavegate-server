@@ -6,6 +6,8 @@ import { isFailClosedMigration } from "./migrate";
 describe("workflow and research generic lifecycle migration", () => {
   const migrationName = "106_workflow_execution_generic_lifecycle.sql";
   const migration = fs.readFileSync(path.join(__dirname, "migrations", migrationName), "utf8");
+  const bindingMigrationName = "107_lifecycle_resource_bindings.sql";
+  const bindingMigration = fs.readFileSync(path.join(__dirname, "migrations", bindingMigrationName), "utf8");
   const runtime = [
     path.join(__dirname, "..", "modules", "workflows", "workflow.service.ts"),
     path.join(__dirname, "..", "modules", "workflows", "workflow-lifecycle.service.ts"),
@@ -14,18 +16,18 @@ describe("workflow and research generic lifecycle migration", () => {
     path.join(__dirname, "..", "modules", "research", "research-lifecycle.service.ts"),
   ].map((file) => fs.readFileSync(file, "utf8")).join("\n");
 
-  it("binds all migrated resources to the shared registry", () => {
+  it("adds only structural lifecycle columns to migrated resources", () => {
     for (const table of ["workflows", "agency_workflow_runs", "research_jobs"]) {
       expect(migration).toContain(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS lifecycle_key`);
-      expect(migration).toContain(`ALTER TABLE ${table} VALIDATE CONSTRAINT ${table}_lifecycle_status_fkey`);
-      expect(migration).toContain(`trg_${table}_initial_status`);
     }
+    expect(bindingMigration).toContain("lifecycle_resource_bindings");
+    expect(bindingMigration).toContain("configure_lifecycle_resource_binding");
   });
 
-  it("bootstraps without overwriting operator policy", () => {
-    expect(migration.match(/ON CONFLICT \(lifecycle_key, status\) DO NOTHING/g)?.length).toBeGreaterThanOrEqual(3);
-    expect(migration.match(/ON CONFLICT \(lifecycle_key, action_key, from_status\) DO NOTHING/g)?.length).toBeGreaterThanOrEqual(3);
-    expect(migration).not.toMatch(/ON CONFLICT[^(]*\([^)]*\) DO UPDATE/i);
+  it("does not bootstrap lifecycle semantics in the release", () => {
+    expect(migration).not.toMatch(/INSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions)/i);
+    expect(migration).not.toMatch(/\bVALUES\s*\(\s*['"]/i);
+    expect(bindingMigration).not.toMatch(/INSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions)/i);
   });
 
   it("removes status-list constraints for migrated resources", () => {
@@ -43,5 +45,6 @@ describe("workflow and research generic lifecycle migration", () => {
 
   it("installs fail-closed", () => {
     expect(isFailClosedMigration(migrationName)).toBe(true);
+    expect(isFailClosedMigration(bindingMigrationName)).toBe(true);
   });
 });

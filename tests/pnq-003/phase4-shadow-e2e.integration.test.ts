@@ -49,9 +49,30 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
       "src/db/migrations/082_pnq_queue_v2_contract.sql",
       "src/db/migrations/083_pnq_v2_runtime_shadow.sql",
       "src/db/migrations/105_generic_resource_lifecycle.sql",
+      "src/db/migrations/107_lifecycle_resource_bindings.sql",
     ]) {
       await applySql(file);
     }
+    await pool.query(`
+      INSERT INTO lifecycle_state_definitions
+        (lifecycle_key, status, initial, terminal, retryable, administrative,
+         dispatchable, manual, sort_order)
+      VALUES
+        ('phase4_job_fixture', 'fixture_waiting', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 10),
+        ('phase4_job_fixture', 'fixture_active', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
+        ('phase4_job_fixture', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 30),
+        ('phase4_job_fixture', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40);
+      INSERT INTO lifecycle_transitions
+        (lifecycle_key, action_key, from_status, to_status, external_allowed,
+         mark_started, mark_completed)
+      VALUES
+        ('phase4_job_fixture', 'fixture_dispatch', 'fixture_waiting', 'fixture_active', FALSE, TRUE, FALSE),
+        ('phase4_job_fixture', 'fixture_complete_waiting', 'fixture_waiting', 'completed', TRUE, FALSE, TRUE),
+        ('phase4_job_fixture', 'fixture_fail_waiting', 'fixture_waiting', 'failed', TRUE, FALSE, TRUE),
+        ('phase4_job_fixture', 'fixture_complete', 'fixture_active', 'completed', TRUE, FALSE, TRUE),
+        ('phase4_job_fixture', 'fixture_fail', 'fixture_active', 'failed', TRUE, FALSE, TRUE);
+      SELECT configure_lifecycle_resource_binding('jobs', 'phase4_job_fixture');
+    `);
     await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS agent_version TEXT`);
     setDeviceExecutionAuthorityForTest("observe_only");
     const { dispatcherService } = await import("../../src/modules/dispatcher/dispatcher.service");

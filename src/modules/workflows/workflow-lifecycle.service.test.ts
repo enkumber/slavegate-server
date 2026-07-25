@@ -16,36 +16,33 @@ describe("workflow lifecycle", () => {
     query.mockResolvedValue({ rows: [] });
   });
 
-  it("resolves actions from PostgreSQL", async () => {
-    await transitionWorkflow("workflow-1", "operator_action", { error: "x" });
+  it("resolves transitions by DB properties without action or lifecycle literals", async () => {
+    await transitionWorkflow("workflow-1", { targetTerminal: true }, { error: "x" });
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain("JOIN lifecycle_transitions transition");
-    expect(sql).toContain("transition.action_key = $2");
     expect(params).toEqual([
       "workflow-1",
-      "operator_action",
       "{\"error\":\"x\"}",
-      "workflow_execution",
+      "{\"targetTerminal\":true}",
     ]);
   });
 
   it("keeps checkpoint CAS predicates inside the transition statement", async () => {
     await transitionWorkflowWhere(
       "workflow-1",
-      "checkpoint",
+      { transitionMarkStarted: true },
       { currentStep: 4 },
       undefined,
-      "workflow.current_step = $3",
+      "workflow.current_step = $2",
       [3],
     );
     const [sql, params] = query.mock.calls[0];
-    expect(sql).toContain("workflow.current_step = $3");
+    expect(sql).toContain("workflow.current_step = $2");
     expect(params).toEqual([
       "workflow-1",
-      "checkpoint",
       3,
       "{\"currentStep\":4}",
-      "workflow_execution",
+      "{\"transitionMarkStarted\":true}",
     ]);
   });
 
@@ -59,7 +56,6 @@ describe("workflow lifecycle", () => {
       "workflow-1",
       "operator_terminal",
       "{\"currentStep\":5}",
-      "workflow_execution",
     ]);
   });
 });

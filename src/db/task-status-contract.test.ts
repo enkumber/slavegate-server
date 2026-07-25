@@ -14,6 +14,14 @@ describe("task status contract migration", () => {
     path.join(__dirname, "migrations", lifecycleMigrationName),
     "utf8",
   );
+  const genericSchemaSql = fs.readFileSync(
+    path.join(__dirname, "migrations", "105_generic_resource_lifecycle.sql"),
+    "utf8",
+  );
+  const resourceBindingSql = fs.readFileSync(
+    path.join(__dirname, "migrations", "107_lifecycle_resource_bindings.sql"),
+    "utf8",
+  );
   const runtimeSources = [
     path.join(__dirname, "..", "api", "routes.ts"),
     path.join(__dirname, "..", "api", "agency-routes.ts"),
@@ -26,16 +34,15 @@ describe("task status contract migration", () => {
     expect(`${cleanupSql}\n${lifecycleSql}`).not.toMatch(/tasks_status_check[\s\S]*CHECK\s*\(\s*status\s+IN/i);
   });
 
-  it("creates DB-owned lifecycle definitions and transition rows idempotently", () => {
-    expect(lifecycleSql).toContain("CREATE TABLE IF NOT EXISTS task_status_definitions");
-    expect(lifecycleSql).toContain("CREATE TABLE IF NOT EXISTS task_status_transitions");
-    expect(lifecycleSql).toContain("ON CONFLICT (status) DO NOTHING");
-    expect(lifecycleSql).toContain("ON CONFLICT (action_key, from_status) DO NOTHING");
-    expect(lifecycleSql).not.toMatch(/ON CONFLICT \(status\) DO UPDATE/i);
-    expect(lifecycleSql).not.toMatch(/ON CONFLICT \(action_key, from_status\) DO UPDATE/i);
-    expect(lifecycleSql).toContain("WHERE definition.initial");
-    expect(lifecycleSql).toContain("FOREIGN KEY (status)");
-    expect(lifecycleSql).toContain("REFERENCES task_status_definitions(status)");
+  it("creates only generic lifecycle mechanisms and retires the task-specific registry", () => {
+    expect(lifecycleSql).toContain("DROP TABLE IF EXISTS task_status_transitions");
+    expect(lifecycleSql).toContain("DROP TABLE IF EXISTS task_status_definitions");
+    expect(genericSchemaSql).toContain("CREATE TABLE IF NOT EXISTS lifecycle_state_definitions");
+    expect(genericSchemaSql).toContain("CREATE TABLE IF NOT EXISTS lifecycle_transitions");
+    expect(resourceBindingSql).toContain("CREATE TABLE IF NOT EXISTS lifecycle_resource_bindings");
+    expect(resourceBindingSql).toContain("CREATE OR REPLACE FUNCTION configure_lifecycle_resource_binding");
+    expect(`${lifecycleSql}\n${genericSchemaSql}\n${resourceBindingSql}`)
+      .not.toMatch(/INSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions)/i);
   });
 
   it("fails server startup closed if the lifecycle contract cannot be installed", () => {

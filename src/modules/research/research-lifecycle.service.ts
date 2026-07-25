@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { getDb } from "../../db/client";
-import { lifecycleKeys } from "../lifecycle/lifecycle.service";
+import {
+  lifecycleTransitionSelectorPredicate,
+  serializeLifecycleTransitionSelector,
+  type LifecycleTransitionSelector,
+} from "../lifecycle/lifecycle.service";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
 
@@ -14,21 +18,38 @@ interface ResearchLifecyclePatch {
 
 export async function transitionResearchJob(
   jobId: string,
-  actionKey: string,
+  selector: LifecycleTransitionSelector,
   patch: ResearchLifecyclePatch = {},
   db: Queryable = getDb(),
 ): Promise<Record<string, unknown> | null> {
+  const selectorPredicate = lifecycleTransitionSelectorPredicate("transition", "target", "$2");
   const result = await db.query(
-    `WITH selected AS (
-       SELECT job.id, transition.*
+    `WITH locked AS (
+       SELECT job.*
          FROM research_jobs job
+        WHERE job.id = $1
+        FOR UPDATE
+     ),
+     candidates AS (
+       SELECT DISTINCT job.id, transition.to_status, transition.mark_started,
+              transition.mark_completed, transition.clear_completed,
+              transition.clear_failure, transition.reset_retry
+         FROM locked job
          JOIN lifecycle_transitions transition
            ON transition.lifecycle_key = job.lifecycle_key
           AND transition.from_status = job.status
-          AND transition.action_key = $2
-        WHERE job.id = $1
-          AND job.lifecycle_key = $4
-        FOR UPDATE OF job
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+        WHERE ${selectorPredicate}
+     ),
+     selected AS (
+       SELECT ranked.*
+         FROM (
+           SELECT candidates.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+             FROM candidates
+         ) ranked
+        WHERE ranked.candidate_count = 1
      )
      UPDATE research_jobs job
         SET status = selected.to_status,
@@ -65,7 +86,7 @@ export async function transitionResearchJob(
        FROM selected
       WHERE job.id = selected.id
       RETURNING job.*`,
-    [jobId, actionKey, JSON.stringify(patch), lifecycleKeys.researchJob],
+    [jobId, serializeLifecycleTransitionSelector(selector), JSON.stringify(patch)],
   );
   return result.rows[0] ?? null;
 }

@@ -19,19 +19,19 @@ beforeEach(() => {
 });
 
 describe("dispatcher job lifecycle", () => {
-  it("selects action transitions from the DB registry", async () => {
-    await transitionJob("job-1", "claim");
+  it("selects transitions by DB properties without action or lifecycle literals", async () => {
+    await transitionJob("job-1", { transitionMarkStarted: true });
     expect(mocks.query).toHaveBeenCalledWith(
       expect.stringContaining("JOIN lifecycle_transitions transition"),
-      ["job-1", "claim", "{}", "dispatcher_job", null],
+      ["job-1", "{\"transitionMarkStarted\":true}", "{}", null],
     );
   });
 
   it("fences device-originated actions to the owning device in SQL", async () => {
-    await transitionJob("job-1", "claim", {}, undefined, "device-1");
+    await transitionJob("job-1", { transitionMarkStarted: true }, {}, undefined, "device-1");
     const [sql, params] = mocks.query.mock.calls[0];
-    expect(String(sql)).toContain("j.device_id = $5::uuid");
-    expect(params).toEqual(["job-1", "claim", "{}", "dispatcher_job", "device-1"]);
+    expect(String(sql)).toContain("j.device_id = $4::uuid");
+    expect(params).toEqual(["job-1", "{\"transitionMarkStarted\":true}", "{}", "device-1"]);
   });
 
   it("accepts a device target status only through an external-enabled DB transition", async () => {
@@ -40,7 +40,7 @@ describe("dispatcher job lifecycle", () => {
     });
     expect(mocks.query).toHaveBeenCalledWith(
       expect.stringContaining("transition.external_allowed"),
-      ["job-1", "operator_defined_terminal", "{\"durationMs\":7}", "dispatcher_job", null],
+      ["job-1", "operator_defined_terminal", "{\"durationMs\":7}", null],
     );
   });
 
@@ -53,12 +53,11 @@ describe("dispatcher job lifecycle", () => {
       "device-1",
     );
     const [sql, params] = mocks.query.mock.calls[0];
-    expect(String(sql)).toContain("j.device_id = $5::uuid");
+    expect(String(sql)).toContain("j.device_id = $4::uuid");
     expect(params).toEqual([
       "job-1",
       "operator_defined_terminal",
       "{}",
-      "dispatcher_job",
       "device-1",
     ]);
   });
@@ -77,6 +76,6 @@ describe("dispatcher job lifecycle", () => {
     const [sql, params] = mocks.query.mock.calls[0];
     expect(String(sql)).toContain("transition.manual_allowed");
     expect(String(sql)).toContain("target.manual");
-    expect(params).toEqual(["job-1", "operator_terminal", "dispatcher_job"]);
+    expect(params).toEqual(["job-1", "operator_terminal"]);
   });
 });

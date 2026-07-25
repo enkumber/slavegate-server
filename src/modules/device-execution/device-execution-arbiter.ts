@@ -1,6 +1,5 @@
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { getDb } from "../../db/client";
-import { getLifecycleTransition, lifecycleKeys } from "../lifecycle/lifecycle.service";
 import { transitionWorkflow } from "../workflows/workflow-lifecycle.service";
 
 export const DEVICE_EXECUTION_ACTIVE_STATES = ["claimed", "dispatching", "dispatched", "reconciling", "blocked"] as const;
@@ -2665,8 +2664,9 @@ export class DeviceExecutionArbiter {
         id: string;
         device_id: string | null;
         status: string;
+        lifecycle_key: string;
       }>(
-        `SELECT id, device_id, status
+        `SELECT id, device_id, status, lifecycle_key
          FROM workflows
          WHERE id = $1
          FOR UPDATE`,
@@ -2693,13 +2693,21 @@ export class DeviceExecutionArbiter {
         });
         return { decision: "rejected", root: null, reason: "workflow_owned_by_different_device" };
       }
-      const cancelTransition = await getLifecycleTransition(
-        lifecycleKeys.workflowExecution,
-        workflow.status,
-        "cancel",
-        client,
+      const cancelTransition = await client.query(
+        `SELECT 1
+           FROM lifecycle_transitions transition
+           JOIN lifecycle_state_definitions target
+             ON target.lifecycle_key = transition.lifecycle_key
+            AND target.status = transition.to_status
+          WHERE transition.lifecycle_key = $1
+            AND transition.from_status = $2
+            AND transition.manual_allowed
+            AND target.terminal
+            AND target.administrative
+          LIMIT 1`,
+        [workflow.lifecycle_key, workflow.status],
       );
-      if (!cancelTransition) {
+      if (!cancelTransition.rows[0]) {
         await insertEvent(client, {
           deviceId: input.deviceId,
           eventType: "persisted_workflow_cancel_rejected",
@@ -2766,7 +2774,11 @@ export class DeviceExecutionArbiter {
         ) ?? null;
       }
 
-      const cancelledWorkflow = await transitionWorkflow(input.workflowId, "cancel", {}, client);
+      const cancelledWorkflow = await transitionWorkflow(input.workflowId, {
+        targetTerminal: true,
+        targetAdministrative: true,
+        transitionManualAllowed: true,
+      }, {}, client);
       if (!cancelledWorkflow) {
         throw new Error(`Queued workflow ${input.workflowId} changed while locked`);
       }
@@ -2973,7 +2985,12 @@ export class DeviceExecutionArbiter {
 	          JOIN lifecycle_transitions workflow_failure
 	            ON workflow_failure.lifecycle_key = workflows.lifecycle_key
 	           AND workflow_failure.from_status = workflows.status
-	           AND workflow_failure.action_key = 'fail'
+	          JOIN lifecycle_state_definitions workflow_failure_state
+	            ON workflow_failure_state.lifecycle_key = workflow_failure.lifecycle_key
+	           AND workflow_failure_state.status = workflow_failure.to_status
+	           AND workflow_failure_state.terminal
+	           AND workflow_failure_state.retryable
+	           AND NOT workflow_failure_state.administrative
           WHERE roots.root_kind = 'server_workflow'
             AND roots.state NOT IN ('completed', 'failed', 'cancelled')
             AND EXISTS (
@@ -3001,6 +3018,25 @@ export class DeviceExecutionArbiter {
                     )
                   )
                 )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+                FROM lifecycle_transitions alternative
+                JOIN lifecycle_state_definitions alternative_state
+                  ON alternative_state.lifecycle_key = alternative.lifecycle_key
+                 AND alternative_state.status = alternative.to_status
+                 AND alternative_state.terminal
+                 AND alternative_state.retryable
+                 AND NOT alternative_state.administrative
+               WHERE alternative.lifecycle_key = workflows.lifecycle_key
+                 AND alternative.from_status = workflows.status
+                 AND (
+                   alternative.action_key,
+                   alternative.to_status
+                 ) IS DISTINCT FROM (
+                   workflow_failure.action_key,
+                   workflow_failure.to_status
+                 )
             )
           FOR UPDATE OF roots, workflows
         ),

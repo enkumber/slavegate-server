@@ -345,10 +345,4 @@ export interface WorkflowExecutionStats {
   mode?: "edge" | "server";
 }
 
-export type WorkflowStatus =
-  | "queued"
-  | "running"
-  | "paused"
-  | "completed"
-  | "failed"
-  | "cancelled";
+export type WorkflowStatus = string;

@@ -39,13 +39,115 @@ export interface LifecycleStalePolicyUpdate {
   staleActionKey: string | null;
 }
 
-export const lifecycleKeys = {
-  task: "task",
-  dispatcherJob: "dispatcher_job",
-  workflowExecution: "workflow_execution",
-  agencyWorkflowRun: "agency_workflow_run",
-  researchJob: "research_job",
-} as const;
+export interface LifecycleStateUpsert {
+  initial: boolean;
+  terminal: boolean;
+  retryable: boolean;
+  administrative: boolean;
+  dispatchable: boolean;
+  manual: boolean;
+  staleAfterMs: number | null;
+  staleActionKey: string | null;
+  sortOrder: number;
+  description: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface LifecycleTransitionUpsert {
+  toStatus: string;
+  manualAllowed: boolean;
+  externalAllowed: boolean;
+  automatic: boolean;
+  markStarted: boolean;
+  markCompleted: boolean;
+  clearCompleted: boolean;
+  clearFailure: boolean;
+  resetRetry: boolean;
+  metadata: Record<string, unknown>;
+}
+
+export interface LifecycleTransitionSelector {
+  targetInitial?: boolean;
+  targetTerminal?: boolean;
+  targetRetryable?: boolean;
+  targetAdministrative?: boolean;
+  targetDispatchable?: boolean;
+  targetManual?: boolean;
+  transitionManualAllowed?: boolean;
+  transitionExternalAllowed?: boolean;
+  transitionAutomatic?: boolean;
+  transitionMarkStarted?: boolean;
+  transitionMarkCompleted?: boolean;
+  transitionClearCompleted?: boolean;
+  transitionClearFailure?: boolean;
+  transitionResetRetry?: boolean;
+}
+
+export function serializeLifecycleTransitionSelector(
+  selector: LifecycleTransitionSelector,
+): string {
+  return JSON.stringify(selector);
+}
+
+export function lifecycleTransitionSelectorPredicate(
+  transitionAlias: string,
+  targetAlias: string,
+  parameter: string,
+): string {
+  const checks: Array<[keyof LifecycleTransitionSelector, string]> = [
+    ["targetInitial", `${targetAlias}.initial`],
+    ["targetTerminal", `${targetAlias}.terminal`],
+    ["targetRetryable", `${targetAlias}.retryable`],
+    ["targetAdministrative", `${targetAlias}.administrative`],
+    ["targetDispatchable", `${targetAlias}.dispatchable`],
+    ["targetManual", `${targetAlias}.manual`],
+    ["transitionManualAllowed", `${transitionAlias}.manual_allowed`],
+    ["transitionExternalAllowed", `${transitionAlias}.external_allowed`],
+    ["transitionAutomatic", `${transitionAlias}.automatic`],
+    ["transitionMarkStarted", `${transitionAlias}.mark_started`],
+    ["transitionMarkCompleted", `${transitionAlias}.mark_completed`],
+    ["transitionClearCompleted", `${transitionAlias}.clear_completed`],
+    ["transitionClearFailure", `${transitionAlias}.clear_failure`],
+    ["transitionResetRetry", `${transitionAlias}.reset_retry`],
+  ];
+  return checks
+    .map(([key, column]) =>
+      `(NOT (${parameter}::jsonb ? '${key}') OR ${column} = (${parameter}::jsonb->>'${key}')::boolean)`,
+    )
+    .join("\n          AND ");
+}
+
+export async function getResourceLifecycleKey(
+  resourceTable: string,
+  db: LifecycleQueryable = getDb(),
+): Promise<string | null> {
+  const result = await db.query(
+    `SELECT lifecycle_key
+       FROM lifecycle_resource_bindings
+      WHERE resource_table = to_regclass($1)`,
+    [resourceTable],
+  );
+  const value = result.rows[0]?.lifecycle_key;
+  return typeof value === "string" ? value : null;
+}
+
+export async function listResourceLifecycleStates(
+  resourceTable: string,
+  db: LifecycleQueryable = getDb(),
+): Promise<LifecycleStateDefinition[]> {
+  const result = await db.query(
+    `SELECT state.lifecycle_key, state.status, state.initial, state.terminal,
+            state.retryable, state.administrative, state.dispatchable, state.manual,
+            state.stale_after_ms, state.stale_action_key, state.description, state.metadata
+       FROM lifecycle_resource_bindings binding
+       JOIN lifecycle_state_definitions state
+         ON state.lifecycle_key = binding.lifecycle_key
+      WHERE binding.resource_table = to_regclass($1)
+      ORDER BY state.sort_order, state.status`,
+    [resourceTable],
+  );
+  return result.rows.map(rowToState);
+}
 
 function rowToState(row: Record<string, unknown>): LifecycleStateDefinition {
   return {
@@ -195,4 +297,108 @@ export async function updateLifecycleStalePolicy(
   );
 
   return result.rows[0] ? rowToState(result.rows[0]) : null;
+}
+
+export async function configureResourceLifecycleBinding(
+  resourceTable: string,
+  lifecycleKey: string,
+  db: LifecycleQueryable = getDb(),
+): Promise<void> {
+  await db.query(
+    "SELECT configure_lifecycle_resource_binding(to_regclass($1), $2)",
+    [resourceTable, lifecycleKey],
+  );
+}
+
+export async function upsertLifecycleState(
+  lifecycleKey: string,
+  status: string,
+  input: LifecycleStateUpsert,
+  db: LifecycleQueryable = getDb(),
+): Promise<LifecycleStateDefinition> {
+  const result = await db.query(
+    `INSERT INTO lifecycle_state_definitions
+       (lifecycle_key, status, initial, terminal, retryable, administrative,
+        dispatchable, manual, stale_after_ms, stale_action_key, sort_order,
+        description, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
+     ON CONFLICT (lifecycle_key, status) DO UPDATE
+       SET initial = EXCLUDED.initial,
+           terminal = EXCLUDED.terminal,
+           retryable = EXCLUDED.retryable,
+           administrative = EXCLUDED.administrative,
+           dispatchable = EXCLUDED.dispatchable,
+           manual = EXCLUDED.manual,
+           stale_after_ms = EXCLUDED.stale_after_ms,
+           stale_action_key = EXCLUDED.stale_action_key,
+           sort_order = EXCLUDED.sort_order,
+           description = EXCLUDED.description,
+           metadata = EXCLUDED.metadata,
+           updated_at = NOW()
+     RETURNING lifecycle_key, status, initial, terminal, retryable, administrative,
+               dispatchable, manual, stale_after_ms, stale_action_key,
+               description, metadata`,
+    [
+      lifecycleKey,
+      status,
+      input.initial,
+      input.terminal,
+      input.retryable,
+      input.administrative,
+      input.dispatchable,
+      input.manual,
+      input.staleAfterMs,
+      input.staleActionKey,
+      input.sortOrder,
+      input.description,
+      JSON.stringify(input.metadata),
+    ],
+  );
+  return rowToState(result.rows[0]);
+}
+
+export async function upsertLifecycleTransition(
+  lifecycleKey: string,
+  actionKey: string,
+  fromStatus: string,
+  input: LifecycleTransitionUpsert,
+  db: LifecycleQueryable = getDb(),
+): Promise<LifecycleTransition> {
+  const result = await db.query(
+    `INSERT INTO lifecycle_transitions
+       (lifecycle_key, action_key, from_status, to_status, manual_allowed,
+        external_allowed, automatic, mark_started, mark_completed,
+        clear_completed, clear_failure, reset_retry, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)
+     ON CONFLICT (lifecycle_key, action_key, from_status) DO UPDATE
+       SET to_status = EXCLUDED.to_status,
+           manual_allowed = EXCLUDED.manual_allowed,
+           external_allowed = EXCLUDED.external_allowed,
+           automatic = EXCLUDED.automatic,
+           mark_started = EXCLUDED.mark_started,
+           mark_completed = EXCLUDED.mark_completed,
+           clear_completed = EXCLUDED.clear_completed,
+           clear_failure = EXCLUDED.clear_failure,
+           reset_retry = EXCLUDED.reset_retry,
+           metadata = EXCLUDED.metadata
+     RETURNING lifecycle_key, action_key, from_status, to_status, manual_allowed,
+               external_allowed, automatic, mark_started, mark_completed,
+               clear_completed, clear_failure, reset_retry, metadata`,
+    [
+      lifecycleKey,
+      actionKey,
+      fromStatus,
+      input.toStatus,
+      input.manualAllowed,
+      input.externalAllowed,
+      input.automatic,
+      input.markStarted,
+      input.markCompleted,
+      input.clearCompleted,
+      input.clearFailure,
+      input.resetRetry,
+      JSON.stringify(input.metadata),
+    ],
+  );
+  return rowToTransition(result.rows[0]);
 }

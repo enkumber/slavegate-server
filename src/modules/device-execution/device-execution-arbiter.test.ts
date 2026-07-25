@@ -124,43 +124,31 @@ class FakeClient {
     }
     if (normalized.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 0 };
 
-    if (normalized.startsWith("SELECT id, device_id, status FROM workflows WHERE id = $1 FOR UPDATE")) {
+    if (normalized.startsWith("SELECT id, device_id, status, lifecycle_key FROM workflows WHERE id = $1 FOR UPDATE")) {
       const [workflowId] = params as [string];
       const found = this.workflows.find((item) => item.id === workflowId);
       return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
     }
 
-    if (normalized.startsWith("SELECT lifecycle_key, action_key, from_status, to_status") &&
-        normalized.includes("FROM lifecycle_transitions")) {
-      const [, fromStatus, actionKey] = params as [string, string, string];
-      if (fromStatus !== "queued" || actionKey !== "cancel") {
-        return { rows: [], rowCount: 0 };
-      }
-      return {
-        rows: [{
-          lifecycle_key: "workflow_execution",
-          action_key: "cancel",
-          from_status: "queued",
-          to_status: "cancelled",
-          manual_allowed: false,
-          external_allowed: false,
-          automatic: false,
-          mark_started: false,
-          mark_completed: true,
-          clear_completed: false,
-          clear_failure: false,
-          reset_retry: false,
-          metadata: {},
-        }],
-        rowCount: 1,
-      };
+    if (normalized.startsWith("SELECT 1 FROM lifecycle_transitions transition") &&
+        normalized.includes("target.terminal") &&
+        normalized.includes("target.administrative")) {
+      const [, fromStatus] = params as [string, string];
+      return fromStatus === "queued"
+        ? { rows: [{ exists: 1 }], rowCount: 1 }
+        : { rows: [], rowCount: 0 };
     }
 
-    if (normalized.startsWith("WITH selected AS ( SELECT workflow.id, transition.*") &&
+    if (normalized.startsWith("WITH locked AS ( SELECT workflow.*") &&
         normalized.includes("UPDATE workflows workflow")) {
-      const [workflowId, actionKey] = params as [string, string];
+      const [workflowId, , selectorJson] = params as [string, string, string];
+      const selector = JSON.parse(selectorJson) as Record<string, unknown>;
       const found = this.workflows.find((item) =>
-        item.id === workflowId && item.status === "queued" && actionKey === "cancel"
+        item.id === workflowId &&
+        item.status === "queued" &&
+        selector.targetTerminal === true &&
+        selector.targetAdministrative === true &&
+        selector.transitionManualAllowed === true
       );
       if (!found) return { rows: [], rowCount: 0 };
       found.status = "cancelled";
@@ -1469,7 +1457,10 @@ describe("DeviceExecutionArbiter observe mode", () => {
       expect(normalized).toContain("jobs.started_at IS NOT NULL");
       expect(normalized).toContain("JOIN lifecycle_state_definitions workflow_state");
       expect(normalized).toContain("JOIN lifecycle_transitions workflow_failure");
-      expect(normalized).toContain("workflow_failure.action_key = 'fail'");
+      expect(normalized).toContain("workflow_failure_state.terminal");
+      expect(normalized).toContain("workflow_failure_state.retryable");
+      expect(normalized).toContain("NOT workflow_failure_state.administrative");
+      expect(normalized).not.toContain("workflow_failure.action_key =");
       expect(normalized).toContain("jobs.completed_at > NOW() - INTERVAL '5 minutes'");
       expect(normalized).not.toContain("workflows.status IN");
       expect(normalized).toContain("WHERE workflows.id::text = candidates.external_id");

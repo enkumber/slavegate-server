@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS research_jobs (
     job_type      TEXT NOT NULL CHECK (job_type IN ('research_profile', 'research_hashtag', 'research_followers')),
     input         JSONB NOT NULL,        -- {username: "x"} or {hashtag: "y", limit: 50}
     output        JSONB,                  -- results when completed
-    status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'scheduled', 'running', 'completed', 'failed')),
+    status        TEXT,
     priority      INT DEFAULT 0,          -- 0=low (research), 10=normal, 20=high
     device_id     UUID REFERENCES devices(id) ON DELETE SET NULL,
     error         TEXT,
@@ -32,21 +32,17 @@ COMMENT ON TABLE research_jobs IS 'Research jobs queue for Marketer automation. 
 -- Fast lookup by status (for Kraken job polling)
 CREATE INDEX IF NOT EXISTS idx_research_jobs_status ON research_jobs(status);
 
--- Fast lookup for cached results (completed jobs by type + input)
-CREATE INDEX IF NOT EXISTS idx_research_jobs_type_input ON research_jobs(job_type, input) 
-    WHERE status = 'completed';
+-- Generic lookup indexes. Lifecycle properties remain DB-authoritative.
+CREATE INDEX IF NOT EXISTS idx_research_jobs_type_input ON research_jobs(job_type, input);
 
 -- Priority ordering for job scheduling
-CREATE INDEX IF NOT EXISTS idx_research_jobs_pending_priority ON research_jobs(priority DESC, created_at ASC)
-    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_research_jobs_pending_priority ON research_jobs(priority DESC, created_at ASC);
 
 -- Device assignment tracking
-CREATE INDEX IF NOT EXISTS idx_research_jobs_device ON research_jobs(device_id)
-    WHERE status IN ('scheduled', 'running');
+CREATE INDEX IF NOT EXISTS idx_research_jobs_device ON research_jobs(device_id);
 
 -- Expired cache cleanup
-CREATE INDEX IF NOT EXISTS idx_research_jobs_expires ON research_jobs(expires_at)
-    WHERE status = 'completed';
+CREATE INDEX IF NOT EXISTS idx_research_jobs_expires ON research_jobs(expires_at);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- HELPER FUNCTION: Set default expires_at on insert

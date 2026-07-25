@@ -96,7 +96,7 @@ interface TaskRunnerResult extends TaskResult {
   output?: Record<string, unknown>;
   generatedWorkflow?: {
     workflowId?: string;
-    status?: "queued" | "running";
+    status?: string;
     mode?: "edge" | "server";
     templateId?: string;
     cacheKey?: string;
@@ -210,7 +210,13 @@ async function persistSuccessfulTaskResult(
   taskId: string,
   resultJson: Record<string, unknown>,
 ): Promise<void> {
-  await transitionTask(taskId, "succeed", { result: resultJson });
+  await transitionTask(taskId, {
+    targetTerminal: true,
+    targetRetryable: false,
+    targetAdministrative: false,
+    transitionMarkCompleted: true,
+    transitionClearFailure: true,
+  }, { result: resultJson });
 }
 
 function isCompiledWorkflow(value: unknown): value is CompiledWorkflow {
@@ -291,7 +297,9 @@ async function executeCompiledWorkflowTask(task: TaskRow): Promise<TaskRunnerRes
     });
     const finalWorkflow = await waitForGeneratedWorkflowFinal(dispatch.workflowId);
     const finalVariables = checkpointVariables(finalWorkflow);
-    const ok = finalWorkflow.status === "completed";
+    const ok = finalWorkflow.lifecycleTerminal === true
+      && finalWorkflow.lifecycleRetryable !== true
+      && finalWorkflow.lifecycleAdministrative !== true;
     const output = {
       workflowId: dispatch.workflowId,
       status: finalWorkflow.status,
@@ -446,10 +454,10 @@ async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<Workfl
     if (!latest) {
       throw new Error(`Generated workflow ${workflowId} not found after dispatch`);
     }
-    if (latest.status === "completed" || latest.status === "cancelled") {
+    if (latest.lifecycleTerminal === true && latest.lifecycleRetryable !== true) {
       return latest;
     }
-    if (latest.status === "failed") {
+    if (latest.lifecycleTerminal === true && latest.lifecycleRetryable === true) {
       const isProvisionalAckTimeout = latest.error?.startsWith(EDGE_WORKFLOW_ACK_TIMEOUT_ERROR_PREFIX) === true;
       if (!isProvisionalAckTimeout) return latest;
 
@@ -467,13 +475,13 @@ async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<Workfl
       continue;
     }
 
-    if (latest.status === "queued" && !queueCancellationLostRace) {
+    if (latest.lifecycleDispatchable === true && !queueCancellationLostRace) {
       if (Date.now() - queuedAt >= GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS) {
         try {
           await cancelPersistedWorkflowSafely(workflowId);
           const cancelled = await workflowService.get(workflowId);
-          if (cancelled?.status === "cancelled") return cancelled;
-          throw new Error(`Generated workflow ${workflowId} cancellation completed without a cancelled workflow row`);
+          if (cancelled?.lifecycleTerminal === true && cancelled.lifecycleAdministrative === true) return cancelled;
+          throw new Error(`Generated workflow ${workflowId} cancellation completed without an administrative terminal row`);
         } catch (err) {
           const code = (err as Error & { code?: string }).code;
           if (code !== "CANCELLATION_UNSUPPORTED_IN_FLIGHT") throw err;
@@ -511,7 +519,11 @@ function agencyWorkflowRunIdFromTask(task: TaskRow): string | null {
 async function markAgencyWorkflowRunStarted(task: TaskRow): Promise<void> {
   const runId = agencyWorkflowRunIdFromTask(task);
   if (!runId) return;
-  await transitionAgencyWorkflowRun(runId, "start");
+  await transitionAgencyWorkflowRun(runId, {
+    targetTerminal: false,
+    targetAdministrative: false,
+    transitionMarkStarted: true,
+  });
 }
 
 async function completeAgencyWorkflowRun(task: TaskRow, result: TaskRunnerResult): Promise<void> {
@@ -520,7 +532,19 @@ async function completeAgencyWorkflowRun(task: TaskRow, result: TaskRunnerResult
   const generatedWorkflow = result.generatedWorkflow ?? {};
   const output = result.output ?? generatedWorkflow.output ?? {};
   const rootFailure = rootFailureFromResult(result);
-  await transitionAgencyWorkflowRun(runId, result.success ? "succeed" : "fail", {
+  await transitionAgencyWorkflowRun(runId, result.success ? {
+    targetTerminal: true,
+    targetRetryable: false,
+    targetAdministrative: false,
+    transitionMarkCompleted: true,
+    transitionClearFailure: true,
+  } : {
+    targetTerminal: true,
+    targetRetryable: true,
+    targetAdministrative: false,
+    transitionMarkCompleted: true,
+    transitionClearFailure: false,
+  }, {
     workflowId: generatedWorkflow.workflowId ?? null,
     output,
     tokenUsage: result.tokenUsage ?? zeroTokenUsage(),
@@ -955,7 +979,13 @@ async function executeGeneratedWorkflowTaskWithSelfHealing(
 async function failAgencyWorkflowRunWithError(task: TaskRow, error: Error): Promise<void> {
   const runId = agencyWorkflowRunIdFromTask(task);
   if (!runId) return;
-  await transitionAgencyWorkflowRun(runId, "fail", {
+  await transitionAgencyWorkflowRun(runId, {
+    targetTerminal: true,
+    targetRetryable: true,
+    targetAdministrative: false,
+    transitionMarkCompleted: true,
+    transitionClearFailure: false,
+  }, {
     error: error.message,
     rootErrorCode: (error as Error & { code?: string }).code ?? "UNHANDLED_TASK_EXCEPTION",
     rootErrorMessage: error.message,
@@ -1135,7 +1165,13 @@ async function executeTask(task: TaskRow): Promise<void> {
   deviceLocks.set(deviceId, true);
   
   try {
-    const started = await transitionTask(taskId, "claim");
+    const started = await transitionTask(taskId, {
+      targetTerminal: false,
+      targetAdministrative: false,
+      targetDispatchable: false,
+      transitionMarkStarted: true,
+      transitionMarkCompleted: false,
+    });
     if (!started) {
       console.warn(`[task-runner] Skipping task ${taskId.slice(0, 8)} — DB lifecycle rejected transition to running`);
       return;
@@ -1209,7 +1245,13 @@ async function executeTask(task: TaskRow): Promise<void> {
         : currentRetryCount + 1;
       const rootFailure = rootFailureFromResult(result);
       
-      await transitionTask(taskId, "fail", {
+      await transitionTask(taskId, {
+        targetTerminal: true,
+        targetRetryable: true,
+        targetAdministrative: false,
+        transitionMarkCompleted: true,
+        transitionClearFailure: false,
+      }, {
         result: resultJson,
         error: result.failReason || "Unknown error",
         retryCount: newRetryCount,
@@ -1265,7 +1307,13 @@ async function executeTask(task: TaskRow): Promise<void> {
       : currentRetryCount + 1;
     const error = err as Error;
     
-    await transitionTask(taskId, "fail", {
+    await transitionTask(taskId, {
+      targetTerminal: true,
+      targetRetryable: true,
+      targetAdministrative: false,
+      transitionMarkCompleted: true,
+      transitionClearFailure: false,
+    }, {
       error: error.message,
       retryCount: newRetryCount,
       rootErrorCode: (error as Error & { code?: string }).code ?? "UNHANDLED_TASK_EXCEPTION",
@@ -1512,7 +1560,11 @@ async function executeGeneratedWorkflowTask(
       output: finalOutput,
     };
 
-    if (finalWorkflow.status !== "completed") {
+    if (
+      finalWorkflow.lifecycleTerminal !== true
+      || finalWorkflow.lifecycleRetryable === true
+      || finalWorkflow.lifecycleAdministrative === true
+    ) {
       return {
         success: false,
         stepsCompleted: finalWorkflow.currentStep,
@@ -1629,7 +1681,13 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
   deviceLocks.set(task.device_id, true);
 
   try {
-    const started = await transitionTask(taskId, "execute_now");
+    const started = await transitionTask(taskId, {
+      targetTerminal: false,
+      targetAdministrative: false,
+      targetDispatchable: false,
+      transitionMarkStarted: true,
+      transitionMarkCompleted: false,
+    });
     if (!started) {
       return { success: false, error: "Task status cannot transition to running" };
     }
@@ -1662,7 +1720,13 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
     if (taskResult.success) {
       await persistSuccessfulTaskResult(taskId, resultJson);
     } else {
-      await transitionTask(taskId, "fail", {
+      await transitionTask(taskId, {
+        targetTerminal: true,
+        targetRetryable: true,
+        targetAdministrative: false,
+        transitionMarkCompleted: true,
+        transitionClearFailure: false,
+      }, {
         result: resultJson,
         error: taskResult.failReason ?? "Unknown error",
         rootErrorCode: rootFailure?.code ?? null,

@@ -9,6 +9,11 @@ describe("generic DB-authoritative lifecycle", () => {
     path.join(__dirname, "migrations", migrationName),
     "utf8",
   );
+  const bindingMigrationName = "107_lifecycle_resource_bindings.sql";
+  const bindingMigration = fs.readFileSync(
+    path.join(__dirname, "migrations", bindingMigrationName),
+    "utf8",
+  );
   const schema = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf8");
   const runtime = [
     path.join(__dirname, "..", "modules", "dispatcher", "dispatcher.service.ts"),
@@ -17,22 +22,23 @@ describe("generic DB-authoritative lifecycle", () => {
     path.join(__dirname, "..", "ws", "direct-ws.server.ts"),
   ].map((file) => fs.readFileSync(file, "utf8")).join("\n");
 
-  it("creates one lifecycle registry shared by tasks and dispatcher jobs", () => {
+  it("creates one policy-free lifecycle mechanism shared by resources", () => {
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS lifecycle_state_definitions");
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS lifecycle_transitions");
     expect(migration).toContain("PRIMARY KEY (lifecycle_key, status)");
-    expect(migration).toContain("FOREIGN KEY (lifecycle_key, status)");
+    expect(migration).toContain("FOREIGN KEY (lifecycle_key, from_status)");
     expect(migration).toContain("ALTER TABLE tasks");
     expect(migration).toContain("ALTER TABLE jobs");
   });
 
-  it("preserves DB policy and never overwrites an existing definition or transition", () => {
-    expect(migration).toContain("ON CONFLICT (lifecycle_key, status) DO NOTHING");
-    expect(migration).toContain("ON CONFLICT (lifecycle_key, action_key, from_status) DO NOTHING");
-    expect(migration).not.toMatch(/ON CONFLICT[^(]*\\([^)]*\\) DO UPDATE/i);
+  it("contains no lifecycle semantic seed or packaged policy", () => {
+    expect(migration).not.toMatch(/INSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions)/i);
+    expect(migration).not.toMatch(/\bVALUES\s*\(\s*['"]/i);
+    expect(bindingMigration).not.toMatch(/INSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions)/i);
+    expect(bindingMigration).not.toMatch(/transition\.action_key\s*=\s*['"]/i);
   });
 
-  it("removes the superseded task registry and status-list checks", () => {
+  it("removes the superseded task registry and uses generic dynamic bindings", () => {
     expect(migration).toContain("DROP TABLE IF EXISTS task_status_transitions");
     expect(migration).toContain("DROP TABLE IF EXISTS task_status_definitions");
     expect(`${schema}\n${migration}`).not.toMatch(
@@ -40,6 +46,10 @@ describe("generic DB-authoritative lifecycle", () => {
     );
     expect(runtime).not.toContain("task_status_definitions");
     expect(runtime).not.toContain("task_status_transitions");
+    expect(bindingMigration).toContain("CREATE TABLE IF NOT EXISTS lifecycle_resource_bindings");
+    expect(bindingMigration).toContain("TG_RELID");
+    expect(bindingMigration).toContain("configure_lifecycle_resource_binding");
+    expect(bindingMigration).toContain("FOREIGN KEY (lifecycle_key, status)");
   });
 
   it("keeps dispatcher runtime policy off status literals and lists", () => {
@@ -56,5 +66,6 @@ describe("generic DB-authoritative lifecycle", () => {
 
   it("installs fail-closed", () => {
     expect(isFailClosedMigration(migrationName)).toBe(true);
+    expect(isFailClosedMigration(bindingMigrationName)).toBe(true);
   });
 });

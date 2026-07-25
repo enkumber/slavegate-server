@@ -4513,7 +4513,13 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
     const failure = `Administratively closed: ${reason}`;
     let closedWorkflowCount = 0;
     for (const workflowId of activeWorkflowIds) {
-      if (await transitionWorkflow(workflowId, "fail", { error: failure }, client)) {
+      if (await transitionWorkflow(workflowId, {
+        targetTerminal: true,
+        targetRetryable: true,
+        targetAdministrative: false,
+        transitionMarkCompleted: true,
+        transitionClearFailure: false,
+      }, { error: failure }, client)) {
         closedWorkflowCount += 1;
       }
     }
@@ -4523,7 +4529,11 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
     if (taskId && task) {
       const transitionedTask = await transitionTask<Record<string, unknown>>(
         taskId,
-        "administrative_cancel",
+        {
+          targetTerminal: true,
+          targetAdministrative: true,
+          transitionManualAllowed: true,
+        },
         { error: failure },
         client,
       );
@@ -4533,7 +4543,13 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
 
     const runUpdate = await transitionAgencyWorkflowRun(
       runId,
-      "fail",
+      {
+        targetTerminal: true,
+        targetRetryable: true,
+        targetAdministrative: false,
+        transitionMarkCompleted: true,
+        transitionClearFailure: false,
+      },
       { error: failure, workflowId: workflowIds[0] ?? null },
       client,
     );
@@ -4554,10 +4570,10 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
       inFlightJobs: inFlightJobs.rows.map((row) => ({ id: row.id, status: row.status })),
     };
     const resultingState = {
-      runStatus: "failed",
+      runStatus: runUpdate.status,
       taskStatus: resultingTaskStatus,
       closedWorkflowCount,
-      workflowStatus: "failed",
+      workflowStatuses: workflowResult.rows.map((row) => row.status),
       inFlightJobCount: inFlightJobs.rows.length,
     };
     const audit = await client.query<{ id: string; created_at: Date | string }>(
@@ -4576,7 +4592,7 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
         runId,
         taskId,
         workflowIds,
-        status: "failed",
+        status: runUpdate.status,
         taskClosed,
         closedWorkflowCount,
         inFlightJobs: inFlightJobs.rows.map((row) => ({ id: row.id, status: row.status })),

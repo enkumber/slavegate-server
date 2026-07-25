@@ -27,7 +27,6 @@ import {
   transitionWorkflow,
   transitionWorkflowWhere,
 } from "./workflow-lifecycle.service";
-import { lifecycleKeys } from "../lifecycle/lifecycle.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,6 +45,11 @@ export interface WorkflowRecord {
   completedAt: string | null;
   error:       string | null;
   createdAt:   string;
+  lifecycleInitial?: boolean;
+  lifecycleTerminal?: boolean;
+  lifecycleRetryable?: boolean;
+  lifecycleAdministrative?: boolean;
+  lifecycleDispatchable?: boolean;
 }
 
 export interface CreateWorkflowInput {
@@ -135,7 +139,20 @@ export class WorkflowService {
 
   async get(id: string): Promise<WorkflowRecord | null> {
     const db = getDb();
-    const result = await db.query("SELECT * FROM workflows WHERE id = $1", [id]);
+    const result = await db.query(
+      `SELECT workflow.*,
+              state.initial AS lifecycle_initial,
+              state.terminal AS lifecycle_terminal,
+              state.retryable AS lifecycle_retryable,
+              state.administrative AS lifecycle_administrative,
+              state.dispatchable AS lifecycle_dispatchable
+         FROM workflows workflow
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = workflow.lifecycle_key
+          AND state.status = workflow.status
+        WHERE workflow.id = $1`,
+      [id],
+    );
     if (result.rows.length === 0) return null;
     return rowToWorkflow(result.rows[0]);
   }
@@ -206,15 +223,17 @@ export class WorkflowService {
     const db = getDb();
     const result = await db.query(
       `SELECT state.status, COUNT(workflow.id) AS count
-         FROM lifecycle_state_definitions state
+         FROM lifecycle_resource_bindings binding
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = binding.lifecycle_key
          LEFT JOIN workflows workflow
            ON workflow.lifecycle_key = state.lifecycle_key
           AND workflow.status = state.status
-        WHERE state.lifecycle_key = $1
+        WHERE binding.resource_table = to_regclass($1)
           AND NOT state.terminal
         GROUP BY state.status, state.sort_order
         ORDER BY state.sort_order, state.status`,
-      [lifecycleKeys.workflowExecution],
+      ["workflows"],
     );
     const counts: Record<string, number> = { total: 0 };
     for (const row of result.rows) {
@@ -227,7 +246,11 @@ export class WorkflowService {
   }
 
   async cancel(id: string): Promise<boolean> {
-    return Boolean(await transitionWorkflow(id, "cancel"));
+    return Boolean(await transitionWorkflow(id, {
+      targetTerminal: true,
+      targetAdministrative: true,
+      transitionManualAllowed: true,
+    }));
   }
 
   // ─── Checkpoint (atomic) ─────────────────────────────────────────────────
@@ -251,10 +274,16 @@ export class WorkflowService {
     try {
       return Boolean(await transitionWorkflowWhere(
         workflowId,
-        "checkpoint",
+        {
+          targetTerminal: false,
+          targetAdministrative: false,
+          targetDispatchable: false,
+          transitionMarkStarted: true,
+          transitionMarkCompleted: false,
+        },
         { checkpoint: newCheckpoint, currentStep: newStep },
         db,
-        "workflow.current_step = $3",
+        "workflow.current_step = $2",
         [expectedStep],
       ));
     } catch (err) {
@@ -266,22 +295,46 @@ export class WorkflowService {
   // ─── Status transitions ────────────────────────────────────────────────
 
   async markRunning(id: string): Promise<boolean> {
-    return Boolean(await transitionWorkflow(id, "start"));
+    return Boolean(await transitionWorkflow(id, {
+      targetTerminal: false,
+      targetAdministrative: false,
+      targetDispatchable: false,
+      transitionMarkStarted: true,
+      transitionMarkCompleted: false,
+    }));
   }
 
   async markCompleted(id: string): Promise<void> {
-    await transitionWorkflow(id, "succeed");
+    await transitionWorkflow(id, {
+      targetTerminal: true,
+      targetRetryable: false,
+      targetAdministrative: false,
+      transitionMarkCompleted: true,
+      transitionClearFailure: true,
+    });
   }
 
   async markFailed(id: string, error: string): Promise<void> {
-    await transitionWorkflow(id, "fail", { error });
+    await transitionWorkflow(id, {
+      targetTerminal: true,
+      targetRetryable: true,
+      targetAdministrative: false,
+      transitionMarkCompleted: true,
+      transitionClearFailure: false,
+    }, { error });
   }
 
   async markFailedIfEdgeStartUnacknowledged(id: string, error: string): Promise<boolean> {
     const db = getDb();
     return Boolean(await transitionWorkflowWhere(
       id,
-      "fail",
+      {
+        targetTerminal: true,
+        targetRetryable: true,
+        targetAdministrative: false,
+        transitionMarkCompleted: true,
+        transitionClearFailure: false,
+      },
       { error },
       db,
       "workflow.current_step = 0 AND (workflow.checkpoint->>'source') IS DISTINCT FROM 'edge'",
@@ -301,16 +354,26 @@ export class WorkflowService {
     const db = getDb();
     return Boolean(await transitionWorkflowWhere(
       id,
-      "fail",
+      {
+        targetTerminal: true,
+        targetRetryable: true,
+        targetAdministrative: false,
+        transitionMarkCompleted: true,
+        transitionClearFailure: false,
+      },
       { error },
       db,
-      "(workflow.checkpoint->>'source') = 'edge' AND (workflow.checkpoint->>'checkpointAt') = $3",
+      "(workflow.checkpoint->>'source') = 'edge' AND (workflow.checkpoint->>'checkpointAt') = $2",
       [observedCheckpointAt],
     ));
   }
 
   async markPaused(id: string): Promise<void> {
-    await transitionWorkflow(id, "pause");
+    await transitionWorkflow(id, {
+      targetTerminal: false,
+      targetAdministrative: true,
+      transitionManualAllowed: true,
+    });
   }
 
   // ─── Template management ─────────────────────────────────────────────────
@@ -850,6 +913,11 @@ function rowToWorkflow(row: Record<string, unknown>): WorkflowRecord {
     completedAt: row.completed_at ? (row.completed_at as Date).toISOString() : null,
     error:       (row.error as string) ?? null,
     createdAt:   (row.created_at as Date).toISOString(),
+    lifecycleInitial: row.lifecycle_initial as boolean | undefined,
+    lifecycleTerminal: row.lifecycle_terminal as boolean | undefined,
+    lifecycleRetryable: row.lifecycle_retryable as boolean | undefined,
+    lifecycleAdministrative: row.lifecycle_administrative as boolean | undefined,
+    lifecycleDispatchable: row.lifecycle_dispatchable as boolean | undefined,
   };
 }
 

@@ -56,6 +56,7 @@ export function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("task_lifecycle_db_authoritative") ||
     fileName.includes("generic_resource_lifecycle") ||
     fileName.includes("workflow_execution_generic_lifecycle") ||
+    fileName.includes("lifecycle_resource_bindings") ||
     fileName.includes("phone_network_incidents_and_audits");
 }
 

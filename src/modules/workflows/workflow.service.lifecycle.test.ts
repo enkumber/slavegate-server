@@ -24,15 +24,14 @@ describe("workflow edge lifecycle transitions", () => {
     expect(query).toHaveBeenCalledTimes(1);
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain("JOIN lifecycle_transitions transition");
-    expect(sql).toContain("transition.action_key = $2");
+    expect(sql).toContain("target.terminal = ($3::jsonb->>'targetTerminal')::boolean");
     expect(sql).toContain("workflow.current_step = 0");
     expect(sql).toContain("(workflow.checkpoint->>'source') IS DISTINCT FROM 'edge'");
     expect(sql).toContain("RETURNING workflow.*");
     expect(params).toEqual([
       "workflow-1",
-      "fail",
       "{\"error\":\"ack timeout\"}",
-      "workflow_execution",
+      "{\"targetTerminal\":true,\"targetRetryable\":true,\"targetAdministrative\":false,\"transitionMarkCompleted\":true,\"transitionClearFailure\":false}",
     ]);
   });
 
@@ -57,14 +56,13 @@ describe("workflow edge lifecycle transitions", () => {
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain("JOIN lifecycle_transitions transition");
     expect(sql).toContain("(workflow.checkpoint->>'source') = 'edge'");
-    expect(sql).toContain("(workflow.checkpoint->>'checkpointAt') = $3");
+    expect(sql).toContain("(workflow.checkpoint->>'checkpointAt') = $2");
     expect(sql).toContain("RETURNING workflow.*");
     expect(params).toEqual([
       "workflow-1",
-      "fail",
       "2026-07-22T12:00:00.000Z",
       "{\"error\":\"progress timeout\"}",
-      "workflow_execution",
+      "{\"targetTerminal\":true,\"targetRetryable\":true,\"targetAdministrative\":false,\"transitionMarkCompleted\":true,\"transitionClearFailure\":false}",
     ]);
   });
 });

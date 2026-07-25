@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { DirectWsServer, mergeWorkflowStatusVariables, otaTerminalStatusFromAuthenticatedVersion, resolveDirectWsResultHandle, sanitizeLifecycleTelemetry, setWorkflowJobResultResolverForTest } from "./direct-ws.server";
+import { DirectWsServer, mergeWorkflowStatusVariables, otaTerminalStatusFromAuthenticatedVersion, resolveDirectWsResultHandle, sanitizeLifecycleTelemetry, setExternalWorkflowLifecycleTargetResolverForTest, setWorkflowJobResultResolverForTest } from "./direct-ws.server";
 import { deviceExecutionArbiter, setDeviceExecutionAuthorityForTest, type DeviceExecutionHandle } from "../modules/device-execution";
 import { pnqV2RuntimeService } from "../modules/device-execution/pnq-v2-runtime.service";
 import { setPnqV2RuntimeConfigForTest } from "../modules/device-execution/pnq-v2-runtime-config";
@@ -29,6 +29,7 @@ afterEach(() => {
   setDeviceExecutionAuthorityForTest(null);
   setPnqV2RuntimeConfigForTest(null);
   setWorkflowJobResultResolverForTest(null);
+  setExternalWorkflowLifecycleTargetResolverForTest(null);
   vi.restoreAllMocks();
 });
 
@@ -430,6 +431,12 @@ describe("PNQ-003 observe-only DirectWS ingress compatibility", () => {
 
   it("persists and publishes observe-only terminal WORKFLOW_STATUS without a pending PNQ handle", async () => {
     setDeviceExecutionAuthorityForTest("observe_only");
+    setExternalWorkflowLifecycleTargetResolverForTest(async () => ({
+      terminal: true,
+      retryable: false,
+      administrative: false,
+      markCompleted: true,
+    }));
     const server = new DirectWsServer();
     const internals = server as unknown as {
       _handleWorkflowStatus: (conn: ReturnType<typeof connection>, msg: Record<string, unknown>) => Promise<void>;

@@ -24,9 +24,9 @@ import { recordJobExecutionEventDetached } from "../observability/job-execution-
 import {
   expireStaleJobs,
   transitionJob,
+  transitionJobByConfiguredStalePolicy,
   transitionJobFromExternalStatus,
 } from "./job-lifecycle.service";
-import { getLifecycleTransition, lifecycleKeys } from "../lifecycle/lifecycle.service";
 
 // ─── Whitelist ─────────────────────────────────────────────────────────────────
 // DO NOT add generic shell commands here. Extend only with explicit approval.
@@ -251,13 +251,6 @@ export class DispatcherService {
         const job = await this.getJob(jobId);
         if (job) {
           const db = getDb();
-          const expiryTransition = await getLifecycleTransition(
-            lifecycleKeys.dispatcherJob,
-            job.status,
-            "expire",
-            db,
-          );
-          if (!expiryTransition?.automatic) return;
 
           // A server-workflow child can remain durably queued behind another
           // PNQ root for longer than its execution timeout.  Its execution
@@ -293,7 +286,7 @@ export class DispatcherService {
             }
           }
 
-          const expired = await transitionJob(jobId, "expire", {}, db);
+          const expired = await transitionJobByConfiguredStalePolicy(jobId, db);
           if (!expired) return;
           await db.query(
             "UPDATE command_log SET result_status = $1 WHERE job_id = $2",
@@ -446,7 +439,11 @@ export class DispatcherService {
   }
 
   async cancelJob(jobId: string): Promise<boolean> {
-    const row = await transitionJob(jobId, "cancel");
+    const row = await transitionJob(jobId, {
+      targetTerminal: true,
+      targetAdministrative: true,
+      transitionManualAllowed: true,
+    });
     if (!row) return false;
     await deviceExecutionArbiter.observeTerminal({
       deviceId: row.device_id,

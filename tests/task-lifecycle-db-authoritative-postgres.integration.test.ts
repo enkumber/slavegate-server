@@ -1,77 +1,48 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import {
-  retryConfiguredTasks,
-  transitionTask,
-} from "../src/modules/task-lifecycle/task-lifecycle.service";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { transitionTask } from "../src/modules/task-lifecycle/task-lifecycle.service";
 
 const repoRoot = path.resolve(__dirname, "..");
 const postgresUrl = process.env.TASK_LIFECYCLE_PG_URL
-  ?? "postgresql://postgres@127.0.0.1:55432/postgres";
-
+  ?? "postgresql://pnqtest@127.0.0.1:55432/pnq001_test";
 let adminPool: Pool;
-let schema = "";
 let pool: Pool;
+let schema = "";
 
-function lifecycleMigration(): string {
-  return fs.readFileSync(
-    path.join(repoRoot, "src/db/migrations/105_generic_resource_lifecycle.sql"),
-    "utf8",
-  );
+function migration(name: string): string {
+  return fs.readFileSync(path.join(repoRoot, "src/db/migrations", name), "utf8");
 }
 
-async function createBaseTaskTable(): Promise<void> {
-  await pool.query(`
-    DROP TABLE IF EXISTS tasks CASCADE;
-    DROP TABLE IF EXISTS jobs CASCADE;
-    DROP TABLE IF EXISTS lifecycle_transitions CASCADE;
-    DROP TABLE IF EXISTS lifecycle_state_definitions CASCADE;
-    DROP TABLE IF EXISTS task_status_transitions CASCADE;
-    DROP TABLE IF EXISTS task_status_definitions CASCADE;
-    DROP FUNCTION IF EXISTS set_initial_resource_lifecycle_status() CASCADE;
-    DROP FUNCTION IF EXISTS set_initial_task_status() CASCADE;
-
-    CREATE TABLE tasks (
-      id UUID PRIMARY KEY,
-      status TEXT,
-      started_at TIMESTAMPTZ,
-      completed_at TIMESTAMPTZ,
-      retry_count INTEGER NOT NULL DEFAULT 0,
-      result JSONB,
-      error TEXT,
-      root_error_code TEXT,
-      root_error_message TEXT,
-      root_error_details JSONB NOT NULL DEFAULT '{}'::jsonb,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    CREATE TABLE jobs (
-      id UUID PRIMARY KEY,
-      status TEXT
-    );
-  `);
-}
-
-describe("DB-authoritative task lifecycle", () => {
+describe("policy-free task lifecycle on real PostgreSQL", () => {
   beforeAll(async () => {
-    if (postgresUrl === process.env.DATABASE_URL) {
-      throw new Error("task lifecycle test database must not be the production DATABASE_URL");
+    const parsed = new URL(postgresUrl);
+    if (!["127.0.0.1", "localhost"].includes(parsed.hostname) || !/(test|pnq)/i.test(parsed.pathname)) {
+      throw new Error("Refusing non-test PostgreSQL target");
     }
     adminPool = new Pool({ connectionString: postgresUrl, max: 2 });
-    const version = await adminPool.query("SELECT version()");
-    if (!String(version.rows[0]?.version ?? "").includes("PostgreSQL")) {
-      throw new Error("task lifecycle integration test requires real PostgreSQL");
-    }
     schema = `task_lifecycle_${process.pid}_${Date.now()}`;
     await adminPool.query(`CREATE SCHEMA "${schema}"`);
-    const url = new URL(postgresUrl);
-    url.searchParams.set("options", `-c search_path=${schema}`);
-    pool = new Pool({ connectionString: url.toString(), max: 2 });
-  });
-
-  beforeEach(async () => {
-    await createBaseTaskTable();
+    pool = new Pool({ connectionString: postgresUrl, max: 4, options: `-c search_path=${schema}` });
+    await pool.query(`
+      CREATE TABLE tasks (
+        id UUID PRIMARY KEY,
+        status TEXT,
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        result JSONB,
+        error TEXT,
+        root_error_code TEXT,
+        root_error_message TEXT,
+        root_error_details JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE jobs (id UUID PRIMARY KEY, status TEXT);
+    `);
+    await pool.query(migration("105_generic_resource_lifecycle.sql"));
+    await pool.query(migration("107_lifecycle_resource_bindings.sql"));
   });
 
   afterAll(async () => {
@@ -80,202 +51,48 @@ describe("DB-authoritative task lifecycle", () => {
     await adminPool?.end();
   });
 
-  it("installs idempotently and resolves initial state from DB", async () => {
-    const migration = lifecycleMigration();
-    await pool.query(migration);
-    await pool.query(migration);
-
-    const id = "10000000-0000-4000-8000-000000000001";
-    const inserted = await pool.query(
-      `INSERT INTO tasks (id) VALUES ($1) RETURNING status`,
-      [id],
-    );
-    const initial = await pool.query(
-      `SELECT status FROM lifecycle_state_definitions
-        WHERE lifecycle_key = 'task' AND initial`,
-    );
-    expect(inserted.rows[0].status).toBe(initial.rows[0].status);
-
-    await expect(
-      pool.query(
-        `INSERT INTO tasks (id, status) VALUES ($1, $2)`,
-        ["10000000-0000-4000-8000-000000000002", "not_configured"],
-      ),
-    ).rejects.toThrow();
+  it("installs no lifecycle semantics on a fresh database", async () => {
+    const definitions = await pool.query("SELECT COUNT(*)::int AS count FROM lifecycle_state_definitions");
+    const transitions = await pool.query("SELECT COUNT(*)::int AS count FROM lifecycle_transitions");
+    const bindings = await pool.query("SELECT COUNT(*)::int AS count FROM lifecycle_resource_bindings");
+    expect(definitions.rows[0].count).toBe(0);
+    expect(transitions.rows[0].count).toBe(0);
+    expect(bindings.rows[0].count).toBe(0);
   });
 
-  it("preserves customized lifecycle metadata and transitions on migration rerun", async () => {
-    const migration = lifecycleMigration();
-    await pool.query(migration);
-    await pool.query(
-      `UPDATE lifecycle_state_definitions
-          SET terminal = TRUE,
-              retryable = FALSE,
-              dispatchable = FALSE,
-              manual = FALSE,
-              description = 'operator configured queued',
-              sort_order = 999
-        WHERE lifecycle_key = 'task' AND status = 'queued'`,
-    );
-    await pool.query(
-      `UPDATE lifecycle_transitions
-          SET to_status = 'cancelled',
-              mark_started = FALSE,
-              mark_completed = TRUE,
-              clear_completed = FALSE,
-              clear_failure = TRUE,
-              reset_retry = TRUE
-        WHERE lifecycle_key = 'task'
-          AND action_key = 'claim'
-          AND from_status = 'queued'`,
-    );
-
-    await pool.query(migration);
-
-    const definition = await pool.query(
-      `SELECT terminal, retryable, dispatchable, manual, description, sort_order
-         FROM lifecycle_state_definitions
-        WHERE lifecycle_key = 'task' AND status = 'queued'`,
-    );
-    expect(definition.rows[0]).toMatchObject({
-      terminal: true,
-      retryable: false,
-      dispatchable: false,
-      manual: false,
-      description: "operator configured queued",
-      sort_order: 999,
-    });
-    const transition = await pool.query(
-      `SELECT to_status, mark_started, mark_completed, clear_completed, clear_failure, reset_retry
-         FROM lifecycle_transitions
-        WHERE lifecycle_key = 'task'
-          AND action_key = 'claim'
-          AND from_status = 'queued'`,
-    );
-    expect(transition.rows[0]).toMatchObject({
-      to_status: "cancelled",
-      mark_started: false,
-      mark_completed: true,
-      clear_completed: false,
-      clear_failure: true,
-      reset_retry: true,
-    });
-  });
-
-  it("reconciles missing canonical rows without replacing an operator initial status", async () => {
+  it("accepts arbitrary DB-only policy and executes it without a code change", async () => {
     await pool.query(`
-      CREATE TABLE task_status_definitions (
-        status TEXT PRIMARY KEY,
-        initial BOOLEAN NOT NULL DEFAULT FALSE,
-        terminal BOOLEAN NOT NULL DEFAULT FALSE,
-        retryable BOOLEAN NOT NULL DEFAULT FALSE,
-        administrative BOOLEAN NOT NULL DEFAULT FALSE,
-        dispatchable BOOLEAN NOT NULL DEFAULT FALSE,
-        manual BOOLEAN NOT NULL DEFAULT FALSE,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-        description TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-      CREATE UNIQUE INDEX uq_task_status_definitions_initial
-        ON task_status_definitions (initial)
-        WHERE initial;
-      INSERT INTO task_status_definitions
-        (status, initial, terminal, retryable, administrative, dispatchable, manual, sort_order, description)
+      INSERT INTO lifecycle_state_definitions
+        (lifecycle_key, status, initial, terminal, retryable, administrative, dispatchable, manual, sort_order)
       VALUES
-        ('operator_ready', TRUE, FALSE, FALSE, FALSE, TRUE, TRUE, 1, 'operator-owned initial');
+        ('test_alpha', 'cold', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 1),
+        ('test_alpha', 'hot', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 2),
+        ('test_alpha', 'ash', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 3);
+      INSERT INTO lifecycle_transitions
+        (lifecycle_key, action_key, from_status, to_status, mark_started)
+      VALUES ('test_alpha', 'ignite', 'cold', 'hot', TRUE);
+      SELECT configure_lifecycle_resource_binding('tasks'::regclass, 'test_alpha');
     `);
 
-    const legacyMigration = fs.readFileSync(
-      path.join(repoRoot, "src/db/migrations/104_task_lifecycle_db_authoritative.sql"),
-      "utf8",
-    );
-    await pool.query(legacyMigration);
-    await pool.query(lifecycleMigration());
-
-    const rows = await pool.query(
-      `SELECT status, initial
-         FROM lifecycle_state_definitions
-        WHERE lifecycle_key = 'task'
-          AND status IN ('operator_ready', 'queued')
-        ORDER BY status`,
-    );
-    expect(rows.rows).toEqual([
-      { status: "operator_ready", initial: true },
-      { status: "queued", initial: false },
-    ]);
-  });
-
-  it("accepts a DB-only status and transition without a code change", async () => {
-    await pool.query(lifecycleMigration());
     const id = "10000000-0000-4000-8000-000000000001";
-    await pool.query(`INSERT INTO tasks (id) VALUES ($1)`, [id]);
-    await pool.query(
-      `INSERT INTO lifecycle_state_definitions
-         (lifecycle_key, status, terminal, retryable, administrative, dispatchable, manual, sort_order)
-       VALUES ('task', $1, FALSE, FALSE, TRUE, FALSE, TRUE, 35)`,
-      ["holding"],
-    );
-    const initial = await pool.query(
-      `SELECT status FROM lifecycle_state_definitions
-        WHERE lifecycle_key = 'task' AND initial`,
-    );
-    await pool.query(
-      `INSERT INTO lifecycle_transitions
-         (lifecycle_key, action_key, from_status, to_status, manual_allowed)
-       VALUES ('task', $1, $2, $3, TRUE)`,
-      ["manual_hold", initial.rows[0].status, "holding"],
-    );
+    const inserted = await pool.query("INSERT INTO tasks (id) VALUES ($1) RETURNING lifecycle_key, status", [id]);
+    expect(inserted.rows[0]).toEqual({ lifecycle_key: "test_alpha", status: "cold" });
 
-    const changed = await transitionTask(
+    const transitioned = await transitionTask(
       id,
-      "manual_hold",
+      { targetTerminal: false, targetDispatchable: false, transitionMarkStarted: true },
       {},
       pool,
     );
-    expect(changed?.status).toBe("holding");
+    expect(transitioned?.status).toBe("hot");
+    expect(transitioned?.started_at).toBeInstanceOf(Date);
   });
 
-  it("returns null for invalid transitions and retries configured tasks through real PostgreSQL", async () => {
-    await pool.query(lifecycleMigration());
-    const id = "10000000-0000-4000-8000-000000000001";
-    await pool.query(`INSERT INTO tasks (id) VALUES ($1)`, [id]);
-    const invalid = await transitionTask(
-      id,
-      "succeed",
-      {},
-      pool,
-    );
-    expect(invalid).toBeNull();
-
-    await pool.query(`
-      INSERT INTO tasks (id, status, completed_at, retry_count, error, root_error_code, root_error_message, root_error_details)
-      VALUES (
-        '10000000-0000-4000-8000-000000000003',
-        'failed',
-        NOW(),
-        4,
-        'failed once',
-        'ROOTED',
-        'root message',
-        '{"reason":"test"}'::jsonb
-      )
-    `);
-    const count = await retryConfiguredTasks("retry", pool);
-    expect(count).toBe(1);
-    const retried = await pool.query(
-      `SELECT status, completed_at, retry_count, error, root_error_code, root_error_message, root_error_details
-         FROM tasks
-        WHERE id = '10000000-0000-4000-8000-000000000003'`,
-    );
-    expect(retried.rows[0]).toMatchObject({
-      status: "queued",
-      completed_at: null,
-      retry_count: 0,
-      error: null,
-      root_error_code: null,
-      root_error_message: null,
-      root_error_details: {},
-    });
+  it("preserves operator policy when structural migrations rerun", async () => {
+    await pool.query("UPDATE lifecycle_state_definitions SET description = 'operator-owned' WHERE lifecycle_key = 'test_alpha' AND status = 'hot'");
+    await pool.query(migration("105_generic_resource_lifecycle.sql"));
+    await pool.query(migration("107_lifecycle_resource_bindings.sql"));
+    const row = await pool.query("SELECT description FROM lifecycle_state_definitions WHERE lifecycle_key = 'test_alpha' AND status = 'hot'");
+    expect(row.rows[0].description).toBe("operator-owned");
   });
 });

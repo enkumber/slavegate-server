@@ -564,13 +564,31 @@ export class SegmentBuildJobService {
         const executionKey = typeof row.execution_key === "string" ? row.execution_key : null;
         const reason = `Segment Builder canary expired while device ${String(row.device_status)} before execution`;
         if (taskId) {
-          await transitionTask(taskId, "fail", { error: reason }, client);
+          await transitionTask(taskId, {
+            targetTerminal: true,
+            targetRetryable: true,
+            targetAdministrative: false,
+            transitionMarkCompleted: true,
+            transitionClearFailure: false,
+          }, { error: reason }, client);
         }
         const workflowId = typeof row.workflow_id === "string" ? row.workflow_id : null;
         if (workflowId) {
-          await transitionWorkflow(workflowId, "fail", { error: reason }, client);
+          await transitionWorkflow(workflowId, {
+            targetTerminal: true,
+            targetRetryable: true,
+            targetAdministrative: false,
+            transitionMarkCompleted: true,
+            transitionClearFailure: false,
+          }, { error: reason }, client);
         }
-        await transitionAgencyWorkflowRun(runId, "fail", { error: reason }, client);
+        await transitionAgencyWorkflowRun(runId, {
+          targetTerminal: true,
+          targetRetryable: true,
+          targetAdministrative: false,
+          transitionMarkCompleted: true,
+          transitionClearFailure: false,
+        }, { error: reason }, client);
         if (executionKey) {
           await client.query(
             `UPDATE workflow_execution_bindings

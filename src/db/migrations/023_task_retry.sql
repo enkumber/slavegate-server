@@ -10,10 +10,9 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;
 -- Update existing rows to have updated_at = created_at or NOW()
 UPDATE tasks SET updated_at = COALESCE(created_at, NOW()) WHERE updated_at IS NULL;
 
--- Index for finding failed tasks eligible for retry
+-- Generic index for lifecycle-driven retry selection.
 CREATE INDEX IF NOT EXISTS idx_tasks_retry_eligible 
-ON tasks(status, retry_count, updated_at) 
-WHERE status = 'failed';
+ON tasks(status, retry_count, updated_at);
 
 COMMENT ON COLUMN tasks.retry_count IS 'Number of retry attempts for failed tasks';
 COMMENT ON COLUMN tasks.updated_at IS 'Last update timestamp for retry backoff calculation';

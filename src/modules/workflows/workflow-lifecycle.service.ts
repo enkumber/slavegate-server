@@ -1,8 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { getDb } from "../../db/client";
 import {
-  lifecycleKeys,
-  listLifecycleStates,
+  lifecycleTransitionSelectorPredicate,
+  listResourceLifecycleStates,
+  serializeLifecycleTransitionSelector,
+  type LifecycleTransitionSelector,
   type LifecycleStateDefinition,
 } from "../lifecycle/lifecycle.service";
 
@@ -23,39 +25,61 @@ export interface WorkflowLifecycleRow extends Record<string, unknown> {
 export async function listWorkflowStatusDefinitions(
   db: Queryable = getDb(),
 ): Promise<LifecycleStateDefinition[]> {
-  return listLifecycleStates(lifecycleKeys.workflowExecution, db);
+  return listResourceLifecycleStates("workflows", db);
 }
 
 export async function transitionWorkflow(
   workflowId: string,
-  actionKey: string,
+  selector: LifecycleTransitionSelector,
   patch: WorkflowLifecyclePatch = {},
   db: Queryable = getDb(),
 ): Promise<WorkflowLifecycleRow | null> {
-  return transitionWorkflowWhere(workflowId, actionKey, patch, db);
+  return transitionWorkflowWhere(workflowId, selector, patch, db);
 }
 
 export async function transitionWorkflowWhere(
   workflowId: string,
-  actionKey: string,
+  selector: LifecycleTransitionSelector,
   patch: WorkflowLifecyclePatch,
   db: Queryable = getDb(),
   extraPredicate = "TRUE",
   extraParams: unknown[] = [],
 ): Promise<WorkflowLifecycleRow | null> {
-  const patchIndex = extraParams.length + 3;
+  const patchIndex = extraParams.length + 2;
+  const selectorIndex = extraParams.length + 3;
+  const selectorPredicate = lifecycleTransitionSelectorPredicate(
+    "transition",
+    "target",
+    `$${selectorIndex}`,
+  );
   const result = await db.query(
-    `WITH selected AS (
-       SELECT workflow.id, transition.*
+    `WITH locked AS (
+       SELECT workflow.*
          FROM workflows workflow
+        WHERE workflow.id = $1
+          AND (${extraPredicate})
+        FOR UPDATE
+     ),
+     candidates AS (
+       SELECT DISTINCT workflow.id, transition.to_status, transition.mark_started,
+              transition.mark_completed, transition.clear_completed,
+              transition.clear_failure, transition.reset_retry
+         FROM locked workflow
          JOIN lifecycle_transitions transition
            ON transition.lifecycle_key = workflow.lifecycle_key
           AND transition.from_status = workflow.status
-          AND transition.action_key = $2
-        WHERE workflow.id = $1
-          AND workflow.lifecycle_key = $${extraParams.length + 4}
-          AND (${extraPredicate})
-        FOR UPDATE OF workflow
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+        WHERE ${selectorPredicate}
+     ),
+     selected AS (
+       SELECT ranked.*
+         FROM (
+           SELECT candidates.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+             FROM candidates
+         ) ranked
+        WHERE ranked.candidate_count = 1
      )
      UPDATE workflows workflow
         SET status = selected.to_status,
@@ -88,7 +112,12 @@ export async function transitionWorkflowWhere(
        FROM selected
       WHERE workflow.id = selected.id
       RETURNING workflow.*`,
-    [workflowId, actionKey, ...extraParams, JSON.stringify(patch), lifecycleKeys.workflowExecution],
+    [
+      workflowId,
+      ...extraParams,
+      JSON.stringify(patch),
+      serializeLifecycleTransitionSelector(selector),
+    ],
   );
   return (result.rows[0] as WorkflowLifecycleRow | undefined) ?? null;
 }
@@ -109,7 +138,6 @@ export async function transitionWorkflowFromExternalStatus(
           AND transition.to_status = $2
           AND transition.external_allowed
         WHERE workflow.id = $1
-          AND workflow.lifecycle_key = $4
         ORDER BY transition.action_key
         LIMIT 1
         FOR UPDATE OF workflow
@@ -145,7 +173,7 @@ export async function transitionWorkflowFromExternalStatus(
        FROM selected
       WHERE workflow.id = selected.id
       RETURNING workflow.*`,
-    [workflowId, targetStatus, JSON.stringify(patch), lifecycleKeys.workflowExecution],
+    [workflowId, targetStatus, JSON.stringify(patch)],
   );
   return (result.rows[0] as WorkflowLifecycleRow | undefined) ?? null;
 }

@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { getDb } from "../../db/client";
-import { lifecycleKeys } from "../lifecycle/lifecycle.service";
+import {
+  lifecycleTransitionSelectorPredicate,
+  serializeLifecycleTransitionSelector,
+  type LifecycleTransitionSelector,
+} from "../lifecycle/lifecycle.service";
 
 type Queryable = Pick<Pool | PoolClient, "query">;
 
@@ -18,21 +22,38 @@ export interface AgencyWorkflowRunPatch {
 
 export async function transitionAgencyWorkflowRun(
   runId: string,
-  actionKey: string,
+  selector: LifecycleTransitionSelector,
   patch: AgencyWorkflowRunPatch = {},
   db: Queryable = getDb(),
 ): Promise<Record<string, unknown> | null> {
+  const selectorPredicate = lifecycleTransitionSelectorPredicate("transition", "target", "$2");
   const result = await db.query(
-    `WITH selected AS (
-       SELECT run.id, transition.*
+    `WITH locked AS (
+       SELECT run.*
          FROM agency_workflow_runs run
+        WHERE run.id = $1
+        FOR UPDATE
+     ),
+     candidates AS (
+       SELECT DISTINCT run.id, transition.to_status, transition.mark_started,
+              transition.mark_completed, transition.clear_completed,
+              transition.clear_failure, transition.reset_retry
+         FROM locked run
          JOIN lifecycle_transitions transition
            ON transition.lifecycle_key = run.lifecycle_key
           AND transition.from_status = run.status
-          AND transition.action_key = $2
-        WHERE run.id = $1
-          AND run.lifecycle_key = $4
-        FOR UPDATE OF run
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+        WHERE ${selectorPredicate}
+     ),
+     selected AS (
+       SELECT ranked.*
+         FROM (
+           SELECT candidates.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+             FROM candidates
+         ) ranked
+        WHERE ranked.candidate_count = 1
      )
      UPDATE agency_workflow_runs run
         SET status = selected.to_status,
@@ -77,7 +98,7 @@ export async function transitionAgencyWorkflowRun(
        FROM selected
       WHERE run.id = selected.id
       RETURNING run.*`,
-    [runId, actionKey, JSON.stringify(patch), lifecycleKeys.agencyWorkflowRun],
+    [runId, serializeLifecycleTransitionSelector(selector), JSON.stringify(patch)],
   );
   return result.rows[0] ?? null;
 }

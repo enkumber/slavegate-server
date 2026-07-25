@@ -18,8 +18,11 @@ import {
   transitionJobManually,
 } from "../modules/dispatcher/job-lifecycle.service";
 import {
+  configureResourceLifecycleBinding,
   listLifecycleStates,
   listLifecycleTransitions,
+  upsertLifecycleState,
+  upsertLifecycleTransition,
   updateLifecycleStalePolicy,
 } from "../modules/lifecycle/lifecycle.service";
 import { authService } from "../modules/auth/auth.service";
@@ -804,6 +807,112 @@ router.get("/lifecycle/:lifecycleKey", requireAdminAuth, async (req, res) => {
   }
   res.json({ ok: true, data: { states, transitions } });
 });
+
+router.put("/lifecycle-bindings/:resourceTable", requireAdminAuth, async (req, res) => {
+  try {
+    const lifecycleKey = typeof req.body?.lifecycleKey === "string"
+      ? req.body.lifecycleKey.trim()
+      : "";
+    if (!lifecycleKey) {
+      return res.status(400).json({ ok: false, error: "lifecycleKey is required" });
+    }
+    await configureResourceLifecycleBinding(req.params.resourceTable, lifecycleKey);
+    res.json({ ok: true, data: { resourceTable: req.params.resourceTable, lifecycleKey } });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.put("/lifecycle/:lifecycleKey/states/:status", requireAdminAuth, async (req, res) => {
+  try {
+    const booleanFields = ["initial", "terminal", "retryable", "administrative", "dispatchable", "manual"] as const;
+    if (booleanFields.some((field) => typeof req.body?.[field] !== "boolean")) {
+      return res.status(400).json({ ok: false, error: `${booleanFields.join(", ")} must be booleans` });
+    }
+    const staleAfterMs = req.body?.staleAfterMs ?? null;
+    const staleActionKey = req.body?.staleActionKey ?? null;
+    if (
+      !((staleAfterMs === null && staleActionKey === null)
+        || (Number.isSafeInteger(staleAfterMs) && staleAfterMs > 0
+          && typeof staleActionKey === "string" && staleActionKey.trim().length > 0))
+    ) {
+      return res.status(400).json({
+        ok: false,
+        error: "staleAfterMs and staleActionKey must both be null, or a positive integer and non-empty action key",
+      });
+    }
+    const metadata = req.body?.metadata;
+    if (metadata !== undefined && (!metadata || typeof metadata !== "object" || Array.isArray(metadata))) {
+      return res.status(400).json({ ok: false, error: "metadata must be an object" });
+    }
+    const state = await upsertLifecycleState(req.params.lifecycleKey, req.params.status, {
+      initial: req.body.initial,
+      terminal: req.body.terminal,
+      retryable: req.body.retryable,
+      administrative: req.body.administrative,
+      dispatchable: req.body.dispatchable,
+      manual: req.body.manual,
+      staleAfterMs,
+      staleActionKey: typeof staleActionKey === "string" ? staleActionKey.trim() : null,
+      sortOrder: Number.isSafeInteger(req.body?.sortOrder) ? req.body.sortOrder : 0,
+      description: typeof req.body?.description === "string" ? req.body.description : null,
+      metadata: metadata ?? {},
+    });
+    res.json({ ok: true, data: state });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.put(
+  "/lifecycle/:lifecycleKey/transitions/:actionKey/:fromStatus",
+  requireAdminAuth,
+  async (req, res) => {
+    try {
+      const toStatus = typeof req.body?.toStatus === "string" ? req.body.toStatus.trim() : "";
+      const booleanFields = [
+        "manualAllowed",
+        "externalAllowed",
+        "automatic",
+        "markStarted",
+        "markCompleted",
+        "clearCompleted",
+        "clearFailure",
+        "resetRetry",
+      ] as const;
+      if (!toStatus || booleanFields.some((field) => typeof req.body?.[field] !== "boolean")) {
+        return res.status(400).json({
+          ok: false,
+          error: `toStatus is required and ${booleanFields.join(", ")} must be booleans`,
+        });
+      }
+      const metadata = req.body?.metadata;
+      if (metadata !== undefined && (!metadata || typeof metadata !== "object" || Array.isArray(metadata))) {
+        return res.status(400).json({ ok: false, error: "metadata must be an object" });
+      }
+      const transition = await upsertLifecycleTransition(
+        req.params.lifecycleKey,
+        req.params.actionKey,
+        req.params.fromStatus,
+        {
+          toStatus,
+          manualAllowed: req.body.manualAllowed,
+          externalAllowed: req.body.externalAllowed,
+          automatic: req.body.automatic,
+          markStarted: req.body.markStarted,
+          markCompleted: req.body.markCompleted,
+          clearCompleted: req.body.clearCompleted,
+          clearFailure: req.body.clearFailure,
+          resetRetry: req.body.resetRetry,
+          metadata: metadata ?? {},
+        },
+      );
+      res.json({ ok: true, data: transition });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: (err as Error).message });
+    }
+  },
+);
 
 router.patch("/lifecycle/:lifecycleKey/states/:status/stale-policy", requireAdminAuth, async (req, res) => {
   try {
@@ -2245,27 +2354,37 @@ router.post("/kill-switch", requireAuth, async (req, res) => {
       const db = getDb();
       await db.query(
         `WITH eligible AS (
-           SELECT workflow.id, workflow.lifecycle_key, transition.to_status
+           SELECT DISTINCT workflow.id, workflow.lifecycle_key, transition.to_status,
+                  transition.mark_completed
            FROM workflows workflow
            JOIN lifecycle_transitions transition
              ON transition.lifecycle_key = workflow.lifecycle_key
             AND transition.from_status = workflow.status
-            AND transition.action_key = 'fail'
-            AND transition.enabled
+           JOIN lifecycle_state_definitions target
+             ON target.lifecycle_key = transition.lifecycle_key
+            AND target.status = transition.to_status
+            AND target.terminal
+            AND target.retryable
+            AND NOT target.administrative
+          ),
+          unambiguous AS (
+            SELECT ranked.*
+              FROM (
+                SELECT eligible.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+                  FROM eligible
+              ) ranked
+             WHERE ranked.candidate_count = 1
          )
          UPDATE workflows workflow
-         SET status = eligible.to_status,
+         SET status = unambiguous.to_status,
              error = $1,
              completed_at = CASE
-               WHEN state.terminal AND state.mark_completed THEN NOW()
+               WHEN unambiguous.mark_completed THEN NOW()
                ELSE workflow.completed_at
              END,
              updated_at = NOW()
-         FROM eligible
-         JOIN lifecycle_state_definitions state
-           ON state.lifecycle_key = eligible.lifecycle_key
-          AND state.status = eligible.to_status
-         WHERE workflow.id = eligible.id`,
+         FROM unambiguous
+         WHERE workflow.id = unambiguous.id`,
         [reason_]
       );
       await alerting.killSwitch(String(initiatedBy));

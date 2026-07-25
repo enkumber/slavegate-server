@@ -319,6 +319,53 @@ interface BatchResult {
   error?:          string;
 }
 
+interface WorkflowLifecycleTarget {
+  terminal: boolean;
+  retryable: boolean;
+  administrative: boolean;
+  markCompleted: boolean;
+}
+
+async function resolveExternalWorkflowLifecycleTarget(
+  workflowId: string,
+  targetStatus: string,
+): Promise<WorkflowLifecycleTarget | null> {
+  const result = await getDb().query(
+    `WITH candidates AS (
+       SELECT DISTINCT target.terminal, target.retryable, target.administrative,
+              transition.mark_completed
+         FROM workflows workflow
+         JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = workflow.lifecycle_key
+          AND transition.from_status = workflow.status
+          AND transition.to_status = $2
+          AND transition.external_allowed
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+        WHERE workflow.id = $1
+     )
+     SELECT candidates.*, COUNT(*) OVER () AS candidate_count
+       FROM candidates`,
+    [workflowId, targetStatus],
+  );
+  if (result.rows.length !== 1 || Number(result.rows[0]?.candidate_count) !== 1) return null;
+  return {
+    terminal: result.rows[0].terminal === true,
+    retryable: result.rows[0].retryable === true,
+    administrative: result.rows[0].administrative === true,
+    markCompleted: result.rows[0].mark_completed === true,
+  };
+}
+
+let externalWorkflowLifecycleTargetResolver = resolveExternalWorkflowLifecycleTarget;
+
+export function setExternalWorkflowLifecycleTargetResolverForTest(
+  resolver: ((workflowId: string, targetStatus: string) => Promise<WorkflowLifecycleTarget | null>) | null,
+): void {
+  externalWorkflowLifecycleTargetResolver = resolver ?? resolveExternalWorkflowLifecycleTarget;
+}
+
 // ─── Rate limiter ─────────────────────────────────────────────────────────────
 
 class RateLimiter {
@@ -1478,7 +1525,13 @@ export class DirectWsServer {
     const jobId = typeof msg.jobId === "string" ? msg.jobId : "";
     if (!jobId) return;
     if (eventType === "agent_job_started") {
-      const claimed = await transitionJob(jobId, "claim", {}, getDb(), conn.deviceId).catch((err) => {
+      const claimed = await transitionJob(jobId, {
+        targetTerminal: false,
+        targetAdministrative: false,
+        targetDispatchable: false,
+        transitionMarkStarted: true,
+        transitionMarkCompleted: false,
+      }, {}, getDb(), conn.deviceId).catch((err) => {
         console.warn(`[direct-ws] JOB_STARTED persistence failed: ${(err as Error).message}`);
         return null;
       });
@@ -1810,11 +1863,12 @@ export class DirectWsServer {
     );
 
     if (workflowId) {
+      const lifecycleTarget = await externalWorkflowLifecycleTargetResolver(workflowId, status);
       workflowEvents.publish({
         source: "edge_device",
-        event: status === "completed"
+        event: lifecycleTarget?.terminal === true && lifecycleTarget.retryable !== true
           ? "completed"
-          : status === "failed"
+          : lifecycleTarget?.terminal === true && lifecycleTarget.retryable === true
             ? "failed"
             : "checkpoint_updated",
         workflowId,
@@ -1835,7 +1889,7 @@ export class DirectWsServer {
         },
       });
 
-      if (status === "completed" || status === "failed" || status === "cancelled") {
+      if (lifecycleTarget?.terminal === true) {
         const terminal = isDeviceExecutionEnforced()
           ? await deviceExecutionArbiter.observeTerminal({
               deviceId: conn.deviceId,
@@ -1883,7 +1937,6 @@ export class DirectWsServer {
     variables: Record<string, unknown> | undefined,
   ): Promise<void> {
     if (!workflowId) return;
-    const { getDb } = require("../db/client");
     const db = getDb();
     const existing = await db.query(
       "SELECT checkpoint FROM workflows WHERE id = $1",
@@ -1903,6 +1956,10 @@ export class DirectWsServer {
       console.error(`[ui-graph] edge learning reconciliation failed for ${workflowId}: ${learningError.message}`);
     });
 
+    const lifecycleTarget = await externalWorkflowLifecycleTargetResolver(workflowId, status);
+    if (!lifecycleTarget) {
+      throw new Error(`DB lifecycle rejected external workflow transition to '${status}'`);
+    }
     const checkpoint = {
       stepIndex: step,
       loopStack: [],
@@ -1915,7 +1972,7 @@ export class DirectWsServer {
         vlmCalls: 0,
         deterministicSteps: step ?? 0,
         batchedSteps: 0,
-        failedSteps: status === 'failed' ? 1 : 0,
+        failedSteps: lifecycleTarget.terminal && lifecycleTarget.retryable ? 1 : 0,
         retriedSteps: 0,
         recoveryAttempts: 0,
         recoveryBudgetExhausted: 0,
@@ -1928,10 +1985,12 @@ export class DirectWsServer {
     };
 
     const { transitionWorkflowFromExternalStatus } = require("../modules/workflows/workflow-lifecycle.service");
-    const terminal = status === "completed" || status === "failed";
-    const persistedCheckpoint = status === "completed"
+    const successfulTerminal = lifecycleTarget.terminal
+      && !lifecycleTarget.retryable
+      && !lifecycleTarget.administrative;
+    const persistedCheckpoint = successfulTerminal
       ? { ...checkpoint, result: { step, total, variables: mergedVariables } }
-      : terminal
+      : lifecycleTarget.terminal
         ? checkpoint
         : {
             ...checkpoint,
@@ -1942,9 +2001,11 @@ export class DirectWsServer {
       status,
       {
         checkpoint: persistedCheckpoint,
-        currentStep: status === "completed" ? (step ?? total) : step,
+        currentStep: successfulTerminal ? (step ?? total) : step,
         totalSteps: total,
-        ...(status === "failed" ? { error: error || "Device reported failure" } : {}),
+        ...(lifecycleTarget.terminal && lifecycleTarget.retryable
+          ? { error: error || "Device reported failure" }
+          : {}),
       },
       db,
     );

@@ -14,6 +14,7 @@ import {
 const repoRoot = path.resolve(__dirname, "../..");
 const migrationPath = path.join(repoRoot, "src/db/migrations/081_device_execution_queue.sql");
 const genericLifecycleMigrationPath = path.join(repoRoot, "src/db/migrations/105_generic_resource_lifecycle.sql");
+const resourceBindingsMigrationPath = path.join(repoRoot, "src/db/migrations/107_lifecycle_resource_bindings.sql");
 const postgresUrl = process.env.PNQ001_PG_URL ?? "postgresql://pnqtest@127.0.0.1:55432/pnq001_test";
 const describePostgres = postgresUrl ? describe : describe.skip;
 
@@ -1047,6 +1048,7 @@ async function resetPnqSchema(db: Pool): Promise<void> {
     DROP TABLE IF EXISTS workflows CASCADE;
     DROP TABLE IF EXISTS lifecycle_transitions CASCADE;
     DROP TABLE IF EXISTS lifecycle_state_definitions CASCADE;
+    DROP TABLE IF EXISTS lifecycle_resource_bindings CASCADE;
     DROP FUNCTION IF EXISTS set_initial_resource_lifecycle_status() CASCADE;
     DROP FUNCTION IF EXISTS pnq_test_reject_workflow_cancel() CASCADE;
     DROP TABLE IF EXISTS device_execution_events CASCADE;
@@ -1089,6 +1091,7 @@ async function resetPnqSchema(db: Pool): Promise<void> {
     );
   `);
   await db.query(fs.readFileSync(genericLifecycleMigrationPath, "utf8"));
+  await db.query(fs.readFileSync(resourceBindingsMigrationPath, "utf8"));
   await db.query(`
     INSERT INTO lifecycle_state_definitions
       (lifecycle_key, status, initial, terminal, retryable, administrative,
@@ -1098,7 +1101,9 @@ async function resetPnqSchema(db: Pool): Promise<void> {
       ('workflow_execution', 'running', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
       ('workflow_execution', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 30),
       ('workflow_execution', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40),
-      ('workflow_execution', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50)
+      ('workflow_execution', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50),
+      ('job_execution', 'pending', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 10),
+      ('job_execution', 'timeout', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 20)
     ON CONFLICT (lifecycle_key, status) DO NOTHING;
     INSERT INTO lifecycle_transitions
       (lifecycle_key, action_key, from_status, to_status, manual_allowed,
@@ -1108,6 +1113,8 @@ async function resetPnqSchema(db: Pool): Promise<void> {
       ('workflow_execution', 'fail', 'queued', 'failed', FALSE, TRUE, FALSE),
       ('workflow_execution', 'fail', 'running', 'failed', FALSE, TRUE, FALSE)
     ON CONFLICT (lifecycle_key, action_key, from_status) DO NOTHING;
+    SELECT configure_lifecycle_resource_binding('workflows', 'workflow_execution');
+    SELECT configure_lifecycle_resource_binding('jobs', 'job_execution');
   `);
   await db.query(fs.readFileSync(migrationPath, "utf8"));
 }
