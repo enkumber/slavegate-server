@@ -30,6 +30,11 @@ import {
 import { workflowService } from "../modules/workflows/workflow.service";
 import { compileGeneratedWorkflowTemplate, computeGeneratedWorkflowCompiledPlanHash } from "../modules/workflows/workflow-validator";
 import { taskRunnerService } from "../modules/task-runner";
+import {
+  listStatusDefinitions,
+  transitionTask,
+  transitionTaskManually,
+} from "../modules/task-lifecycle/task-lifecycle.service";
 
 const router = Router();
 
@@ -1806,8 +1811,8 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
       intent: body.intent,
     };
     const taskResult = await client.query<{ id: string }>(
-      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
-       VALUES ($1, $2, 'generated_workflow', $3, $4, 'queued')
+      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time)
+       VALUES ($1, $2, 'generated_workflow', $3, $4)
        RETURNING id`,
       [
         body.accountId,
@@ -2732,8 +2737,8 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
       promotionScope: scope,
     };
     const taskResult = await client.query<{ id: string }>(
-      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
-       VALUES ($1, $2, 'generated_workflow', $3, $4, 'queued')
+      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time)
+       VALUES ($1, $2, 'generated_workflow', $3, $4)
        RETURNING id`,
       [accountId, deviceId, JSON.stringify(taskParams), scheduledTime]
     );
@@ -4435,7 +4440,7 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
   const db = getDb();
   const client = await db.connect();
   const actor = adminAuditActor(req);
-  const terminalStatuses = new Set(["completed", "failed", "cancelled"]);
+  const terminalWorkflowStatuses = new Set(["completed", "failed", "cancelled"]);
   try {
     await client.query("BEGIN");
     const runResult = await client.query<Record<string, unknown>>(
@@ -4447,7 +4452,7 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
       await client.query("ROLLBACK");
       return res.status(404).json({ ok: false, code: "WORKFLOW_RUN_NOT_FOUND", error: "Workflow run not found" });
     }
-    if (terminalStatuses.has(String(run.status))) {
+    if (terminalWorkflowStatuses.has(String(run.status))) {
       await client.query("ROLLBACK");
       return res.status(409).json({
         ok: false,
@@ -4475,7 +4480,7 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
       .map((row) => row.id)
       .filter((id): id is string => typeof id === "string");
     const activeWorkflowIds = workflowResult.rows
-      .filter((row) => !terminalStatuses.has(String(row.status)))
+      .filter((row) => !terminalWorkflowStatuses.has(String(row.status)))
       .map((row) => row.id)
       .filter((id): id is string => typeof id === "string");
 
@@ -4505,14 +4510,16 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
     }
 
     let taskClosed = false;
-    if (taskId && task && !terminalStatuses.has(String(task.status))) {
-      const update = await client.query(
-        `UPDATE tasks
-         SET status = 'failed', completed_at = NOW(), updated_at = NOW(), error = $2
-         WHERE id = $1 AND status IN ('queued', 'running', 'paused')`,
-        [taskId, failure],
+    let resultingTaskStatus = task?.status ?? null;
+    if (taskId && task) {
+      const transitionedTask = await transitionTask<Record<string, unknown>>(
+        taskId,
+        "administrative_cancel",
+        { error: failure },
+        client,
       );
-      taskClosed = (update.rowCount ?? 0) === 1;
+      taskClosed = Boolean(transitionedTask);
+      resultingTaskStatus = transitionedTask?.status ?? resultingTaskStatus;
     }
 
     const runUpdate = await client.query(
@@ -4544,7 +4551,7 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
     };
     const resultingState = {
       runStatus: "failed",
-      taskStatus: taskClosed ? "failed" : task?.status ?? null,
+      taskStatus: resultingTaskStatus,
       closedWorkflowCount,
       workflowStatus: "failed",
       inFlightJobCount: inFlightJobs.rows.length,
@@ -4610,8 +4617,9 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
         `SELECT COUNT(*)::int AS count
          FROM agency_workflow_runs r
          LEFT JOIN tasks t ON t.id = r.task_id
+         LEFT JOIN task_status_definitions task_state ON task_state.status = t.status
          WHERE r.status = 'failed'
-            OR t.status = 'failed'`
+            OR task_state.retryable`
       ),
       db.query(
         `SELECT COUNT(*)::int AS count
@@ -4629,8 +4637,9 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
            SELECT r.request_key, r.cache_key
            FROM agency_workflow_runs r
            LEFT JOIN tasks t ON t.id = r.task_id
+           LEFT JOIN task_status_definitions task_state ON task_state.status = t.status
            WHERE r.status = 'failed'
-              OR t.status = 'failed'
+              OR task_state.retryable
          )
          SELECT COUNT(DISTINCT c.cache_key)::int AS count
          FROM generated_workflow_plan_cache c
@@ -4669,8 +4678,9 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
          SELECT r.request_key, r.cache_key
          FROM agency_workflow_runs r
          LEFT JOIN tasks t ON t.id = r.task_id
+         LEFT JOIN task_status_definitions task_state ON task_state.status = t.status
          WHERE r.status = 'failed'
-            OR t.status = 'failed'
+            OR task_state.retryable
        ),
        deleted AS (
          DELETE FROM generated_workflow_plan_cache c
@@ -4701,8 +4711,9 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
        WHERE r.status = 'failed'
           OR EXISTS (
             SELECT 1 FROM tasks t
+            JOIN task_status_definitions task_state ON task_state.status = t.status
             WHERE t.id = r.task_id
-              AND t.status = 'failed'
+              AND task_state.retryable
           )
        RETURNING id`
     );
@@ -4919,24 +4930,23 @@ router.get("/tasks", async (req: Request, res: Response) => {
   });
 });
 
+router.get("/tasks/status-definitions", async (_req: Request, res: Response) => {
+  const definitions = await listStatusDefinitions();
+  res.json({ ok: true, data: definitions });
+});
+
 router.patch("/tasks/:id", async (req: Request, res: Response) => {
-  const db = getDb();
-  const { status } = req.body as { status: "paused" | "queued" };
+  const { status } = req.body as { status?: string };
 
-  if (!["paused", "queued"].includes(status)) {
-    return res.status(400).json({ ok: false, error: "status must be 'paused' or 'queued'" });
+  if (!status) {
+    return res.status(400).json({ ok: false, error: "status required" });
   }
-
-  const result = await db.query(
-    `UPDATE tasks SET status = $1 WHERE id = $2 AND status IN ('queued', 'paused') RETURNING *`,
-    [status, req.params.id]
-  );
-
-  if (result.rows.length === 0) {
+  const result = await transitionTaskManually(req.params.id, status);
+  if (!result) {
     return res.status(404).json({ ok: false, error: "Task not found or not modifiable" });
   }
 
-  res.json({ ok: true, data: result.rows[0] });
+  res.json({ ok: true, data: result });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

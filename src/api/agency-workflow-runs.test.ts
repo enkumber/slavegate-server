@@ -444,7 +444,7 @@ describe("agency workflow runs API", () => {
       .mockResolvedValueOnce({ rows: [workflow] })
       .mockResolvedValueOnce({ rows: [{ id: "55555555-5555-4555-8555-555555555555", status: "running" }] })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // workflow update
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // task update
+      .mockResolvedValueOnce({ rows: [{ ...task, status: "cancelled" }], rowCount: 1 }) // task transition
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // run update
       .mockResolvedValueOnce({ rows: [{ id: "17", created_at: createdAt }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [] }); // COMMIT

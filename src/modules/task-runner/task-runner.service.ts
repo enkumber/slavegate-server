@@ -42,6 +42,11 @@ import {
 } from "../incidents/incident.service";
 import { evaluatePostconditionContract } from "../workflow-segments/postcondition";
 import { shortKey } from "../workflow-segments/key-utils";
+import {
+  getConfiguredRetryStats,
+  retryConfiguredTasks,
+  transitionTask,
+} from "../task-lifecycle/task-lifecycle.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -74,6 +79,8 @@ export interface TaskRow {
   completed_at?: Date;
   retry_count?: number;
   updated_at?: Date;
+  status_dispatchable?: boolean;
+  status_retryable?: boolean;
 }
 
 export interface TaskRunnerConfig {
@@ -202,19 +209,7 @@ async function persistSuccessfulTaskResult(
   taskId: string,
   resultJson: Record<string, unknown>,
 ): Promise<void> {
-  await getDb().query(
-    `UPDATE tasks
-     SET status = 'completed',
-         completed_at = NOW(),
-         updated_at = NOW(),
-         result = $2,
-         error = NULL,
-         root_error_code = NULL,
-         root_error_message = NULL,
-         root_error_details = '{}'::jsonb
-     WHERE id = $1`,
-    [taskId, JSON.stringify(resultJson)],
-  );
+  await transitionTask(taskId, "succeed", { result: resultJson });
 }
 
 function isCompiledWorkflow(value: unknown): value is CompiledWorkflow {
@@ -1097,21 +1092,25 @@ async function runPollCycle(): Promise<void> {
   
   const db = getDb();
   
-  // Fetch queued tasks + failed tasks eligible for retry
+  // Fetch dispatchable tasks + retryable tasks eligible for retry
   // Exponential backoff: 5 * 3^retry_count seconds (5s, 15s, 45s)
   const result = await db.query<TaskRow>(`
-    SELECT id, account_id, device_id, routine, params, scheduled_time, status, retry_count, updated_at
+    SELECT tasks.id, tasks.account_id, tasks.device_id, tasks.routine, tasks.params,
+           tasks.scheduled_time, tasks.status, tasks.retry_count, tasks.updated_at,
+           status_def.dispatchable AS status_dispatchable,
+           status_def.retryable AS status_retryable
     FROM tasks
-    WHERE 
-      (status = 'queued' AND scheduled_time <= NOW())
+    JOIN task_status_definitions status_def ON status_def.status = tasks.status
+    WHERE
+      (status_def.dispatchable AND tasks.scheduled_time <= NOW())
       OR (
-        status = 'failed' 
-        AND COALESCE(retry_count, 0) < $2
-        AND updated_at < NOW() - (INTERVAL '1 second' * (5 * POWER(3, COALESCE(retry_count, 0))))
+        status_def.retryable
+        AND COALESCE(tasks.retry_count, 0) < $2
+        AND tasks.updated_at < NOW() - (INTERVAL '1 second' * (5 * POWER(3, COALESCE(tasks.retry_count, 0))))
       )
-    ORDER BY 
-      CASE WHEN status = 'queued' THEN 0 ELSE 1 END,
-      scheduled_time ASC
+    ORDER BY
+      status_def.sort_order,
+      tasks.scheduled_time ASC
     LIMIT $1
   `, [config.batchSize, config.maxRetries]);
   
@@ -1119,9 +1118,9 @@ async function runPollCycle(): Promise<void> {
     return; // Nothing to do
   }
   
-  const queuedCount = result.rows.filter(t => t.status === 'queued').length;
-  const retryCount = result.rows.filter(t => t.status === 'failed').length;
-  console.log(`[task-runner] Found ${queuedCount} queued + ${retryCount} retry-eligible tasks`);
+  const dispatchableCount = result.rows.filter((t) => t.status_dispatchable === true).length;
+  const retryCount = result.rows.filter((t) => t.status_retryable === true).length;
+  console.log(`[task-runner] Found ${dispatchableCount} dispatchable + ${retryCount} retry-eligible tasks`);
   
   // Process each task (respecting device locks)
   for (const task of result.rows) {
@@ -1167,11 +1166,11 @@ async function executeTask(task: TaskRow): Promise<void> {
   deviceLocks.set(deviceId, true);
   
   try {
-    // Update status to running
-    await db.query(`
-      UPDATE tasks SET status = 'running', started_at = NOW()
-      WHERE id = $1
-    `, [taskId]);
+    const started = await transitionTask(taskId, "claim");
+    if (!started) {
+      console.warn(`[task-runner] Skipping task ${taskId.slice(0, 8)} — DB lifecycle rejected transition to running`);
+      return;
+    }
     await markAgencyWorkflowRunStarted(task);
     publishGeneratedWorkflowTaskEvent(task, "task_running");
     
@@ -1241,27 +1240,14 @@ async function executeTask(task: TaskRow): Promise<void> {
         : currentRetryCount + 1;
       const rootFailure = rootFailureFromResult(result);
       
-      await db.query(`
-        UPDATE tasks 
-        SET status = 'failed', 
-            completed_at = NOW(), 
-            updated_at = NOW(),
-            result = $2, 
-            error = $3,
-            retry_count = $4,
-            root_error_code = $5,
-            root_error_message = $6,
-            root_error_details = $7
-        WHERE id = $1
-      `, [
-        taskId,
-        JSON.stringify(resultJson),
-        result.failReason || "Unknown error",
-        newRetryCount,
-        rootFailure?.code ?? null,
-        rootFailure?.message ?? null,
-        JSON.stringify(rootFailure?.details ?? {}),
-      ]);
+      await transitionTask(taskId, "fail", {
+        result: resultJson,
+        error: result.failReason || "Unknown error",
+        retryCount: newRetryCount,
+        rootErrorCode: rootFailure?.code ?? null,
+        rootErrorMessage: rootFailure?.message ?? null,
+        rootErrorDetails: rootFailure?.details ?? {},
+      });
       await completeAgencyWorkflowRun(task, result);
       if (task.routine !== GENERATED_WORKFLOW_ROUTINE) {
         await recordGeneratedWorkflowLearning(task, result);
@@ -1310,24 +1296,13 @@ async function executeTask(task: TaskRow): Promise<void> {
       : currentRetryCount + 1;
     const error = err as Error;
     
-    await db.query(`
-      UPDATE tasks 
-      SET status = 'failed', 
-          completed_at = NOW(), 
-          updated_at = NOW(),
-          error = $2,
-          retry_count = $3,
-          root_error_code = $4,
-          root_error_message = $2,
-          root_error_details = $5
-      WHERE id = $1
-    `, [
-      taskId,
-      error.message,
-      newRetryCount,
-      (error as Error & { code?: string }).code ?? "UNHANDLED_TASK_EXCEPTION",
-      JSON.stringify({ stack: error.stack?.split("\n").slice(0, 8).join("\n") ?? null }),
-    ]);
+    await transitionTask(taskId, "fail", {
+      error: error.message,
+      retryCount: newRetryCount,
+      rootErrorCode: (error as Error & { code?: string }).code ?? "UNHANDLED_TASK_EXCEPTION",
+      rootErrorMessage: error.message,
+      rootErrorDetails: { stack: error.stack?.split("\n").slice(0, 8).join("\n") ?? null },
+    });
     await failAgencyWorkflowRunWithError(task, error);
     publishGeneratedWorkflowTaskEvent(task, "task_failed", { error: error.message });
     
@@ -1671,7 +1646,6 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
   if (!isDeviceOnline(task.device_id)) {
     return { success: false, error: "Device is offline" };
   }
-  
   // Execute synchronously
   const accountResult = task.account_id
     ? await db.query<{ platform: string; client_id: string | null }>(
@@ -1686,7 +1660,10 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
   deviceLocks.set(task.device_id, true);
 
   try {
-    await db.query(`UPDATE tasks SET status = 'running', started_at = NOW() WHERE id = $1`, [taskId]);
+    const started = await transitionTask(taskId, "execute_now");
+    if (!started) {
+      return { success: false, error: "Task status cannot transition to running" };
+    }
     await markAgencyWorkflowRunStarted(task);
     publishGeneratedWorkflowTaskEvent(task, "task_running");
     
@@ -1716,20 +1693,13 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
     if (taskResult.success) {
       await persistSuccessfulTaskResult(taskId, resultJson);
     } else {
-      await db.query(
-        `UPDATE tasks SET status = 'failed', completed_at = NOW(), updated_at = NOW(),
-           result = $2, error = $3,
-           root_error_code = $4, root_error_message = $5, root_error_details = $6
-         WHERE id = $1`,
-        [
-          taskId,
-          JSON.stringify(resultJson),
-          taskResult.failReason ?? "Unknown error",
-          rootFailure?.code ?? null,
-          rootFailure?.message ?? null,
-          JSON.stringify(rootFailure?.details ?? {}),
-        ],
-      );
+      await transitionTask(taskId, "fail", {
+        result: resultJson,
+        error: taskResult.failReason ?? "Unknown error",
+        rootErrorCode: rootFailure?.code ?? null,
+        rootErrorMessage: rootFailure?.message ?? null,
+        rootErrorDetails: rootFailure?.details ?? {},
+      });
     }
     await completeAgencyWorkflowRun(task, taskResult);
     if (task.routine !== GENERATED_WORKFLOW_ROUTINE) {
@@ -1775,19 +1745,7 @@ export async function executeTaskNow(taskId: string): Promise<TaskResult | { suc
  * Returns the number of tasks reset.
  */
 export async function retryFailedTasks(): Promise<{ resetCount: number }> {
-  const db = getDb();
-  
-  const result = await db.query(`
-    UPDATE tasks 
-    SET status = 'queued', 
-        retry_count = 0,
-        error = NULL,
-        updated_at = NOW()
-    WHERE status = 'failed'
-    RETURNING id
-  `);
-  
-  const resetCount = result.rowCount ?? 0;
+  const resetCount = await retryConfiguredTasks();
   
   if (resetCount > 0) {
     console.log(`[task-runner] Reset ${resetCount} failed tasks to queued`);
@@ -1804,31 +1762,7 @@ export async function getFailedTasksStats(): Promise<{
   retryableCount: number;
   exhaustedCount: number;
 }> {
-  const db = getDb();
-  
-  const result = await db.query<{ retry_count: number; count: string }>(`
-    SELECT COALESCE(retry_count, 0) as retry_count, COUNT(*) as count
-    FROM tasks
-    WHERE status = 'failed'
-    GROUP BY COALESCE(retry_count, 0)
-  `);
-  
-  let totalFailed = 0;
-  let retryableCount = 0;
-  let exhaustedCount = 0;
-  
-  for (const row of result.rows) {
-    const count = parseInt(row.count, 10);
-    totalFailed += count;
-    
-    if (row.retry_count < config.maxRetries) {
-      retryableCount += count;
-    } else {
-      exhaustedCount += count;
-    }
-  }
-  
-  return { totalFailed, retryableCount, exhaustedCount };
+  return getConfiguredRetryStats(config.maxRetries);
 }
 
 // ─── Exports ──────────────────────────────────────────────────────────────────

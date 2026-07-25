@@ -97,8 +97,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   account_id      UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   device_id       UUID        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   scheduled_time  TIMESTAMPTZ NOT NULL,
-  status          TEXT        NOT NULL DEFAULT 'queued'
-                              CHECK (status IN ('queued', 'running', 'completed', 'failed', 'paused')),
+  status          TEXT        NOT NULL,
   routine         TEXT        NOT NULL,
   params          JSONB       NOT NULL DEFAULT '{}'::jsonb,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

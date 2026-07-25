@@ -64,6 +64,10 @@ import {
 import { canaryService } from "../modules/canary/canary.service";
 import { alerting, AlertType } from "../modules/observability/alerts";
 import { taskRunnerService } from "../modules/task-runner";
+import {
+  listStatusDefinitions,
+  transitionTaskManually,
+} from "../modules/task-lifecycle/task-lifecycle.service";
 import { getDb } from "../db/client";
 import { scalabilityConfig } from "../config/scalability.config";
 import type {
@@ -246,13 +250,15 @@ export async function queueHumanAgencyWorkflowRun(input: {
       `SELECT r.id, r.task_id, r.status
        FROM agency_workflow_runs r
        JOIN tasks t ON t.id = r.task_id
+       JOIN task_status_definitions task_state ON task_state.status = t.status
        WHERE r.cache_key = $1
          AND r.device_id = $2
          AND r.account_id IS NOT DISTINCT FROM $3
          AND r.context ->> 'source' = 'dashboard_human'
          AND r.context ->> 'requestKey' = $4
          AND r.status IN ('queued', 'running')
-         AND t.status IN ('queued', 'running')
+         AND NOT task_state.terminal
+         AND NOT task_state.administrative
        ORDER BY r.created_at ASC
        LIMIT 1
        FOR UPDATE OF r`,
@@ -333,8 +339,8 @@ export async function queueHumanAgencyWorkflowRun(input: {
     }
     if (input.allowCandidateArtifact === true) taskParams.allowCandidateArtifact = true;
     const taskResult = await client.query<{ id: string }>(
-      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
-       VALUES ($1, $2, 'generated_workflow', $3, $4, 'queued')
+      `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time)
+       VALUES ($1, $2, 'generated_workflow', $3, $4)
        RETURNING id`,
       [
         input.target.account_id,
@@ -2581,8 +2587,8 @@ router.post("/tasks", requireAuth, async (req, res) => {
     
     const id = crypto.randomUUID();
     await db.query(
-      `INSERT INTO tasks (id, account_id, device_id, routine, params, scheduled_time, status, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'queued', NOW())`,
+      `INSERT INTO tasks (id, account_id, device_id, routine, params, scheduled_time, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
       [id, account_id, device_id, routine, JSON.stringify(params || {}), scheduled_time || new Date().toISOString()]
     );
     
@@ -2621,17 +2627,23 @@ router.get("/tasks", requireAuth, async (req, res) => {
   }
 });
 
+router.get("/tasks/status-definitions", requireAuth, async (_req, res) => {
+  try {
+    res.json({ ok: true, data: await listStatusDefinitions() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 router.patch("/tasks/:id", requireAuth, async (req, res) => {
   try {
-    const db = getDb();
     const { status } = req.body as { status?: string };
     
-    if (status && !["queued", "paused", "cancelled"].includes(status)) {
-      return res.status(400).json({ ok: false, error: "Invalid status" });
-    }
-    
     if (status) {
-      await db.query(`UPDATE tasks SET status = $1 WHERE id = $2`, [status, req.params.id]);
+      const updated = await transitionTaskManually(req.params.id, status);
+      if (!updated) {
+        return res.status(409).json({ ok: false, error: "Task status transition is not allowed" });
+      }
     }
     
     res.json({ ok: true });

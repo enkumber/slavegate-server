@@ -263,10 +263,10 @@ function task(params: Record<string, unknown>, overrides: Partial<TaskRow> = {})
 
 function mockTaskDb(row: TaskRow, platform = "reddit") {
   mocks.dbQuery
+    .mockResolvedValue({ rows: [], rowCount: 0 })
     .mockResolvedValueOnce({ rows: [row] })
     .mockResolvedValueOnce({ rows: [{ platform, client_id: CLIENT_ID }] })
-    .mockResolvedValueOnce({ rows: [] })
-    .mockResolvedValueOnce({ rows: [] });
+    .mockResolvedValueOnce({ rows: [{ ...row, status: "running" }], rowCount: 1 });
 }
 
 describe("task-runner generated_workflow routine", () => {
@@ -377,10 +377,8 @@ describe("task-runner generated_workflow routine", () => {
       status: "completed",
     }));
     expect(mocks.dbQuery).toHaveBeenCalledWith(
-      expect.stringMatching(
-        /status = 'completed'[\s\S]*error = NULL[\s\S]*root_error_code = NULL[\s\S]*root_error_message = NULL[\s\S]*root_error_details = '\{\}'::jsonb/,
-      ),
-      [TASK_ID, expect.any(String)],
+      expect.stringContaining("task_status_transitions transition"),
+      [TASK_ID, "succeed", expect.any(String)],
     );
   });
 
@@ -1297,6 +1295,7 @@ describe("task-runner compiled_workflow routine", () => {
     );
     mocks.dbQuery
       .mockResolvedValueOnce({ rows: [row] })
+      .mockResolvedValueOnce({ rows: [{ ...row, status: "running" }], rowCount: 1 })
       .mockResolvedValue({ rows: [] });
     mocks.compiledWorkflowToEdgeTemplate.mockResolvedValueOnce({
       id: compiledWorkflow.id,
