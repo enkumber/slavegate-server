@@ -11,6 +11,7 @@
     "db:seed": "node -r tsx/cjs src/db/seed.ts",
     "lint": "eslint src --ext .ts",
     "test": "vitest run",
+    "hardcoding:audit": "node scripts/audit-no-hardcoding.mjs",
     "semantic-catalog:audit": "vitest run src/modules/human-workflow/db-authoritative-workflow-semantics.test.ts"
   },
   "dependencies": {
