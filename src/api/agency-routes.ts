@@ -37,6 +37,10 @@ import {
 } from "../modules/task-lifecycle/task-lifecycle.service";
 import { transitionWorkflow } from "../modules/workflows/workflow-lifecycle.service";
 import { transitionAgencyWorkflowRun } from "../modules/workflows/agency-workflow-run-lifecycle.service";
+import {
+  getResourceLifecycleState,
+  selectResourceLifecycleTransition,
+} from "../modules/lifecycle/lifecycle.service";
 
 const router = Router();
 
@@ -207,7 +211,11 @@ function rowToStepCandidate(row: Record<string, unknown>): Record<string, unknow
     validationEvidence: row.validation_evidence ?? {},
     validatedBy: row.validated_by ?? null,
     validatedAt: row.validated_at instanceof Date ? row.validated_at.toISOString() : row.validated_at ?? null,
-    libraryState: row.library_state ?? "review_only",
+    libraryState: row.library_state ?? null,
+    libraryReusable: row.library_reusable === true,
+    libraryTerminal: row.library_terminal === true,
+    candidateReusable: row.candidate_reusable === true,
+    candidateTerminal: row.candidate_terminal === true,
     promotionScope: row.promotion_scope ?? null,
     promotionNote: row.promotion_note ?? null,
     promotedBy: row.promoted_by ?? null,
@@ -231,15 +239,15 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
   const promotionScope = typeof row.promotion_scope === "string" && row.promotion_scope.trim().length > 0
     ? row.promotion_scope.trim()
     : null;
-  const libraryState = typeof row.library_state === "string" ? row.library_state : "review_only";
+  const libraryState = typeof row.library_state === "string" ? row.library_state : null;
   const effectiveScope = promotionScope ?? contractScope;
   const preconditions = nonEmptyStringArray(contract.preconditions);
   const postconditions = nonEmptyStringArray(contract.postconditions);
   const compatibility = normalizeJsonObject(contract.compatibility);
   const evidence = normalizeJsonObject(row.validation_evidence);
-  const limitedReuse = libraryState === "limited_reuse" && !!promotionScope;
+  const limitedReuse = row.library_reusable === true && !!promotionScope;
   const gates = {
-    validatedStep: row.candidate_state === "validated_step",
+    validatedStep: row.candidate_reusable === true,
     contractPresent: Object.keys(contract).length > 0,
     preconditionsPresent: preconditions.length > 0,
     postconditionsPresent: postconditions.length > 0,
@@ -260,7 +268,7 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
   if (!gates.successfulSourceRun) blockers.push("source_run_not_completed");
   if (!gates.scopedReuse) blockers.push("reuse_scope_not_explicit");
   if (!gates.limitedReusePromoted) blockers.push("limited_reuse_not_promoted");
-  if (libraryState === "revoked") blockers.push("limited_reuse_revoked");
+  if (row.library_terminal === true) blockers.push("limited_reuse_revoked");
   blockers.push("compiler_auto_use_disabled");
 
   const readyGateCount = [
@@ -386,11 +394,15 @@ function compilerAwarenessEventPolicyGateSummary(row: Record<string, unknown>): 
     risk: gate.risk ?? null,
     owner: gate.owner ?? null,
     safeToAutoApply: gate.safeToAutoApply === true,
+    stateCapabilities: gate.stateCapabilities ?? null,
   }));
   return {
     gates,
     total: gates.length,
-    blocked: gates.filter((gate) => gate.state === "blocked").length,
+    blocked: gates.filter((gate) => {
+      const capabilities = normalizeJsonObject(gate.stateCapabilities);
+      return capabilities.dispatchable !== true && capabilities.manual !== true;
+    }).length,
     highRisk: gates.filter((gate) => gate.risk === "high").length,
     safeToAutoApply: gates.filter((gate) => gate.safeToAutoApply === true).length,
   };
@@ -601,9 +613,9 @@ function parseStepCandidateValidation(input: unknown): {
   };
 }
 
-type StepLibraryPromotionAction = "promote_limited" | "revoke";
+type StepLibraryPromotionAction = string;
 
-type WorkflowDefinitionPromotionAction = "promote_limited" | "revoke";
+type WorkflowDefinitionPromotionAction = string;
 
 function parseWorkflowDefinitionPromotion(input: unknown): {
   action: WorkflowDefinitionPromotionAction;
@@ -612,22 +624,11 @@ function parseWorkflowDefinitionPromotion(input: unknown): {
 } | { error: string; code: string } {
   const body = normalizeJsonObject(input);
   const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
-  if (!["promote_limited", "revoke"].includes(action)) {
-    return { error: "action must be one of promote_limited, revoke", code: "INVALID_WORKFLOW_DEFINITION_PROMOTION_ACTION" };
-  }
+  if (!action) return { error: "action is required", code: "INVALID_WORKFLOW_DEFINITION_PROMOTION_ACTION" };
 
   const rawScope = typeof body.scope === "string" ? body.scope.trim() : "";
-  if (action === "promote_limited") {
-    if (!rawScope) {
-      return { error: "scope is required for limited promotion", code: "WORKFLOW_DEFINITION_PROMOTION_SCOPE_REQUIRED" };
-    }
-    if (rawScope.length > 160) {
-      return { error: "scope must be 160 characters or fewer", code: "WORKFLOW_DEFINITION_PROMOTION_SCOPE_TOO_LONG" };
-    }
-    const loweredScope = rawScope.toLowerCase();
-    if (["global", "all", "compiler", "auto"].some((blocked) => loweredScope === blocked || loweredScope.startsWith(`${blocked}:`))) {
-      return { error: "global or compiler scope is not allowed in this phase", code: "WORKFLOW_DEFINITION_GLOBAL_SCOPE_DISABLED" };
-    }
+  if (rawScope.length > 160) {
+    return { error: "scope must be 160 characters or fewer", code: "WORKFLOW_DEFINITION_PROMOTION_SCOPE_TOO_LONG" };
   }
 
   const note = typeof body.note === "string" ? body.note.trim() : "";
@@ -636,8 +637,8 @@ function parseWorkflowDefinitionPromotion(input: unknown): {
   }
 
   return {
-    action: action as WorkflowDefinitionPromotionAction,
-    scope: action === "promote_limited" ? rawScope : null,
+    action,
+    scope: rawScope || null,
     note: note.length > 0 ? note : null,
   };
 }
@@ -665,7 +666,7 @@ function parseWorkflowDefinitionRollback(input: unknown): {
 
 function parseWorkflowDefinitionVersion(input: unknown): {
   note: string | null;
-  status: string;
+  status: string | null;
   title: string | null;
   description: string | null | undefined;
   goal: string | null;
@@ -680,8 +681,9 @@ function parseWorkflowDefinitionVersion(input: unknown): {
   const body = normalizeJsonObject(input);
   const note = typeof body.note === "string" ? body.note.trim() : "";
   if (note.length > 1000) return { error: "note must be 1000 characters or fewer", code: "WORKFLOW_DEFINITION_VERSION_NOTE_TOO_LONG" };
-  const status = typeof body.status === "string" && body.status.trim().length > 0 ? body.status.trim() : "draft";
-  if (!["draft", "active"].includes(status)) return { error: "new version status must be draft or active", code: "WORKFLOW_DEFINITION_VERSION_STATUS_INVALID" };
+  const status = typeof body.status === "string" && body.status.trim().length > 0
+    ? body.status.trim()
+    : null;
   const title = typeof body.title === "string" && body.title.trim().length > 0 ? body.title.trim() : null;
   const description = typeof body.description === "string" ? body.description.trim() || null : undefined;
   const goal = typeof body.goal === "string" && body.goal.trim().length > 0 ? body.goal.trim() : null;
@@ -709,33 +711,29 @@ function parseWorkflowDefinitionVersion(input: unknown): {
 }
 
 function parseWorkflowDefinitionLifecycle(input: unknown): {
-  action: "archive" | "deprecate" | "activate" | "draft";
+  action: string;
   note: string | null;
 } | { error: string; code: string } {
   const body = normalizeJsonObject(input);
   const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
-  if (!["archive", "deprecate", "activate", "draft"].includes(action)) {
-    return { error: "action must be one of archive, deprecate, activate, draft", code: "WORKFLOW_DEFINITION_LIFECYCLE_ACTION_INVALID" };
-  }
+  if (!action) return { error: "action is required", code: "WORKFLOW_DEFINITION_LIFECYCLE_ACTION_INVALID" };
   const note = typeof body.note === "string" ? body.note.trim() : "";
   if (note.length > 1000) return { error: "note must be 1000 characters or fewer", code: "WORKFLOW_DEFINITION_LIFECYCLE_NOTE_TOO_LONG" };
-  return { action: action as "archive" | "deprecate" | "activate" | "draft", note: note.length > 0 ? note : null };
+  return { action, note: note.length > 0 ? note : null };
 }
 
 function parseCompilerPolicyGateUpdate(input: unknown): {
-  state: "blocked" | "review_ready" | "enabled";
+  state: string;
   note: string | null;
   config: Record<string, unknown>;
 } | { error: string; code: string } {
   const body = normalizeJsonObject(input);
   const state = typeof body.state === "string" ? body.state.trim() : "";
-  if (!["blocked", "review_ready", "enabled"].includes(state)) {
-    return { error: "state must be one of blocked, review_ready, enabled", code: "COMPILER_POLICY_GATE_STATE_INVALID" };
-  }
+  if (!state) return { error: "state is required", code: "COMPILER_POLICY_GATE_STATE_INVALID" };
   const note = typeof body.note === "string" ? body.note.trim() : "";
   if (note.length > 1000) return { error: "note must be 1000 characters or fewer", code: "COMPILER_POLICY_GATE_NOTE_TOO_LONG" };
   return {
-    state: state as "blocked" | "review_ready" | "enabled",
+    state,
     note: note.length > 0 ? note : null,
     config: normalizeJsonObject(body.config),
   };
@@ -748,21 +746,11 @@ function parseStepLibraryPromotion(input: unknown): {
 } | { error: string; code: string } {
   const body = normalizeJsonObject(input);
   const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
-  if (!["promote_limited", "revoke"].includes(action)) {
-    return { error: "action must be one of promote_limited, revoke", code: "INVALID_STEP_LIBRARY_PROMOTION_ACTION" };
-  }
+  if (!action) return { error: "action is required", code: "INVALID_STEP_LIBRARY_PROMOTION_ACTION" };
 
   const rawScope = typeof body.scope === "string" ? body.scope.trim() : "";
-  if (action === "promote_limited") {
-    if (!rawScope) {
-      return { error: "scope is required for limited promotion", code: "STEP_LIBRARY_PROMOTION_SCOPE_REQUIRED" };
-    }
-    if (rawScope.length > 120) {
-      return { error: "scope must be 120 characters or fewer", code: "STEP_LIBRARY_PROMOTION_SCOPE_TOO_LONG" };
-    }
-    if (["global", "all", "compiler", "auto"].includes(rawScope.toLowerCase())) {
-      return { error: "global or compiler scope is not allowed in this phase", code: "STEP_LIBRARY_GLOBAL_SCOPE_DISABLED" };
-    }
+  if (rawScope.length > 120) {
+    return { error: "scope must be 120 characters or fewer", code: "STEP_LIBRARY_PROMOTION_SCOPE_TOO_LONG" };
   }
 
   const note = typeof body.note === "string" ? body.note.trim() : "";
@@ -771,8 +759,8 @@ function parseStepLibraryPromotion(input: unknown): {
   }
 
   return {
-    action: action as StepLibraryPromotionAction,
-    scope: action === "promote_limited" ? rawScope : null,
+    action,
+    scope: rawScope || null,
     note: note.length > 0 ? note : null,
   };
 }
@@ -917,7 +905,7 @@ async function workflowDefinitionImpactPreview(db: ReturnType<typeof getDb>, def
   const [versions, promotions, validations] = await Promise.all([
     db.query(
       `SELECT id, version, status, promotion_state, promotion_scope, promotion_confidence, updated_at
-       FROM agency_workflow_definitions
+       FROM agency_workflow_definitions_lifecycle
        WHERE definition_key = $1
        ORDER BY version DESC`,
       [definition.key]
@@ -1018,7 +1006,7 @@ function workflowDefinitionHardeningPreview(definition: ReturnType<typeof rowToW
 async function workflowDefinitionRollbackPreview(db: ReturnType<typeof getDb>, definition: ReturnType<typeof rowToWorkflowDefinition>): Promise<Record<string, unknown>> {
   const rows = await db.query(
     `SELECT *
-     FROM agency_workflow_definitions
+     FROM agency_workflow_definitions_lifecycle
      WHERE definition_key = $1
        AND id <> $2
      ORDER BY version DESC, updated_at DESC
@@ -1263,7 +1251,7 @@ async function hydrateAgencyWorkflowRun(db: ReturnType<typeof getDb>, runId: str
 async function loadStepCandidates(db: Pick<ReturnType<typeof getDb>, "query">, runId: string): Promise<Record<string, unknown>[]> {
   const result = await db.query(
     `SELECT *
-     FROM agency_workflow_step_candidates
+     FROM agency_workflow_step_candidates_lifecycle
      WHERE run_id = $1
      ORDER BY step_index ASC`,
     [runId]
@@ -1944,7 +1932,7 @@ router.get("/workflow-step-candidates", requireAdminAuth, async (req: Request, r
               r.status AS run_status,
               r.intent AS run_intent,
               d.friendly_name AS device_name
-       FROM agency_workflow_step_candidates c
+       FROM agency_workflow_step_candidates_lifecycle c
        LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
        LEFT JOIN devices d ON d.id = r.device_id
        ${where}
@@ -1953,7 +1941,7 @@ router.get("/workflow-step-candidates", requireAdminAuth, async (req: Request, r
       values
     ),
     db.query(
-      `SELECT COUNT(*) FROM agency_workflow_step_candidates c ${where}`,
+      `SELECT COUNT(*) FROM agency_workflow_step_candidates_lifecycle c ${where}`,
       values.slice(0, -2)
     ),
   ]);
@@ -2002,7 +1990,7 @@ router.get("/step-library", requireAdminAuth, async (req: Request, res: Response
               r.status AS run_status,
               r.intent AS run_intent,
               d.friendly_name AS device_name
-       FROM agency_workflow_step_candidates c
+       FROM agency_workflow_step_candidates_lifecycle c
        LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
        LEFT JOIN devices d ON d.id = r.device_id
        ${where}
@@ -2011,7 +1999,7 @@ router.get("/step-library", requireAdminAuth, async (req: Request, res: Response
       values
     ),
     db.query(
-      `SELECT COUNT(*) FROM agency_workflow_step_candidates c
+      `SELECT COUNT(*) FROM agency_workflow_step_candidates_lifecycle c
        LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
        ${where}`,
       values.slice(0, -2)
@@ -2503,7 +2491,7 @@ router.get("/workflow-definitions", requireAdminAuth, async (req: Request, res: 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = await db.query(
     `SELECT *
-     FROM agency_workflow_definitions
+     FROM agency_workflow_definitions_lifecycle
      ${where}
      ORDER BY
        CASE status
@@ -2555,7 +2543,7 @@ router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Reques
   const [definitions, gates] = await Promise.all([
     db.query(
       `SELECT *
-       FROM agency_workflow_definitions
+       FROM agency_workflow_definitions_lifecycle
        WHERE status IN ('active', 'draft')
        ORDER BY definition_key ASC, version DESC`
     ),
@@ -2597,7 +2585,7 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
   }
 
   const [definitionRows, gates] = await Promise.all([
-    db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id]),
+    db.query(`SELECT * FROM agency_workflow_definitions_lifecycle WHERE id = $1`, [req.params.id]),
     getCompilerPolicyGates(db),
   ]);
   const row = definitionRows.rows[0];
@@ -2841,7 +2829,7 @@ router.post("/workflow-definitions/:id/executable-artifact", requireAdminAuth, a
     return res.status(400).json({ ok: false, code: "REQUEST_KEY_INVALID", error: "requestKey must be a 24-character lowercase hex string" });
   }
 
-  const definitionRow = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  const definitionRow = (await db.query(`SELECT * FROM agency_workflow_definitions_lifecycle WHERE id = $1`, [req.params.id])).rows[0];
   if (!definitionRow) {
     return res.status(404).json({ ok: false, code: "WORKFLOW_DEFINITION_NOT_FOUND", error: "Workflow definition not found" });
   }
@@ -2992,12 +2980,12 @@ router.post("/workflow-definitions/:id/executable-artifact", requireAdminAuth, a
 
 router.get("/workflow-definitions/:id/versions", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
-  const row = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  const row = (await db.query(`SELECT * FROM agency_workflow_definitions_lifecycle WHERE id = $1`, [req.params.id])).rows[0];
   if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
   const definition = rowToWorkflowDefinition(row);
   const rows = await db.query(
     `SELECT *
-     FROM agency_workflow_definitions
+     FROM agency_workflow_definitions_lifecycle
      WHERE definition_key = $1
      ORDER BY version DESC`,
     [definition.key]
@@ -3022,12 +3010,12 @@ router.post("/workflow-definitions/:id/versions", requireAdminAuth, async (req: 
   if ("error" in parsed) {
     return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
   }
-  const row = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  const row = (await db.query(`SELECT * FROM agency_workflow_definitions_lifecycle WHERE id = $1`, [req.params.id])).rows[0];
   if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
   const source = rowToWorkflowDefinition(row);
   const versionRow = await db.query(
     `SELECT COALESCE(MAX(version), 0) + 1 AS next_version
-     FROM agency_workflow_definitions
+     FROM agency_workflow_definitions_lifecycle
      WHERE definition_key = $1`,
     [source.key]
   );
@@ -3113,16 +3101,16 @@ router.post("/workflow-definitions/:id/versions", requireAdminAuth, async (req: 
 
 router.get("/workflow-definitions/:id/diff", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
-  const rows = await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id]);
+  const rows = await db.query(`SELECT * FROM agency_workflow_definitions_lifecycle WHERE id = $1`, [req.params.id]);
   const sourceRow = rows.rows[0];
   if (!sourceRow) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
   const source = rowToWorkflowDefinition(sourceRow);
   let targetRow = null;
   if (typeof req.query.targetId === "string" && req.query.targetId.trim().length > 0) {
-    targetRow = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.query.targetId.trim()])).rows[0] ?? null;
+    targetRow = (await db.query(`SELECT * FROM agency_workflow_definitions_lifecycle WHERE id = $1`, [req.query.targetId.trim()])).rows[0] ?? null;
   } else {
     targetRow = (await db.query(
-      `SELECT * FROM agency_workflow_definitions WHERE definition_key = $1 AND id <> $2 ORDER BY version DESC LIMIT 1`,
+      `SELECT * FROM agency_workflow_definitions_lifecycle WHERE definition_key = $1 AND id <> $2 ORDER BY version DESC LIMIT 1`,
       [source.key, source.id]
     )).rows[0] ?? null;
   }
@@ -3136,7 +3124,7 @@ router.get("/workflow-definitions/:id/diff", requireAdminAuth, async (req: Reque
 
 router.get("/workflow-definitions/:id/impact-preview", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
-  const row = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  const row = (await db.query(`SELECT * FROM agency_workflow_definitions_lifecycle WHERE id = $1`, [req.params.id])).rows[0];
   if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
   const definition = rowToWorkflowDefinition(row);
   res.json({ ok: true, data: await workflowDefinitionImpactPreview(db, definition) });
@@ -3144,7 +3132,7 @@ router.get("/workflow-definitions/:id/impact-preview", requireAdminAuth, async (
 
 router.get("/workflow-definitions/:id/promotion-hardening", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
-  const row = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  const row = (await db.query(`SELECT * FROM agency_workflow_definitions_lifecycle WHERE id = $1`, [req.params.id])).rows[0];
   if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
   const scope = typeof req.query.scope === "string" && req.query.scope.trim().length > 0 ? req.query.scope.trim() : null;
   const definition = rowToWorkflowDefinition(row);
@@ -3178,7 +3166,7 @@ router.patch("/workflow-definitions/:id/lifecycle", requireAdminAuth, async (req
   if ("error" in parsed) {
     return res.status(400).json({ ok: false, error: parsed.error, code: parsed.code });
   }
-  const row = (await db.query(`SELECT * FROM agency_workflow_definitions WHERE id = $1`, [req.params.id])).rows[0];
+  const row = (await db.query(`SELECT * FROM agency_workflow_definitions_lifecycle WHERE id = $1`, [req.params.id])).rows[0];
   if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
   const definition = rowToWorkflowDefinition(row);
   const nextStatus = parsed.action === "archive" ? "archived" : parsed.action === "deprecate" ? "deprecated" : parsed.action === "activate" ? "active" : "draft";
@@ -3226,7 +3214,7 @@ router.get("/workflow-definitions/:id/rollback-preview", requireAdminAuth, async
   const db = getDb();
   const rows = await db.query(
     `SELECT *
-     FROM agency_workflow_definitions
+     FROM agency_workflow_definitions_lifecycle
      WHERE id = $1`,
     [req.params.id]
   );
@@ -3265,7 +3253,7 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
   const [definitionRows, gates] = await Promise.all([
     db.query(
       `SELECT *
-       FROM agency_workflow_definitions
+       FROM agency_workflow_definitions_lifecycle
        WHERE id = $1`,
       [req.params.id]
     ),
@@ -3509,7 +3497,7 @@ router.post("/workflow-definitions/:id/rollback", requireAdminAuth, async (req: 
 
   const rows = await db.query(
     `SELECT *
-     FROM agency_workflow_definitions
+     FROM agency_workflow_definitions_lifecycle
      WHERE id = $1`,
     [req.params.id]
   );
@@ -3533,7 +3521,7 @@ router.post("/workflow-definitions/:id/rollback", requireAdminAuth, async (req: 
 
   const targetRows = await db.query(
     `SELECT *
-     FROM agency_workflow_definitions
+     FROM agency_workflow_definitions_lifecycle
      WHERE id = $1`,
     [targetId]
   );
@@ -3838,7 +3826,7 @@ router.get("/workflow-validation-pipeline", requireAdminAuth, async (req: Reques
   const [definitions, gates] = await Promise.all([
     db.query(
       `SELECT *
-       FROM agency_workflow_definitions
+       FROM agency_workflow_definitions_lifecycle
        WHERE ${conditions.join(" AND ")}
        ORDER BY
          CASE status
@@ -4023,7 +4011,7 @@ router.get("/compiler-control-plane", requireAdminAuth, async (req: Request, res
               ) AS library_terminal,
               r.intent AS run_intent,
               d.friendly_name AS device_name
-       FROM agency_workflow_step_candidates c
+       FROM agency_workflow_step_candidates_lifecycle c
        LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
        LEFT JOIN devices d ON d.id = r.device_id
        WHERE ${conditions.join(" AND ")}
@@ -4208,7 +4196,7 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
             ) AS library_terminal,
             r.intent AS run_intent,
             d.friendly_name AS device_name
-     FROM agency_workflow_step_candidates c
+     FROM agency_workflow_step_candidates_lifecycle c
      LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
      LEFT JOIN devices d ON d.id = r.device_id
      WHERE ${conditions.join(" AND ")}
@@ -4297,7 +4285,7 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
             r.status AS run_status,
             r.intent AS run_intent,
             d.friendly_name AS device_name
-     FROM agency_workflow_step_candidates c
+     FROM agency_workflow_step_candidates_lifecycle c
      LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
      LEFT JOIN devices d ON d.id = r.device_id
      WHERE c.id = $1`,
@@ -4411,7 +4399,7 @@ router.patch("/workflow-step-candidates/:id/review", requireAdminAuth, async (re
 
   const db = getDb();
   const existing = await db.query(
-    `SELECT * FROM agency_workflow_step_candidates WHERE id = $1`,
+    `SELECT * FROM agency_workflow_step_candidates_lifecycle WHERE id = $1`,
     [req.params.id]
   );
   if (existing.rows.length === 0) {
@@ -4449,7 +4437,7 @@ router.patch("/workflow-step-candidates/:id/validate", requireAdminAuth, async (
 
   const db = getDb();
   const existing = await db.query(
-    `SELECT * FROM agency_workflow_step_candidates WHERE id = $1`,
+    `SELECT * FROM agency_workflow_step_candidates_lifecycle WHERE id = $1`,
     [req.params.id]
   );
   if (existing.rows.length === 0) {

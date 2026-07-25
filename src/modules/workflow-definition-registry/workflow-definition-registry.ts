@@ -3,13 +3,21 @@ import type { WorkflowTemplate } from "../workflows/types";
 
 type JsonObject = Record<string, unknown>;
 
-export type WorkflowDefinitionStatus = "draft" | "active" | "deprecated" | "archived";
+export type WorkflowDefinitionStatus = string;
 
 export interface WorkflowDefinition {
   id: string;
   key: string;
   version: number;
   status: WorkflowDefinitionStatus | string;
+  statusCapabilities: {
+    initial: boolean;
+    terminal: boolean;
+    retryable: boolean;
+    administrative: boolean;
+    dispatchable: boolean;
+    manual: boolean;
+  };
   title: string;
   description: string | null;
   platform: string;
@@ -28,6 +36,14 @@ export interface WorkflowDefinition {
   policy: JsonObject;
   promotion: {
     state: string;
+    stateCapabilities: {
+      initial: boolean;
+      terminal: boolean;
+      retryable: boolean;
+      administrative: boolean;
+      dispatchable: boolean;
+      manual: boolean;
+    };
     scope: string | null;
     note: string | null;
     promotedBy: string | null;
@@ -118,7 +134,15 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
     id: String(row.id),
     key: String(row.definition_key),
     version: typeof row.version === "number" ? row.version : Number(row.version ?? 1),
-    status: String(row.status ?? "draft"),
+    status: String(row.status ?? ""),
+    statusCapabilities: {
+      initial: row.status_initial === true,
+      terminal: row.status_terminal === true,
+      retryable: row.status_retryable === true,
+      administrative: row.status_administrative === true,
+      dispatchable: row.status_dispatchable === true,
+      manual: row.status_manual === true,
+    },
     title: String(row.title),
     description: typeof row.description === "string" ? row.description : null,
     platform: String(row.platform),
@@ -136,7 +160,15 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
     rollback: objectValue(row.rollback),
     policy: registryPolicy(rowPolicy),
     promotion: {
-      state: String(row.promotion_state ?? "review_only"),
+      state: String(row.promotion_state ?? ""),
+      stateCapabilities: {
+        initial: row.promotion_initial === true,
+        terminal: row.promotion_terminal === true,
+        retryable: row.promotion_retryable === true,
+        administrative: row.promotion_administrative === true,
+        dispatchable: row.promotion_dispatchable === true,
+        manual: row.promotion_manual === true,
+      },
       scope: typeof row.promotion_scope === "string" ? row.promotion_scope : null,
       note: typeof row.promotion_note === "string" ? row.promotion_note : null,
       promotedBy: typeof row.promoted_by === "string" ? row.promoted_by : null,
@@ -231,16 +263,20 @@ function gateSummary(policyGates: CompilerPolicyGate[]): JsonObject {
       owner: gate.owner,
       safeToAutoApply: gate.remediation.safeToAutoApply,
       version: gate.version ?? 1,
+      stateCapabilities: gate.stateCapabilities,
     })),
     total: policyGates.length,
-    blocked: policyGates.filter((gate) => gate.state !== "enabled").length,
+    blocked: policyGates.filter((gate) =>
+      gate.stateCapabilities?.dispatchable !== true
+    ).length,
     highRisk: policyGates.filter((gate) => gate.risk === "high").length,
     safeToAutoApply: policyGates.filter((gate) => gate.remediation.safeToAutoApply === true).length,
   };
 }
 
 function gateEnabled(policyGates: CompilerPolicyGate[], id: string): boolean {
-  return policyGates.find((gate) => gate.id === id)?.state === "enabled";
+  return policyGates.find((gate) => gate.id === id)
+    ?.stateCapabilities?.dispatchable === true;
 }
 
 function scopeMatches(requestedScope: string | undefined, promotionScope: string | null): boolean {
