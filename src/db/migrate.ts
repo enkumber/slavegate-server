@@ -35,7 +35,7 @@ async function applyFile(client: any, filePath: string): Promise<{ ok: boolean; 
   }
 }
 
-function isFailClosedMigration(fileName: string): boolean {
+export function isFailClosedMigration(fileName: string): boolean {
   return fileName.includes("device_execution_queue") ||
     fileName.includes("queue_v2_contract") ||
     fileName.includes("queue_v2_runtime") ||
@@ -52,6 +52,7 @@ function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("postgres_compiler_control_plane") ||
     fileName.includes("generic_workflow_segments") ||
     fileName.includes("segment_builder_agent_jobs") ||
+    fileName.includes("task_status_contract") ||
     fileName.includes("phone_network_incidents_and_audits");
 }
 
