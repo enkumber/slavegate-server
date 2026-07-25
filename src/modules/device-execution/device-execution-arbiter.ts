@@ -583,15 +583,14 @@ export class DeviceExecutionArbiter {
         rootId: root.id,
         deviceId: input.deviceId,
         ownerGeneration: input.ownerGeneration,
-        toState: "blocked",
+        selector: { targetTerminal: false, targetManual: true, transitionAutomatic: true },
         reason: input.reason,
         metadata: input.metadata,
       });
-      await updateOperationState(client, {
+      await transitionOperationState(client, {
         operationKind: "job",
         operationId: input.operationId,
-        fromStates: ["registered", "dispatching", "dispatched", "rejected"],
-        toState: "blocked",
+        selector: { targetTerminal: false, targetManual: true, transitionAutomatic: true },
         ownerGeneration: input.ownerGeneration,
         metadata: input.metadata,
       });
@@ -831,10 +830,9 @@ export class DeviceExecutionArbiter {
           };
         }
 
-        const dispatching = await updateRootState(client, {
+        const dispatching = await transitionRootState(client, {
           rootId: root.id,
-          fromStates: ["queued"],
-          toState: "dispatching",
+          selector: { targetTerminal: false, transitionAutomatic: true },
           ownerGenerationIncrement: true,
           metadata,
         });
@@ -860,10 +858,9 @@ export class DeviceExecutionArbiter {
         }
         current = dispatching;
       } else if (rootIsClaimed(root)) {
-        const dispatching = await updateRootState(client, {
+        const dispatching = await transitionRootState(client, {
           rootId: root.id,
-          fromStates: ["claimed"],
-          toState: "dispatching",
+          selector: { targetTerminal: false, transitionAutomatic: true },
           ownerGenerationIncrement: false,
           metadata,
         });
@@ -879,11 +876,10 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      const dispatchingOperation = await updateOperationState(client, {
+      const dispatchingOperation = await transitionOperationState(client, {
         operationKind,
         operationId: input.jobId,
-        fromStates: ["registered"],
-        toState: "dispatching",
+        selector: { targetTerminal: false, transitionAutomatic: true },
         ownerGeneration: toNumber(current.owner_generation),
         wireHandle: encodeDeviceExecutionHandle(rootToHandle(current, operationKind, input.jobId)),
         metadata: {
@@ -1051,7 +1047,7 @@ export class DeviceExecutionArbiter {
           rootId: root.id,
           deviceId: input.deviceId,
           ownerGeneration: expectedGeneration,
-          toState: "blocked",
+          selector: { targetTerminal: false, targetManual: true, transitionAutomatic: true },
           reason: wireError ?? "device_offline_or_transport_rejected_after_dispatching",
           metadata: {
             ...metadata,
@@ -1059,11 +1055,10 @@ export class DeviceExecutionArbiter {
             wireError: wireError ?? null,
           },
         }) ?? root;
-        const blockedOperation = await updateOperationState(client, {
+        const blockedOperation = await transitionOperationState(client, {
           operationKind,
           operationId: input.jobId,
-          fromStates: ["registered", "dispatching", "dispatched", "rejected"],
-          toState: "blocked",
+          selector: { targetTerminal: false, targetManual: true, transitionAutomatic: true },
           ownerGeneration: expectedGeneration,
           wireHandle: prepared.permit.wireHandle,
           metadata: {
@@ -1095,10 +1090,9 @@ export class DeviceExecutionArbiter {
 
       const dispatched = rootIsDispatched(root)
         ? root
-        : await updateRootState(client, {
+        : await transitionRootState(client, {
             rootId: root.id,
-            fromStates: ["dispatching"],
-            toState: "dispatched",
+            selector: { targetTerminal: false, transitionAutomatic: true },
             ownerGenerationIncrement: false,
             metadata: {
               ...metadata,
@@ -1127,11 +1121,10 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      const dispatchedOperation = await updateOperationState(client, {
+      const dispatchedOperation = await transitionOperationState(client, {
         operationKind,
         operationId: input.jobId,
-        fromStates: ["dispatching"],
-        toState: "dispatched",
+        selector: { targetTerminal: false, transitionAutomatic: true },
         ownerGeneration: expectedGeneration,
         wireHandle: prepared.permit.wireHandle,
         metadata: {
@@ -1322,21 +1315,19 @@ export class DeviceExecutionArbiter {
 
       let current = root;
       if (rootIsInitialPhase(root) || rootIsClaimed(root)) {
-        const dispatching = await updateRootState(client, {
+        const dispatching = await transitionRootState(client, {
           rootId: root.id,
-          fromStates: ["queued", "claimed"],
-          toState: "dispatching",
+          selector: { targetTerminal: false, transitionAutomatic: true },
           ownerGenerationIncrement: rootIsInitialPhase(root),
           metadata,
         });
         if (dispatching) current = dispatching;
       }
 
-      const operationDispatching = await updateOperationState(client, {
+      const operationDispatching = await transitionOperationState(client, {
         operationKind,
         operationId: input.operationId,
-        fromStates: ["registered", "rejected"],
-        toState: "dispatching",
+        selector: { targetTerminal: false, transitionAutomatic: true },
         ownerGeneration: toNumber(current.owner_generation),
         wireHandle: encodeDeviceExecutionHandle(operationRowToHandle({ ...operation, owner_generation: current.owner_generation })),
         metadata: { ...metadata, handle: encodeDeviceExecutionHandle(operationRowToHandle({ ...operation, owner_generation: current.owner_generation })) },
@@ -1434,15 +1425,14 @@ export class DeviceExecutionArbiter {
           rootId: root.id,
           deviceId: input.deviceId,
           ownerGeneration: expectedGeneration,
-          toState: "blocked",
+          selector: { targetTerminal: false, targetManual: true, transitionAutomatic: true },
           reason: wireError ?? "device_offline_or_transport_rejected_after_dispatching",
           metadata,
         }) ?? root;
-        const rejected = await updateOperationState(client, {
+        const rejected = await transitionOperationState(client, {
           operationKind,
           operationId: input.operationId,
-          fromStates: ["registered", "dispatching"],
-          toState: "blocked",
+          selector: { targetTerminal: false, targetManual: true, transitionAutomatic: true },
           ownerGeneration: expectedGeneration,
           metadata: { ...metadata, wireError: wireError ?? null },
         });
@@ -1467,20 +1457,19 @@ export class DeviceExecutionArbiter {
       }
 
       const completionPreviousState = root.state;
-      const dispatched = completionPreviousState === "dispatching"
-        ? await updateRootState(client, {
+      const rootWasDispatching = rootIsDispatching(root);
+      const dispatched = rootWasDispatching
+        ? await transitionRootState(client, {
             rootId: root.id,
-            fromStates: ["dispatching"],
-            toState: "dispatched",
+            selector: { targetTerminal: false, transitionAutomatic: true },
             ownerGenerationIncrement: false,
             metadata,
           })
         : root;
-      const dispatchedOperation = await updateOperationState(client, {
+      const dispatchedOperation = await transitionOperationState(client, {
         operationKind,
         operationId: input.operationId,
-        fromStates: ["registered", "dispatching", "rejected"],
-        toState: "dispatched",
+        selector: { targetTerminal: false, transitionAutomatic: true },
         ownerGeneration: toNumber((dispatched ?? root).owner_generation),
         wireHandle: encodeDeviceExecutionHandle(operationRowToHandle({ ...operation, owner_generation: (dispatched ?? root).owner_generation })),
         metadata: {
@@ -1492,7 +1481,7 @@ export class DeviceExecutionArbiter {
       await insertEvent(client, {
         rootId: (dispatched ?? root).id,
         deviceId: (dispatched ?? root).device_id,
-        eventType: completionPreviousState === "dispatching" ? "root_dispatched" : "observe_dispatched_without_root_transition",
+        eventType: rootWasDispatching ? "root_dispatched" : "observe_dispatched_without_root_transition",
         previousState: completionPreviousState,
         newState: (dispatched ?? root).state,
         actor,
@@ -2806,10 +2795,8 @@ export class DeviceExecutionArbiter {
     ownerGeneration?: number;
     reason: string;
     actor?: string;
-    state?: DeviceExecutionState;
     metadata?: Record<string, unknown>;
   }): Promise<DeviceExecutionTransitionResult> {
-    const toState = input.state ?? "blocked";
     const rootKind = input.rootKind ?? input.handle?.rootKind ?? "job";
     const rootKindPolicy = await getDeviceExecutionRootKindPolicy(rootKind, this.dbProvider());
     const operationKind = input.handle?.operationKind ?? rootKindPolicy.operationKind;
@@ -2902,7 +2889,7 @@ export class DeviceExecutionArbiter {
         rootId: root.id,
         deviceId: input.deviceId,
         ownerGeneration: expectedGeneration,
-        toState,
+        selector: { targetTerminal: false, targetManual: true, transitionAutomatic: true },
         reason: input.reason,
         metadata: input.metadata,
       });
@@ -2911,11 +2898,10 @@ export class DeviceExecutionArbiter {
       }
 
       const ambiguousOperation = operation
-        ? await updateOperationState(client, {
+        ? await transitionOperationState(client, {
             operationKind: operation.operation_kind,
             operationId: operation.operation_id,
-            fromStates: ["registered", "dispatching", "dispatched", "reconciling", "blocked", "rejected"],
-            toState,
+            selector: { targetTerminal: false, targetManual: true, transitionAutomatic: true },
             ownerGeneration: expectedGeneration,
             metadata: input.metadata,
           }) ?? operation
@@ -3486,7 +3472,7 @@ async function selectRoot(
   client: Queryable,
   input: {
     rootId?: string;
-    rootKind: DeviceExecutionRootKind;
+    rootKind?: DeviceExecutionRootKind;
     externalId?: string;
     forUpdate: boolean;
   },
@@ -3499,6 +3485,7 @@ async function selectRoot(
     return result.rows[0] ?? null;
   }
   if (!input.externalId) return null;
+  if (!input.rootKind) return null;
   return selectRootByExternalId(client, input.rootKind, input.externalId, input.forUpdate);
 }
 
@@ -3717,6 +3704,34 @@ async function updateRootState(
   return result.rows[0] ?? null;
 }
 
+async function transitionRootState(
+  client: Queryable,
+  input: {
+    rootId: string;
+    selector: LifecycleTransitionSelector;
+    ownerGenerationIncrement: boolean;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<DeviceExecutionRootRow | null> {
+  const current = await selectRoot(client, { rootId: input.rootId, forUpdate: true });
+  if (!current) return null;
+  const transition = await selectResourceLifecycleTransition(
+    "device_execution_roots",
+    current.state,
+    input.selector,
+    "state",
+    client,
+  );
+  if (!transition) return null;
+  return updateRootState(client, {
+    rootId: input.rootId,
+    fromStates: [current.state],
+    toState: transition.toStatus,
+    ownerGenerationIncrement: input.ownerGenerationIncrement,
+    metadata: input.metadata,
+  });
+}
+
 async function updateOperationState(
   client: Queryable,
   input: {
@@ -3768,6 +3783,43 @@ async function updateOperationState(
     ]
   );
   return result.rows[0] ?? null;
+}
+
+async function transitionOperationState(
+  client: Queryable,
+  input: {
+    operationKind: DeviceExecutionOperationKind;
+    operationId: string;
+    selector: LifecycleTransitionSelector;
+    ownerGeneration?: number;
+    wireHandle?: DeviceExecutionWireHandle;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<DeviceExecutionOperationRow | null> {
+  const current = await selectOperationByIdentity(
+    client,
+    input.operationKind,
+    input.operationId,
+    true,
+  );
+  if (!current) return null;
+  const transition = await selectResourceLifecycleTransition(
+    "device_execution_operations",
+    current.state,
+    input.selector,
+    "state",
+    client,
+  );
+  if (!transition) return null;
+  return updateOperationState(client, {
+    operationKind: input.operationKind,
+    operationId: input.operationId,
+    fromStates: [current.state],
+    toState: transition.toStatus,
+    ownerGeneration: input.ownerGeneration,
+    wireHandle: input.wireHandle,
+    metadata: input.metadata,
+  });
 }
 
 async function cancelRegisteredOperationsForRoot(
@@ -3904,11 +3956,23 @@ async function updateRootAmbiguous(
     rootId: string;
     deviceId: string;
     ownerGeneration: number;
-    toState: DeviceExecutionState;
+    selector: LifecycleTransitionSelector;
     reason: string;
     metadata?: Record<string, unknown>;
   },
 ): Promise<DeviceExecutionRootRow | null> {
+  const current = await selectRoot(client, { rootId: input.rootId, forUpdate: true });
+  if (!current || current.device_id !== input.deviceId || toNumber(current.owner_generation) !== input.ownerGeneration) {
+    return null;
+  }
+  const transition = await selectResourceLifecycleTransition(
+    "device_execution_roots",
+    current.state,
+    input.selector,
+    "state",
+    client,
+  );
+  if (!transition) return null;
   const result = await client.query<DeviceExecutionRootRow>(
     `UPDATE device_execution_roots
      SET state = $1,
@@ -3926,7 +3990,7 @@ async function updateRootAmbiguous(
        )
      RETURNING *`,
     [
-      input.toState,
+      transition.toStatus,
       input.reason,
       JSON.stringify(input.metadata ?? {}),
       input.rootId,

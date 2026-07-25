@@ -530,7 +530,6 @@ export class DirectWsServer {
           handle: pending.permit.handle,
           reason: "direct_ws_server_shutdown_before_result",
           actor: "direct_ws_close",
-          state: "blocked",
           metadata: { handle: pending.permit.wireHandle },
         }, () => {
           if (this.pendingJobs.get(jobId) !== pending) return;
@@ -550,7 +549,6 @@ export class DirectWsServer {
         handle: pending.handle,
         reason: "direct_ws_server_shutdown_before_batch_result",
         actor: "direct_ws_close",
-        state: "blocked",
       }, () => {
         if (this.pendingBatches.get(batchId) !== pending) return;
         clearTimeout(pending.timer);
@@ -569,7 +567,6 @@ export class DirectWsServer {
         handle: pending.handle,
         reason: "direct_ws_server_shutdown_before_workflow_terminal",
         actor: "direct_ws_close",
-        state: "blocked",
       }, () => {
         if (this.pendingWorkflows.get(workflowId) !== pending) return;
         clearTimeout(pending.timer);
@@ -835,7 +832,6 @@ export class DirectWsServer {
       handle: permit.handle,
       reason: "job_result_timeout",
       actor: "direct_ws_waiter_timeout",
-      state: "blocked",
       metadata: { timeoutMs, handle: permit.wireHandle },
     }, () => {
       if (this.pendingJobs.get(jobId) !== pending) return;
@@ -944,7 +940,6 @@ export class DirectWsServer {
       handle,
       reason: "workflow_status_timeout",
       actor: "direct_ws_workflow_timeout",
-      state: "blocked",
     }, () => {
       if (this.pendingWorkflows.get(handle.operationId) !== pending) return;
       this.pendingWorkflows.delete(handle.operationId);
@@ -1064,7 +1059,6 @@ export class DirectWsServer {
       handle,
       reason: "batch_result_timeout",
       actor: "direct_ws_batch_timeout",
-      state: "blocked",
       metadata: { timeoutMs },
     }, () => {
       if (this.pendingBatches.get(handle.operationId) !== pending) return;
@@ -1285,7 +1279,6 @@ export class DirectWsServer {
         handle: pending.permit.handle,
         reason: "device_disconnected_before_job_result",
         actor: "direct_ws_disconnect",
-        state: "blocked",
         metadata: { handle: pending.permit.wireHandle, closeCode, closeReason },
       }, () => {
         if (this.pendingJobs.get(jobId) !== pending) return;
@@ -1300,7 +1293,6 @@ export class DirectWsServer {
         handle: pending.handle,
         reason: "device_disconnected_before_batch_result",
         actor: "direct_ws_disconnect",
-        state: "blocked",
         metadata: { closeCode, closeReason },
       }, () => {
         if (this.pendingBatches.get(batchId) !== pending) return;
@@ -1315,7 +1307,6 @@ export class DirectWsServer {
         handle: pending.handle,
         reason: "device_disconnected_before_workflow_terminal",
         actor: "direct_ws_disconnect",
-        state: "blocked",
         metadata: { closeCode, closeReason },
       }, () => {
         if (this.pendingWorkflows.get(workflowId) !== pending) return;

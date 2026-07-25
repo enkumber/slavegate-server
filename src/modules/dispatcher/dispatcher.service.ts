@@ -313,7 +313,6 @@ export class DispatcherService {
               externalId: jobId,
               reason: "job_timeout",
               actor: "dispatcher_timeout",
-              state: "blocked",
               metadata: { timeoutMs, jobType: req.type },
             });
           }

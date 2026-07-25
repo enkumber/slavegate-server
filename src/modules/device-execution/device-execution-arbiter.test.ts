@@ -213,12 +213,17 @@ class FakeClient {
         normalized.includes("FROM lifecycle_resource_bindings binding")) {
       const [tableName, fromStatus, selectorJson] = params as [string, string, string];
       const selector = JSON.parse(selectorJson) as Record<string, unknown>;
-      if (selector.targetTerminal !== true) return { rows: [], rowCount: 0 };
-      const toStatus = selector.targetAdministrative === true
-        ? "cancelled"
-        : selector.targetRetryable === true
-          ? "failed"
-          : "completed";
+      const toStatus = selector.targetManual === true
+        ? "blocked"
+        : selector.targetTerminal === true
+          ? selector.targetAdministrative === true
+            ? "cancelled"
+            : selector.targetRetryable === true
+              ? "failed"
+              : "completed"
+          : fromStatus === "dispatching"
+            ? "dispatched"
+            : "dispatching";
       return {
         rows: [{
           lifecycle_key: tableName,
