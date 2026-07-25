@@ -55,7 +55,7 @@ export async function getStatusDefinition(status: string, db: Queryable = getDb(
 }
 
 export async function listStatusDefinitions(db: Queryable = getDb()): Promise<TaskStatusDefinition[]> {
-  const definitions = await listResourceLifecycleStates("tasks", db);
+  const definitions = await listResourceLifecycleStates("tasks", "status", db);
   return definitions.map((definition) => ({
     status: definition.status,
     terminal: definition.terminal,

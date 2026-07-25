@@ -84,6 +84,13 @@ export interface LifecycleTransitionSelector {
   transitionResetRetry?: boolean;
 }
 
+export type LifecycleStateSelector = Partial<
+  Pick<
+    LifecycleStateDefinition,
+    "initial" | "terminal" | "retryable" | "administrative" | "dispatchable" | "manual"
+  >
+>;
+
 export function serializeLifecycleTransitionSelector(
   selector: LifecycleTransitionSelector,
 ): string {
@@ -133,13 +140,15 @@ export function lifecycleTransitionSelectorPredicate(
 
 export async function getResourceLifecycleKey(
   resourceTable: string,
+  stateColumn = "status",
   db: LifecycleQueryable = getDb(),
 ): Promise<string | null> {
   const result = await db.query(
     `SELECT lifecycle_key
        FROM lifecycle_resource_bindings
-      WHERE resource_table = to_regclass($1)`,
-    [resourceTable],
+      WHERE resource_table = to_regclass($1)
+        AND state_column = $2::name`,
+    [resourceTable, stateColumn],
   );
   const value = result.rows[0]?.lifecycle_key;
   return typeof value === "string" ? value : null;
@@ -147,6 +156,7 @@ export async function getResourceLifecycleKey(
 
 export async function listResourceLifecycleStates(
   resourceTable: string,
+  stateColumn = "status",
   db: LifecycleQueryable = getDb(),
 ): Promise<LifecycleStateDefinition[]> {
   const result = await db.query(
@@ -157,10 +167,85 @@ export async function listResourceLifecycleStates(
        JOIN lifecycle_state_definitions state
          ON state.lifecycle_key = binding.lifecycle_key
       WHERE binding.resource_table = to_regclass($1)
+        AND binding.state_column = $2::name
       ORDER BY state.sort_order, state.status`,
-    [resourceTable],
+    [resourceTable, stateColumn],
   );
   return result.rows.map(rowToState);
+}
+
+export async function getResourceLifecycleState(
+  resourceTable: string,
+  status: string,
+  stateColumn = "status",
+  db: LifecycleQueryable = getDb(),
+): Promise<LifecycleStateDefinition | null> {
+  const result = await db.query(
+    `SELECT state.lifecycle_key, state.status, state.initial, state.terminal,
+            state.retryable, state.administrative, state.dispatchable, state.manual,
+            state.stale_after_ms, state.stale_action_key, state.description, state.metadata
+       FROM lifecycle_resource_bindings binding
+       JOIN lifecycle_state_definitions state
+         ON state.lifecycle_key = binding.lifecycle_key
+      WHERE binding.resource_table = to_regclass($1)
+        AND binding.state_column = $3::name
+        AND state.status = $2`,
+    [resourceTable, status, stateColumn],
+  );
+  return result.rows[0] ? rowToState(result.rows[0]) : null;
+}
+
+export async function resourceLifecycleStateMatches(
+  resourceTable: string,
+  status: string,
+  selector: LifecycleStateSelector,
+  stateColumn = "status",
+  db: LifecycleQueryable = getDb(),
+): Promise<boolean> {
+  const state = await getResourceLifecycleState(resourceTable, status, stateColumn, db);
+  if (!state) return false;
+  return Object.entries(selector).every(
+    ([property, expected]) =>
+      state[property as keyof LifecycleStateSelector] === expected,
+  );
+}
+
+export async function selectResourceLifecycleTransition(
+  resourceTable: string,
+  fromStatus: string,
+  selector: LifecycleTransitionSelector,
+  stateColumn = "status",
+  db: LifecycleQueryable = getDb(),
+): Promise<LifecycleTransition | null> {
+  const predicate = lifecycleTransitionSelectorPredicate("transition", "target", "$3");
+  const result = await db.query(
+    `SELECT transition.lifecycle_key, transition.action_key, transition.from_status,
+            transition.to_status, transition.manual_allowed, transition.external_allowed,
+            transition.automatic, transition.mark_started, transition.mark_completed,
+            transition.clear_completed, transition.clear_failure, transition.reset_retry,
+            transition.metadata
+       FROM lifecycle_resource_bindings binding
+       JOIN lifecycle_transitions transition
+         ON transition.lifecycle_key = binding.lifecycle_key
+        AND transition.from_status = $2
+       JOIN lifecycle_state_definitions target
+         ON target.lifecycle_key = transition.lifecycle_key
+        AND target.status = transition.to_status
+      WHERE binding.resource_table = to_regclass($1)
+        AND binding.state_column = $4::name
+        AND ${predicate}
+      ORDER BY target.sort_order, transition.action_key`,
+    [
+      resourceTable,
+      fromStatus,
+      serializeLifecycleTransitionSelector(selector),
+      stateColumn,
+    ],
+  );
+  if (result.rows.length > 1) {
+    throw new Error("lifecycle transition selector is ambiguous for configured resource");
+  }
+  return result.rows[0] ? rowToTransition(result.rows[0]) : null;
 }
 
 function rowToState(row: Record<string, unknown>): LifecycleStateDefinition {

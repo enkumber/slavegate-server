@@ -25,7 +25,7 @@ export interface WorkflowLifecycleRow extends Record<string, unknown> {
 export async function listWorkflowStatusDefinitions(
   db: Queryable = getDb(),
 ): Promise<LifecycleStateDefinition[]> {
-  return listResourceLifecycleStates("workflows", db);
+  return listResourceLifecycleStates("workflows", "status", db);
 }
 
 export async function transitionWorkflow(

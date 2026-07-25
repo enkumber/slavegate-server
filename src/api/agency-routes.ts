@@ -482,8 +482,20 @@ async function getCompilerPolicyGates(db: ReturnType<typeof getDb>, filters: {
   owner?: string;
 } = {}) {
   const configRows = await db.query(
-    `SELECT gate_id, state, version, owner, risk, config, updated_by, updated_at
-     FROM agency_compiler_policy_gate_config`
+    `SELECT gate.gate_id, gate.state, gate.version, gate.owner, gate.risk,
+            gate.config, gate.updated_by, gate.updated_at,
+            definition.initial AS state_initial,
+            definition.terminal AS state_terminal,
+            definition.retryable AS state_retryable,
+            definition.administrative AS state_administrative,
+            definition.dispatchable AS state_dispatchable,
+            definition.manual AS state_manual
+       FROM agency_compiler_policy_gate_config gate
+       JOIN lifecycle_resource_bindings binding
+         ON binding.resource_table = to_regclass('agency_compiler_policy_gate_config')
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = binding.lifecycle_key
+        AND definition.status = gate.state`
   );
   return listCompilerPolicyGatesWithConfig(configRows.rows, filters);
 }
@@ -1966,7 +1978,9 @@ router.get("/step-library", requireAdminAuth, async (req: Request, res: Response
   const intent = typeof req.query.intent === "string" && req.query.intent.trim().length > 0
     ? req.query.intent.trim()
     : null;
-  const conditions = ["c.candidate_state = 'validated_step'"];
+  const conditions = [
+    "lifecycle_state_matches('agency_workflow_step_candidates', c.candidate_state, '{\"dispatchable\":true}', 'candidate_state')",
+  ];
   const values: unknown[] = [];
   let idx = 1;
 
@@ -3983,6 +3997,30 @@ router.get("/compiler-control-plane", requireAdminAuth, async (req: Request, res
   const [steps, gates, device] = await Promise.all([
     db.query(
       `SELECT c.*,
+              lifecycle_state_matches(
+                'agency_workflow_step_candidates',
+                c.candidate_state,
+                '{"dispatchable":true}',
+                'candidate_state'
+              ) AS candidate_reusable,
+              lifecycle_state_matches(
+                'agency_workflow_step_candidates',
+                c.candidate_state,
+                '{"terminal":true}',
+                'candidate_state'
+              ) AS candidate_terminal,
+              lifecycle_state_matches(
+                'agency_workflow_step_candidates',
+                c.library_state,
+                '{"dispatchable":true}',
+                'library_state'
+              ) AS library_reusable,
+              lifecycle_state_matches(
+                'agency_workflow_step_candidates',
+                c.library_state,
+                '{"terminal":true}',
+                'library_state'
+              ) AS library_terminal,
               r.intent AS run_intent,
               d.friendly_name AS device_name
        FROM agency_workflow_step_candidates c
@@ -4004,7 +4042,7 @@ router.get("/compiler-control-plane", requireAdminAuth, async (req: Request, res
       : db.query(
           `SELECT id, friendly_name, model, android_version, agent_version, status, last_seen_at
            FROM devices
-           WHERE status IN ('online', 'approved')
+           WHERE lifecycle_state_matches('devices', status, '{"dispatchable":true}')
            ORDER BY last_seen_at DESC NULLS LAST
            LIMIT 1`
         ),
@@ -4133,7 +4171,9 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
     : undefined;
 
   const values: unknown[] = [];
-  const conditions = ["c.candidate_state = 'validated_step'"];
+  const conditions = [
+    "lifecycle_state_matches('agency_workflow_step_candidates', c.candidate_state, '{\"dispatchable\":true}', 'candidate_state')",
+  ];
   let idx = 1;
   if (action) {
     conditions.push(`c.action = $${idx++}`);
@@ -4142,6 +4182,30 @@ router.get("/compiler-awareness", requireAdminAuth, async (req: Request, res: Re
 
   const steps = await db.query(
     `SELECT c.*,
+            lifecycle_state_matches(
+              'agency_workflow_step_candidates',
+              c.candidate_state,
+              '{"dispatchable":true}',
+              'candidate_state'
+            ) AS candidate_reusable,
+            lifecycle_state_matches(
+              'agency_workflow_step_candidates',
+              c.candidate_state,
+              '{"terminal":true}',
+              'candidate_state'
+            ) AS candidate_terminal,
+            lifecycle_state_matches(
+              'agency_workflow_step_candidates',
+              c.library_state,
+              '{"dispatchable":true}',
+              'library_state'
+            ) AS library_reusable,
+            lifecycle_state_matches(
+              'agency_workflow_step_candidates',
+              c.library_state,
+              '{"terminal":true}',
+              'library_state'
+            ) AS library_terminal,
             r.intent AS run_intent,
             d.friendly_name AS device_name
      FROM agency_workflow_step_candidates c

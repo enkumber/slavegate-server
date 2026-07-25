@@ -26,7 +26,7 @@ export interface JobLifecycleRow extends Record<string, unknown> {
 export async function listJobStatusDefinitions(
   db: Queryable = getDb(),
 ): Promise<LifecycleStateDefinition[]> {
-  return listResourceLifecycleStates("jobs", db);
+  return listResourceLifecycleStates("jobs", "status", db);
 }
 
 export async function transitionJob(

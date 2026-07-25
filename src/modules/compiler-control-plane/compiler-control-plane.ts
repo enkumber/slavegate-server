@@ -1,4 +1,5 @@
 import { CompilerPolicyGate } from "../compiler-policy-gates/compiler-policy-gates";
+import { resourceLifecycleStateMatches } from "../lifecycle/lifecycle.service";
 import { ToolCatalogEntry, listToolCatalog } from "../tool-catalog/tool-catalog";
 
 type JsonObject = Record<string, unknown>;
@@ -22,11 +23,20 @@ function gateSummary(gates: CompilerPolicyGate[]): JsonObject {
       owner: gate.owner,
       safeToAutoApply: gate.remediation.safeToAutoApply,
       version: gate.version ?? 1,
+      stateCapabilities: gate.stateCapabilities,
     })),
     total: gates.length,
-    blocked: gates.filter((gate) => gate.state === "blocked").length,
-    reviewReady: gates.filter((gate) => gate.state === "review_ready").length,
-    enabled: gates.filter((gate) => gate.state === "enabled").length,
+    blocked: gates.filter((gate) =>
+      gate.stateCapabilities?.dispatchable !== true &&
+      gate.stateCapabilities?.manual !== true
+    ).length,
+    reviewReady: gates.filter((gate) =>
+      gate.stateCapabilities?.manual === true &&
+      gate.stateCapabilities?.dispatchable !== true
+    ).length,
+    enabled: gates.filter((gate) =>
+      gate.stateCapabilities?.dispatchable === true
+    ).length,
     highRisk: gates.filter((gate) => gate.risk === "high").length,
     safeToAutoApply: 0,
   };
@@ -52,9 +62,12 @@ function stringList(value: unknown): string[] {
     : [];
 }
 
-function deviceManifestTool(tool: ToolCatalogEntry, device: JsonObject | null): JsonObject {
-  const deviceOnline = device?.status === "online" || device?.status === "approved";
-  const available = tool.requiresDevice ? deviceOnline : true;
+function deviceManifestTool(
+  tool: ToolCatalogEntry,
+  device: JsonObject | null,
+  deviceAvailable: boolean,
+): JsonObject {
+  const available = tool.requiresDevice ? deviceAvailable : true;
   return {
     id: tool.id,
     name: tool.name,
@@ -78,7 +91,11 @@ function deviceManifestTool(tool: ToolCatalogEntry, device: JsonObject | null): 
 }
 
 async function buildCapabilityManifest(device: JsonObject | null): Promise<JsonObject> {
-  const tools = (await listToolCatalog({})).map((tool) => deviceManifestTool(tool, device));
+  const deviceAvailable = typeof device?.status === "string"
+    ? await resourceLifecycleStateMatches("devices", device.status, { dispatchable: true })
+    : false;
+  const tools = (await listToolCatalog({}))
+    .map((tool) => deviceManifestTool(tool, device, deviceAvailable));
   const availableTools = tools.filter((tool) => tool.available === true).length;
   return {
     source: "server_inferred_manifest",
@@ -92,7 +109,7 @@ async function buildCapabilityManifest(device: JsonObject | null): Promise<JsonO
     status: device?.status ?? null,
     lastSeenAt: device?.last_seen_at instanceof Date ? device.last_seen_at.toISOString() : device?.last_seen_at ?? null,
     compatibility: {
-      state: device ? (device.status === "online" || device.status === "approved" ? "known_device" : "device_not_online") : "unknown_device",
+      available: deviceAvailable,
       availableTools,
       totalTools: tools.length,
     },
@@ -126,8 +143,8 @@ function buildLimitedReusePlan(input: {
     if (!stepScopeMatches) blockers.add("limited_reuse_scope_mismatch");
     if (!promotionScope) blockers.add("scope_not_declared");
     if (!capabilityMatch) blockers.add("capability_not_available");
-    if (step.libraryState !== "limited_reuse") blockers.add("limited_reuse_not_promoted");
-    if (step.libraryState === "revoked") blockers.add("step_library_entry_revoked");
+    if (step.reusable !== true) blockers.add("limited_reuse_not_promoted");
+    if (step.terminal === true) blockers.add("step_library_entry_revoked");
     blockers.add("step_not_compiler_eligible");
 
     return {

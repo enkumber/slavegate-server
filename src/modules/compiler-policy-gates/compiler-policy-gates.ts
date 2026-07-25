@@ -1,4 +1,4 @@
-export type CompilerPolicyGateState = "blocked" | "review_ready" | "enabled";
+export type CompilerPolicyGateState = string;
 export type CompilerPolicyGateRisk = "low" | "medium" | "high";
 
 export interface CompilerPolicyGate {
@@ -6,6 +6,14 @@ export interface CompilerPolicyGate {
   title: string;
   category: string;
   state: CompilerPolicyGateState;
+  stateCapabilities?: {
+    initial: boolean;
+    terminal: boolean;
+    retryable: boolean;
+    administrative: boolean;
+    dispatchable: boolean;
+    manual: boolean;
+  };
   risk: CompilerPolicyGateRisk;
   owner: "product" | "engineering" | "qa" | "security";
   blocks: string[];
@@ -34,6 +42,12 @@ export interface CompilerPolicyGateConfigRow {
   config?: Record<string, unknown> | null;
   updated_by?: string | null;
   updated_at?: Date | string | null;
+  state_initial?: boolean | null;
+  state_terminal?: boolean | null;
+  state_retryable?: boolean | null;
+  state_administrative?: boolean | null;
+  state_dispatchable?: boolean | null;
+  state_manual?: boolean | null;
 }
 
 function strings(value: unknown): string[] {
@@ -47,7 +61,7 @@ function object(value: unknown): Record<string, unknown> {
 }
 
 function state(value: unknown): CompilerPolicyGateState {
-  return value === "enabled" || value === "review_ready" ? value : "blocked";
+  return typeof value === "string" ? value : "";
 }
 
 function risk(value: unknown): CompilerPolicyGateRisk {
@@ -66,6 +80,14 @@ function toGate(row: CompilerPolicyGateConfigRow): CompilerPolicyGate {
     title: String(config.title ?? row.gate_id ?? ""),
     category: String(config.category ?? "execution"),
     state: gateState,
+    stateCapabilities: {
+      initial: row.state_initial === true,
+      terminal: row.state_terminal === true,
+      retryable: row.state_retryable === true,
+      administrative: row.state_administrative === true,
+      dispatchable: row.state_dispatchable === true,
+      manual: row.state_manual === true,
+    },
     risk: risk(row.risk),
     owner: owner(row.owner),
     blocks: strings(config.blocks),
@@ -74,7 +96,7 @@ function toGate(row: CompilerPolicyGateConfigRow): CompilerPolicyGate {
     remediation: {
       state: "manual_review_required",
       nextActions: strings(config.nextActions),
-      safeToAutoApply: gateState === "enabled" && config.killSwitch !== true,
+      safeToAutoApply: row.state_dispatchable === true && config.killSwitch !== true,
     },
     guardrails: strings(config.guardrails),
     notes: strings(config.notes),

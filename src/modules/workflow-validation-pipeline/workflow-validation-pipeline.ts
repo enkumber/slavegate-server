@@ -75,13 +75,22 @@ function gateSummary(policyGates: CompilerPolicyGate[]): JsonObject {
       owner: gate.owner,
       safeToAutoApply: gate.remediation.safeToAutoApply,
       version: gate.version ?? 1,
+      stateCapabilities: gate.stateCapabilities,
     }));
   return {
     gates,
     total: gates.length,
-    blocked: gates.filter((gate) => gate.state === "blocked").length,
-    reviewReady: gates.filter((gate) => gate.state === "review_ready").length,
-    enabled: gates.filter((gate) => gate.state === "enabled").length,
+    blocked: gates.filter((gate) =>
+      gate.stateCapabilities?.dispatchable !== true &&
+      gate.stateCapabilities?.manual !== true
+    ).length,
+    reviewReady: gates.filter((gate) =>
+      gate.stateCapabilities?.manual === true &&
+      gate.stateCapabilities?.dispatchable !== true
+    ).length,
+    enabled: gates.filter((gate) =>
+      gate.stateCapabilities?.dispatchable === true
+    ).length,
     highRisk: gates.filter((gate) => gate.risk === "high").length,
     safeToAutoApply: 0,
   };
@@ -213,7 +222,7 @@ function buildStaticValidation(definition: WorkflowDefinition): JsonObject {
     .map((check) => `${check.id}_missing`);
   return {
     mode: "static_validation_read_only",
-    state: blockers.length === 0 ? "passed" : "blocked",
+    valid: blockers.length === 0,
     checks,
     checkGroups: checks.reduce((groups, check) => ({
       ...groups,
@@ -346,7 +355,7 @@ function readiness(kind: "smoke" | "canary" | "regression", definition: Workflow
     canary: "canary_not_enabled",
     regression: "regression_suite_not_recorded",
   };
-  const staticPassed = staticValidation.state === "passed";
+  const staticPassed = staticValidation.valid === true;
   const coveragePercent = Number((objectValue(dryRun.branchCoverage).coveragePercent) ?? 0);
   const commonCriteria = [
     { id: "static_validation_passed", passed: staticPassed },
@@ -479,7 +488,9 @@ function buildItem(definition: WorkflowDefinition, policyGateSummary: JsonObject
 export function buildWorkflowValidationPipeline(input: WorkflowValidationPipelineInput): JsonObject {
   const policyGateSummary = gateSummary(input.policyGates);
   const items = input.definitions.map((definition) => buildItem(definition, policyGateSummary));
-  const passedStatic = items.filter((item) => (item.staticValidation as JsonObject).state === "passed").length;
+  const passedStatic = items.filter((item) =>
+    (item.staticValidation as JsonObject).valid === true
+  ).length;
   const staticWarnings = items.reduce((total, item) => total + Number((item.staticValidation as JsonObject).warnings ?? 0), 0);
   const dryRunFixtures = items.reduce((total, item) => {
     const matrix = (item.dryRun as JsonObject).fixtureMatrix;

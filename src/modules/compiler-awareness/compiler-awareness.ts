@@ -8,6 +8,10 @@ export interface CompilerAwarenessStepRow {
   type?: string | null;
   candidate_state?: string | null;
   library_state?: string | null;
+  candidate_reusable?: boolean | null;
+  candidate_terminal?: boolean | null;
+  library_reusable?: boolean | null;
+  library_terminal?: boolean | null;
   promotion_scope?: string | null;
   validation_contract?: Record<string, unknown> | null;
   validation_evidence?: Record<string, unknown> | null;
@@ -234,12 +238,14 @@ function eligibilityForKnowledge(entry: { policy?: Record<string, unknown> }): R
 }
 
 function eligibilityForStep(step: CompilerAwarenessStepRow): Record<string, unknown> {
-  const libraryState = step.library_state ?? "review_only";
-  const promotedForLimitedReuse = libraryState === "limited_reuse" && typeof step.promotion_scope === "string" && step.promotion_scope.trim().length > 0;
+  const promotedForLimitedReuse =
+    step.library_reusable === true &&
+    typeof step.promotion_scope === "string" &&
+    step.promotion_scope.trim().length > 0;
   const gates = {
-    validatedStep: step.candidate_state === "validated_step",
+    validatedStep: step.candidate_reusable === true,
     limitedReusePromoted: promotedForLimitedReuse,
-    notRevoked: libraryState !== "revoked",
+    notRevoked: step.library_terminal !== true,
     scopedReuseDeclared: typeof step.promotion_scope === "string" && step.promotion_scope.trim().length > 0,
     compilerEligiblePolicy: false,
     autoUseEnabled: false,
@@ -272,7 +278,7 @@ function decisionFor(input: {
   knowledgeCandidates: Array<Record<string, unknown>>;
 }): Record<string, unknown> {
   const blockers = ["compiler_auto_use_disabled"];
-  if (input.stepCandidates.some((step) => step.libraryState === "revoked")) {
+  if (input.stepCandidates.some((step) => step.libraryTerminal === true)) {
     blockers.push("step_library_entry_revoked");
   }
   if (input.stepCandidates.some((step) => step.compilerEligible === false)) {
@@ -378,8 +384,10 @@ export async function buildCompilerAwareness(input: CompilerAwarenessInput = {})
     name: step.label ?? step.action ?? step.id,
     action: step.action ?? null,
     type: step.type ?? null,
-    status: step.candidate_state ?? "validated_step",
-    libraryState: step.library_state ?? "review_only",
+    status: step.candidate_state ?? null,
+    libraryState: step.library_state ?? null,
+    libraryTerminal: step.library_terminal === true,
+    reusable: step.library_reusable === true,
     promotionScope: step.promotion_scope ?? null,
     runIntent: step.run_intent ?? null,
     deviceName: step.device_name ?? null,
