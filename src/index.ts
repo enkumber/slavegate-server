@@ -42,7 +42,10 @@ import configRoutes, { seedSystemPrompts } from "./api/config-routes";
 import uiGraphRoutes from "./modules/ui-graph/routes";
 import { describeUiGraphRuntimeFlags } from "./modules/ui-graph/config";
 import segmentBuilderRoutes from "./modules/segment-builder/routes";
-import { ensureSegmentBuilderAgentToken } from "./modules/segment-builder/segment-build-job.service";
+import {
+  ensureSegmentBuilderAgentToken,
+  segmentBuildJobService,
+} from "./modules/segment-builder/segment-build-job.service";
 
 const PORT = parseInt(process.env.PORT ?? "21211", 10);
 
@@ -261,6 +264,24 @@ async function bootstrap(): Promise<void> {
     );
   }
   if (queueSweepTimer) queueSweepTimer.unref();
+  const segmentBuilderRecoveryTimer = setInterval(() => {
+    segmentBuildJobService.sweepRecovery()
+      .then((summary) => {
+        if (summary.expiredCanaries > 0 || summary.redispatchedLeases > 0) {
+          console.warn(
+            `[segment-builder] recovery sweep expiredCanaries=${summary.expiredCanaries} ` +
+            `redispatchedLeases=${summary.redispatchedLeases}`,
+          );
+        }
+      })
+      .catch(err =>
+        console.error("[segment-builder] recovery sweep error:", (err as Error).message)
+      );
+  }, 30_000);
+  segmentBuilderRecoveryTimer.unref();
+  segmentBuildJobService.sweepRecovery().catch(err =>
+    console.error("[segment-builder] startup recovery sweep error:", (err as Error).message)
+  );
   if (isPnqV2ShadowRuntimeEnabled()) {
     pnqV2RuntimeService.startPeriodicSweep();
   }
@@ -298,6 +319,7 @@ async function bootstrap(): Promise<void> {
     console.log(`\n[server] ${signal} received — shutting down...`);
     httpServer.close();
     if (queueSweepTimer) clearInterval(queueSweepTimer);
+    clearInterval(segmentBuilderRecoveryTimer);
     if (isPnqV2ShadowRuntimeEnabled()) {
       await pnqV2RuntimeService.close();
     }

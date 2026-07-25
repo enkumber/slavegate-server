@@ -15,6 +15,8 @@ export type SegmentBuildReason =
   | "segment_missing";
 
 export const SEGMENT_BUILDER_AGENT_ID = "segment-builder";
+const SEGMENT_BUILDER_SWEEP_LIMIT = 25;
+const OFFLINE_QUEUED_CANARY_TIMEOUT_MS = 5 * 60_000;
 
 export type SegmentBuildStatus =
   | "pending_agent"
@@ -359,26 +361,55 @@ export class SegmentBuildJobService {
   }
 
   async dispatch(job: SegmentBuildJob): Promise<SegmentBuildJob> {
-    if (!["pending_agent", "failed"].includes(job.status)) return job;
+    const normalDispatch = ["pending_agent", "failed"].includes(job.status);
+    const expiredLeaseRecovery = [
+      "claimed",
+      "building",
+      "candidate_ready",
+      "canary_running",
+    ].includes(job.status)
+      && typeof job.claimExpiresAt === "string"
+      && Date.parse(job.claimExpiresAt) < Date.now();
+    if (!normalDispatch && !expiredLeaseRecovery) return job;
     const url = await this.dispatcherUrl();
     const token = hookToken();
     const sessionKey = `hook:phone-network:${job.id}`;
-    const reserved = await getDb().query(
-      `UPDATE segment_build_jobs
-       SET status = 'dispatched',
-           agent_session_key = $2,
-           dispatch_attempts = dispatch_attempts + 1,
-           last_dispatch_error = NULL,
-           dispatched_at = NOW(),
-           completed_at = NULL,
-           updated_at = NOW()
-       WHERE id = $1
-         AND status IN ('pending_agent','failed')
-       RETURNING *`,
-      [job.id, sessionKey],
-    );
+    const reserved = expiredLeaseRecovery
+      ? await getDb().query(
+        `UPDATE segment_build_jobs
+         SET agent_session_key = $2,
+             dispatch_attempts = dispatch_attempts + 1,
+             last_dispatch_error = NULL,
+             dispatched_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1
+           AND status IN ('claimed','building','candidate_ready','canary_running')
+           AND claim_expires_at < NOW()
+           AND (dispatched_at IS NULL OR dispatched_at < NOW() - INTERVAL '30 seconds')
+         RETURNING *`,
+        [job.id, sessionKey],
+      )
+      : await getDb().query(
+        `UPDATE segment_build_jobs
+         SET status = 'dispatched',
+             agent_session_key = $2,
+             dispatch_attempts = dispatch_attempts + 1,
+             last_dispatch_error = NULL,
+             dispatched_at = NOW(),
+             completed_at = NULL,
+             updated_at = NOW()
+         WHERE id = $1
+           AND status IN ('pending_agent','failed')
+         RETURNING *`,
+        [job.id, sessionKey],
+      );
     if (!reserved.rows[0]) return (await this.get(job.id)) ?? job;
-    await event(job.id, "dispatch_started", "phone-network", { sessionKey });
+    await event(
+      job.id,
+      expiredLeaseRecovery ? "recovery_dispatch_started" : "dispatch_started",
+      "phone-network",
+      { sessionKey, previousStatus: job.status },
+    );
     try {
       const response = await fetch(url, {
         method: "POST",
@@ -398,7 +429,12 @@ export class SegmentBuildJobService {
       if (!response.ok) {
         throw new Error(`OpenClaw hook returned HTTP ${response.status}`);
       }
-      await event(job.id, "dispatched", "phone-network", { sessionKey });
+      await event(
+        job.id,
+        expiredLeaseRecovery ? "recovery_dispatched" : "dispatched",
+        "phone-network",
+        { sessionKey, previousStatus: job.status },
+      );
       return (await this.get(job.id)) ?? rowToJob(reserved.rows[0]);
     } catch (error) {
       const message = (error as Error).message.slice(0, 500);
@@ -424,18 +460,214 @@ export class SegmentBuildJobService {
     });
   }
 
+  async sweepExpiredAgentLeases(limit = SEGMENT_BUILDER_SWEEP_LIMIT): Promise<number> {
+    const result = await getDb().query(
+      `SELECT *
+       FROM segment_build_jobs
+       WHERE status IN ('claimed','building','candidate_ready','canary_running')
+         AND claim_expires_at < NOW()
+       ORDER BY claim_expires_at ASC
+       LIMIT $1`,
+      [Math.max(1, Math.min(limit, SEGMENT_BUILDER_SWEEP_LIMIT))],
+    );
+    let redispatched = 0;
+    for (const row of result.rows) {
+      const before = rowToJob(row);
+      const after = await this.dispatch(before);
+      if (after.dispatchAttempts > before.dispatchAttempts) redispatched += 1;
+    }
+    return redispatched;
+  }
+
+  async expireOfflineQueuedCanaries(
+    timeoutMs = OFFLINE_QUEUED_CANARY_TIMEOUT_MS,
+    limit = SEGMENT_BUILDER_SWEEP_LIMIT,
+  ): Promise<number> {
+    const candidates = await getDb().query(
+      `SELECT j.id
+       FROM segment_build_jobs j
+       JOIN agency_workflow_runs r
+         ON r.id::text = j.result ->> 'canaryRunId'
+       JOIN devices d ON d.id = j.device_id
+       LEFT JOIN tasks t ON t.id = r.task_id
+       WHERE j.status = 'canary_running'
+         AND r.status = 'queued'
+         AND r.created_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')
+         AND d.status <> 'online'
+         AND (t.id IS NULL OR t.status = 'queued')
+       ORDER BY r.created_at ASC
+       LIMIT $2`,
+      [
+        Math.max(1_000, timeoutMs),
+        Math.max(1, Math.min(limit, SEGMENT_BUILDER_SWEEP_LIMIT)),
+      ],
+    );
+    let expired = 0;
+    for (const candidate of candidates.rows) {
+      const db = getDb();
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
+        const locked = await client.query(
+          `SELECT
+             j.id,
+             j.device_id,
+             j.result ->> 'executionKey' AS execution_key,
+             r.id AS run_id,
+             r.task_id,
+             r.workflow_id,
+             r.status AS run_status,
+             d.status AS device_status
+           FROM segment_build_jobs j
+           JOIN agency_workflow_runs r
+             ON r.id::text = j.result ->> 'canaryRunId'
+           JOIN devices d ON d.id = j.device_id
+           WHERE j.id = $1
+             AND j.status = 'canary_running'
+           FOR UPDATE OF j, r`,
+          [candidate.id],
+        );
+        const row = locked.rows[0] as Record<string, unknown> | undefined;
+        if (
+          !row
+          || row.run_status !== "queued"
+          || row.device_status === "online"
+        ) {
+          await client.query("ROLLBACK");
+          continue;
+        }
+        const taskId = typeof row.task_id === "string" ? row.task_id : null;
+        if (taskId) {
+          const task = await client.query(
+            `SELECT status FROM tasks WHERE id = $1 FOR UPDATE`,
+            [taskId],
+          );
+          if (task.rows[0]?.status !== "queued") {
+            await client.query("ROLLBACK");
+            continue;
+          }
+        }
+        const runId = String(row.run_id);
+        const executionKey = typeof row.execution_key === "string" ? row.execution_key : null;
+        const reason = `Segment Builder canary expired while device ${String(row.device_status)} before execution`;
+        if (taskId) {
+          await client.query(
+            `UPDATE tasks
+             SET status = 'failed',
+                 completed_at = NOW(),
+                 updated_at = NOW(),
+                 error = $2
+             WHERE id = $1 AND status = 'queued'`,
+            [taskId, reason],
+          );
+        }
+        const workflowId = typeof row.workflow_id === "string" ? row.workflow_id : null;
+        if (workflowId) {
+          await client.query(
+            `UPDATE workflows
+             SET status = 'failed',
+                 completed_at = NOW(),
+                 error = $2
+             WHERE id = $1 AND status IN ('queued','paused')`,
+            [workflowId, reason],
+          );
+        }
+        await client.query(
+          `UPDATE agency_workflow_runs
+           SET status = 'failed',
+               completed_at = NOW(),
+               updated_at = NOW(),
+               error = $2
+           WHERE id = $1 AND status = 'queued'`,
+          [runId, reason],
+        );
+        if (executionKey) {
+          await client.query(
+            `UPDATE workflow_execution_bindings
+             SET status = 'failed',
+                 postcondition_verified = FALSE,
+                 result_evidence = result_evidence || jsonb_build_object(
+                   'failureCode', 'SEGMENT_BUILD_CANARY_DEVICE_OFFLINE_TIMEOUT',
+                   'runId', $2::text,
+                   'deviceStatus', $3::text
+                 ),
+                 updated_at = NOW()
+             WHERE execution_key = $1
+               AND status IN ('resolved','queued')`,
+            [executionKey, runId, String(row.device_status)],
+          );
+        }
+        const build = await client.query(
+          `UPDATE segment_build_jobs
+           SET status = 'failed',
+               error = $2,
+               evidence = evidence || jsonb_build_object(
+                 'offlineCanaryTimeout', jsonb_build_object(
+                   'runId', $3::text,
+                   'taskId', $4::text,
+                   'deviceStatus', $5::text
+                 )
+               ),
+               claim_expires_at = NULL,
+               completed_at = NOW(),
+               updated_at = NOW()
+           WHERE id = $1 AND status = 'canary_running'
+           RETURNING id`,
+          [candidate.id, reason, runId, taskId, String(row.device_status)],
+        );
+        if (build.rows.length === 0) {
+          await client.query("ROLLBACK");
+          continue;
+        }
+        await client.query(
+          `INSERT INTO segment_build_job_events(job_id, event_type, actor, payload)
+           VALUES ($1, 'canary_expired_offline', 'phone-network-kernel', $2::jsonb)`,
+          [
+            candidate.id,
+            JSON.stringify({
+              runId,
+              taskId,
+              executionKey,
+              deviceStatus: row.device_status,
+            }),
+          ],
+        );
+        await client.query("COMMIT");
+        expired += 1;
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        console.error(
+          `[segment-builder] offline canary expiry ${String(candidate.id)} failed: ${(error as Error).message}`,
+        );
+      } finally {
+        client.release();
+      }
+    }
+    return expired;
+  }
+
+  async sweepRecovery(): Promise<{ expiredCanaries: number; redispatchedLeases: number }> {
+    const expiredCanaries = await this.expireOfflineQueuedCanaries();
+    const redispatchedLeases = await this.sweepExpiredAgentLeases();
+    return { expiredCanaries, redispatchedLeases };
+  }
+
   async claim(id: string, agentId: string): Promise<SegmentBuildJob | null> {
     if (agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
     const result = await getDb().query(
       `UPDATE segment_build_jobs
-       SET status = 'claimed',
+       SET status = CASE
+             WHEN status IN ('candidate_ready','canary_running') THEN status
+             ELSE 'claimed'
+           END,
            assigned_agent = $2,
            claimed_at = COALESCE(claimed_at, NOW()),
            claim_expires_at = NOW() + INTERVAL '10 minutes',
            updated_at = NOW()
        WHERE id = $1
          AND (status IN ('pending_agent','dispatched') OR
-              (status IN ('claimed','building') AND claim_expires_at < NOW()))
+              (status IN ('claimed','building','candidate_ready','canary_running')
+               AND claim_expires_at < NOW()))
        RETURNING *`,
       [id, agentId],
     );
