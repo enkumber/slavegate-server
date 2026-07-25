@@ -35,6 +35,8 @@ import {
   transitionTask,
   transitionTaskManually,
 } from "../modules/task-lifecycle/task-lifecycle.service";
+import { transitionWorkflow } from "../modules/workflows/workflow-lifecycle.service";
+import { transitionAgencyWorkflowRun } from "../modules/workflows/agency-workflow-run-lifecycle.service";
 
 const router = Router();
 
@@ -1781,10 +1783,10 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
       intent: body.intent,
     };
     const runResult = await client.query<{ id: string }>(
-      `INSERT INTO agency_workflow_runs
-         (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
-          canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, status, context)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued', $12)
+	      `INSERT INTO agency_workflow_runs
+	         (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
+	          canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, context)
+	       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING id`,
       [
         body.clientId,
@@ -2704,10 +2706,10 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
       safeToAutoApply: true,
     };
     const runResult = await client.query<{ id: string }>(
-      `INSERT INTO agency_workflow_runs
-         (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
-          canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, status, context)
-       VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10, 'queued', $11)
+	      `INSERT INTO agency_workflow_runs
+	         (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
+	          canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, context)
+	       VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10, $11)
        RETURNING id`,
       [
         clientId,
@@ -4440,11 +4442,16 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
   const db = getDb();
   const client = await db.connect();
   const actor = adminAuditActor(req);
-  const terminalWorkflowStatuses = new Set(["completed", "failed", "cancelled"]);
   try {
     await client.query("BEGIN");
     const runResult = await client.query<Record<string, unknown>>(
-      `SELECT * FROM agency_workflow_runs WHERE id = $1 FOR UPDATE`,
+      `SELECT run.*, state.terminal AS lifecycle_terminal
+       FROM agency_workflow_runs run
+       JOIN lifecycle_state_definitions state
+         ON state.lifecycle_key = run.lifecycle_key
+        AND state.status = run.status
+       WHERE run.id = $1
+       FOR UPDATE OF run`,
       [runId],
     );
     const run = runResult.rows[0];
@@ -4452,7 +4459,7 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
       await client.query("ROLLBACK");
       return res.status(404).json({ ok: false, code: "WORKFLOW_RUN_NOT_FOUND", error: "Workflow run not found" });
     }
-    if (terminalWorkflowStatuses.has(String(run.status))) {
+    if (run.lifecycle_terminal === true) {
       await client.query("ROLLBACK");
       return res.status(409).json({
         ok: false,
@@ -4467,20 +4474,24 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
       : { rows: [] as Record<string, unknown>[] };
     const task = taskResult.rows[0] ?? null;
     const workflowResult = await client.query<Record<string, unknown>>(
-      `SELECT id, status, current_step, total_steps, error
-       FROM workflows
-       WHERE id = $1::uuid
-          OR checkpoint #>> '{variables,taskId}' = $2
-          OR checkpoint #>> '{variables,controlPlaneContext,taskId}' = $2
-          OR checkpoint #>> '{variables,controlPlaneContext,agencyWorkflowRunId}' = $3
-       FOR UPDATE`,
+      `SELECT workflow.id, workflow.status, workflow.current_step, workflow.total_steps,
+              workflow.error, state.terminal AS lifecycle_terminal
+       FROM workflows workflow
+       JOIN lifecycle_state_definitions state
+         ON state.lifecycle_key = workflow.lifecycle_key
+        AND state.status = workflow.status
+       WHERE workflow.id = $1::uuid
+          OR workflow.checkpoint #>> '{variables,taskId}' = $2
+          OR workflow.checkpoint #>> '{variables,controlPlaneContext,taskId}' = $2
+          OR workflow.checkpoint #>> '{variables,controlPlaneContext,agencyWorkflowRunId}' = $3
+       FOR UPDATE OF workflow`,
       [typeof run.workflow_id === "string" ? run.workflow_id : null, taskId, runId],
     );
     const workflowIds = workflowResult.rows
       .map((row) => row.id)
       .filter((id): id is string => typeof id === "string");
     const activeWorkflowIds = workflowResult.rows
-      .filter((row) => !terminalWorkflowStatuses.has(String(row.status)))
+      .filter((row) => row.lifecycle_terminal !== true)
       .map((row) => row.id)
       .filter((id): id is string => typeof id === "string");
 
@@ -4501,15 +4512,10 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
 
     const failure = `Administratively closed: ${reason}`;
     let closedWorkflowCount = 0;
-    if (activeWorkflowIds.length > 0) {
-      const update = await client.query(
-        `UPDATE workflows
-         SET status = 'failed', completed_at = NOW(), error = $2
-         WHERE id = ANY($1::uuid[])
-           AND status IN ('queued', 'running', 'paused')`,
-        [activeWorkflowIds, failure],
-      );
-      closedWorkflowCount = update.rowCount ?? 0;
+    for (const workflowId of activeWorkflowIds) {
+      if (await transitionWorkflow(workflowId, "fail", { error: failure }, client)) {
+        closedWorkflowCount += 1;
+      }
     }
 
     let taskClosed = false;
@@ -4525,18 +4531,13 @@ router.post("/workflow-runs/:id/admin-close", requireAdminAuth, async (req: Requ
       resultingTaskStatus = transitionedTask?.status ?? resultingTaskStatus;
     }
 
-    const runUpdate = await client.query(
-      `UPDATE agency_workflow_runs
-       SET status = 'failed',
-           workflow_id = COALESCE(workflow_id, $3::uuid),
-           completed_at = NOW(),
-           updated_at = NOW(),
-           error = $2
-       WHERE id = $1
-         AND status NOT IN ('completed', 'failed', 'cancelled')`,
-      [runId, failure, workflowIds[0] ?? null],
+    const runUpdate = await transitionAgencyWorkflowRun(
+      runId,
+      "fail",
+      { error: failure, workflowId: workflowIds[0] ?? null },
+      client,
     );
-    if ((runUpdate.rowCount ?? 0) !== 1) {
+    if (!runUpdate) {
       throw new Error("workflow run changed state during administrative close");
     }
 
@@ -4619,9 +4620,14 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
       db.query(
         `SELECT COUNT(*)::int AS count
          FROM agency_workflow_runs r
+         JOIN lifecycle_state_definitions run_state
+           ON run_state.lifecycle_key = r.lifecycle_key
+          AND run_state.status = r.status
          LEFT JOIN tasks t ON t.id = r.task_id
-         LEFT JOIN task_status_definitions task_state ON task_state.status = t.status
-         WHERE r.status = 'failed'
+         LEFT JOIN lifecycle_state_definitions task_state
+           ON task_state.lifecycle_key = t.lifecycle_key
+          AND task_state.status = t.status
+         WHERE run_state.retryable
             OR task_state.retryable`
       ),
       db.query(
@@ -4639,9 +4645,14 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
 
            SELECT r.request_key, r.cache_key
            FROM agency_workflow_runs r
+           JOIN lifecycle_state_definitions run_state
+             ON run_state.lifecycle_key = r.lifecycle_key
+            AND run_state.status = r.status
            LEFT JOIN tasks t ON t.id = r.task_id
-           LEFT JOIN task_status_definitions task_state ON task_state.status = t.status
-           WHERE r.status = 'failed'
+           LEFT JOIN lifecycle_state_definitions task_state
+             ON task_state.lifecycle_key = t.lifecycle_key
+            AND task_state.status = t.status
+           WHERE run_state.retryable
               OR task_state.retryable
          )
          SELECT COUNT(DISTINCT c.cache_key)::int AS count
@@ -4680,9 +4691,14 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
 
          SELECT r.request_key, r.cache_key
          FROM agency_workflow_runs r
+         JOIN lifecycle_state_definitions run_state
+           ON run_state.lifecycle_key = r.lifecycle_key
+          AND run_state.status = r.status
          LEFT JOIN tasks t ON t.id = r.task_id
-         LEFT JOIN task_status_definitions task_state ON task_state.status = t.status
-         WHERE r.status = 'failed'
+         LEFT JOIN lifecycle_state_definitions task_state
+           ON task_state.lifecycle_key = t.lifecycle_key
+          AND task_state.status = t.status
+         WHERE run_state.retryable
             OR task_state.retryable
        ),
        deleted AS (
@@ -4711,10 +4727,18 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
 
     const workflowRuns = await client.query(
       `DELETE FROM agency_workflow_runs r
-       WHERE r.status = 'failed'
+       WHERE EXISTS (
+            SELECT 1
+            FROM lifecycle_state_definitions run_state
+            WHERE run_state.lifecycle_key = r.lifecycle_key
+              AND run_state.status = r.status
+              AND run_state.retryable
+          )
           OR EXISTS (
             SELECT 1 FROM tasks t
-            JOIN task_status_definitions task_state ON task_state.status = t.status
+            JOIN lifecycle_state_definitions task_state
+              ON task_state.lifecycle_key = t.lifecycle_key
+             AND task_state.status = t.status
             WHERE t.id = r.task_id
               AND task_state.retryable
           )
@@ -5021,13 +5045,21 @@ router.get("/reports/stats", async (_req: Request, res: Response) => {
       FROM posts
     `),
     db.query(`
-      SELECT 
-        COUNT(*) as total,
-        COUNT(*) FILTER (WHERE status = 'queued') as queued,
-        COUNT(*) FILTER (WHERE status = 'running') as running,
-        COUNT(*) FILTER (WHERE status = 'completed') as completed,
-        COUNT(*) FILTER (WHERE status = 'failed') as failed
-      FROM tasks
+      SELECT COALESCE(SUM(state_count.count), 0)::int AS total,
+             COALESCE(
+               jsonb_object_agg(state.status, state_count.count ORDER BY state.sort_order)
+                 FILTER (WHERE state.status IS NOT NULL),
+               '{}'::jsonb
+             ) AS statuses
+      FROM lifecycle_state_definitions state
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS count
+        FROM tasks task
+        WHERE task.lifecycle_key = state.lifecycle_key
+          AND task.status = state.status
+      ) state_count ON TRUE
+      WHERE state.lifecycle_key = 'task'
+      GROUP BY state.lifecycle_key
     `),
     db.query(`
       SELECT 
@@ -5043,7 +5075,10 @@ router.get("/reports/stats", async (_req: Request, res: Response) => {
     data: {
       clients: clients.rows[0],
       posts: posts.rows[0],
-      tasks: tasks.rows[0],
+      tasks: {
+        total: Number(tasks.rows[0]?.total ?? 0),
+        ...((tasks.rows[0]?.statuses as Record<string, number> | undefined) ?? {}),
+      },
       materials: materials.rows[0],
     },
   });

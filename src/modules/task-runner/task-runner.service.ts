@@ -47,6 +47,7 @@ import {
   retryConfiguredTasks,
   transitionTask,
 } from "../task-lifecycle/task-lifecycle.service";
+import { transitionAgencyWorkflowRun } from "../workflows/agency-workflow-run-lifecycle.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -510,48 +511,25 @@ function agencyWorkflowRunIdFromTask(task: TaskRow): string | null {
 async function markAgencyWorkflowRunStarted(task: TaskRow): Promise<void> {
   const runId = agencyWorkflowRunIdFromTask(task);
   if (!runId) return;
-  const db = getDb();
-  await db.query(
-    `UPDATE agency_workflow_runs
-     SET status = 'running', started_at = COALESCE(started_at, NOW())
-     WHERE id = $1`,
-    [runId],
-  );
+  await transitionAgencyWorkflowRun(runId, "start");
 }
 
 async function completeAgencyWorkflowRun(task: TaskRow, result: TaskRunnerResult): Promise<void> {
   const runId = agencyWorkflowRunIdFromTask(task);
   if (!runId) return;
-  const db = getDb();
   const generatedWorkflow = result.generatedWorkflow ?? {};
   const output = result.output ?? generatedWorkflow.output ?? {};
   const rootFailure = rootFailureFromResult(result);
-  await db.query(
-    `UPDATE agency_workflow_runs
-     SET status = $2,
-         workflow_id = COALESCE($3, workflow_id),
-         output = $4,
-         token_usage = $5,
-         recovery_requests = $6,
-         error = $7,
-         root_error_code = $8,
-         root_error_message = $9,
-         root_error_details = $10,
-         completed_at = NOW()
-     WHERE id = $1`,
-    [
-      runId,
-      result.success ? "completed" : "failed",
-      generatedWorkflow.workflowId ?? null,
-      JSON.stringify(output),
-      JSON.stringify(result.tokenUsage ?? zeroTokenUsage()),
-      0,
-      result.success ? null : result.failReason ?? "Unknown error",
-      rootFailure?.code ?? null,
-      rootFailure?.message ?? null,
-      JSON.stringify(rootFailure?.details ?? {}),
-    ],
-  );
+  await transitionAgencyWorkflowRun(runId, result.success ? "succeed" : "fail", {
+    workflowId: generatedWorkflow.workflowId ?? null,
+    output,
+    tokenUsage: result.tokenUsage ?? zeroTokenUsage(),
+    recoveryRequests: 0,
+    error: result.success ? null : result.failReason ?? "Unknown error",
+    rootErrorCode: rootFailure?.code ?? null,
+    rootErrorMessage: rootFailure?.message ?? null,
+    rootErrorDetails: rootFailure?.details ?? {},
+  });
 }
 
 async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunnerResult): Promise<void> {
@@ -977,23 +955,12 @@ async function executeGeneratedWorkflowTaskWithSelfHealing(
 async function failAgencyWorkflowRunWithError(task: TaskRow, error: Error): Promise<void> {
   const runId = agencyWorkflowRunIdFromTask(task);
   if (!runId) return;
-  const db = getDb();
-  await db.query(
-    `UPDATE agency_workflow_runs
-     SET status = 'failed',
-         error = $2,
-         root_error_code = $3,
-         root_error_message = $2,
-         root_error_details = $4,
-         completed_at = NOW()
-     WHERE id = $1`,
-    [
-      runId,
-      error.message,
-      (error as Error & { code?: string }).code ?? "UNHANDLED_TASK_EXCEPTION",
-      JSON.stringify({ stack: error.stack?.split("\n").slice(0, 8).join("\n") ?? null }),
-    ],
-  );
+  await transitionAgencyWorkflowRun(runId, "fail", {
+    error: error.message,
+    rootErrorCode: (error as Error & { code?: string }).code ?? "UNHANDLED_TASK_EXCEPTION",
+    rootErrorMessage: error.message,
+    rootErrorDetails: { stack: error.stack?.split("\n").slice(0, 8).join("\n") ?? null },
+  });
 }
 
 // ─── Task Runner State ────────────────────────────────────────────────────────
@@ -1100,7 +1067,9 @@ async function runPollCycle(): Promise<void> {
            status_def.dispatchable AS status_dispatchable,
            status_def.retryable AS status_retryable
     FROM tasks
-    JOIN task_status_definitions status_def ON status_def.status = tasks.status
+    JOIN lifecycle_state_definitions status_def
+      ON status_def.lifecycle_key = tasks.lifecycle_key
+     AND status_def.status = tasks.status
     WHERE
       (status_def.dispatchable AND tasks.scheduled_time <= NOW())
       OR (

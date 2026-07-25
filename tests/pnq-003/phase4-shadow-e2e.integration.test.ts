@@ -38,10 +38,17 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
     await dbClient.closeDb();
     pool = new Pool({ connectionString: isolatedUrl, max: 10 });
     await applySql("src/db/schema.sql");
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id UUID PRIMARY KEY,
+        status TEXT
+      )
+    `);
     for (const file of [
       "src/db/migrations/081_device_execution_queue.sql",
       "src/db/migrations/082_pnq_queue_v2_contract.sql",
       "src/db/migrations/083_pnq_v2_runtime_shadow.sql",
+      "src/db/migrations/105_generic_resource_lifecycle.sql",
     ]) {
       await applySql(file);
     }

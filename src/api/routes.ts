@@ -259,13 +259,19 @@ export async function queueHumanAgencyWorkflowRun(input: {
       `SELECT r.id, r.task_id, r.status
        FROM agency_workflow_runs r
        JOIN tasks t ON t.id = r.task_id
-       JOIN task_status_definitions task_state ON task_state.status = t.status
+       JOIN lifecycle_state_definitions task_state
+         ON task_state.lifecycle_key = t.lifecycle_key
+        AND task_state.status = t.status
+       JOIN lifecycle_state_definitions run_state
+         ON run_state.lifecycle_key = r.lifecycle_key
+        AND run_state.status = r.status
        WHERE r.cache_key = $1
          AND r.device_id = $2
          AND r.account_id IS NOT DISTINCT FROM $3
          AND r.context ->> 'source' = 'dashboard_human'
          AND r.context ->> 'requestKey' = $4
-         AND r.status IN ('queued', 'running')
+         AND NOT run_state.terminal
+         AND NOT run_state.administrative
          AND NOT task_state.terminal
          AND NOT task_state.administrative
        ORDER BY r.created_at ASC
@@ -305,10 +311,10 @@ export async function queueHumanAgencyWorkflowRun(input: {
     let runId = existingRun?.id;
     if (!runId) {
       const runResult = await client.query<{ id: string }>(
-        `INSERT INTO agency_workflow_runs
-           (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
-            canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, status, context)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'queued', $12)
+	          `INSERT INTO agency_workflow_runs
+	           (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
+	            canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, context)
+	         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING id`,
         [
           input.target.client_id,
@@ -2238,7 +2244,28 @@ router.post("/kill-switch", requireAuth, async (req, res) => {
       // Fleet-wide: cancel DB workflows
       const db = getDb();
       await db.query(
-        "UPDATE workflows SET status = 'failed', error = $1 WHERE status IN ('running', 'queued')",
+        `WITH eligible AS (
+           SELECT workflow.id, workflow.lifecycle_key, transition.to_status
+           FROM workflows workflow
+           JOIN lifecycle_transitions transition
+             ON transition.lifecycle_key = workflow.lifecycle_key
+            AND transition.from_status = workflow.status
+            AND transition.action_key = 'fail'
+            AND transition.enabled
+         )
+         UPDATE workflows workflow
+         SET status = eligible.to_status,
+             error = $1,
+             completed_at = CASE
+               WHEN state.terminal AND state.mark_completed THEN NOW()
+               ELSE workflow.completed_at
+             END,
+             updated_at = NOW()
+         FROM eligible
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = eligible.lifecycle_key
+          AND state.status = eligible.to_status
+         WHERE workflow.id = eligible.id`,
         [reason_]
       );
       await alerting.killSwitch(String(initiatedBy));
@@ -2775,7 +2802,7 @@ router.get("/scalability/status", async (_req, res) => {
           },
         },
         capacity: {
-          workflowsAvailable: Math.max(0, scalabilityConfig.maxGlobalConcurrentWorkflows - wfCounts.running),
+          workflowsAvailable: Math.max(0, scalabilityConfig.maxGlobalConcurrentWorkflows - wfCounts.total),
           dbPoolAvailable: poolStats.maxCount - poolStats.totalCount,
           wsSlotsAvailable: scalabilityConfig.maxWsConnections - wsConnections,
         },

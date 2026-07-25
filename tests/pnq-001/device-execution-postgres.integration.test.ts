@@ -13,6 +13,7 @@ import {
 
 const repoRoot = path.resolve(__dirname, "../..");
 const migrationPath = path.join(repoRoot, "src/db/migrations/081_device_execution_queue.sql");
+const genericLifecycleMigrationPath = path.join(repoRoot, "src/db/migrations/105_generic_resource_lifecycle.sql");
 const postgresUrl = process.env.PNQ001_PG_URL ?? "postgresql://pnqtest@127.0.0.1:55432/pnq001_test";
 const describePostgres = postgresUrl ? describe : describe.skip;
 
@@ -459,16 +460,16 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     );
 
     await expect(arbiter.reconcileUndispatchedTimedOutServerWorkflows()).resolves.toEqual({
-      reconciledRoots: 3,
+      reconciledRoots: 1,
     });
 
     expect(await workflowStatus(pool, workflowId)).toBe("failed");
     expect(await stateForExternalId(pool, workflowId)).toBe("failed");
     expect(await workflowStatus(pool, failedWorkflowId)).toBe("failed");
-    expect(await stateForExternalId(pool, failedWorkflowId)).toBe("failed");
+    expect(await stateForExternalId(pool, failedWorkflowId)).toBe("claimed");
     expect(await workflowStatus(pool, staleTerminalWorkflowId)).toBe("failed");
-    expect(await stateForExternalId(pool, staleTerminalWorkflowId)).toBe("failed");
-    expect(await eventCount(pool, "undispatched_timed_out_workflow_reconciled")).toBe(3);
+    expect(await stateForExternalId(pool, staleTerminalWorkflowId)).toBe("claimed");
+    expect(await eventCount(pool, "undispatched_timed_out_workflow_reconciled")).toBe(1);
     expect(await workflowStatus(pool, startedWorkflowId)).toBe("running");
     expect(await stateForExternalId(pool, startedWorkflowId)).toBe("claimed");
   });
@@ -1042,7 +1043,11 @@ async function resetPnqSchema(db: Pool): Promise<void> {
   await db.query(`
     DROP TABLE IF EXISTS command_log CASCADE;
     DROP TABLE IF EXISTS jobs CASCADE;
+    DROP TABLE IF EXISTS tasks CASCADE;
     DROP TABLE IF EXISTS workflows CASCADE;
+    DROP TABLE IF EXISTS lifecycle_transitions CASCADE;
+    DROP TABLE IF EXISTS lifecycle_state_definitions CASCADE;
+    DROP FUNCTION IF EXISTS set_initial_resource_lifecycle_status() CASCADE;
     DROP FUNCTION IF EXISTS pnq_test_reject_workflow_cancel() CASCADE;
     DROP TABLE IF EXISTS device_execution_events CASCADE;
     DROP TABLE IF EXISTS device_execution_operations CASCADE;
@@ -1057,9 +1062,18 @@ async function resetPnqSchema(db: Pool): Promise<void> {
     CREATE TABLE workflows (
       id UUID PRIMARY KEY,
       device_id UUID REFERENCES devices(id),
+      lifecycle_key TEXT NOT NULL DEFAULT 'workflow_execution',
       status TEXT NOT NULL,
+      started_at TIMESTAMPTZ,
       completed_at TIMESTAMPTZ,
+      current_step INTEGER NOT NULL DEFAULT 0,
+      total_steps INTEGER,
+      checkpoint JSONB NOT NULL DEFAULT '{}'::jsonb,
       error TEXT
+    );
+    CREATE TABLE tasks (
+      id UUID PRIMARY KEY,
+      status TEXT
     );
     CREATE TABLE jobs (
       id UUID PRIMARY KEY,
@@ -1073,6 +1087,27 @@ async function resetPnqSchema(db: Pool): Promise<void> {
       job_id UUID REFERENCES jobs(id),
       command_raw TEXT NOT NULL
     );
+  `);
+  await db.query(fs.readFileSync(genericLifecycleMigrationPath, "utf8"));
+  await db.query(`
+    INSERT INTO lifecycle_state_definitions
+      (lifecycle_key, status, initial, terminal, retryable, administrative,
+       dispatchable, manual, sort_order)
+    VALUES
+      ('workflow_execution', 'queued', TRUE, FALSE, FALSE, FALSE, TRUE, TRUE, 10),
+      ('workflow_execution', 'running', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
+      ('workflow_execution', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 30),
+      ('workflow_execution', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40),
+      ('workflow_execution', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50)
+    ON CONFLICT (lifecycle_key, status) DO NOTHING;
+    INSERT INTO lifecycle_transitions
+      (lifecycle_key, action_key, from_status, to_status, manual_allowed,
+       mark_completed, clear_failure)
+    VALUES
+      ('workflow_execution', 'cancel', 'queued', 'cancelled', TRUE, TRUE, FALSE),
+      ('workflow_execution', 'fail', 'queued', 'failed', FALSE, TRUE, FALSE),
+      ('workflow_execution', 'fail', 'running', 'failed', FALSE, TRUE, FALSE)
+    ON CONFLICT (lifecycle_key, action_key, from_status) DO NOTHING;
   `);
   await db.query(fs.readFileSync(migrationPath, "utf8"));
 }

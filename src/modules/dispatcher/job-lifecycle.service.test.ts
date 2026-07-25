@@ -30,7 +30,7 @@ describe("dispatcher job lifecycle", () => {
   it("fences device-originated actions to the owning device in SQL", async () => {
     await transitionJob("job-1", "claim", {}, undefined, "device-1");
     const [sql, params] = mocks.query.mock.calls[0];
-    expect(String(sql)).toContain("j.device_id = $5");
+    expect(String(sql)).toContain("j.device_id = $5::uuid");
     expect(params).toEqual(["job-1", "claim", "{}", "dispatcher_job", "device-1"]);
   });
 
@@ -53,7 +53,7 @@ describe("dispatcher job lifecycle", () => {
       "device-1",
     );
     const [sql, params] = mocks.query.mock.calls[0];
-    expect(String(sql)).toContain("j.device_id = $5");
+    expect(String(sql)).toContain("j.device_id = $5::uuid");
     expect(params).toEqual([
       "job-1",
       "operator_defined_terminal",

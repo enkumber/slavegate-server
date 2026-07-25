@@ -13,7 +13,7 @@ describe("workflow edge lifecycle transitions", () => {
     query.mockReset();
   });
 
-  it("fails an unacknowledged start only through an atomic queued/running guard", async () => {
+  it("fails an unacknowledged start only through a DB-defined transition and checkpoint guard", async () => {
     query.mockResolvedValue({ rowCount: 1, rows: [{ id: "workflow-1" }] });
 
     await expect(workflowService.markFailedIfEdgeStartUnacknowledged(
@@ -23,11 +23,17 @@ describe("workflow edge lifecycle transitions", () => {
 
     expect(query).toHaveBeenCalledTimes(1);
     const [sql, params] = query.mock.calls[0];
-    expect(sql).toContain("status IN ('queued', 'running')");
-    expect(sql).toContain("current_step = 0");
-    expect(sql).toContain("(checkpoint->>'source') IS DISTINCT FROM 'edge'");
-    expect(sql).toContain("RETURNING id");
-    expect(params).toEqual(["ack timeout", "workflow-1"]);
+    expect(sql).toContain("JOIN lifecycle_transitions transition");
+    expect(sql).toContain("transition.action_key = $2");
+    expect(sql).toContain("workflow.current_step = 0");
+    expect(sql).toContain("(workflow.checkpoint->>'source') IS DISTINCT FROM 'edge'");
+    expect(sql).toContain("RETURNING workflow.*");
+    expect(params).toEqual([
+      "workflow-1",
+      "fail",
+      "{\"error\":\"ack timeout\"}",
+      "workflow_execution",
+    ]);
   });
 
   it("reports a lost ACK race without overwriting the newer workflow state", async () => {
@@ -49,14 +55,16 @@ describe("workflow edge lifecycle transitions", () => {
     )).resolves.toBe(true);
 
     const [sql, params] = query.mock.calls[0];
-    expect(sql).toContain("status = 'running'");
-    expect(sql).toContain("(checkpoint->>'source') = 'edge'");
-    expect(sql).toContain("(checkpoint->>'checkpointAt') = $3");
-    expect(sql).toContain("RETURNING id");
+    expect(sql).toContain("JOIN lifecycle_transitions transition");
+    expect(sql).toContain("(workflow.checkpoint->>'source') = 'edge'");
+    expect(sql).toContain("(workflow.checkpoint->>'checkpointAt') = $3");
+    expect(sql).toContain("RETURNING workflow.*");
     expect(params).toEqual([
-      "progress timeout",
       "workflow-1",
+      "fail",
       "2026-07-22T12:00:00.000Z",
+      "{\"error\":\"progress timeout\"}",
+      "workflow_execution",
     ]);
   });
 });

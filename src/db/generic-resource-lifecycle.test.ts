@@ -13,6 +13,7 @@ describe("generic DB-authoritative lifecycle", () => {
   const runtime = [
     path.join(__dirname, "..", "modules", "dispatcher", "dispatcher.service.ts"),
     path.join(__dirname, "..", "modules", "dispatcher", "job-lifecycle.service.ts"),
+    path.join(__dirname, "..", "modules", "task-runner", "task-runner.service.ts"),
     path.join(__dirname, "..", "ws", "direct-ws.server.ts"),
   ].map((file) => fs.readFileSync(file, "utf8")).join("\n");
 
@@ -37,6 +38,8 @@ describe("generic DB-authoritative lifecycle", () => {
     expect(`${schema}\n${migration}`).not.toMatch(
       /(?:jobs|tasks)_status_check[\s\S]{0,200}CHECK\s*\(\s*status\s+IN/i,
     );
+    expect(runtime).not.toContain("task_status_definitions");
+    expect(runtime).not.toContain("task_status_transitions");
   });
 
   it("keeps dispatcher runtime policy off status literals and lists", () => {

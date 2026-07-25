@@ -23,6 +23,11 @@ import {
   type GeneratedWorkflowCompiledPlan,
 } from "./workflow-validator";
 import { portableCapabilityMetadata } from "../human-workflow/portable-capability";
+import {
+  transitionWorkflow,
+  transitionWorkflowWhere,
+} from "./workflow-lifecycle.service";
+import { lifecycleKeys } from "../lifecycle/lifecycle.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -113,8 +118,8 @@ export class WorkflowService {
     const db = getDb();
     const result = await db.query(
       `INSERT INTO workflows
-         (template_id, account_id, device_id, status, current_step, total_steps, checkpoint, hbe_params)
-       VALUES ($1, $2, $3, 'queued', 0, $4, $5, $6)
+         (template_id, account_id, device_id, current_step, total_steps, checkpoint, hbe_params)
+       VALUES ($1, $2, $3, 0, $4, $5, $6)
        RETURNING *`,
       [
         input.templateId ?? null,
@@ -181,9 +186,14 @@ export class WorkflowService {
   async countActiveByDevice(deviceId: string): Promise<number> {
     const db = getDb();
     const result = await db.query(
-      `SELECT COUNT(*) FROM workflows
-       WHERE device_id = $1 AND status IN ('queued', 'running')`,
-      [deviceId]
+      `SELECT COUNT(*)
+         FROM workflows workflow
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = workflow.lifecycle_key
+          AND state.status = workflow.status
+        WHERE workflow.device_id = $1
+          AND COALESCE((state.metadata->>'countsAsActive')::boolean, FALSE)`,
+      [deviceId],
     );
     return parseInt(result.rows[0]?.count ?? "0", 10);
   }
@@ -192,39 +202,32 @@ export class WorkflowService {
    * Get count of workflows in all active states.
    * Returns a breakdown for monitoring/dashboard.
    */
-  async getActiveCounts(): Promise<{
-    queued: number;
-    running: number;
-    paused: number;
-    total: number;
-  }> {
+  async getActiveCounts(): Promise<Record<string, number>> {
     const db = getDb();
     const result = await db.query(
-      `SELECT status, COUNT(*) as count FROM workflows
-       WHERE status IN ('queued', 'running', 'paused')
-       GROUP BY status`
+      `SELECT state.status, COUNT(workflow.id) AS count
+         FROM lifecycle_state_definitions state
+         LEFT JOIN workflows workflow
+           ON workflow.lifecycle_key = state.lifecycle_key
+          AND workflow.status = state.status
+        WHERE state.lifecycle_key = $1
+          AND NOT state.terminal
+        GROUP BY state.status, state.sort_order
+        ORDER BY state.sort_order, state.status`,
+      [lifecycleKeys.workflowExecution],
     );
-    const counts = { queued: 0, running: 0, paused: 0, total: 0 };
+    const counts: Record<string, number> = { total: 0 };
     for (const row of result.rows) {
       const status = row.status as string;
       const count = parseInt(row.count as string, 10);
-      if (status === 'queued') counts.queued = count;
-      else if (status === 'running') counts.running = count;
-      else if (status === 'paused') counts.paused = count;
+      counts[status] = count;
+      counts.total += count;
     }
-    counts.total = counts.queued + counts.running + counts.paused;
     return counts;
   }
 
   async cancel(id: string): Promise<boolean> {
-    const db = getDb();
-    const result = await db.query(
-      `UPDATE workflows SET status = 'cancelled', completed_at = NOW()
-       WHERE id = $1 AND status = 'queued'
-       RETURNING id`,
-      [id]
-    );
-    return (result.rowCount ?? 0) > 0;
+    return Boolean(await transitionWorkflow(id, "cancel"));
   }
 
   // ─── Checkpoint (atomic) ─────────────────────────────────────────────────
@@ -246,15 +249,14 @@ export class WorkflowService {
   ): Promise<boolean> {
     const db = getDb();
     try {
-      const result = await db.query(
-        `UPDATE workflows
-         SET checkpoint = $1, current_step = $2, status = 'running'
-         WHERE id = $3
-           AND current_step = $4
-           AND status NOT IN ('cancelled', 'completed', 'failed')`,
-        [JSON.stringify(newCheckpoint), newStep, workflowId, expectedStep]
-      );
-      return (result.rowCount ?? 0) > 0;
+      return Boolean(await transitionWorkflowWhere(
+        workflowId,
+        "checkpoint",
+        { checkpoint: newCheckpoint, currentStep: newStep },
+        db,
+        "workflow.current_step = $3",
+        [expectedStep],
+      ));
     } catch (err) {
       console.error(`[workflow] saveCheckpoint failed for ${workflowId}: ${(err as Error).message}`);
       return false;
@@ -264,44 +266,26 @@ export class WorkflowService {
   // ─── Status transitions ────────────────────────────────────────────────
 
   async markRunning(id: string): Promise<boolean> {
-    const db = getDb();
-    const result = await db.query(
-      `UPDATE workflows SET status = 'running', started_at = COALESCE(started_at, NOW())
-       WHERE id = $1 AND status IN ('queued', 'paused')`,
-      [id]
-    );
-    return (result.rowCount ?? 0) > 0;
+    return Boolean(await transitionWorkflow(id, "start"));
   }
 
   async markCompleted(id: string): Promise<void> {
-    const db = getDb();
-    await db.query(
-      "UPDATE workflows SET status = 'completed', completed_at = NOW() WHERE id = $1",
-      [id]
-    );
+    await transitionWorkflow(id, "succeed");
   }
 
   async markFailed(id: string, error: string): Promise<void> {
-    const db = getDb();
-    await db.query(
-      "UPDATE workflows SET status = 'failed', completed_at = NOW(), error = $1 WHERE id = $2",
-      [error, id]
-    );
+    await transitionWorkflow(id, "fail", { error });
   }
 
   async markFailedIfEdgeStartUnacknowledged(id: string, error: string): Promise<boolean> {
     const db = getDb();
-    const result = await db.query(
-      `UPDATE workflows
-       SET status = 'failed', completed_at = NOW(), error = $1
-       WHERE id = $2
-         AND status IN ('queued', 'running')
-         AND current_step = 0
-         AND (checkpoint->>'source') IS DISTINCT FROM 'edge'
-       RETURNING id`,
-      [error, id],
-    );
-    return (result.rowCount ?? 0) > 0;
+    return Boolean(await transitionWorkflowWhere(
+      id,
+      "fail",
+      { error },
+      db,
+      "workflow.current_step = 0 AND (workflow.checkpoint->>'source') IS DISTINCT FROM 'edge'",
+    ));
   }
 
   /**
@@ -315,25 +299,18 @@ export class WorkflowService {
     error: string,
   ): Promise<boolean> {
     const db = getDb();
-    const result = await db.query(
-      `UPDATE workflows
-       SET status = 'failed', completed_at = NOW(), error = $1
-       WHERE id = $2
-         AND status = 'running'
-         AND (checkpoint->>'source') = 'edge'
-         AND (checkpoint->>'checkpointAt') = $3
-       RETURNING id`,
-      [error, id, observedCheckpointAt],
-    );
-    return (result.rowCount ?? 0) > 0;
+    return Boolean(await transitionWorkflowWhere(
+      id,
+      "fail",
+      { error },
+      db,
+      "(workflow.checkpoint->>'source') = 'edge' AND (workflow.checkpoint->>'checkpointAt') = $3",
+      [observedCheckpointAt],
+    ));
   }
 
   async markPaused(id: string): Promise<void> {
-    const db = getDb();
-    await db.query(
-      "UPDATE workflows SET status = 'paused' WHERE id = $1 AND status = 'running'",
-      [id]
-    );
+    await transitionWorkflow(id, "pause");
   }
 
   // ─── Template management ─────────────────────────────────────────────────

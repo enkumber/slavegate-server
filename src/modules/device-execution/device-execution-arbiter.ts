@@ -1,5 +1,7 @@
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { getDb } from "../../db/client";
+import { getLifecycleTransition, lifecycleKeys } from "../lifecycle/lifecycle.service";
+import { transitionWorkflow } from "../workflows/workflow-lifecycle.service";
 
 export const DEVICE_EXECUTION_ACTIVE_STATES = ["claimed", "dispatching", "dispatched", "reconciling", "blocked"] as const;
 export const DEVICE_EXECUTION_TERMINAL_STATES = ["completed", "failed", "cancelled"] as const;
@@ -2691,7 +2693,13 @@ export class DeviceExecutionArbiter {
         });
         return { decision: "rejected", root: null, reason: "workflow_owned_by_different_device" };
       }
-      if (workflow.status !== "queued") {
+      const cancelTransition = await getLifecycleTransition(
+        lifecycleKeys.workflowExecution,
+        workflow.status,
+        "cancel",
+        client,
+      );
+      if (!cancelTransition) {
         await insertEvent(client, {
           deviceId: input.deviceId,
           eventType: "persisted_workflow_cancel_rejected",
@@ -2758,14 +2766,8 @@ export class DeviceExecutionArbiter {
         ) ?? null;
       }
 
-      const cancelledWorkflow = await client.query<{ id: string }>(
-        `UPDATE workflows
-         SET status = 'cancelled', completed_at = NOW()
-         WHERE id = $1 AND device_id = $2 AND status = 'queued'
-         RETURNING id`,
-        [input.workflowId, input.deviceId],
-      );
-      if ((cancelledWorkflow.rowCount ?? 0) !== 1) {
+      const cancelledWorkflow = await transitionWorkflow(input.workflowId, "cancel", {}, client);
+      if (!cancelledWorkflow) {
         throw new Error(`Queued workflow ${input.workflowId} changed while locked`);
       }
 
@@ -2956,13 +2958,22 @@ export class DeviceExecutionArbiter {
       const reconciled = await client.query<{ id: string }>(
         `
         WITH candidates AS (
-          SELECT roots.id,
-                 roots.device_id,
-                 roots.external_id,
-                 roots.state AS previous_state
-          FROM device_execution_roots roots
-          JOIN workflows workflows
-            ON workflows.id::text = roots.external_id
+	          SELECT roots.id,
+	                 roots.device_id,
+	                 roots.external_id,
+	                 roots.state AS previous_state,
+	                 workflow_failure.to_status AS workflow_failure_status,
+	                 workflow_failure.mark_completed AS workflow_mark_completed
+	          FROM device_execution_roots roots
+	          JOIN workflows workflows
+	            ON workflows.id::text = roots.external_id
+	          JOIN lifecycle_state_definitions workflow_state
+	            ON workflow_state.lifecycle_key = workflows.lifecycle_key
+	           AND workflow_state.status = workflows.status
+	          JOIN lifecycle_transitions workflow_failure
+	            ON workflow_failure.lifecycle_key = workflows.lifecycle_key
+	           AND workflow_failure.from_status = workflows.status
+	           AND workflow_failure.action_key = 'fail'
           WHERE roots.root_kind = 'server_workflow'
             AND roots.state NOT IN ('completed', 'failed', 'cancelled')
             AND EXISTS (
@@ -2985,7 +2996,7 @@ export class DeviceExecutionArbiter {
                   OR (
                     jobs.started_at IS NOT NULL
                     AND (
-                      workflows.status NOT IN ('completed', 'failed', 'cancelled')
+	                      NOT workflow_state.terminal
                       OR jobs.completed_at > NOW() - INTERVAL '5 minutes'
                     )
                   )
@@ -2995,13 +3006,15 @@ export class DeviceExecutionArbiter {
         ),
         failed_workflows AS (
           UPDATE workflows workflows
-          SET status = 'failed',
-              completed_at = COALESCE(workflows.completed_at, NOW()),
-              error = COALESCE(workflows.error, $1)
-          FROM candidates
-          WHERE workflows.id::text = candidates.external_id
-            AND workflows.status IN ('queued', 'running')
-          RETURNING workflows.id
+	          SET status = candidates.workflow_failure_status,
+	              completed_at = CASE
+	                WHEN candidates.workflow_mark_completed THEN COALESCE(workflows.completed_at, NOW())
+	                ELSE workflows.completed_at
+	              END,
+	              error = COALESCE(workflows.error, $1)
+	          FROM candidates
+	          WHERE workflows.id::text = candidates.external_id
+	          RETURNING workflows.id
         ),
         failed_roots AS (
           UPDATE device_execution_roots roots
@@ -3069,12 +3082,15 @@ export class DeviceExecutionArbiter {
       const candidateDevices = await client.query<{ device_id: string }>(
         `SELECT DISTINCT roots.device_id
          FROM device_execution_roots roots
-         JOIN workflows workflows
-           ON workflows.id::text = roots.external_id
-          AND workflows.device_id = roots.device_id
-         WHERE roots.root_kind = 'server_workflow'
-           AND roots.state IN ('blocked', 'reconciling')
-           AND workflows.status IN ('completed', 'failed', 'cancelled')
+	         JOIN workflows workflows
+	           ON workflows.id::text = roots.external_id
+	          AND workflows.device_id = roots.device_id
+	         JOIN lifecycle_state_definitions workflow_state
+	           ON workflow_state.lifecycle_key = workflows.lifecycle_key
+	          AND workflow_state.status = workflows.status
+	         WHERE roots.root_kind = 'server_workflow'
+	           AND roots.state IN ('blocked', 'reconciling')
+	           AND workflow_state.terminal
            AND workflows.completed_at IS NOT NULL
          ORDER BY roots.device_id`,
       );
@@ -3092,9 +3108,12 @@ export class DeviceExecutionArbiter {
                  roots.state AS previous_state,
                  workflows.status AS terminal_state
           FROM device_execution_roots roots
-          JOIN workflows workflows
-            ON workflows.id::text = roots.external_id
-           AND workflows.device_id = roots.device_id
+	          JOIN workflows workflows
+	            ON workflows.id::text = roots.external_id
+	           AND workflows.device_id = roots.device_id
+	          JOIN lifecycle_state_definitions workflow_state
+	            ON workflow_state.lifecycle_key = workflows.lifecycle_key
+	           AND workflow_state.status = workflows.status
           JOIN device_execution_operations root_operation
             ON root_operation.root_id = roots.id
            AND root_operation.device_id = roots.device_id
@@ -3104,7 +3123,7 @@ export class DeviceExecutionArbiter {
            AND root_operation.owner_generation = roots.owner_generation
           WHERE roots.root_kind = 'server_workflow'
             AND roots.state IN ('blocked', 'reconciling')
-            AND workflows.status IN ('completed', 'failed', 'cancelled')
+	            AND workflow_state.terminal
             AND workflows.completed_at IS NOT NULL
             AND NOT EXISTS (
               SELECT 1

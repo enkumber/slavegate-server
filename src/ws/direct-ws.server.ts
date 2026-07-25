@@ -1927,51 +1927,40 @@ export class DirectWsServer {
       error: error ?? null,
     };
 
-    if (status === 'completed') {
-      await db.query(
-        `UPDATE workflows
-         SET status = 'completed',
-             current_step = $1,
-             total_steps = COALESCE($2, total_steps),
-             checkpoint = $3,
-             completed_at = NOW()
-         WHERE id = $4`,
-        [step ?? total, total, JSON.stringify({ ...checkpoint, result: { step, total, variables: mergedVariables } }), workflowId]
-      );
-    } else if (status === 'failed') {
-      await db.query(
-        `UPDATE workflows
-         SET status = 'failed',
-             current_step = COALESCE($1, current_step),
-             total_steps = COALESCE($2, total_steps),
-             checkpoint = $3,
-             error = $4,
-             completed_at = NOW()
-         WHERE id = $5`,
-        [step, total, JSON.stringify(checkpoint), error || 'Device reported failure', workflowId]
-      );
-    } else {
-      // running / paused — update only columns present in the canonical workflows schema.
-      // Older Umbrel installs do not have a `progress` column; checkpoint carries progress details.
-      await db.query(
-        `UPDATE workflows
-         SET status = $1,
-             current_step = COALESCE($2, current_step),
-             total_steps = COALESCE($3, total_steps),
-             checkpoint = $4
-         WHERE id = $5
-           AND status NOT IN ('cancelled', 'completed', 'failed')`,
-        [
-          status,
-          step,
-          total,
-          JSON.stringify({
+    const { transitionWorkflowFromExternalStatus } = require("../modules/workflows/workflow-lifecycle.service");
+    const terminal = status === "completed" || status === "failed";
+    const persistedCheckpoint = status === "completed"
+      ? { ...checkpoint, result: { step, total, variables: mergedVariables } }
+      : terminal
+        ? checkpoint
+        : {
             ...checkpoint,
             progress: { step, total, error, variables: JSON.stringify(mergedVariables).slice(0, 1000) },
-          }),
-          workflowId,
-        ]
+          };
+    const transitioned = await transitionWorkflowFromExternalStatus(
+      workflowId,
+      status,
+      {
+        checkpoint: persistedCheckpoint,
+        currentStep: status === "completed" ? (step ?? total) : step,
+        totalSteps: total,
+        ...(status === "failed" ? { error: error || "Device reported failure" } : {}),
+      },
+      db,
+    );
+    if (!transitioned) {
+      const current = await db.query(
+        `SELECT state.status, state.terminal
+           FROM workflows workflow
+           JOIN lifecycle_state_definitions state
+             ON state.lifecycle_key = workflow.lifecycle_key
+            AND state.status = workflow.status
+          WHERE workflow.id = $1`,
+        [workflowId],
       );
+      if (current.rows[0]?.terminal !== true) {
+        throw new Error(`DB lifecycle rejected external workflow transition to '${status}'`);
+      }
     }
   }
 

@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS lifecycle_transitions (
 -- Preserve operator-modified task lifecycle configuration from 3.9.265.
 DO $$
 BEGIN
-  IF to_regclass('public.task_status_definitions') IS NOT NULL THEN
+  IF to_regclass('task_status_definitions') IS NOT NULL THEN
     EXECUTE $copy$
       INSERT INTO lifecycle_state_definitions
         (lifecycle_key, status, initial, terminal, retryable, administrative,
@@ -69,7 +69,7 @@ BEGIN
     $copy$;
   END IF;
 
-  IF to_regclass('public.task_status_transitions') IS NOT NULL THEN
+  IF to_regclass('task_status_transitions') IS NOT NULL THEN
     EXECUTE $copy$
       INSERT INTO lifecycle_transitions
         (lifecycle_key, action_key, from_status, to_status, manual_allowed,

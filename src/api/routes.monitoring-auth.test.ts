@@ -84,7 +84,12 @@ describe("real API router monitoring auth", () => {
 
   it("allows openclaw_agent tokens on GET /api/scalability/status", async () => {
     mockOpenClawTokenLookup("agent-token");
-    mocks.db.query.mockImplementationOnce(async () => ({ rows: [] }));
+    mocks.db.query.mockImplementationOnce(async () => ({
+      rows: [
+        { status: "operator_ready", count: "0" },
+        { status: "operator_running", count: "0" },
+      ],
+    }));
 
     const response = await getJson("/api/scalability/status", { authorization: "Bearer agent-token" });
 
@@ -92,7 +97,7 @@ describe("real API router monitoring auth", () => {
     expect(response.body.ok).toBe(true);
     expect(response.body.data).toMatchObject({
       current: {
-        workflows: { queued: 0, running: 0, paused: 0, total: 0 },
+        workflows: { operator_ready: 0, operator_running: 0, total: 0 },
         webSocket: { totalConnections: 0, onlineDevices: 0 },
       },
     });

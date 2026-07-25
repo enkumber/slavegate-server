@@ -427,7 +427,7 @@ describe("agency workflow runs API", () => {
   });
 
   it("atomically closes a stuck run, task and associated workflow with an audit event", async () => {
-    const run = hydratedRun({ status: "running", workflow_id: null });
+    const run = { ...hydratedRun({ status: "running", workflow_id: null }), lifecycle_terminal: false };
     const task = { id: run.task_id, status: "running", error: null };
     const workflow = {
       id: "44444444-4444-4444-8444-444444444444",
@@ -435,6 +435,7 @@ describe("agency workflow runs API", () => {
       current_step: 3,
       total_steps: 36,
       error: null,
+      lifecycle_terminal: false,
     };
     const createdAt = new Date("2026-07-20T12:00:00.000Z");
     mocks.client.query
@@ -443,9 +444,9 @@ describe("agency workflow runs API", () => {
       .mockResolvedValueOnce({ rows: [task] })
       .mockResolvedValueOnce({ rows: [workflow] })
       .mockResolvedValueOnce({ rows: [{ id: "55555555-5555-4555-8555-555555555555", status: "running" }] })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // workflow update
+      .mockResolvedValueOnce({ rows: [{ ...workflow, status: "failed" }], rowCount: 1 }) // workflow update
       .mockResolvedValueOnce({ rows: [{ ...task, status: "cancelled" }], rowCount: 1 }) // task transition
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // run update
+      .mockResolvedValueOnce({ rows: [{ ...run, status: "failed" }], rowCount: 1 }) // run update
       .mockResolvedValueOnce({ rows: [{ id: "17", created_at: createdAt }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [] }); // COMMIT
 
@@ -475,7 +476,7 @@ describe("agency workflow runs API", () => {
   });
 
   it("refuses to rewrite an already terminal workflow run", async () => {
-    const run = hydratedRun({ status: "failed" });
+    const run = { ...hydratedRun({ status: "failed" }), lifecycle_terminal: true };
     mocks.client.query
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [run] })

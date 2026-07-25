@@ -17,7 +17,7 @@ let pool: Pool;
 
 function lifecycleMigration(): string {
   return fs.readFileSync(
-    path.join(repoRoot, "src/db/migrations/104_task_lifecycle_db_authoritative.sql"),
+    path.join(repoRoot, "src/db/migrations/105_generic_resource_lifecycle.sql"),
     "utf8",
   );
 }
@@ -25,8 +25,12 @@ function lifecycleMigration(): string {
 async function createBaseTaskTable(): Promise<void> {
   await pool.query(`
     DROP TABLE IF EXISTS tasks CASCADE;
+    DROP TABLE IF EXISTS jobs CASCADE;
+    DROP TABLE IF EXISTS lifecycle_transitions CASCADE;
+    DROP TABLE IF EXISTS lifecycle_state_definitions CASCADE;
     DROP TABLE IF EXISTS task_status_transitions CASCADE;
     DROP TABLE IF EXISTS task_status_definitions CASCADE;
+    DROP FUNCTION IF EXISTS set_initial_resource_lifecycle_status() CASCADE;
     DROP FUNCTION IF EXISTS set_initial_task_status() CASCADE;
 
     CREATE TABLE tasks (
@@ -41,7 +45,11 @@ async function createBaseTaskTable(): Promise<void> {
       root_error_message TEXT,
       root_error_details JSONB NOT NULL DEFAULT '{}'::jsonb,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
+    );
+    CREATE TABLE jobs (
+      id UUID PRIMARY KEY,
+      status TEXT
+    );
   `);
 }
 
@@ -83,7 +91,8 @@ describe("DB-authoritative task lifecycle", () => {
       [id],
     );
     const initial = await pool.query(
-      `SELECT status FROM task_status_definitions WHERE initial`,
+      `SELECT status FROM lifecycle_state_definitions
+        WHERE lifecycle_key = 'task' AND initial`,
     );
     expect(inserted.rows[0].status).toBe(initial.rows[0].status);
 
@@ -99,24 +108,25 @@ describe("DB-authoritative task lifecycle", () => {
     const migration = lifecycleMigration();
     await pool.query(migration);
     await pool.query(
-      `UPDATE task_status_definitions
+      `UPDATE lifecycle_state_definitions
           SET terminal = TRUE,
               retryable = FALSE,
               dispatchable = FALSE,
               manual = FALSE,
               description = 'operator configured queued',
               sort_order = 999
-        WHERE status = 'queued'`,
+        WHERE lifecycle_key = 'task' AND status = 'queued'`,
     );
     await pool.query(
-      `UPDATE task_status_transitions
+      `UPDATE lifecycle_transitions
           SET to_status = 'cancelled',
               mark_started = FALSE,
               mark_completed = TRUE,
               clear_completed = FALSE,
               clear_failure = TRUE,
               reset_retry = TRUE
-        WHERE action_key = 'claim'
+        WHERE lifecycle_key = 'task'
+          AND action_key = 'claim'
           AND from_status = 'queued'`,
     );
 
@@ -124,8 +134,8 @@ describe("DB-authoritative task lifecycle", () => {
 
     const definition = await pool.query(
       `SELECT terminal, retryable, dispatchable, manual, description, sort_order
-         FROM task_status_definitions
-        WHERE status = 'queued'`,
+         FROM lifecycle_state_definitions
+        WHERE lifecycle_key = 'task' AND status = 'queued'`,
     );
     expect(definition.rows[0]).toMatchObject({
       terminal: true,
@@ -137,8 +147,9 @@ describe("DB-authoritative task lifecycle", () => {
     });
     const transition = await pool.query(
       `SELECT to_status, mark_started, mark_completed, clear_completed, clear_failure, reset_retry
-         FROM task_status_transitions
-        WHERE action_key = 'claim'
+         FROM lifecycle_transitions
+        WHERE lifecycle_key = 'task'
+          AND action_key = 'claim'
           AND from_status = 'queued'`,
     );
     expect(transition.rows[0]).toMatchObject({
@@ -175,12 +186,18 @@ describe("DB-authoritative task lifecycle", () => {
         ('operator_ready', TRUE, FALSE, FALSE, FALSE, TRUE, TRUE, 1, 'operator-owned initial');
     `);
 
+    const legacyMigration = fs.readFileSync(
+      path.join(repoRoot, "src/db/migrations/104_task_lifecycle_db_authoritative.sql"),
+      "utf8",
+    );
+    await pool.query(legacyMigration);
     await pool.query(lifecycleMigration());
 
     const rows = await pool.query(
       `SELECT status, initial
-         FROM task_status_definitions
-        WHERE status IN ('operator_ready', 'queued')
+         FROM lifecycle_state_definitions
+        WHERE lifecycle_key = 'task'
+          AND status IN ('operator_ready', 'queued')
         ORDER BY status`,
     );
     expect(rows.rows).toEqual([
@@ -194,18 +211,19 @@ describe("DB-authoritative task lifecycle", () => {
     const id = "10000000-0000-4000-8000-000000000001";
     await pool.query(`INSERT INTO tasks (id) VALUES ($1)`, [id]);
     await pool.query(
-      `INSERT INTO task_status_definitions
-         (status, terminal, retryable, administrative, dispatchable, manual, sort_order)
-       VALUES ($1, FALSE, FALSE, TRUE, FALSE, TRUE, 35)`,
+      `INSERT INTO lifecycle_state_definitions
+         (lifecycle_key, status, terminal, retryable, administrative, dispatchable, manual, sort_order)
+       VALUES ('task', $1, FALSE, FALSE, TRUE, FALSE, TRUE, 35)`,
       ["holding"],
     );
     const initial = await pool.query(
-      `SELECT status FROM task_status_definitions WHERE initial`,
+      `SELECT status FROM lifecycle_state_definitions
+        WHERE lifecycle_key = 'task' AND initial`,
     );
     await pool.query(
-      `INSERT INTO task_status_transitions
-         (action_key, from_status, to_status, manual_allowed)
-       VALUES ($1, $2, $3, TRUE)`,
+      `INSERT INTO lifecycle_transitions
+         (lifecycle_key, action_key, from_status, to_status, manual_allowed)
+       VALUES ('task', $1, $2, $3, TRUE)`,
       ["manual_hold", initial.rows[0].status, "holding"],
     );
 

@@ -44,7 +44,7 @@ export async function transitionJob(
           AND transition.action_key = $2
         WHERE j.id = $1
           AND j.lifecycle_key = $4
-          AND ($5::text IS NULL OR j.device_id = $5)
+          AND ($5::uuid IS NULL OR j.device_id = $5::uuid)
         FOR UPDATE OF j
      )
      UPDATE jobs
@@ -95,7 +95,7 @@ export async function transitionJobFromExternalStatus(
           AND transition.external_allowed
         WHERE j.id = $1
           AND j.lifecycle_key = $4
-          AND ($5::text IS NULL OR j.device_id = $5)
+          AND ($5::uuid IS NULL OR j.device_id = $5::uuid)
         ORDER BY transition.action_key
         LIMIT 1
         FOR UPDATE OF j

@@ -130,14 +130,41 @@ class FakeClient {
       return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
     }
 
-    if (normalized.startsWith("UPDATE workflows SET status = 'cancelled'")) {
-      const [workflowId, deviceId] = params as [string, string];
+    if (normalized.startsWith("SELECT lifecycle_key, action_key, from_status, to_status") &&
+        normalized.includes("FROM lifecycle_transitions")) {
+      const [, fromStatus, actionKey] = params as [string, string, string];
+      if (fromStatus !== "queued" || actionKey !== "cancel") {
+        return { rows: [], rowCount: 0 };
+      }
+      return {
+        rows: [{
+          lifecycle_key: "workflow_execution",
+          action_key: "cancel",
+          from_status: "queued",
+          to_status: "cancelled",
+          manual_allowed: false,
+          external_allowed: false,
+          automatic: false,
+          mark_started: false,
+          mark_completed: true,
+          clear_completed: false,
+          clear_failure: false,
+          reset_retry: false,
+          metadata: {},
+        }],
+        rowCount: 1,
+      };
+    }
+
+    if (normalized.startsWith("WITH selected AS ( SELECT workflow.id, transition.*") &&
+        normalized.includes("UPDATE workflows workflow")) {
+      const [workflowId, actionKey] = params as [string, string];
       const found = this.workflows.find((item) =>
-        item.id === workflowId && item.device_id === deviceId && item.status === "queued"
+        item.id === workflowId && item.status === "queued" && actionKey === "cancel"
       );
       if (!found) return { rows: [], rowCount: 0 };
       found.status = "cancelled";
-      return { rows: [{ id: found.id }], rowCount: 1 };
+      return { rows: [{ ...found }], rowCount: 1 };
     }
 
     if (normalized.startsWith("SELECT * FROM device_execution_roots WHERE root_kind = $1 AND external_id = $2")) {
@@ -1440,10 +1467,12 @@ describe("DeviceExecutionArbiter observe mode", () => {
       expect(normalized).not.toContain("jobs.status NOT IN");
       expect(normalized).toContain("jobs.completed_at IS NULL");
       expect(normalized).toContain("jobs.started_at IS NOT NULL");
-      expect(normalized).toContain("workflows.status NOT IN ('completed', 'failed', 'cancelled')");
+      expect(normalized).toContain("JOIN lifecycle_state_definitions workflow_state");
+      expect(normalized).toContain("JOIN lifecycle_transitions workflow_failure");
+      expect(normalized).toContain("workflow_failure.action_key = 'fail'");
       expect(normalized).toContain("jobs.completed_at > NOW() - INTERVAL '5 minutes'");
-      expect(normalized).not.toContain("AND workflows.status IN ('queued', 'running') AND EXISTS");
-      expect(normalized).toContain("WHERE workflows.id::text = candidates.external_id AND workflows.status IN ('queued', 'running')");
+      expect(normalized).not.toContain("workflows.status IN");
+      expect(normalized).toContain("WHERE workflows.id::text = candidates.external_id");
       expect(normalized).toContain("undispatched_timed_out_workflow_reconciled");
       return { rows: [{ id: "reconciled-root" }], rowCount: 1 };
     });

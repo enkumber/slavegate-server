@@ -142,8 +142,8 @@ describe("saveCheckpoint — uses pool.query instead of db.connect", () => {
     expect(methodBody).not.toContain("COMMIT");
     expect(methodBody).not.toContain("ROLLBACK");
 
-    // Should use pool.query
-    expect(methodBody).toContain("db.query(");
+    // Should use the atomic DB-authoritative transition helper.
+    expect(methodBody).toContain("transitionWorkflowWhere(");
   });
 });
 
@@ -934,7 +934,8 @@ describe("Workflow service per-device methods", () => {
     );
 
     expect(source).toContain("async countActiveByDevice(deviceId: string)");
-    expect(source).toContain("WHERE device_id = $1 AND status IN ('queued', 'running')");
+    expect(source).toContain("JOIN lifecycle_state_definitions state");
+    expect(source).toContain("state.metadata->>'countsAsActive'");
   });
 
   it("should have getActiveCounts method for monitoring", async () => {
@@ -946,7 +947,8 @@ describe("Workflow service per-device methods", () => {
     );
 
     expect(source).toContain("async getActiveCounts()");
-    expect(source).toContain("GROUP BY status");
+    expect(source).toContain("GROUP BY state.status, state.sort_order");
+    expect(source).not.toContain("counts.queued + counts.running");
   });
 });
 
@@ -1053,9 +1055,11 @@ describe("Per-device isolation logic", () => {
     expect(methodMatch).toBeTruthy();
     const methodBody = methodMatch![0];
 
-    // Query should check both 'queued' and 'running' statuses
-    expect(methodBody).toContain("'queued', 'running'");
+    // Active-state membership is configured in PostgreSQL, not duplicated here.
+    expect(methodBody).toContain("lifecycle_state_definitions");
+    expect(methodBody).toContain("countsAsActive");
+    expect(methodBody).not.toContain("'queued', 'running'");
     // Should filter by device_id
-    expect(methodBody).toContain("device_id = $1");
+    expect(methodBody).toContain("workflow.device_id = $1");
   });
 });

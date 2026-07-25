@@ -13,6 +13,8 @@
  */
 
 import { getDb } from "../../db/client";
+import { lifecycleKeys } from "../lifecycle/lifecycle.service";
+import { transitionResearchJob } from "./research-lifecycle.service";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -103,10 +105,13 @@ class ResearchService {
     
     // Check for existing pending/scheduled/running job with same type + input
     const existing = await db.query(`
-      SELECT id FROM research_jobs
-      WHERE job_type = $1 
-        AND input = $2::jsonb
-        AND status IN ('pending', 'scheduled', 'running')
+      SELECT job.id FROM research_jobs job
+      JOIN lifecycle_state_definitions state
+        ON state.lifecycle_key = job.lifecycle_key
+       AND state.status = job.status
+      WHERE job.job_type = $1
+        AND job.input = $2::jsonb
+        AND COALESCE((state.metadata->>'dedupeActive')::boolean, FALSE)
       LIMIT 1
     `, [type, normalizedInput]);
     
@@ -117,8 +122,12 @@ class ResearchService {
     
     // Check queue size to prevent bloat
     const queueSize = await db.query(`
-      SELECT COUNT(*) FROM research_jobs
-      WHERE job_type = $1 AND status = 'pending'
+      SELECT COUNT(*) FROM research_jobs job
+      JOIN lifecycle_state_definitions state
+        ON state.lifecycle_key = job.lifecycle_key
+       AND state.status = job.status
+      WHERE job.job_type = $1
+        AND COALESCE((state.metadata->>'queuePending')::boolean, FALSE)
     `, [type]);
     
     if (parseInt(queueSize.rows[0].count) >= this.MAX_PENDING_PER_TYPE) {
@@ -151,12 +160,15 @@ class ResearchService {
     
     const result = await db.query(`
       SELECT id, job_type, input, output, completed_at, expires_at
-      FROM research_jobs
-      WHERE job_type = $1
-        AND input = $2::jsonb
-        AND status = 'completed'
-        AND expires_at > NOW()
-      ORDER BY completed_at DESC
+      FROM research_jobs job
+      JOIN lifecycle_state_definitions state
+        ON state.lifecycle_key = job.lifecycle_key
+       AND state.status = job.status
+      WHERE job.job_type = $1
+        AND job.input = $2::jsonb
+        AND COALESCE((state.metadata->>'cacheReadable')::boolean, FALSE)
+        AND job.expires_at > NOW()
+      ORDER BY job.completed_at DESC
       LIMIT 1
     `, [type, normalizedInput]);
     
@@ -183,9 +195,12 @@ class ResearchService {
     const db = getDb();
     
     const result = await db.query(`
-      SELECT * FROM research_jobs
-      WHERE status = 'pending'
-      ORDER BY priority DESC, created_at ASC
+      SELECT job.* FROM research_jobs job
+      JOIN lifecycle_state_definitions state
+        ON state.lifecycle_key = job.lifecycle_key
+       AND state.status = job.status
+      WHERE state.dispatchable
+      ORDER BY job.priority DESC, job.created_at ASC
       LIMIT $1
     `, [limit]);
     
@@ -197,15 +212,7 @@ class ResearchService {
    * Called by Kraken when assigning work.
    */
   async scheduleJob(jobId: string, deviceId: string): Promise<void> {
-    const db = getDb();
-    
-    await db.query(`
-      UPDATE research_jobs
-      SET status = 'scheduled',
-          device_id = $2,
-          scheduled_at = NOW()
-      WHERE id = $1 AND status = 'pending'
-    `, [jobId, deviceId]);
+    await transitionResearchJob(jobId, "schedule", { deviceId, scheduledAtNow: true });
     
     console.log(`[research] Scheduled job ${jobId} on device ${deviceId.slice(0, 8)}`);
   }
@@ -215,14 +222,7 @@ class ResearchService {
    * Called by Hydra when execution starts.
    */
   async startJob(jobId: string): Promise<void> {
-    const db = getDb();
-    
-    await db.query(`
-      UPDATE research_jobs
-      SET status = 'running',
-          started_at = NOW()
-      WHERE id = $1 AND status = 'scheduled'
-    `, [jobId]);
+    await transitionResearchJob(jobId, "start");
     
     console.log(`[research] Started job ${jobId}`);
   }
@@ -242,15 +242,11 @@ class ResearchService {
       SELECT job_type, input FROM research_jobs WHERE id = $1
     `, [jobId]);
 
-    await db.query(`
-      UPDATE research_jobs
-      SET status = 'completed',
-          output = $2::jsonb,
-          completed_at = NOW(),
-          expires_at = NOW() + INTERVAL '7 days',
-          error = NULL
-      WHERE id = $1 AND status IN ('pending', 'scheduled', 'running')
-    `, [jobId, JSON.stringify(output)]);
+    await transitionResearchJob(jobId, "succeed", {
+      output,
+      expiresAt: new Date(Date.now() + this.DEFAULT_CACHE_DAYS * 24 * 60 * 60 * 1000).toISOString(),
+      error: null,
+    }, db);
 
     console.log(`[research] Completed job ${jobId}`);
 
@@ -300,15 +296,7 @@ class ResearchService {
    * Called by Hydra when research fails.
    */
   async failJob(jobId: string, error: string): Promise<void> {
-    const db = getDb();
-    
-    await db.query(`
-      UPDATE research_jobs
-      SET status = 'failed',
-          error = $2,
-          completed_at = NOW()
-      WHERE id = $1 AND status IN ('scheduled', 'running')
-    `, [jobId, error]);
+    await transitionResearchJob(jobId, "fail", { error });
     
     console.log(`[research] Failed job ${jobId}: ${error}`);
   }
@@ -335,10 +323,14 @@ class ResearchService {
     const db = getDb();
     
     const result = await db.query(`
-      DELETE FROM research_jobs
-      WHERE status = 'completed'
-        AND expires_at < NOW()
-      RETURNING id
+      DELETE FROM research_jobs job
+      USING lifecycle_state_definitions state
+      WHERE state.lifecycle_key = job.lifecycle_key
+        AND state.status = job.status
+        AND state.terminal
+        AND COALESCE((state.metadata->>'cacheReadable')::boolean, FALSE)
+        AND job.expires_at < NOW()
+      RETURNING job.id
     `);
     
     const count = result.rowCount ?? 0;
@@ -356,19 +348,35 @@ class ResearchService {
     const db = getDb();
     
     const result = await db.query(`
-      UPDATE research_jobs
-      SET status = 'pending',
-          device_id = NULL,
-          scheduled_at = NULL,
-          started_at = NULL
-      WHERE status IN ('scheduled', 'running')
-        AND (
-          (scheduled_at IS NOT NULL AND scheduled_at < NOW() - INTERVAL '1 hour')
-          OR (started_at IS NOT NULL AND started_at < NOW() - INTERVAL '1 hour')
-        )
-      RETURNING id
-    `);
-    
+      WITH candidates AS (
+        SELECT job.id, transition.to_status, transition.clear_completed,
+               transition.clear_failure, transition.reset_retry
+        FROM research_jobs job
+        JOIN lifecycle_state_definitions state
+          ON state.lifecycle_key = job.lifecycle_key
+         AND state.status = job.status
+        JOIN lifecycle_transitions transition
+          ON transition.lifecycle_key = job.lifecycle_key
+         AND transition.from_status = job.status
+         AND transition.action_key = state.stale_action_key
+         AND transition.automatic
+        WHERE job.lifecycle_key = $1
+          AND state.stale_after_ms IS NOT NULL
+          AND COALESCE(job.started_at, job.scheduled_at, job.created_at)
+                + state.stale_after_ms * INTERVAL '1 millisecond' <= NOW()
+        FOR UPDATE OF job SKIP LOCKED
+      )
+      UPDATE research_jobs job
+      SET status = candidates.to_status,
+          device_id = CASE WHEN candidates.reset_retry THEN NULL ELSE job.device_id END,
+          scheduled_at = CASE WHEN candidates.reset_retry THEN NULL ELSE job.scheduled_at END,
+          started_at = CASE WHEN candidates.reset_retry THEN NULL ELSE job.started_at END,
+          completed_at = CASE WHEN candidates.clear_completed THEN NULL ELSE job.completed_at END,
+          error = CASE WHEN candidates.clear_failure THEN NULL ELSE job.error END
+      FROM candidates
+      WHERE job.id = candidates.id
+      RETURNING job.id
+    `, [lifecycleKeys.researchJob]);
     const count = result.rowCount ?? 0;
     if (count > 0) {
       console.log(`[research] Reset ${count} stuck jobs`);
@@ -383,18 +391,17 @@ class ResearchService {
     const db = getDb();
     
     const result = await db.query(`
-      SELECT status, COUNT(*) as count
-      FROM research_jobs
-      GROUP BY status
-    `);
+      SELECT state.status, COUNT(job.id) as count
+      FROM lifecycle_state_definitions state
+      LEFT JOIN research_jobs job
+        ON job.lifecycle_key = state.lifecycle_key
+       AND job.status = state.status
+      WHERE state.lifecycle_key = $1
+      GROUP BY state.status, state.sort_order
+      ORDER BY state.sort_order, state.status
+    `, [lifecycleKeys.researchJob]);
     
-    const stats: Record<string, number> = {
-      pending: 0,
-      scheduled: 0,
-      running: 0,
-      completed: 0,
-      failed: 0,
-    };
+    const stats: Record<string, number> = {};
     
     for (const row of result.rows) {
       stats[row.status] = parseInt(row.count);

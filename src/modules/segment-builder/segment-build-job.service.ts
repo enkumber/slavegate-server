@@ -8,6 +8,9 @@ import type {
   WorkflowCompositionNodeRecord,
 } from "../workflow-segments/types";
 import type { WorkflowTemplate } from "../workflows/types";
+import { transitionTask } from "../task-lifecycle/task-lifecycle.service";
+import { transitionWorkflow } from "../workflows/workflow-lifecycle.service";
+import { transitionAgencyWorkflowRun } from "../workflows/agency-workflow-run-lifecycle.service";
 
 export type SegmentBuildReason =
   | "capability_missing"
@@ -561,36 +564,13 @@ export class SegmentBuildJobService {
         const executionKey = typeof row.execution_key === "string" ? row.execution_key : null;
         const reason = `Segment Builder canary expired while device ${String(row.device_status)} before execution`;
         if (taskId) {
-          await client.query(
-            `UPDATE tasks
-             SET status = 'failed',
-                 completed_at = NOW(),
-                 updated_at = NOW(),
-                 error = $2
-             WHERE id = $1 AND status = 'queued'`,
-            [taskId, reason],
-          );
+          await transitionTask(taskId, "fail", { error: reason }, client);
         }
         const workflowId = typeof row.workflow_id === "string" ? row.workflow_id : null;
         if (workflowId) {
-          await client.query(
-            `UPDATE workflows
-             SET status = 'failed',
-                 completed_at = NOW(),
-                 error = $2
-             WHERE id = $1 AND status IN ('queued','paused')`,
-            [workflowId, reason],
-          );
+          await transitionWorkflow(workflowId, "fail", { error: reason }, client);
         }
-        await client.query(
-          `UPDATE agency_workflow_runs
-           SET status = 'failed',
-               completed_at = NOW(),
-               updated_at = NOW(),
-               error = $2
-           WHERE id = $1 AND status = 'queued'`,
-          [runId, reason],
-        );
+        await transitionAgencyWorkflowRun(runId, "fail", { error: reason }, client);
         if (executionKey) {
           await client.query(
             `UPDATE workflow_execution_bindings

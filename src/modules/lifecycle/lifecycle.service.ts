@@ -42,6 +42,9 @@ export interface LifecycleStalePolicyUpdate {
 export const lifecycleKeys = {
   task: "task",
   dispatcherJob: "dispatcher_job",
+  workflowExecution: "workflow_execution",
+  agencyWorkflowRun: "agency_workflow_run",
+  researchJob: "research_job",
 } as const;
 
 function rowToState(row: Record<string, unknown>): LifecycleStateDefinition {
