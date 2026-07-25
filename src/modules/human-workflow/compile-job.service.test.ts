@@ -46,6 +46,7 @@ describe("humanWorkflowCompileJobService", () => {
   it("marks stale running jobs as retryable failed when fetched by id", async () => {
     mocks.db.query
       .mockResolvedValueOnce({ rows: [jobRow()] })
+      .mockResolvedValueOnce({ rows: [{ terminal: false }] })
       .mockResolvedValueOnce({
         rows: [jobRow({
           status: "failed",
@@ -60,7 +61,13 @@ describe("humanWorkflowCompileJobService", () => {
     expect(job?.status).toBe("failed");
     expect(job?.error).toBe("compile job worker expired; retry compile");
     expect(job?.errorClass).toBe("timeout");
-    expect(mocks.db.query.mock.calls[1][0]).toContain("status = 'failed'");
+    expect(mocks.db.query.mock.calls[2][0]).toContain("lifecycle_transitions");
+    expect(mocks.db.query.mock.calls[2][0]).not.toContain("status = 'failed'");
+    expect(JSON.parse(mocks.db.query.mock.calls[2][1][1])).toMatchObject({
+      targetTerminal: true,
+      targetRetryable: true,
+      transitionAutomatic: true,
+    });
   });
 
   it("does not mark fresh running jobs as stale", async () => {
@@ -110,8 +117,18 @@ describe("humanWorkflowCompileJobService", () => {
     expect(job?.status).toBe("queued");
     expect(job?.retryCount).toBe(2);
     expect(job?.lastRetriedAt).toBe("2026-06-18T10:01:00.000Z");
-    expect(mocks.db.query.mock.calls[0][0]).toContain("retry_count = COALESCE(retry_count, 0) + 1");
-    expect(mocks.db.query.mock.calls[0][0]).not.toContain("result = NULL");
+    expect(mocks.db.query.mock.calls[0][0]).toContain("lifecycle_transitions");
+    expect(mocks.db.query.mock.calls[0][0]).not.toContain("status = 'queued'");
+    expect(JSON.parse(mocks.db.query.mock.calls[0][1][1])).toMatchObject({
+      targetInitial: true,
+      targetDispatchable: true,
+      transitionClearCompleted: true,
+      transitionClearFailure: true,
+    });
+    expect(JSON.parse(mocks.db.query.mock.calls[0][1][2])).toMatchObject({
+      incrementRetry: true,
+      markRetried: true,
+    });
   });
 
   it("persists raw LLM debug output and appends it to job history on failure", async () => {
@@ -131,7 +148,8 @@ describe("humanWorkflowCompileJobService", () => {
       }],
     };
     mocks.db.query
-      .mockResolvedValueOnce({ rows: [jobRow()] })
+      .mockResolvedValueOnce({ rows: [jobRow({ llm_started_at: null })] })
+      .mockResolvedValueOnce({ rows: [jobRow({ llm_started_at: new Date().toISOString() })] })
       .mockResolvedValueOnce({ rows: [] });
 
     humanWorkflowCompileJobService.runInProcess(
@@ -144,8 +162,11 @@ describe("humanWorkflowCompileJobService", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(mocks.db.query).toHaveBeenCalledTimes(2);
-    expect(mocks.db.query.mock.calls[1][0]).toContain("llmDebugHistory");
-    expect(JSON.parse(mocks.db.query.mock.calls[1][1][2])).toEqual({ llmDebug });
+    expect(mocks.db.query).toHaveBeenCalledTimes(3);
+    expect(mocks.db.query.mock.calls[2][0]).toContain("llmDebugHistory");
+    expect(JSON.parse(mocks.db.query.mock.calls[2][1][2])).toMatchObject({
+      error: "human workflow undercompiled",
+      appendDebug: { llmDebug },
+    });
   });
 });

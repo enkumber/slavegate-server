@@ -73,6 +73,7 @@ export interface LifecycleTransitionSelector {
   targetAdministrative?: boolean;
   targetDispatchable?: boolean;
   targetManual?: boolean;
+  targetHasAutomaticNonterminalExit?: boolean;
   transitionManualAllowed?: boolean;
   transitionExternalAllowed?: boolean;
   transitionAutomatic?: boolean;
@@ -110,11 +111,24 @@ export function lifecycleTransitionSelectorPredicate(
     ["transitionClearFailure", `${transitionAlias}.clear_failure`],
     ["transitionResetRetry", `${transitionAlias}.reset_retry`],
   ];
-  return checks
+  const predicates = checks
     .map(([key, column]) =>
       `(NOT (${parameter}::jsonb ? '${key}') OR ${column} = (${parameter}::jsonb->>'${key}')::boolean)`,
-    )
-    .join("\n          AND ");
+    );
+  predicates.push(
+    `(NOT (${parameter}::jsonb ? 'targetHasAutomaticNonterminalExit') OR EXISTS (
+      SELECT 1
+        FROM lifecycle_transitions outgoing
+        JOIN lifecycle_state_definitions outgoing_target
+          ON outgoing_target.lifecycle_key = outgoing.lifecycle_key
+         AND outgoing_target.status = outgoing.to_status
+       WHERE outgoing.lifecycle_key = ${targetAlias}.lifecycle_key
+         AND outgoing.from_status = ${targetAlias}.status
+         AND outgoing.automatic
+         AND NOT outgoing_target.terminal
+    ) = (${parameter}::jsonb->>'targetHasAutomaticNonterminalExit')::boolean)`,
+  );
+  return predicates.join("\n          AND ");
 }
 
 export async function getResourceLifecycleKey(

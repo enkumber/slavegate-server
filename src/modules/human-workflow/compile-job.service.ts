@@ -1,6 +1,10 @@
 import { getDb } from "../../db/client";
+import {
+  lifecycleTransitionSelectorPredicate,
+  serializeLifecycleTransitionSelector,
+  type LifecycleTransitionSelector,
+} from "../lifecycle/lifecycle.service";
 
-export type HumanWorkflowCompileJobStatus = "queued" | "running" | "ready" | "failed" | "cancelled";
 export type HumanWorkflowCompileJobSource = "cache" | "shortcut" | "llm";
 export type HumanWorkflowCompileJobErrorClass = "timeout" | "provider_error" | "validation_error" | "unknown";
 
@@ -11,7 +15,7 @@ export interface HumanWorkflowCompileJobRecord {
   accountId: string | null;
   intent: string;
   platform: string;
-  status: HumanWorkflowCompileJobStatus;
+  status: string;
   cacheKey: string | null;
   source: HumanWorkflowCompileJobSource | null;
   shortcutId: string | null;
@@ -60,7 +64,7 @@ function rowToJob(row: Record<string, unknown>): HumanWorkflowCompileJobRecord {
     accountId: (row.account_id as string | null) ?? null,
     intent: row.intent as string,
     platform: row.platform as string,
-    status: row.status as HumanWorkflowCompileJobStatus,
+    status: String(row.status),
     cacheKey: (row.cache_key as string | null) ?? null,
     source: (row.source as HumanWorkflowCompileJobSource | null) ?? null,
     shortcutId: (row.shortcut_id as string | null) ?? null,
@@ -79,10 +83,146 @@ function rowToJob(row: Record<string, unknown>): HumanWorkflowCompileJobRecord {
   };
 }
 
-function isStaleRunningJob(row: Record<string, unknown>): boolean {
-  if (row.status !== "running" || !row.llm_started_at) return false;
+async function isStaleCompileJob(row: Record<string, unknown>): Promise<boolean> {
+  if (!row.llm_started_at) return false;
   const startedAt = new Date(row.llm_started_at as string).getTime();
-  return Number.isFinite(startedAt) && Date.now() - startedAt > staleRunningJobMs();
+  if (!Number.isFinite(startedAt) || Date.now() - startedAt <= staleRunningJobMs()) {
+    return false;
+  }
+  const result = await getDb().query(
+    `SELECT state.terminal
+       FROM human_workflow_compile_jobs job
+       JOIN lifecycle_state_definitions state
+         ON state.lifecycle_key = job.lifecycle_key
+        AND state.status = job.status
+      WHERE job.id = $1`,
+    [row.id],
+  );
+  return result.rows[0]?.terminal === false;
+}
+
+interface CompileJobPatch {
+  cacheKey?: string | null;
+  source?: HumanWorkflowCompileJobSource;
+  shortcutId?: string | null;
+  error?: string | null;
+  providerErrorCode?: string | null;
+  result?: Record<string, unknown> | null;
+  appendDebug?: Record<string, unknown> | null;
+  incrementRetry?: boolean;
+  markRetried?: boolean;
+  clearResult?: boolean;
+}
+
+async function transitionCompileJob(
+  id: string,
+  selector: LifecycleTransitionSelector,
+  patch: CompileJobPatch = {},
+): Promise<HumanWorkflowCompileJobRecord | null> {
+  const selectorPredicate = lifecycleTransitionSelectorPredicate("transition", "target", "$2");
+  const result = await getDb().query(
+    `WITH locked AS (
+       SELECT job.*
+         FROM human_workflow_compile_jobs job
+        WHERE job.id = $1
+        FOR UPDATE
+     ),
+     candidates AS (
+       SELECT DISTINCT job.id, transition.to_status, transition.mark_started,
+              transition.mark_completed, transition.clear_completed,
+              transition.clear_failure, transition.reset_retry
+         FROM locked job
+         JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = job.lifecycle_key
+          AND transition.from_status = job.status
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+        WHERE ${selectorPredicate}
+     ),
+     selected AS (
+       SELECT ranked.*
+         FROM (
+           SELECT candidates.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+             FROM candidates
+         ) ranked
+        WHERE ranked.candidate_count = 1
+     )
+     UPDATE human_workflow_compile_jobs job
+        SET status = selected.to_status,
+            cache_key = CASE
+              WHEN $3::jsonb ? 'cacheKey' THEN NULLIF($3::jsonb->>'cacheKey', '')
+              ELSE job.cache_key
+            END,
+            source = CASE
+              WHEN $3::jsonb ? 'source' THEN $3::jsonb->>'source'
+              ELSE job.source
+            END,
+            shortcut_id = CASE
+              WHEN $3::jsonb ? 'shortcutId'
+                THEN NULLIF($3::jsonb->>'shortcutId', '')::uuid
+              ELSE job.shortcut_id
+            END,
+            error = CASE
+              WHEN selected.clear_failure THEN NULL
+              WHEN $3::jsonb ? 'error' THEN $3::jsonb->>'error'
+              ELSE job.error
+            END,
+            provider_error_code = CASE
+              WHEN selected.clear_failure THEN NULL
+              WHEN $3::jsonb ? 'providerErrorCode' THEN $3::jsonb->>'providerErrorCode'
+              ELSE job.provider_error_code
+            END,
+            result = CASE
+              WHEN COALESCE(($3::jsonb->>'clearResult')::boolean, false) THEN NULL
+              WHEN $3::jsonb ? 'appendDebug' THEN
+                jsonb_build_object(
+                  'llmDebug', $3::jsonb->'appendDebug'->'llmDebug',
+                  'llmDebugHistory', COALESCE(job.result->'llmDebugHistory', '[]'::jsonb)
+                    || jsonb_build_array($3::jsonb->'appendDebug'->'llmDebug')
+                )
+              WHEN $3::jsonb ? 'result' THEN
+                (COALESCE(job.result, '{}'::jsonb) - 'llmDebug')
+                  || (COALESCE($3::jsonb->'result', '{}'::jsonb) - 'llmDebug')
+                  || jsonb_build_object(
+                    'llmDebug', $3::jsonb->'result'->'llmDebug',
+                    'llmDebugHistory', COALESCE(job.result->'llmDebugHistory', '[]'::jsonb)
+                      || jsonb_build_array($3::jsonb->'result'->'llmDebug')
+                  )
+              ELSE job.result
+            END,
+            llm_started_at = CASE
+              WHEN selected.mark_started THEN NOW()
+              WHEN selected.clear_completed THEN NULL
+              ELSE job.llm_started_at
+            END,
+            llm_completed_at = CASE
+              WHEN selected.mark_completed THEN NOW()
+              WHEN selected.clear_completed THEN NULL
+              ELSE job.llm_completed_at
+            END,
+            completed_at = CASE
+              WHEN selected.mark_completed THEN NOW()
+              WHEN selected.clear_completed THEN NULL
+              ELSE job.completed_at
+            END,
+            retry_count = CASE
+              WHEN COALESCE(($3::jsonb->>'incrementRetry')::boolean, false)
+                THEN COALESCE(job.retry_count, 0) + 1
+              WHEN selected.reset_retry THEN 0
+              ELSE job.retry_count
+            END,
+            last_retried_at = CASE
+              WHEN COALESCE(($3::jsonb->>'markRetried')::boolean, false) THEN NOW()
+              ELSE job.last_retried_at
+            END,
+            updated_at = NOW()
+       FROM selected
+      WHERE job.id = selected.id
+      RETURNING job.*`,
+    [id, serializeLifecycleTransitionSelector(selector), JSON.stringify(patch)],
+  );
+  return result.rows[0] ? rowToJob(result.rows[0]) : null;
 }
 
 export class HumanWorkflowCompileJobService {
@@ -97,8 +237,8 @@ export class HumanWorkflowCompileJobService {
   }): Promise<HumanWorkflowCompileJobRecord> {
     const result = await getDb().query(
       `INSERT INTO human_workflow_compile_jobs
-         (request_key, device_id, account_id, intent, platform, status, source, timeout_ms)
-       VALUES ($1, $2, $3, $4, $5, 'queued', 'llm', $6)
+         (request_key, device_id, account_id, intent, platform, source, timeout_ms)
+       VALUES ($1, $2, $3, $4, $5, 'llm', $6)
        ON CONFLICT (request_key) DO UPDATE SET updated_at = NOW()
        RETURNING *`,
       [input.requestKey, input.deviceId, input.accountId, input.intent, input.platform, humanWorkflowCompileTimeoutMs()],
@@ -109,71 +249,61 @@ export class HumanWorkflowCompileJobService {
   async getById(id: string): Promise<HumanWorkflowCompileJobRecord | null> {
     const result = await getDb().query(`SELECT * FROM human_workflow_compile_jobs WHERE id = $1`, [id]);
     if (result.rows.length === 0) return null;
-    if (isStaleRunningJob(result.rows[0])) return this.markStaleRunningFailed(id);
+    if (await isStaleCompileJob(result.rows[0])) return this.markStaleRunningFailed(id);
     return rowToJob(result.rows[0]);
   }
 
   async getByRequestKey(requestKey: string): Promise<HumanWorkflowCompileJobRecord | null> {
     const result = await getDb().query(`SELECT * FROM human_workflow_compile_jobs WHERE request_key = $1`, [requestKey]);
     if (result.rows.length === 0) return null;
-    if (isStaleRunningJob(result.rows[0])) return this.markStaleRunningFailed(result.rows[0].id as string);
+    if (await isStaleCompileJob(result.rows[0])) return this.markStaleRunningFailed(result.rows[0].id as string);
     return rowToJob(result.rows[0]);
   }
 
   private async markStaleRunningFailed(id: string): Promise<HumanWorkflowCompileJobRecord> {
-    const result = await getDb().query(
-      `UPDATE human_workflow_compile_jobs
-       SET status = 'failed',
-           error = 'compile job worker expired; retry compile',
-           llm_completed_at = NOW(),
-           completed_at = NOW(),
-           updated_at = NOW()
-       WHERE id = $1 AND status = 'running'
-       RETURNING *`,
-      [id],
-    );
-    return rowToJob(result.rows[0]);
+    const transitioned = await transitionCompileJob(id, {
+      targetTerminal: true,
+      targetRetryable: true,
+      transitionAutomatic: true,
+      transitionMarkCompleted: true,
+    }, {
+      error: "compile job worker expired; retry compile",
+    });
+    if (!transitioned) {
+      const current = await getDb().query(
+        "SELECT * FROM human_workflow_compile_jobs WHERE id = $1",
+        [id],
+      );
+      if (!current.rows[0]) throw new Error("compile job disappeared while expiring stale worker");
+      return rowToJob(current.rows[0]);
+    }
+    return transitioned;
   }
 
   async requeueFailed(id: string): Promise<HumanWorkflowCompileJobRecord | null> {
-    const result = await getDb().query(
-      `UPDATE human_workflow_compile_jobs
-       SET status = 'queued',
-           retry_count = COALESCE(retry_count, 0) + 1,
-           last_retried_at = NOW(),
-           error = NULL,
-           provider_error_code = NULL,
-           llm_completed_at = NULL,
-           completed_at = NULL,
-           updated_at = NOW()
-       WHERE id = $1 AND status = 'failed'
-       RETURNING *`,
-      [id],
-    );
-    if (result.rows.length === 0) return null;
-    return rowToJob(result.rows[0]);
+    return transitionCompileJob(id, {
+      targetInitial: true,
+      targetDispatchable: true,
+      transitionClearCompleted: true,
+      transitionClearFailure: true,
+    }, {
+      incrementRetry: true,
+      markRetried: true,
+    });
   }
 
   async requeueMissingArtifact(id: string): Promise<HumanWorkflowCompileJobRecord | null> {
-    const result = await getDb().query(
-      `UPDATE human_workflow_compile_jobs
-       SET status = 'queued',
-           retry_count = COALESCE(retry_count, 0) + 1,
-           last_retried_at = NOW(),
-           cache_key = NULL,
-           error = NULL,
-           provider_error_code = NULL,
-           result = NULL,
-           llm_started_at = NULL,
-           llm_completed_at = NULL,
-           completed_at = NULL,
-           updated_at = NOW()
-       WHERE id = $1 AND status = 'ready'
-       RETURNING *`,
-      [id],
-    );
-    if (result.rows.length === 0) return null;
-    return rowToJob(result.rows[0]);
+    return transitionCompileJob(id, {
+      targetInitial: true,
+      targetDispatchable: true,
+      transitionClearCompleted: true,
+      transitionClearFailure: true,
+    }, {
+      incrementRetry: true,
+      markRetried: true,
+      cacheKey: null,
+      clearResult: true,
+    });
   }
 
   runInProcess(jobId: string, runner: () => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>): void {
@@ -181,58 +311,39 @@ export class HumanWorkflowCompileJobService {
     this.running.add(jobId);
     setImmediate(async () => {
       try {
-        const claimed = await getDb().query(
-          `UPDATE human_workflow_compile_jobs
-           SET status = 'running', llm_started_at = NOW(), updated_at = NOW()
-           WHERE id = $1 AND (
-             status IN ('queued', 'failed')
-             OR (status = 'running' AND llm_started_at < NOW() - ($2::int * INTERVAL '1 millisecond'))
-           )
-           RETURNING *`,
-          [jobId, staleRunningJobMs()],
-        );
-        if (claimed.rows.length === 0) return;
+        const current = await this.getById(jobId);
+        if (!current) return;
+        const claimed = await transitionCompileJob(jobId, {
+          targetTerminal: false,
+          transitionMarkStarted: true,
+        });
+        if (!claimed) return;
         const result = await runner();
-        await getDb().query(
-          `UPDATE human_workflow_compile_jobs
-           SET status = 'ready',
-               cache_key = $2,
-               source = 'llm',
-               shortcut_id = $3,
-               error = NULL,
-               result = (COALESCE(result, '{}'::jsonb) - 'llmDebug')
-                 || ($4::jsonb - 'llmDebug')
-                 || jsonb_build_object(
-                      'llmDebug', $4::jsonb -> 'llmDebug',
-                      'llmDebugHistory', COALESCE(result -> 'llmDebugHistory', '[]'::jsonb)
-                        || jsonb_build_array($4::jsonb -> 'llmDebug')
-                    ),
-               llm_completed_at = NOW(),
-               completed_at = NOW(),
-               updated_at = NOW()
-           WHERE id = $1`,
-          [jobId, result.cacheKey ?? null, result.shortcutId ?? null, JSON.stringify(result)],
-        );
+        await transitionCompileJob(jobId, {
+          targetTerminal: true,
+          targetRetryable: false,
+          transitionMarkCompleted: true,
+          transitionClearFailure: true,
+        }, {
+          cacheKey: result.cacheKey ?? null,
+          source: "llm",
+          shortcutId: result.shortcutId ?? null,
+          result,
+        });
       } catch (err) {
         const typed = err as Error & { validationErrors?: string[]; debugPayload?: Record<string, unknown> };
         const validationDetail = Array.isArray(typed.validationErrors) && typed.validationErrors.length > 0
           ? `: ${typed.validationErrors.slice(0, 6).join("; ")}`
           : "";
-        await getDb().query(
-          `UPDATE human_workflow_compile_jobs
-           SET status = 'failed',
-               error = $2,
-               result = jsonb_build_object(
-                 'llmDebug', $3::jsonb -> 'llmDebug',
-                 'llmDebugHistory', COALESCE(result -> 'llmDebugHistory', '[]'::jsonb)
-                   || jsonb_build_array($3::jsonb -> 'llmDebug')
-               ),
-               llm_completed_at = NOW(),
-               completed_at = NOW(),
-               updated_at = NOW()
-           WHERE id = $1`,
-          [jobId, `${typed.message}${validationDetail}`, typed.debugPayload ? JSON.stringify(typed.debugPayload) : null],
-        ).catch(() => {});
+        await transitionCompileJob(jobId, {
+          targetTerminal: true,
+          targetRetryable: true,
+          transitionAutomatic: true,
+          transitionMarkCompleted: true,
+        }, {
+          error: `${typed.message}${validationDetail}`,
+          appendDebug: typed.debugPayload ?? null,
+        }).catch(() => {});
       } finally {
         this.running.delete(jobId);
       }

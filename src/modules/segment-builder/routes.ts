@@ -152,7 +152,6 @@ router.post("/jobs/:id/canary", asyncRoute(async (req, res) => {
     if (
       !job
       || job.assignedAgent !== agentId
-      || job.status !== "candidate_ready"
       || typeof job.result.compositionName !== "string"
       || typeof job.result.compositionVersion !== "string"
     ) {

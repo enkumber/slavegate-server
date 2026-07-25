@@ -22,6 +22,17 @@ vi.mock("../../db/client", () => {
         return { rows: [{ callback_url: "http://10.21.0.16:18788/hooks/phone-network-segment" }] };
       }
       if (text.includes("INSERT INTO segment_build_job_events")) return { rows: [] };
+      if (text.includes("SELECT definition.initial, definition.terminal")) {
+        const status = String(state.row.status);
+        return {
+          rows: [{
+            initial: status === "pending_agent",
+            terminal: ["completed", "failed", "blocked", "cancelled"].includes(status),
+            retryable: status === "failed",
+            dispatchable: status === "pending_agent" || status === "failed",
+          }],
+        };
+      }
       if (
         text.includes("FROM segment_build_jobs")
         && text.includes("ORDER BY claim_expires_at ASC")
@@ -69,6 +80,72 @@ vi.mock("../../db/client", () => {
           dispatch_attempts: Number(state.row.dispatch_attempts ?? 0) + 1,
           last_dispatch_error: null,
           dispatched_at: new Date().toISOString(),
+        };
+        return { rows: [{ ...state.row }] };
+      }
+      if (
+        text.includes("WITH locked AS (")
+        && text.includes("UPDATE segment_build_jobs job")
+        && text.includes("lifecycle_transitions")
+      ) {
+        const selector = JSON.parse(String(params.at(-1) ?? "{}")) as Record<string, boolean>;
+        const patch = JSON.parse(String(params.at(-2) ?? "{}")) as Record<string, unknown>;
+        const current = String(state.row.status);
+        let target: string | null = null;
+        if (selector.targetInitial === true && selector.transitionAutomatic === true && current === "dispatched") {
+          target = "pending_agent";
+        } else if (
+          selector.targetTerminal === false
+          && selector.transitionAutomatic === true
+          && selector.transitionClearFailure === true
+          && (current === "pending_agent" || current === "failed")
+        ) {
+          target = "dispatched";
+        } else if (
+          selector.transitionMarkStarted === true
+          && selector.transitionExternalAllowed === true
+          && (current === "pending_agent" || current === "dispatched")
+        ) {
+          target = "claimed";
+        } else if (
+          selector.targetHasAutomaticNonterminalExit === false
+          && selector.transitionExternalAllowed === true
+          && current === "claimed"
+        ) {
+          target = "building";
+        }
+        if (!target) return { rows: [] };
+        state.row = {
+          ...state.row,
+          status: target,
+          assigned_agent: patch.assignedAgent ?? state.row.assigned_agent,
+          agent_session_key: patch.agentSessionKey ?? state.row.agent_session_key,
+          dispatch_attempts: patch.incrementDispatchAttempts === true
+            ? Number(state.row.dispatch_attempts ?? 0) + 1
+            : state.row.dispatch_attempts,
+          last_dispatch_error: patch.lastDispatchError ?? (
+            selector.transitionClearFailure === true ? null : state.row.last_dispatch_error
+          ),
+          dispatched_at: patch.incrementDispatchAttempts === true
+            ? new Date().toISOString()
+            : state.row.dispatched_at,
+          claim_expires_at: patch.refreshLease === true
+            ? new Date(Date.now() + 600_000).toISOString()
+            : state.row.claim_expires_at,
+        };
+        return { rows: [{ ...state.row }] };
+      }
+      if (
+        text.includes("UPDATE segment_build_jobs job")
+        && text.includes("AND NOT definition.terminal")
+        && text.includes("job.claim_expires_at < NOW()")
+      ) {
+        const expired = Date.parse(String(state.row.claim_expires_at)) < Date.now();
+        if (!expired) return { rows: [] };
+        state.row = {
+          ...state.row,
+          assigned_agent: params[1],
+          claim_expires_at: new Date(Date.now() + 600_000).toISOString(),
         };
         return { rows: [{ ...state.row }] };
       }
@@ -260,7 +337,7 @@ describe("SegmentBuildJobService dispatch", () => {
 
     expect(result.status).toBe("claimed");
     expect(result.dispatchAttempts).toBe(1);
-    expect(state.queries.findIndex((query) => query.includes("SET status = 'dispatched'")))
+    expect(state.queries.findIndex((query) => query.includes("lifecycle_transitions")))
       .toBeLessThan(state.queries.findIndex((query) => query.includes("SELECT * FROM segment_build_jobs")));
   });
 

@@ -11,6 +11,11 @@ import type { WorkflowTemplate } from "../workflows/types";
 import { transitionTask } from "../task-lifecycle/task-lifecycle.service";
 import { transitionWorkflow } from "../workflows/workflow-lifecycle.service";
 import { transitionAgencyWorkflowRun } from "../workflows/agency-workflow-run-lifecycle.service";
+import {
+  lifecycleTransitionSelectorPredicate,
+  serializeLifecycleTransitionSelector,
+  type LifecycleTransitionSelector,
+} from "../lifecycle/lifecycle.service";
 
 export type SegmentBuildReason =
   | "capability_missing"
@@ -22,18 +27,6 @@ const SEGMENT_BUILDER_SWEEP_LIMIT = 25;
 const OFFLINE_QUEUED_CANARY_TIMEOUT_MS = 5 * 60_000;
 const RECOVERY_REDISPATCH_GUARD_MS = 10 * 60_000;
 
-export type SegmentBuildStatus =
-  | "pending_agent"
-  | "dispatched"
-  | "claimed"
-  | "building"
-  | "candidate_ready"
-  | "canary_running"
-  | "completed"
-  | "failed"
-  | "blocked"
-  | "cancelled";
-
 export interface SegmentBuildJob {
   id: string;
   requestKey: string;
@@ -44,7 +37,7 @@ export interface SegmentBuildJob {
   platform: string;
   capabilityKey: string | null;
   reason: SegmentBuildReason;
-  status: SegmentBuildStatus;
+  status: string;
   assignedAgent: string;
   agentSessionKey: string | null;
   dispatchAttempts: number;
@@ -145,7 +138,7 @@ function rowToJob(row: Record<string, unknown>): SegmentBuildJob {
     platform: row.platform as string,
     capabilityKey: (row.capability_key as string | null) ?? null,
     reason: row.reason as SegmentBuildReason,
-    status: row.status as SegmentBuildStatus,
+    status: String(row.status),
     assignedAgent: row.assigned_agent as string,
     agentSessionKey: (row.agent_session_key as string | null) ?? null,
     dispatchAttempts: Number(row.dispatch_attempts ?? 0),
@@ -166,6 +159,139 @@ async function event(jobId: string, eventType: string, actor: string, payload: R
      VALUES ($1,$2,$3,$4::jsonb)`,
     [jobId, eventType, actor, JSON.stringify(payload)],
   );
+}
+
+interface SegmentBuildTransitionPatch {
+  assignedAgent?: string;
+  agentSessionKey?: string;
+  incrementDispatchAttempts?: boolean;
+  lastDispatchError?: string | null;
+  refreshLease?: boolean;
+  candidate?: Record<string, unknown>;
+  resultPatch?: Record<string, unknown>;
+  evidencePatch?: Record<string, unknown>;
+  error?: string | null;
+}
+
+async function transitionSegmentBuildJob(
+  id: string,
+  selector: LifecycleTransitionSelector,
+  patch: SegmentBuildTransitionPatch = {},
+  extraPredicate = "TRUE",
+  extraParams: unknown[] = [],
+): Promise<SegmentBuildJob | null> {
+  const patchIndex = extraParams.length + 2;
+  const selectorIndex = extraParams.length + 3;
+  const selectorPredicate = lifecycleTransitionSelectorPredicate(
+    "transition",
+    "target",
+    `$${selectorIndex}`,
+  );
+  const result = await getDb().query(
+    `WITH locked AS (
+       SELECT job.*
+         FROM segment_build_jobs job
+        WHERE job.id = $1
+          AND (${extraPredicate})
+        FOR UPDATE
+     ),
+     candidates AS (
+       SELECT DISTINCT job.id, transition.to_status, transition.mark_started,
+              transition.mark_completed, transition.clear_completed,
+              transition.clear_failure, transition.reset_retry
+         FROM locked job
+         JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = job.lifecycle_key
+          AND transition.from_status = job.status
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+        WHERE ${selectorPredicate}
+     ),
+     selected AS (
+       SELECT ranked.*
+         FROM (
+           SELECT candidates.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+             FROM candidates
+         ) ranked
+        WHERE ranked.candidate_count = 1
+     )
+     UPDATE segment_build_jobs job
+        SET status = selected.to_status,
+            assigned_agent = CASE
+              WHEN $${patchIndex}::jsonb ? 'assignedAgent'
+                THEN $${patchIndex}::jsonb->>'assignedAgent'
+              ELSE job.assigned_agent
+            END,
+            agent_session_key = CASE
+              WHEN $${patchIndex}::jsonb ? 'agentSessionKey'
+                THEN $${patchIndex}::jsonb->>'agentSessionKey'
+              ELSE job.agent_session_key
+            END,
+            dispatch_attempts = CASE
+              WHEN COALESCE(($${patchIndex}::jsonb->>'incrementDispatchAttempts')::boolean, false)
+                THEN job.dispatch_attempts + 1
+              WHEN selected.reset_retry THEN 0
+              ELSE job.dispatch_attempts
+            END,
+            last_dispatch_error = CASE
+              WHEN selected.clear_failure THEN NULL
+              WHEN $${patchIndex}::jsonb ? 'lastDispatchError'
+                THEN $${patchIndex}::jsonb->>'lastDispatchError'
+              ELSE job.last_dispatch_error
+            END,
+            dispatched_at = CASE
+              WHEN COALESCE(($${patchIndex}::jsonb->>'incrementDispatchAttempts')::boolean, false)
+                THEN NOW()
+              ELSE job.dispatched_at
+            END,
+            claimed_at = CASE
+              WHEN selected.mark_started THEN COALESCE(job.claimed_at, NOW())
+              ELSE job.claimed_at
+            END,
+            claim_expires_at = CASE
+              WHEN COALESCE(($${patchIndex}::jsonb->>'refreshLease')::boolean, false)
+                THEN NOW() + INTERVAL '10 minutes'
+              WHEN selected.mark_completed THEN NULL
+              ELSE job.claim_expires_at
+            END,
+            candidate = CASE
+              WHEN $${patchIndex}::jsonb ? 'candidate'
+                THEN $${patchIndex}::jsonb->'candidate'
+              ELSE job.candidate
+            END,
+            result = CASE
+              WHEN $${patchIndex}::jsonb ? 'resultPatch'
+                THEN job.result || $${patchIndex}::jsonb->'resultPatch'
+              ELSE job.result
+            END,
+            evidence = CASE
+              WHEN $${patchIndex}::jsonb ? 'evidencePatch'
+                THEN job.evidence || $${patchIndex}::jsonb->'evidencePatch'
+              ELSE job.evidence
+            END,
+            error = CASE
+              WHEN selected.clear_failure THEN NULL
+              WHEN $${patchIndex}::jsonb ? 'error' THEN $${patchIndex}::jsonb->>'error'
+              ELSE job.error
+            END,
+            completed_at = CASE
+              WHEN selected.mark_completed THEN NOW()
+              WHEN selected.clear_completed THEN NULL
+              ELSE job.completed_at
+            END,
+            updated_at = NOW()
+       FROM selected
+      WHERE job.id = selected.id
+      RETURNING job.*`,
+    [
+      id,
+      ...extraParams,
+      JSON.stringify(patch),
+      serializeLifecycleTransitionSelector(selector),
+    ],
+  );
+  return result.rows[0] ? rowToJob(result.rows[0]) : null;
 }
 
 function hookToken(): string {
@@ -371,13 +497,20 @@ export class SegmentBuildJobService {
   }
 
   async dispatch(job: SegmentBuildJob): Promise<SegmentBuildJob> {
-    const normalDispatch = ["pending_agent", "failed"].includes(job.status);
-    const expiredLeaseRecovery = [
-      "claimed",
-      "building",
-      "candidate_ready",
-      "canary_running",
-    ].includes(job.status)
+    const state = await getDb().query(
+      `SELECT definition.initial, definition.terminal, definition.retryable,
+              definition.dispatchable
+         FROM segment_build_jobs job
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = job.lifecycle_key
+          AND definition.status = job.status
+        WHERE job.id = $1`,
+      [job.id],
+    );
+    const definition = state.rows[0] as Record<string, unknown> | undefined;
+    const normalDispatch = definition?.dispatchable === true
+      && (definition.initial === true || definition.retryable === true);
+    const expiredLeaseRecovery = definition?.terminal === false
       && typeof job.claimExpiresAt === "string"
       && Date.parse(job.claimExpiresAt) < Date.now();
     if (!normalDispatch && !expiredLeaseRecovery) return job;
@@ -386,14 +519,17 @@ export class SegmentBuildJobService {
     const sessionKey = `hook:phone-network:${job.id}`;
     const reserved = expiredLeaseRecovery
       ? await getDb().query(
-        `UPDATE segment_build_jobs
+        `UPDATE segment_build_jobs job
          SET agent_session_key = $2,
              dispatch_attempts = dispatch_attempts + 1,
              last_dispatch_error = NULL,
              dispatched_at = NOW(),
              updated_at = NOW()
-         WHERE id = $1
-           AND status IN ('claimed','building','candidate_ready','canary_running')
+         FROM lifecycle_state_definitions definition
+         WHERE job.id = $1
+           AND definition.lifecycle_key = job.lifecycle_key
+           AND definition.status = job.status
+           AND NOT definition.terminal
            AND claim_expires_at < NOW()
            AND (
              dispatched_at IS NULL
@@ -402,21 +538,18 @@ export class SegmentBuildJobService {
          RETURNING *`,
         [job.id, sessionKey, RECOVERY_REDISPATCH_GUARD_MS],
       )
-      : await getDb().query(
-        `UPDATE segment_build_jobs
-         SET status = 'dispatched',
-             agent_session_key = $2,
-             dispatch_attempts = dispatch_attempts + 1,
-             last_dispatch_error = NULL,
-             dispatched_at = NOW(),
-             completed_at = NULL,
-             updated_at = NOW()
-         WHERE id = $1
-           AND status IN ('pending_agent','failed')
-         RETURNING *`,
-        [job.id, sessionKey],
-      );
-    if (!reserved.rows[0]) return (await this.get(job.id)) ?? job;
+      : null;
+    const transitioned = expiredLeaseRecovery
+      ? (reserved?.rows[0] ? rowToJob(reserved.rows[0]) : null)
+      : await transitionSegmentBuildJob(job.id, {
+        targetTerminal: false,
+        transitionAutomatic: true,
+        transitionClearFailure: true,
+      }, {
+        agentSessionKey: sessionKey,
+        incrementDispatchAttempts: true,
+      });
+    if (!transitioned) return (await this.get(job.id)) ?? job;
     await event(
       job.id,
       expiredLeaseRecovery ? "recovery_dispatch_started" : "dispatch_started",
@@ -448,18 +581,15 @@ export class SegmentBuildJobService {
         "phone-network",
         { sessionKey, previousStatus: job.status },
       );
-      return (await this.get(job.id)) ?? rowToJob(reserved.rows[0]);
+      return (await this.get(job.id)) ?? transitioned;
     } catch (error) {
       const message = (error as Error).message.slice(0, 500);
-      const updated = await getDb().query(
-        `UPDATE segment_build_jobs
-         SET status = CASE WHEN status = 'dispatched' THEN 'pending_agent' ELSE status END,
-             last_dispatch_error = $2,
-             updated_at = NOW()
-         WHERE id = $1
-         RETURNING *`,
-        [job.id, message],
-      );
+      await transitionSegmentBuildJob(job.id, {
+        targetInitial: true,
+        transitionAutomatic: true,
+      }, {
+        lastDispatchError: message,
+      });
       await event(job.id, "dispatch_failed", "phone-network", { error: message });
       throw Object.assign(new Error(message), { code: "SEGMENT_BUILDER_DISPATCH_FAILED" });
     }
@@ -476,8 +606,11 @@ export class SegmentBuildJobService {
   async sweepExpiredAgentLeases(limit = SEGMENT_BUILDER_SWEEP_LIMIT): Promise<number> {
     const result = await getDb().query(
       `SELECT *
-       FROM segment_build_jobs
-       WHERE status IN ('claimed','building','candidate_ready','canary_running')
+       FROM segment_build_jobs job
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = job.lifecycle_key
+        AND definition.status = job.status
+       WHERE NOT definition.terminal
          AND claim_expires_at < NOW()
        ORDER BY claim_expires_at ASC
        LIMIT $1`,
@@ -662,37 +795,59 @@ export class SegmentBuildJobService {
 
   async claim(id: string, agentId: string): Promise<SegmentBuildJob | null> {
     if (agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
-    const result = await getDb().query(
-      `UPDATE segment_build_jobs
-       SET status = CASE
-             WHEN status IN ('candidate_ready','canary_running') THEN status
-             ELSE 'claimed'
-           END,
-           assigned_agent = $2,
-           claimed_at = COALESCE(claimed_at, NOW()),
-           claim_expires_at = NOW() + INTERVAL '10 minutes',
-           updated_at = NOW()
-       WHERE id = $1
-         AND (status IN ('pending_agent','dispatched') OR
-              (status IN ('claimed','building','candidate_ready','canary_running')
-               AND claim_expires_at < NOW()))
-       RETURNING *`,
-      [id, agentId],
-    );
-    if (!result.rows[0]) return null;
+    let job = await transitionSegmentBuildJob(id, {
+      targetTerminal: false,
+      transitionExternalAllowed: true,
+      transitionMarkStarted: true,
+    }, {
+      assignedAgent: agentId,
+      refreshLease: true,
+    });
+    if (!job) {
+      const recovered = await getDb().query(
+        `UPDATE segment_build_jobs job
+            SET assigned_agent = $2,
+                claimed_at = COALESCE(claimed_at, NOW()),
+                claim_expires_at = NOW() + INTERVAL '10 minutes',
+                updated_at = NOW()
+           FROM lifecycle_state_definitions definition
+          WHERE job.id = $1
+            AND definition.lifecycle_key = job.lifecycle_key
+            AND definition.status = job.status
+            AND NOT definition.terminal
+            AND job.claim_expires_at < NOW()
+          RETURNING job.*`,
+        [id, agentId],
+      );
+      job = recovered.rows[0] ? rowToJob(recovered.rows[0]) : null;
+    }
+    if (!job) return null;
     await event(id, "claimed", agentId);
-    return rowToJob(result.rows[0]);
+    return job;
   }
 
   async heartbeat(id: string, agentId: string): Promise<SegmentBuildJob | null> {
     if (agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
+    const progressed = await transitionSegmentBuildJob(id, {
+      targetTerminal: false,
+      targetHasAutomaticNonterminalExit: false,
+      transitionExternalAllowed: true,
+      transitionMarkStarted: false,
+    }, {
+      refreshLease: true,
+    }, "job.assigned_agent = $2", [agentId]);
+    if (progressed) return progressed;
     const result = await getDb().query(
-      `UPDATE segment_build_jobs
-       SET status = CASE WHEN status = 'claimed' THEN 'building' ELSE status END,
-           claim_expires_at = NOW() + INTERVAL '10 minutes',
-           updated_at = NOW()
-       WHERE id = $1 AND assigned_agent = $2 AND status IN ('claimed','building','candidate_ready','canary_running')
-       RETURNING *`,
+      `UPDATE segment_build_jobs job
+          SET claim_expires_at = NOW() + INTERVAL '10 minutes',
+              updated_at = NOW()
+         FROM lifecycle_state_definitions definition
+        WHERE job.id = $1
+          AND job.assigned_agent = $2
+          AND definition.lifecycle_key = job.lifecycle_key
+          AND definition.status = job.status
+          AND NOT definition.terminal
+        RETURNING job.*`,
       [id, agentId],
     );
     return result.rows[0] ? rowToJob(result.rows[0]) : null;
@@ -704,7 +859,19 @@ export class SegmentBuildJobService {
     const canonical = JSON.stringify(candidate);
     const candidateHash = crypto.createHash("sha256").update(canonical).digest("hex");
     const current = await this.get(id);
-    if (!current || current.assignedAgent !== agentId || !["claimed", "building", "candidate_ready"].includes(current.status)) {
+    if (!current || current.assignedAgent !== agentId) {
+      return null;
+    }
+    const currentDefinition = await getDb().query(
+      `SELECT definition.terminal
+         FROM segment_build_jobs job
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = job.lifecycle_key
+          AND definition.status = job.status
+        WHERE job.id = $1`,
+      [id],
+    );
+    if (currentDefinition.rows[0]?.terminal !== false) {
       return null;
     }
     if (parsed.composition.platform.toLowerCase() !== current.platform.toLowerCase()) {
@@ -806,37 +973,25 @@ export class SegmentBuildJobService {
       agentId,
     );
 
-    const result = await getDb().query(
-      `UPDATE segment_build_jobs
-       SET status = 'candidate_ready',
-           candidate = $3::jsonb,
-           result = result || jsonb_build_object(
-             'candidateHash', $4::text,
-             'capabilityKey', $5::text,
-             'compositionName', $6::text,
-             'compositionVersion', $7::text,
-             'compositionKey', $8::text,
-             'segmentRefs', $9::jsonb
-           ),
-           claim_expires_at = NOW() + INTERVAL '10 minutes',
-           updated_at = NOW()
-       WHERE id = $1 AND assigned_agent = $2 AND status IN ('claimed','building','candidate_ready')
-       RETURNING *`,
-      [
-        id,
-        agentId,
-        canonical,
+    const transitioned = await transitionSegmentBuildJob(id, {
+      targetTerminal: false,
+      targetHasAutomaticNonterminalExit: true,
+      transitionExternalAllowed: true,
+    }, {
+      candidate,
+      refreshLease: true,
+      resultPatch: {
         candidateHash,
-        parsed.capability.capabilityKey,
-        parsed.composition.compositionName,
-        parsed.composition.version,
-        composition.compositionKey,
-        JSON.stringify(segmentRefs),
-      ],
-    );
-    if (!result.rows[0]) return null;
+        capabilityKey: parsed.capability.capabilityKey,
+        compositionName: parsed.composition.compositionName,
+        compositionVersion: parsed.composition.version,
+        compositionKey: composition.compositionKey,
+        segmentRefs,
+      },
+    }, "job.assigned_agent = $2", [agentId]);
+    if (!transitioned) return null;
     await event(id, "candidate_submitted", agentId, { candidateHash });
-    return rowToJob(result.rows[0]);
+    return transitioned;
   }
 
   async reserveCanary(input: {
@@ -846,26 +1001,21 @@ export class SegmentBuildJobService {
     requestKey: string;
   }): Promise<SegmentBuildJob | null> {
     if (input.agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
-    const result = await getDb().query(
-      `UPDATE segment_build_jobs
-       SET status = 'canary_running',
-           result = result || jsonb_build_object(
-             'executionKey', $3::text,
-             'canaryRequestKey', $4::text
-           ),
-           claim_expires_at = NOW() + INTERVAL '10 minutes',
-           updated_at = NOW()
-       WHERE id = $1
-         AND assigned_agent = $2
-         AND status = 'candidate_ready'
-       RETURNING *`,
-      [input.id, input.agentId, input.executionKey, input.requestKey],
-    );
-    if (!result.rows[0]) return null;
+    const transitioned = await transitionSegmentBuildJob(input.id, {
+      targetTerminal: false,
+      transitionAutomatic: true,
+    }, {
+      refreshLease: true,
+      resultPatch: {
+        executionKey: input.executionKey,
+        canaryRequestKey: input.requestKey,
+      },
+    }, "job.assigned_agent = $2", [input.agentId]);
+    if (!transitioned) return null;
     await event(input.id, "canary_reserved", input.agentId, {
       executionKey: input.executionKey,
     });
-    return rowToJob(result.rows[0]);
+    return transitioned;
   }
 
   async attachCanaryRun(input: {
@@ -885,8 +1035,14 @@ export class SegmentBuildJobService {
            updated_at = NOW()
        WHERE id = $1
          AND assigned_agent = $2
-         AND status = 'canary_running'
          AND result ->> 'executionKey' = $3
+         AND EXISTS (
+           SELECT 1
+             FROM lifecycle_state_definitions definition
+            WHERE definition.lifecycle_key = segment_build_jobs.lifecycle_key
+              AND definition.status = segment_build_jobs.status
+              AND NOT definition.terminal
+         )
        RETURNING *`,
       [input.id, input.agentId, input.executionKey, input.runId, input.taskId],
     );
@@ -902,58 +1058,56 @@ export class SegmentBuildJobService {
   async canaryDispatchFailed(id: string, agentId: string, error: string): Promise<SegmentBuildJob | null> {
     if (agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
     const message = error.slice(0, 1000);
-    const result = await getDb().query(
-      `UPDATE segment_build_jobs
-       SET status = 'building',
-           error = $3,
-           evidence = evidence || jsonb_build_object('canaryDispatchError', $3::text),
-           claim_expires_at = NOW() + INTERVAL '10 minutes',
-           updated_at = NOW()
-       WHERE id = $1
-         AND assigned_agent = $2
-         AND status = 'canary_running'
-         AND NOT (result ? 'canaryRunId')
-       RETURNING *`,
-      [id, agentId, message],
-    );
-    if (!result.rows[0]) return null;
+    const transitioned = await transitionSegmentBuildJob(id, {
+      targetTerminal: false,
+      transitionAutomatic: true,
+    }, {
+      error: message,
+      refreshLease: true,
+      evidencePatch: { canaryDispatchError: message },
+    }, "job.assigned_agent = $2 AND NOT (job.result ? 'canaryRunId')", [agentId]);
+    if (!transitioned) return null;
     await event(id, "canary_dispatch_failed", agentId, { error: message });
-    return rowToJob(result.rows[0]);
+    return transitioned;
   }
 
   async reconcileCanary(id: string): Promise<SegmentBuildJob | null> {
     const job = await this.get(id);
-    if (!job || job.status !== "canary_running") return job;
+    if (!job) return job;
     const executionKey = typeof job.result.executionKey === "string" ? job.result.executionKey : "";
     if (!/^[a-f0-9]{24}$/.test(executionKey)) return job;
+    const canaryRunId = typeof job.result.canaryRunId === "string" ? job.result.canaryRunId : "";
     const executionResult = await getDb().query(
-      `SELECT status, postcondition_verified, result_evidence
-       FROM workflow_execution_bindings
-       WHERE execution_key = $1
-       ORDER BY updated_at DESC
+      `SELECT binding.postcondition_verified, binding.result_evidence,
+              run_state.terminal AS run_terminal,
+              run_state.retryable AS run_retryable
+       FROM workflow_execution_bindings binding
+       JOIN agency_workflow_runs run ON run.id = $2::uuid
+       JOIN lifecycle_state_definitions run_state
+         ON run_state.lifecycle_key = run.lifecycle_key
+        AND run_state.status = run.status
+       WHERE binding.execution_key = $1
+       ORDER BY binding.updated_at DESC
        LIMIT 1`,
-      [executionKey],
+      [executionKey, canaryRunId || null],
     );
     const execution = executionResult.rows[0] as Record<string, unknown> | undefined;
-    if (!execution || !["completed", "failed"].includes(String(execution.status))) return job;
-    if (execution.status === "failed" || execution.postcondition_verified !== true) {
-      const failed = await getDb().query(
-        `UPDATE segment_build_jobs
-         SET status = 'building',
-             error = 'canary failed or postcondition was not verified',
-             evidence = evidence || jsonb_build_object(
-               'lastCanaryExecutionKey', $2::text,
-               'lastCanaryResult', $3::jsonb
-             ),
-             claim_expires_at = NOW() + INTERVAL '10 minutes',
-             updated_at = NOW()
-         WHERE id = $1 AND status = 'canary_running'
-         RETURNING *`,
-        [id, executionKey, JSON.stringify(execution.result_evidence ?? {})],
-      );
-      if (failed.rows[0]) {
+    if (!execution || execution.run_terminal !== true) return job;
+    if (execution.run_retryable === true || execution.postcondition_verified !== true) {
+      const failed = await transitionSegmentBuildJob(id, {
+        targetTerminal: false,
+        transitionAutomatic: true,
+      }, {
+        error: "canary failed or postcondition was not verified",
+        refreshLease: true,
+        evidencePatch: {
+          lastCanaryExecutionKey: executionKey,
+          lastCanaryResult: execution.result_evidence ?? {},
+        },
+      });
+      if (failed) {
         await event(id, "canary_failed", "phone-network-kernel", { executionKey });
-        return rowToJob(failed.rows[0]);
+        return failed;
       }
       return this.get(id);
     }
@@ -1026,28 +1180,28 @@ export class SegmentBuildJobService {
        WHERE capability_key = $1`,
       [capabilityKey],
     );
-    const completed = await getDb().query(
-      `UPDATE segment_build_jobs
-       SET status = 'completed',
-           evidence = evidence || jsonb_build_object(
-             'canaryExecutionKey', $2::text,
-             'postconditionVerified', true
-           ),
-           error = NULL,
-           completed_at = NOW(),
-           updated_at = NOW()
-       WHERE id = $1 AND status = 'canary_running'
-       RETURNING *`,
-      [id, executionKey],
-    );
-    if (!completed.rows[0]) return this.get(id);
+    const completed = await transitionSegmentBuildJob(id, {
+      targetTerminal: true,
+      targetRetryable: false,
+      targetAdministrative: false,
+      transitionAutomatic: true,
+      transitionMarkCompleted: true,
+      transitionClearFailure: true,
+    }, {
+      evidencePatch: {
+        canaryExecutionKey: executionKey,
+        postconditionVerified: true,
+      },
+      error: null,
+    });
+    if (!completed) return this.get(id);
     await event(id, "promoted", "phone-network-kernel", {
       executionKey,
       compositionName,
       compositionVersion,
       segmentRefs,
     });
-    return rowToJob(completed.rows[0]);
+    return completed;
   }
 
   async fail(id: string, agentId: string, error: string, blocked = false): Promise<SegmentBuildJob | null> {
