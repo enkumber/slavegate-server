@@ -1,20 +1,10 @@
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { getDb } from "../../db/client";
 import { transitionWorkflow } from "../workflows/workflow-lifecycle.service";
-
-export const DEVICE_EXECUTION_ACTIVE_STATES = ["claimed", "dispatching", "dispatched", "reconciling", "blocked"] as const;
-export const DEVICE_EXECUTION_TERMINAL_STATES = ["completed", "failed", "cancelled"] as const;
-export const DEVICE_EXECUTION_OPERATION_STATES = [
-  "registered",
-  "dispatching",
-  "dispatched",
-  "completed",
-  "failed",
-  "cancelled",
-  "reconciling",
-  "blocked",
-  "rejected",
-] as const;
+import {
+  getResourceLifecycleState,
+  selectResourceLifecycleTransition,
+} from "../lifecycle/lifecycle.service";
 
 export type DeviceExecutionRootKind =
   | "job"
@@ -24,19 +14,10 @@ export type DeviceExecutionRootKind =
   | "control"
   | "unknown";
 
-export type DeviceExecutionState =
-  | "queued"
-  | "claimed"
-  | "dispatching"
-  | "dispatched"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "reconciling"
-  | "blocked";
+export type DeviceExecutionState = string;
 
 export type DeviceExecutionOperationKind = "job" | "batch" | "workflow" | "control" | "admin";
-export type DeviceExecutionOperationState = typeof DEVICE_EXECUTION_OPERATION_STATES[number];
+export type DeviceExecutionOperationState = string;
 export type DeviceExecutionEgressLane = "device_execution" | "control" | "admin";
 
 export interface DeviceExecutionOperation {
@@ -243,7 +224,7 @@ export interface DeviceExecutionPermit {
   rootId: string;
   deviceId: string;
   ownerGeneration: number;
-  state: Extract<DeviceExecutionState, "claimed" | "dispatching" | "dispatched">;
+  state: DeviceExecutionState;
 }
 
 export interface DeviceExecutionJobDispatchPermit {
@@ -343,6 +324,11 @@ interface DeviceExecutionRootRow extends QueryResultRow {
   metadata: Record<string, unknown> | null;
   created_at: Date;
   updated_at: Date;
+  claimed_at: Date | null;
+  dispatching_at: Date | null;
+  dispatched_at: Date | null;
+  terminal_at: Date | null;
+  reconciliation_reason: string | null;
 }
 
 interface DeviceExecutionOperationRow extends QueryResultRow {
@@ -360,6 +346,9 @@ interface DeviceExecutionOperationRow extends QueryResultRow {
   metadata: Record<string, unknown> | null;
   created_at: Date;
   updated_at: Date;
+  dispatching_at: Date | null;
+  dispatched_at: Date | null;
+  terminal_at: Date | null;
 }
 
 interface SchemaValidationRow extends QueryResultRow {
@@ -373,9 +362,6 @@ interface SchemaValidationRow extends QueryResultRow {
   missing_indexes: unknown;
   invalid_index_predicates: unknown;
 }
-
-const ACTIVE_STATE_SQL = "'claimed', 'dispatching', 'dispatched', 'reconciling', 'blocked'";
-const TERMINAL_STATE_SQL = "'completed', 'failed', 'cancelled'";
 
 export class DeviceExecutionSchemaError extends Error {
   constructor(message: string) {
@@ -790,7 +776,6 @@ export class DeviceExecutionArbiter {
         root,
         operationKind,
         operationId: input.jobId,
-        state: "registered",
         egressLane: boundary?.egressLane ?? "device_execution",
         wireType,
         metadata,
@@ -825,7 +810,7 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      if (isTerminalState(root.state)) {
+      if (rootIsTerminal(root)) {
         const handle = operationRowToHandle(operation);
         await insertEvent(client, {
           rootId: root.id,
@@ -847,7 +832,7 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      if (root.state === "reconciling" || root.state === "blocked") {
+      if (root.reconciliation_reason != null) {
         const handle = operationRowToHandle(operation);
         await insertEvent(client, {
           rootId: root.id,
@@ -869,7 +854,7 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      if (root.state === "dispatched" && !requiresExistingRoot) {
+      if (rootIsDispatched(root) && !requiresExistingRoot) {
         const handle = operationRowToHandle(operation);
         await insertEvent(client, {
           rootId: root.id,
@@ -892,7 +877,7 @@ export class DeviceExecutionArbiter {
       }
 
       let current = root;
-      if (root.state === "queued") {
+      if (rootIsInitialPhase(root)) {
         const oldest = await selectOldestQueuedRoot(client, input.deviceId);
         if (!oldest || oldest.id !== root.id) {
           const handle = operationRowToHandle(operation);
@@ -949,7 +934,7 @@ export class DeviceExecutionArbiter {
           };
         }
         current = dispatching;
-      } else if (root.state === "claimed") {
+      } else if (rootIsClaimed(root)) {
         const dispatching = await updateRootState(client, {
           rootId: root.id,
           fromStates: ["claimed"],
@@ -958,7 +943,7 @@ export class DeviceExecutionArbiter {
           metadata,
         });
         if (dispatching) current = dispatching;
-      } else if (root.state !== "dispatching" && !(requiresExistingRoot && root.state === "dispatched")) {
+      } else if (!rootIsDispatching(root) && !(requiresExistingRoot && rootIsDispatched(root))) {
         return {
           decision: "ignored" as const,
           root: rowToRoot(root),
@@ -1074,9 +1059,9 @@ export class DeviceExecutionArbiter {
         toNumber(operation.owner_generation) === expectedGeneration;
 
       const childAlreadyTerminal = requiresExistingRoot &&
-        root.state === "dispatched" &&
-        isTerminalOperationState(operation.state);
-      if (sameOwner && ((isTerminalState(root.state) && isTerminalOperationState(operation.state)) || childAlreadyTerminal)) {
+        rootIsDispatched(root) &&
+        operationIsTerminal(operation);
+      if (sameOwner && ((rootIsTerminal(root) && operationIsTerminal(operation)) || childAlreadyTerminal)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: root.device_id,
@@ -1105,7 +1090,7 @@ export class DeviceExecutionArbiter {
 
       if (
         !sameOwner ||
-        (root.state !== "dispatching" && !(requiresExistingRoot && root.state === "dispatched"))
+        (!rootIsDispatching(root) && !(requiresExistingRoot && rootIsDispatched(root)))
       ) {
         await insertEvent(client, {
           rootId: root.id,
@@ -1183,7 +1168,7 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      const dispatched = root.state === "dispatched"
+      const dispatched = rootIsDispatched(root)
         ? root
         : await updateRootState(client, {
             rootId: root.id,
@@ -1335,7 +1320,7 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      if (isTerminalState(root.state)) {
+      if (rootIsTerminal(root)) {
         return {
           decision: "terminal" as const,
           root: rowToRoot(root),
@@ -1343,7 +1328,7 @@ export class DeviceExecutionArbiter {
           reason: "root_already_terminal",
         };
       }
-      if (root.state === "reconciling" || root.state === "blocked") {
+      if (root.reconciliation_reason != null) {
         return {
           decision: "ambiguous" as const,
           root: rowToRoot(root),
@@ -1356,7 +1341,6 @@ export class DeviceExecutionArbiter {
         root,
         operationKind,
         operationId: input.operationId,
-        state: "registered",
         egressLane: boundary?.egressLane ?? "device_execution",
         wireType: input.wireType,
         metadata,
@@ -1364,7 +1348,7 @@ export class DeviceExecutionArbiter {
       const handle = operationRowToHandle(operation);
 
       const active = await selectActiveRoot(client, input.deviceId);
-      if (active && active.id !== root.id && root.state === "queued") {
+      if (active && active.id !== root.id && rootIsInitialPhase(root)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: root.device_id,
@@ -1385,7 +1369,7 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      if (root.state === "queued") {
+      if (rootIsInitialPhase(root)) {
         const oldest = await selectOldestQueuedRoot(client, input.deviceId);
         if (!oldest || oldest.id !== root.id) {
           await insertEvent(client, {
@@ -1411,12 +1395,12 @@ export class DeviceExecutionArbiter {
       }
 
       let current = root;
-      if (root.state === "queued" || root.state === "claimed") {
+      if (rootIsInitialPhase(root) || rootIsClaimed(root)) {
         const dispatching = await updateRootState(client, {
           rootId: root.id,
           fromStates: ["queued", "claimed"],
           toState: "dispatching",
-          ownerGenerationIncrement: root.state === "queued",
+          ownerGenerationIncrement: rootIsInitialPhase(root),
           metadata,
         });
         if (dispatching) current = dispatching;
@@ -1496,9 +1480,9 @@ export class DeviceExecutionArbiter {
         toNumber(root.owner_generation) === expectedGeneration &&
         toNumber(operation.owner_generation) === expectedGeneration;
       const childAlreadyTerminal = requiresExistingRoot &&
-        root.state === "dispatched" &&
-        isTerminalOperationState(operation.state);
-      if (sameOwner && ((isTerminalState(root.state) && isTerminalOperationState(operation.state)) || childAlreadyTerminal)) {
+        rootIsDispatched(root) &&
+        operationIsTerminal(operation);
+      if (sameOwner && ((rootIsTerminal(root) && operationIsTerminal(operation)) || childAlreadyTerminal)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: root.device_id,
@@ -1623,7 +1607,6 @@ export class DeviceExecutionArbiter {
               root: existing,
               operationKind: rootKindToOperationKind(rootKind),
               operationId: input.externalId,
-              state: "registered",
               egressLane: "device_execution",
               wireType: null,
               metadata: { externalId: input.externalId, requestKey: input.requestKey, duplicate: true },
@@ -1675,7 +1658,6 @@ export class DeviceExecutionArbiter {
             root,
             operationKind: rootKindToOperationKind(rootKind),
             operationId: input.externalId,
-            state: "registered",
             egressLane: "device_execution",
             wireType: null,
             metadata: { rootKind, externalId: input.externalId, requestKey: input.requestKey },
@@ -1759,7 +1741,6 @@ export class DeviceExecutionArbiter {
         root,
         operationKind: rootKindToOperationKind(rootKind),
         operationId: input.externalId,
-        state: "registered",
         egressLane: "device_execution",
         wireType: rootKindToWireType(rootKind),
         metadata: {
@@ -1798,7 +1779,7 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      if (isTerminalState(root.state)) {
+      if (rootIsTerminal(root)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: root.device_id,
@@ -1818,7 +1799,7 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      if (root.state === "dispatched") {
+      if (rootIsDispatched(root)) {
         const dispatchedOperation = await updateOperationState(client, {
           operationKind: operation.operation_kind,
           operationId: operation.operation_id,
@@ -1848,7 +1829,7 @@ export class DeviceExecutionArbiter {
       }
 
       const active = await selectActiveRoot(client, input.deviceId);
-      if (active && active.id !== root.id && root.state === "queued") {
+      if (active && active.id !== root.id && rootIsInitialPhase(root)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: root.device_id,
@@ -1872,7 +1853,7 @@ export class DeviceExecutionArbiter {
         rootId: root.id,
         fromStates: ["queued", "claimed"],
         toState: "dispatched",
-        ownerGenerationIncrement: root.state === "queued",
+        ownerGenerationIncrement: rootIsInitialPhase(root),
         metadata: input.metadata,
       });
       if (!dispatched) {
@@ -1967,12 +1948,11 @@ export class DeviceExecutionArbiter {
     rootId?: string;
     handle?: DeviceExecutionHandle;
     ownerGeneration?: number;
-    status: "completed" | "failed" | "cancelled" | string;
+    status: string;
     actor?: string;
     reason?: string;
     metadata?: Record<string, unknown>;
   }): Promise<DeviceExecutionTransitionResult> {
-    const terminalState = normalizeTerminalState(input.status);
     const rootKind = input.rootKind ?? input.handle?.rootKind ?? "job";
     const operationKind = input.handle?.operationKind ?? rootKindToOperationKind(rootKind);
     const operationId = input.handle?.operationId ?? input.externalId;
@@ -1997,6 +1977,16 @@ export class DeviceExecutionArbiter {
         });
         return { decision: "missing", root: null, reason: "no_matching_root" };
       }
+      const terminalDefinition = await getResourceLifecycleState(
+        "device_execution_roots",
+        input.status,
+        "state",
+        client,
+      );
+      if (!terminalDefinition?.terminal) {
+        return { decision: "rejected", root: rowToRoot(root), reason: "unconfigured_terminal_state" };
+      }
+      const terminalState = terminalDefinition.status;
 
       if (root.device_id !== input.deviceId) {
         await insertEvent(client, {
@@ -2047,7 +2037,7 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      if (isTerminalState(root.state)) {
+      if (rootIsTerminal(root)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: root.device_id,
@@ -2078,7 +2068,7 @@ export class DeviceExecutionArbiter {
         operationPolicy?.requiresExistingRootHandle === true &&
         operationPolicy.retainsRootUntilTerminal === false;
       const terminal = isServerWorkflowChild
-        ? root.state === "dispatching"
+        ? rootIsDispatching(root)
           ? await updateRootState(client, {
               rootId: root.id,
               fromStates: ["dispatching"],
@@ -2128,7 +2118,7 @@ export class DeviceExecutionArbiter {
               root: terminal,
               operationKind,
               operationId,
-              state: terminalState,
+              targetState: terminalState,
               egressLane: "device_execution",
               wireType: rootKindToWireType(rootKind),
               metadata: input.metadata ?? {},
@@ -2162,12 +2152,11 @@ export class DeviceExecutionArbiter {
     reportedHandle?: DeviceExecutionHandle | null;
     /** Explicit compatibility lane for jobs dispatched before typed PNQ handles existed. */
     allowLegacyMissingHandle?: boolean;
-    status: "completed" | "failed" | "cancelled" | string;
+    status: string;
     actor?: string;
     reason?: string;
     metadata?: Record<string, unknown>;
   }): Promise<DeviceExecutionAcceptedJobResult> {
-    const terminalState = normalizeTerminalState(input.status);
     return this.withTransaction(async (client) => {
       await lockDevice(client, input.deviceId);
       const operationKind: DeviceExecutionOperationKind = "job";
@@ -2199,6 +2188,22 @@ export class DeviceExecutionArbiter {
         });
         return { accepted: false, decision: "missing", root: null, reason: "no_matching_root" };
       }
+      const terminalDefinition = await getResourceLifecycleState(
+        "device_execution_roots",
+        input.status,
+        "state",
+        client,
+      );
+      if (!terminalDefinition?.terminal) {
+        return {
+          accepted: false,
+          decision: "rejected",
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          reason: "unconfigured_terminal_state",
+        };
+      }
+      const terminalState = terminalDefinition.status;
 
       const handle = operationRowToHandle(operation);
       const expectedGeneration = toNumber(operation.owner_generation);
@@ -2246,8 +2251,8 @@ export class DeviceExecutionArbiter {
         root.device_id === input.deviceId &&
         operation.device_id === input.deviceId &&
         toNumber(root.owner_generation) === expectedGeneration &&
-        ((operation.state === "dispatching" && (root.state === "dispatching" || root.state === "dispatched")) ||
-          (operation.state === "dispatched" && root.state === "dispatched"));
+        ((operationIsDispatching(operation) && (rootIsDispatching(root) || rootIsDispatched(root))) ||
+          (operationIsDispatched(operation) && rootIsDispatched(root)));
       if (
         !isCurrentDispatchOwner ||
         toNumber(operation.owner_generation) !== expectedGeneration
@@ -2288,7 +2293,7 @@ export class DeviceExecutionArbiter {
         operationBoundary !== null &&
         (["generated_child", "self_healing_child", "prestep_child", "recovery_child"] as readonly string[]).includes(operationBoundary);
       const terminal = isServerWorkflowChild
-        ? root.state === "dispatching"
+        ? rootIsDispatching(root)
           ? await updateRootState(client, {
               rootId: root.id,
               fromStates: ["dispatching"],
@@ -2361,7 +2366,7 @@ export class DeviceExecutionArbiter {
   async finishServerWorkflowRoot(input: {
     deviceId: string;
     workflowId: string;
-    status: "completed" | "failed" | "cancelled";
+    status: string;
     actor?: string;
     reason?: string;
     metadata?: Record<string, unknown>;
@@ -2379,10 +2384,10 @@ export class DeviceExecutionArbiter {
         });
         return { decision: "missing", root: null, reason: "canonical_root_not_found" };
       }
-      if (root.device_id !== input.deviceId || isTerminalState(root.state) || root.state === "blocked" || root.state === "reconciling") {
+      if (root.device_id !== input.deviceId || rootIsTerminal(root) || root.reconciliation_reason != null) {
         const reason = root.device_id !== input.deviceId
           ? "root_owned_by_different_device"
-          : isTerminalState(root.state)
+          : rootIsTerminal(root)
             ? "root_already_terminal"
             : "root_ambiguous_not_finishable";
         await insertEvent(client, {
@@ -2489,9 +2494,9 @@ export class DeviceExecutionArbiter {
           reason: "child_operation_already_terminal",
         };
       }
-      if (root.state === "blocked" || root.state === "reconciling" || isTerminalState(root.state)) {
+      if (root.reconciliation_reason != null || rootIsTerminal(root)) {
         return {
-          decision: root.state === "blocked" || root.state === "reconciling" ? "ambiguous" : "rejected",
+          decision: root.reconciliation_reason != null ? "ambiguous" : "rejected",
           root: rowToRoot(root),
           operation: rowToOperation(operation),
           handle: operationHandle,
@@ -2581,7 +2586,7 @@ export class DeviceExecutionArbiter {
         });
         return { decision: "rejected", root: rowToRoot(root), reason: "root_owned_by_different_device" };
       }
-      if (root.state !== "queued") {
+      if (!rootIsInitialPhase(root)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: input.deviceId,
@@ -2736,7 +2741,7 @@ export class DeviceExecutionArbiter {
         });
         return { decision: "rejected", root: rowToRoot(root), reason: "root_owned_by_different_device" };
       }
-      if (root && root.state !== "queued") {
+      if (root && !rootIsInitialPhase(root)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: input.deviceId,
@@ -2810,7 +2815,7 @@ export class DeviceExecutionArbiter {
     ownerGeneration?: number;
     reason: string;
     actor?: string;
-    state?: Extract<DeviceExecutionState, "reconciling" | "blocked">;
+    state?: DeviceExecutionState;
     metadata?: Record<string, unknown>;
   }): Promise<DeviceExecutionTransitionResult> {
     const toState = input.state ?? "blocked";
@@ -2853,7 +2858,7 @@ export class DeviceExecutionArbiter {
         return { decision: "rejected", root: rowToRoot(root), reason: "root_owned_by_different_device" };
       }
 
-      if (isTerminalState(root.state)) {
+      if (rootIsTerminal(root)) {
         await insertEvent(client, {
           rootId: root.id,
           deviceId: root.device_id,
@@ -3054,7 +3059,7 @@ export class DeviceExecutionArbiter {
         ),
         failed_roots AS (
           UPDATE device_execution_roots roots
-          SET state = 'failed',
+          SET state = candidates.workflow_failure_status,
               terminal_at = COALESCE(roots.terminal_at, NOW()),
               terminal_reason = $1,
               updated_at = NOW(),
@@ -3065,12 +3070,29 @@ export class DeviceExecutionArbiter {
         ),
         failed_operations AS (
           UPDATE device_execution_operations operations
-          SET state = 'failed',
+          SET state = (
+                SELECT definition.status
+                FROM lifecycle_resource_bindings binding
+                JOIN lifecycle_state_definitions definition
+                  ON definition.lifecycle_key = binding.lifecycle_key
+                 AND definition.terminal
+                 AND definition.retryable
+                WHERE binding.resource_table = 'device_execution_operations'::regclass
+                  AND binding.state_column = 'state'::name
+                ORDER BY definition.sort_order, definition.status
+                LIMIT 1
+              ),
+              terminal_at = COALESCE(operations.terminal_at, NOW()),
               updated_at = NOW(),
               metadata = operations.metadata || $3::jsonb
           FROM failed_roots
           WHERE operations.root_id = failed_roots.id
-            AND operations.state NOT IN ('completed', 'failed', 'cancelled')
+            AND NOT lifecycle_state_matches(
+                  'device_execution_operations'::regclass,
+                  operations.state,
+                  '{"terminal":true}'::jsonb,
+                  'state'::name
+                )
           RETURNING operations.id
         )
         INSERT INTO device_execution_events
@@ -3079,7 +3101,7 @@ export class DeviceExecutionArbiter {
                candidates.device_id,
                'undispatched_timed_out_workflow_reconciled',
                candidates.previous_state,
-               'failed',
+               candidates.workflow_failure_status,
                $2,
                $1,
                $3::jsonb
@@ -3125,7 +3147,12 @@ export class DeviceExecutionArbiter {
 	           ON workflow_state.lifecycle_key = workflows.lifecycle_key
 	          AND workflow_state.status = workflows.status
 	         WHERE roots.root_kind = 'server_workflow'
-	           AND roots.state IN ('blocked', 'reconciling')
+	           AND lifecycle_state_matches(
+                 'device_execution_roots'::regclass,
+                 roots.state,
+                 '{"manual":true,"terminal":false}'::jsonb,
+                 'state'::name
+               )
 	           AND workflow_state.terminal
            AND workflows.completed_at IS NOT NULL
          ORDER BY roots.device_id`,
@@ -3158,7 +3185,12 @@ export class DeviceExecutionArbiter {
            AND root_operation.operation_id = roots.external_id
            AND root_operation.owner_generation = roots.owner_generation
           WHERE roots.root_kind = 'server_workflow'
-            AND roots.state IN ('blocked', 'reconciling')
+            AND lifecycle_state_matches(
+                  'device_execution_roots'::regclass,
+                  roots.state,
+                  '{"manual":true,"terminal":false}'::jsonb,
+                  'state'::name
+                )
 	            AND workflow_state.terminal
             AND workflows.completed_at IS NOT NULL
             AND NOT EXISTS (
@@ -3169,12 +3201,22 @@ export class DeviceExecutionArbiter {
                   child.operation_kind = 'workflow'
                   AND child.operation_id = roots.external_id
                 )
-                AND child.state NOT IN ('completed', 'failed', 'cancelled', 'rejected')
+                AND NOT lifecycle_state_matches(
+                      'device_execution_operations'::regclass,
+                      child.state,
+                      '{"terminal":true}'::jsonb,
+                      'state'::name
+                    )
                 AND NOT (
                   child.operation_kind = 'job'
                   AND child.device_id = roots.device_id
                   AND child.owner_generation = roots.owner_generation
-                  AND child.state IN ('blocked', 'reconciling')
+                  AND lifecycle_state_matches(
+                        'device_execution_operations'::regclass,
+                        child.state,
+                        '{"manual":true,"terminal":false}'::jsonb,
+                        'state'::name
+                      )
                   AND EXISTS (
                     SELECT 1
                     FROM jobs child_job
@@ -3231,7 +3273,12 @@ export class DeviceExecutionArbiter {
           WHERE operations.root_id = candidates.id
             AND operations.device_id = candidates.device_id
             AND operations.owner_generation = candidates.owner_generation
-            AND operations.state IN ('registered', 'dispatching', 'dispatched', 'reconciling', 'blocked')
+            AND NOT lifecycle_state_matches(
+                  'device_execution_operations'::regclass,
+                  operations.state,
+                  '{"terminal":true}'::jsonb,
+                  'state'::name
+                )
           RETURNING operations.id
         )
         INSERT INTO device_execution_events
@@ -3272,14 +3319,31 @@ export class DeviceExecutionArbiter {
       const reconciled = await client.query<{ id: string }>(
         `
         WITH candidates AS (
-          SELECT id, device_id, state AS previous_state
+          SELECT id, device_id, state AS previous_state,
+                 lifecycle_transition_target(
+                   'device_execution_roots'::regclass,
+                   state,
+                   '{"targetManual":true,"targetTerminal":false,"automatic":true}'::jsonb,
+                   'state'::name
+                 ) AS target_state
           FROM device_execution_roots
-          WHERE state IN ('claimed', 'dispatching', 'dispatched')
+          WHERE lifecycle_state_matches(
+                  'device_execution_roots'::regclass,
+                  state,
+                  '{"initial":false,"terminal":false,"manual":false}'::jsonb,
+                  'state'::name
+                )
+            AND lifecycle_transition_target(
+                  'device_execution_roots'::regclass,
+                  state,
+                  '{"targetManual":true,"targetTerminal":false,"automatic":true}'::jsonb,
+                  'state'::name
+                ) IS NOT NULL
           FOR UPDATE
         ),
         updated_roots AS (
           UPDATE device_execution_roots roots
-          SET state = 'reconciling',
+          SET state = candidates.target_state,
               reconciliation_reason = $1,
               updated_at = NOW(),
               metadata = roots.metadata || $3::jsonb
@@ -3289,12 +3353,28 @@ export class DeviceExecutionArbiter {
         ),
         updated_operations AS (
           UPDATE device_execution_operations operations
-          SET state = 'reconciling',
+          SET state = lifecycle_transition_target(
+                'device_execution_operations'::regclass,
+                operations.state,
+                '{"targetManual":true,"targetTerminal":false,"automatic":true}'::jsonb,
+                'state'::name
+              ),
               updated_at = NOW(),
               metadata = operations.metadata || $3::jsonb
           FROM updated_roots
           WHERE operations.root_id = updated_roots.id
-            AND operations.state IN ('registered', 'dispatching', 'dispatched')
+            AND NOT lifecycle_state_matches(
+                  'device_execution_operations'::regclass,
+                  operations.state,
+                  '{"terminal":true}'::jsonb,
+                  'state'::name
+                )
+            AND lifecycle_transition_target(
+                  'device_execution_operations'::regclass,
+                  operations.state,
+                  '{"targetManual":true,"targetTerminal":false,"automatic":true}'::jsonb,
+                  'state'::name
+                ) IS NOT NULL
           RETURNING operations.id
         )
         INSERT INTO device_execution_events
@@ -3307,7 +3387,13 @@ export class DeviceExecutionArbiter {
       );
 
       const ambiguous = await client.query<{ count: string }>(
-        "SELECT COUNT(*)::text AS count FROM device_execution_roots WHERE state IN ('reconciling', 'blocked')"
+        `SELECT COUNT(*)::text AS count FROM device_execution_roots
+         WHERE lifecycle_state_matches(
+           'device_execution_roots'::regclass,
+           state,
+           '{"manual":true,"terminal":false}'::jsonb,
+           'state'::name
+         )`
       );
 
       return {
@@ -3326,13 +3412,26 @@ export class DeviceExecutionArbiter {
     const [active, queued, recent] = await Promise.all([
       this.dbProvider().query<DeviceExecutionRootRow>(
         `SELECT * FROM device_execution_roots
-         WHERE device_id = $1 AND state IN (${ACTIVE_STATE_SQL})
+         WHERE device_id = $1
+           AND lifecycle_state_matches(
+             'device_execution_roots'::regclass,
+             state,
+             '{"initial":false,"terminal":false}'::jsonb,
+             'state'::name
+           )
          ORDER BY updated_at DESC
          LIMIT 1`,
         [deviceId]
       ),
       this.dbProvider().query<{ count: string }>(
-        "SELECT COUNT(*)::text AS count FROM device_execution_roots WHERE device_id = $1 AND state = 'queued'",
+        `SELECT COUNT(*)::text AS count FROM device_execution_roots
+         WHERE device_id = $1
+           AND lifecycle_state_matches(
+             'device_execution_roots'::regclass,
+             state,
+             '{"initial":true}'::jsonb,
+             'state'::name
+           )`,
         [deviceId]
       ),
       this.dbProvider().query<DeviceExecutionRootRow>(
@@ -3429,7 +3528,13 @@ async function selectOperationByIdentity(
 async function selectActiveRoot(client: Queryable, deviceId: string): Promise<DeviceExecutionRootRow | null> {
   const result = await client.query<DeviceExecutionRootRow>(
     `SELECT * FROM device_execution_roots
-     WHERE device_id = $1 AND state IN (${ACTIVE_STATE_SQL})
+     WHERE device_id = $1
+       AND lifecycle_state_matches(
+         'device_execution_roots'::regclass,
+         state,
+         '{"initial":false,"terminal":false}'::jsonb,
+         'state'::name
+       )
      ORDER BY updated_at DESC
      LIMIT 1
      FOR UPDATE`,
@@ -3441,7 +3546,13 @@ async function selectActiveRoot(client: Queryable, deviceId: string): Promise<De
 async function selectOldestQueuedRoot(client: Queryable, deviceId: string): Promise<DeviceExecutionRootRow | null> {
   const result = await client.query<DeviceExecutionRootRow>(
     `SELECT * FROM device_execution_roots
-     WHERE device_id = $1 AND state = 'queued'
+     WHERE device_id = $1
+       AND lifecycle_state_matches(
+         'device_execution_roots'::regclass,
+         state,
+         '{"initial":true}'::jsonb,
+         'state'::name
+       )
      ORDER BY fifo_sequence ASC
      LIMIT 1
      FOR UPDATE SKIP LOCKED`,
@@ -3462,8 +3573,8 @@ async function insertRoot(
 ): Promise<DeviceExecutionRootRow> {
   const result = await client.query<DeviceExecutionRootRow>(
     `INSERT INTO device_execution_roots
-       (device_id, root_kind, external_id, request_key, state, metadata)
-     VALUES ($1, $2, $3, $4, 'queued', $5::jsonb)
+       (device_id, root_kind, external_id, request_key, metadata)
+     VALUES ($1, $2, $3, $4, $5::jsonb)
      RETURNING *`,
     [
       input.deviceId,
@@ -3482,7 +3593,7 @@ async function upsertOperation(
     root: DeviceExecutionRootRow;
     operationKind: DeviceExecutionOperationKind;
     operationId: string;
-    state: DeviceExecutionOperationState;
+    targetState?: DeviceExecutionOperationState;
     egressLane: DeviceExecutionEgressLane;
     wireType: string | null;
     metadata: Record<string, unknown>;
@@ -3492,20 +3603,49 @@ async function upsertOperation(
   const result = await client.query<DeviceExecutionOperationRow>(
     `INSERT INTO device_execution_operations
        (root_id, device_id, root_kind, operation_kind, operation_id, owner_generation, state, egress_lane, wire_type, wire_handle, metadata)
-     VALUES ($1, $2, $3, $4, $5, $6::bigint, $7, $8, $9, $10::jsonb, $11::jsonb)
+     VALUES (
+       $1, $2, $3, $4, $5, $6::bigint,
+       COALESCE($7, (
+         SELECT definition.status
+         FROM lifecycle_resource_bindings binding
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = binding.lifecycle_key
+         WHERE binding.resource_table = 'device_execution_operations'::regclass
+           AND binding.state_column = 'state'::name
+           AND definition.initial
+         ORDER BY definition.sort_order, definition.status
+         LIMIT 1
+       )),
+       $8, $9, $10::jsonb, $11::jsonb
+     )
      ON CONFLICT (operation_kind, operation_id) DO UPDATE
        SET owner_generation = CASE
-             WHEN device_execution_operations.state = 'registered' THEN EXCLUDED.owner_generation
+             WHEN lifecycle_state_matches(
+               'device_execution_operations'::regclass,
+               device_execution_operations.state,
+               '{"initial":true}'::jsonb,
+               'state'::name
+             ) THEN EXCLUDED.owner_generation
              ELSE device_execution_operations.owner_generation
            END,
            state = CASE
-             WHEN device_execution_operations.state = 'registered' THEN EXCLUDED.state
+             WHEN lifecycle_state_matches(
+               'device_execution_operations'::regclass,
+               device_execution_operations.state,
+               '{"initial":true}'::jsonb,
+               'state'::name
+             ) THEN EXCLUDED.state
              ELSE device_execution_operations.state
            END,
            egress_lane = EXCLUDED.egress_lane,
            wire_type = COALESCE(EXCLUDED.wire_type, device_execution_operations.wire_type),
            wire_handle = CASE
-             WHEN device_execution_operations.state = 'registered' THEN EXCLUDED.wire_handle
+             WHEN lifecycle_state_matches(
+               'device_execution_operations'::regclass,
+               device_execution_operations.state,
+               '{"initial":true}'::jsonb,
+               'state'::name
+             ) THEN EXCLUDED.wire_handle
              ELSE device_execution_operations.wire_handle
            END,
            metadata = CASE
@@ -3523,7 +3663,7 @@ async function upsertOperation(
       input.operationKind,
       input.operationId,
       toNumber(input.root.owner_generation),
-      input.state,
+      input.targetState ?? null,
       input.egressLane,
       input.wireType,
       JSON.stringify(encodeDeviceExecutionHandle(handle)),
@@ -3542,22 +3682,24 @@ async function updateRootState(
   input: {
     rootId: string;
     fromStates: DeviceExecutionState[];
-    toState: Extract<DeviceExecutionState, "claimed" | "dispatching" | "dispatched">;
+    toState: DeviceExecutionState;
     ownerGenerationIncrement: boolean;
     metadata?: Record<string, unknown>;
   },
 ): Promise<DeviceExecutionRootRow | null> {
-  const timestampColumn =
-    input.toState === "claimed"
-      ? "claimed_at"
-      : input.toState === "dispatching"
-        ? "dispatching_at"
-        : "dispatched_at";
   const result = await client.query<DeviceExecutionRootRow>(
     `UPDATE device_execution_roots
      SET state = $1,
          owner_generation = owner_generation + $2::bigint,
-         ${timestampColumn} = NOW(),
+         claimed_at = COALESCE(claimed_at, NOW()),
+         dispatching_at = CASE
+           WHEN claimed_at IS NOT NULL THEN COALESCE(dispatching_at, NOW())
+           ELSE dispatching_at
+         END,
+         dispatched_at = CASE
+           WHEN dispatching_at IS NOT NULL THEN COALESCE(dispatched_at, NOW())
+           ELSE dispatched_at
+         END,
          updated_at = NOW(),
          metadata = metadata || $3::jsonb
      WHERE id = $4
@@ -3586,23 +3728,29 @@ async function updateOperationState(
     metadata?: Record<string, unknown>;
   },
 ): Promise<DeviceExecutionOperationRow | null> {
-  const timestampColumn =
-    input.toState === "dispatching"
-      ? "dispatching_at"
-      : input.toState === "dispatched"
-        ? "dispatched_at"
-        : isTerminalOperationState(input.toState)
-          ? "terminal_at"
-          : null;
-  const timestampAssignment = timestampColumn ? `, ${timestampColumn} = NOW()` : "";
+  const target = await getResourceLifecycleState(
+    "device_execution_operations",
+    input.toState,
+    "state",
+    client,
+  );
+  if (!target) throw new Error("Device execution operation target state is not configured");
   const result = await client.query<DeviceExecutionOperationRow>(
     `UPDATE device_execution_operations
      SET state = $1,
          owner_generation = COALESCE($2::bigint, owner_generation),
          updated_at = NOW(),
          metadata = metadata || $3::jsonb,
-         wire_handle = COALESCE($4::jsonb, wire_handle)
-         ${timestampAssignment}
+         wire_handle = COALESCE($4::jsonb, wire_handle),
+         dispatching_at = CASE
+           WHEN NOT $8::boolean THEN COALESCE(dispatching_at, NOW())
+           ELSE dispatching_at
+         END,
+         dispatched_at = CASE
+           WHEN NOT $8::boolean AND dispatching_at IS NOT NULL THEN COALESCE(dispatched_at, NOW())
+           ELSE dispatched_at
+         END,
+         terminal_at = CASE WHEN $8::boolean THEN NOW() ELSE terminal_at END
      WHERE operation_kind = $5
        AND operation_id = $6
        AND state = ANY($7::text[])
@@ -3615,6 +3763,7 @@ async function updateOperationState(
       input.operationKind,
       input.operationId,
       input.fromStates,
+      target.terminal,
     ]
   );
   return result.rows[0] ?? null;
@@ -3630,13 +3779,29 @@ async function cancelRegisteredOperationsForRoot(
 ): Promise<DeviceExecutionOperationRow[]> {
   const result = await client.query<DeviceExecutionOperationRow>(
     `UPDATE device_execution_operations
-     SET state = 'cancelled',
+     SET state = lifecycle_transition_target(
+           'device_execution_operations'::regclass,
+           state,
+           '{"targetTerminal":true,"manualAllowed":true,"markCompleted":true}'::jsonb,
+           'state'::name
+         ),
          owner_generation = $2::bigint,
          terminal_at = NOW(),
          updated_at = NOW(),
          metadata = metadata || $3::jsonb
      WHERE root_id = $1
-       AND state = 'registered'
+       AND lifecycle_state_matches(
+             'device_execution_operations'::regclass,
+             state,
+             '{"initial":true}'::jsonb,
+             'state'::name
+           )
+       AND lifecycle_transition_target(
+             'device_execution_operations'::regclass,
+             state,
+             '{"targetTerminal":true,"manualAllowed":true,"markCompleted":true}'::jsonb,
+             'state'::name
+           ) IS NOT NULL
      RETURNING *`,
     [input.rootId, input.ownerGeneration, JSON.stringify(input.metadata ?? {})],
   );
@@ -3649,7 +3814,7 @@ async function updateRootTerminal(
     rootId: string;
     deviceId: string;
     ownerGeneration: number;
-    toState: Extract<DeviceExecutionState, "completed" | "failed" | "cancelled">;
+    toState: DeviceExecutionState;
     reason: string;
     metadata?: Record<string, unknown>;
   },
@@ -3664,7 +3829,12 @@ async function updateRootTerminal(
      WHERE id = $4
        AND device_id = $5
        AND owner_generation = $6::bigint
-       AND state NOT IN (${TERMINAL_STATE_SQL})
+       AND NOT lifecycle_state_matches(
+         'device_execution_roots'::regclass,
+         state,
+         '{"terminal":true}'::jsonb,
+         'state'::name
+       )
      RETURNING *`,
     [
       input.toState,
@@ -3690,7 +3860,12 @@ async function updateQueuedRootTerminal(
 ): Promise<DeviceExecutionRootRow | null> {
   const result = await client.query<DeviceExecutionRootRow>(
     `UPDATE device_execution_roots
-     SET state = 'cancelled',
+     SET state = lifecycle_transition_target(
+           'device_execution_roots'::regclass,
+           state,
+           '{"targetTerminal":true,"manualAllowed":true,"markCompleted":true}'::jsonb,
+           'state'::name
+         ),
          terminal_reason = $1,
          terminal_at = NOW(),
          updated_at = NOW(),
@@ -3698,7 +3873,18 @@ async function updateQueuedRootTerminal(
      WHERE id = $3
        AND device_id = $4
        AND owner_generation = $5::bigint
-       AND state = 'queued'
+       AND lifecycle_state_matches(
+             'device_execution_roots'::regclass,
+             state,
+             '{"initial":true}'::jsonb,
+             'state'::name
+           )
+       AND lifecycle_transition_target(
+             'device_execution_roots'::regclass,
+             state,
+             '{"targetTerminal":true,"manualAllowed":true,"markCompleted":true}'::jsonb,
+             'state'::name
+           ) IS NOT NULL
      RETURNING *`,
     [
       input.reason,
@@ -3717,7 +3903,7 @@ async function updateRootAmbiguous(
     rootId: string;
     deviceId: string;
     ownerGeneration: number;
-    toState: Extract<DeviceExecutionState, "reconciling" | "blocked">;
+    toState: DeviceExecutionState;
     reason: string;
     metadata?: Record<string, unknown>;
   },
@@ -3731,7 +3917,12 @@ async function updateRootAmbiguous(
      WHERE id = $4
        AND device_id = $5
        AND owner_generation = $6::bigint
-       AND state NOT IN (${TERMINAL_STATE_SQL})
+       AND NOT lifecycle_state_matches(
+         'device_execution_roots'::regclass,
+         state,
+         '{"terminal":true}'::jsonb,
+         'state'::name
+       )
      RETURNING *`,
     [
       input.toState,
@@ -3882,12 +4073,47 @@ function toNumber(value: string | number): number {
   return typeof value === "number" ? value : Number(value);
 }
 
-function isTerminalState(state: DeviceExecutionState): boolean {
-  return (DEVICE_EXECUTION_TERMINAL_STATES as readonly string[]).includes(state);
+function rootIsTerminal(root: DeviceExecutionRootRow): boolean {
+  return root.terminal_at != null;
 }
 
-function isTerminalOperationState(state: DeviceExecutionOperationState): boolean {
-  return (["completed", "failed", "cancelled"] as readonly string[]).includes(state);
+function operationIsTerminal(operation: DeviceExecutionOperationRow): boolean {
+  return operation.terminal_at != null;
+}
+
+function rootIsInitialPhase(root: DeviceExecutionRootRow): boolean {
+  return root.claimed_at == null
+    && root.dispatching_at == null
+    && root.dispatched_at == null
+    && root.terminal_at == null
+    && root.reconciliation_reason == null;
+}
+
+function rootIsClaimed(root: DeviceExecutionRootRow): boolean {
+  return root.claimed_at != null
+    && root.dispatching_at == null
+    && root.dispatched_at == null
+    && root.terminal_at == null;
+}
+
+function rootIsDispatching(root: DeviceExecutionRootRow): boolean {
+  return root.dispatching_at != null
+    && root.dispatched_at == null
+    && root.terminal_at == null;
+}
+
+function rootIsDispatched(root: DeviceExecutionRootRow): boolean {
+  return root.dispatched_at != null && root.terminal_at == null;
+}
+
+function operationIsDispatching(operation: DeviceExecutionOperationRow): boolean {
+  return operation.dispatching_at != null
+    && operation.dispatched_at == null
+    && operation.terminal_at == null;
+}
+
+function operationIsDispatched(operation: DeviceExecutionOperationRow): boolean {
+  return operation.dispatched_at != null && operation.terminal_at == null;
 }
 
 function deviceExecutionHandlesEqual(left: DeviceExecutionHandle, right: DeviceExecutionHandle): boolean {
@@ -3920,11 +4146,6 @@ function isRootKind(value: string): value is DeviceExecutionRootKind {
 
 function isOperationKind(value: string): value is DeviceExecutionOperationKind {
   return ["job", "batch", "workflow", "control", "admin"].includes(value);
-}
-
-function normalizeTerminalState(status: string): Extract<DeviceExecutionState, "completed" | "failed" | "cancelled"> {
-  if (status === "completed" || status === "cancelled") return status;
-  return "failed";
 }
 
 function parseStringArray(value: unknown): string[] {

@@ -26,6 +26,11 @@ interface RootRow {
   fifo_sequence: number;
   owner_generation: number;
   observe_mode: boolean;
+  claimed_at: Date | null;
+  dispatching_at: Date | null;
+  dispatched_at: Date | null;
+  terminal_at: Date | null;
+  reconciliation_reason: string | null;
   metadata: Record<string, unknown>;
   created_at: Date;
   updated_at: Date;
@@ -55,6 +60,9 @@ interface OperationRow {
   wire_type: string | null;
   wire_handle: Record<string, unknown>;
   metadata: Record<string, unknown>;
+  dispatching_at: Date | null;
+  dispatched_at: Date | null;
+  terminal_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -66,16 +74,26 @@ interface WorkflowRow {
 }
 
 function root(overrides: Partial<RootRow> = {}): RootRow {
+  const state = overrides.state ?? "queued";
+  const progressed = !["queued"].includes(state);
+  const dispatching = ["dispatching", "dispatched", "reconciling", "blocked", "completed", "failed", "cancelled"].includes(state);
+  const dispatched = ["dispatched", "reconciling", "blocked", "completed", "failed", "cancelled"].includes(state);
+  const terminal = ["completed", "failed", "cancelled"].includes(state);
   return {
     id: overrides.id ?? `root-${Math.random().toString(16).slice(2)}`,
     device_id: overrides.device_id ?? DEVICE_A,
     root_kind: overrides.root_kind ?? "job",
     external_id: overrides.external_id ?? null,
     request_key: overrides.request_key ?? null,
-    state: overrides.state ?? "queued",
+    state,
     fifo_sequence: overrides.fifo_sequence ?? 1,
     owner_generation: overrides.owner_generation ?? 0,
     observe_mode: overrides.observe_mode ?? true,
+    claimed_at: overrides.claimed_at ?? (progressed ? new Date("2026-07-15T19:30:10.000Z") : null),
+    dispatching_at: overrides.dispatching_at ?? (dispatching ? new Date("2026-07-15T19:30:20.000Z") : null),
+    dispatched_at: overrides.dispatched_at ?? (dispatched ? new Date("2026-07-15T19:30:30.000Z") : null),
+    terminal_at: overrides.terminal_at ?? (terminal ? new Date("2026-07-15T19:30:40.000Z") : null),
+    reconciliation_reason: overrides.reconciliation_reason ?? (["reconciling", "blocked"].includes(state) ? "fixture" : null),
     metadata: overrides.metadata ?? {},
     created_at: overrides.created_at ?? new Date("2026-07-15T19:30:00.000Z"),
     updated_at: overrides.updated_at ?? new Date("2026-07-15T19:30:00.000Z"),
@@ -83,6 +101,10 @@ function root(overrides: Partial<RootRow> = {}): RootRow {
 }
 
 function operation(overrides: Partial<OperationRow> = {}): OperationRow {
+  const state = overrides.state ?? "registered";
+  const dispatching = ["dispatching", "dispatched", "reconciling", "blocked", "completed", "failed", "cancelled", "rejected"].includes(state);
+  const dispatched = ["dispatched", "reconciling", "blocked", "completed", "failed", "cancelled"].includes(state);
+  const terminal = ["completed", "failed", "cancelled"].includes(state);
   return {
     id: overrides.id ?? 1,
     root_id: overrides.root_id ?? "root-1",
@@ -91,11 +113,14 @@ function operation(overrides: Partial<OperationRow> = {}): OperationRow {
     operation_kind: overrides.operation_kind ?? "job",
     operation_id: overrides.operation_id ?? "job-1",
     owner_generation: overrides.owner_generation ?? 0,
-    state: overrides.state ?? "registered",
+    state,
     egress_lane: overrides.egress_lane ?? "device_execution",
     wire_type: overrides.wire_type ?? null,
     wire_handle: overrides.wire_handle ?? {},
     metadata: overrides.metadata ?? {},
+    dispatching_at: overrides.dispatching_at ?? (dispatching ? new Date("2026-07-15T19:30:20.000Z") : null),
+    dispatched_at: overrides.dispatched_at ?? (dispatched ? new Date("2026-07-15T19:30:30.000Z") : null),
+    terminal_at: overrides.terminal_at ?? (terminal ? new Date("2026-07-15T19:30:40.000Z") : null),
     created_at: overrides.created_at ?? new Date("2026-07-15T19:30:00.000Z"),
     updated_at: overrides.updated_at ?? new Date("2026-07-15T19:30:00.000Z"),
   };
@@ -123,6 +148,30 @@ class FakeClient {
       return { rows: [], rowCount: 0 };
     }
     if (normalized.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 0 };
+
+    if (normalized.startsWith("SELECT state.lifecycle_key, state.status") &&
+        normalized.includes("FROM lifecycle_resource_bindings binding")) {
+      const [tableName, status] = params as [string, string];
+      const initial = tableName === "device_execution_roots" ? status === "queued" : status === "registered";
+      const terminal = ["completed", "failed", "cancelled"].includes(status);
+      return {
+        rows: [{
+          lifecycle_key: tableName,
+          status,
+          initial,
+          terminal,
+          retryable: false,
+          administrative: status === "cancelled",
+          dispatchable: !terminal,
+          manual: ["reconciling", "blocked"].includes(status),
+          stale_after_ms: null,
+          stale_action_key: null,
+          description: null,
+          metadata: {},
+        }],
+        rowCount: 1,
+      };
+    }
 
     if (normalized.startsWith("SELECT id, device_id, status, lifecycle_key FROM workflows WHERE id = $1 FOR UPDATE")) {
       const [workflowId] = params as [string];
@@ -173,13 +222,17 @@ class FakeClient {
       return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
     }
 
-    if (normalized.includes("WHERE device_id = $1 AND state IN ('claimed', 'dispatching', 'dispatched', 'reconciling', 'blocked')")) {
+    if (normalized.includes("WHERE device_id = $1") &&
+        normalized.includes("lifecycle_state_matches(") &&
+        normalized.includes("'\"initial\":false,\"terminal\":false'".slice(1, -1))) {
       const [deviceId] = params as [string];
       const found = this.roots.find((item) => item.device_id === deviceId && ["claimed", "dispatching", "dispatched", "reconciling", "blocked"].includes(item.state));
       return { rows: found ? [found] : [], rowCount: found ? 1 : 0 };
     }
 
-    if (normalized.includes("WHERE device_id = $1 AND state = 'queued'")) {
+    if (normalized.includes("WHERE device_id = $1") &&
+        normalized.includes("lifecycle_state_matches(") &&
+        normalized.includes('"initial":true')) {
       const [deviceId] = params as [string];
       const found = this.roots
         .filter((item) => item.device_id === deviceId && item.state === "queued")
@@ -221,7 +274,7 @@ class FakeClient {
         if (existing.root_id === rootId) {
           if (existing.state === "registered") {
             existing.owner_generation = Number(ownerGeneration);
-            existing.state = state;
+            existing.state = state ?? "registered";
             existing.wire_handle = JSON.parse(wireHandle) as Record<string, unknown>;
           }
           existing.egress_lane = egressLane;
@@ -240,7 +293,7 @@ class FakeClient {
         operation_kind: operationKind,
         operation_id: operationId,
         owner_generation: Number(ownerGeneration),
-        state,
+        state: state ?? "registered",
         egress_lane: egressLane,
         wire_type: wireType,
         wire_handle: JSON.parse(wireHandle) as Record<string, unknown>,
@@ -266,8 +319,34 @@ class FakeClient {
       const found = this.roots.find((item) => item.id === rootId && item.device_id === deviceId && item.owner_generation === ownerGeneration && !["completed", "failed", "cancelled"].includes(item.state));
       if (!found) return { rows: [], rowCount: 0 };
       found.state = toState;
+      if (toState === "dispatching") {
+        found.dispatching_at = new Date("2026-07-15T19:31:00.000Z");
+      }
+      if (toState === "dispatched") {
+        found.dispatching_at ??= new Date("2026-07-15T19:31:00.000Z");
+        found.dispatched_at = new Date("2026-07-15T19:31:00.000Z");
+      }
+      found.terminal_at = new Date("2026-07-15T19:31:00.000Z");
       found.metadata = { ...found.metadata, ...(JSON.parse(metadata) as Record<string, unknown>) };
       found.updated_at = new Date("2026-07-15T19:31:00.000Z");
+      found.metadata.terminalReason = reason;
+      return { rows: [found], rowCount: 1 };
+    }
+
+    if (normalized.startsWith("UPDATE device_execution_roots") &&
+        normalized.includes("state = lifecycle_transition_target(") &&
+        normalized.includes("terminal_reason = $1")) {
+      const [reason, metadata, rootId, deviceId, ownerGeneration] = params as [string, string, string, string, number];
+      const found = this.roots.find((item) =>
+        item.id === rootId &&
+        item.device_id === deviceId &&
+        item.owner_generation === ownerGeneration &&
+        item.state === "queued"
+      );
+      if (!found) return { rows: [], rowCount: 0 };
+      found.state = "cancelled";
+      found.terminal_at = new Date("2026-07-15T19:31:00.000Z");
+      found.metadata = { ...found.metadata, ...(JSON.parse(metadata) as Record<string, unknown>) };
       found.metadata.terminalReason = reason;
       return { rows: [found], rowCount: 1 };
     }
@@ -277,17 +356,21 @@ class FakeClient {
       const found = this.roots.find((item) => item.id === rootId && item.device_id === deviceId && item.owner_generation === ownerGeneration && !["completed", "failed", "cancelled"].includes(item.state));
       if (!found) return { rows: [], rowCount: 0 };
       found.state = toState;
+      found.reconciliation_reason = reason;
       found.metadata = { ...found.metadata, ...(JSON.parse(metadata) as Record<string, unknown>) };
       found.updated_at = new Date("2026-07-15T19:31:00.000Z");
       found.metadata.reconciliationReason = reason;
       return { rows: [found], rowCount: 1 };
     }
 
-    if (normalized.startsWith("UPDATE device_execution_operations") && normalized.includes("WHERE root_id = $1") && normalized.includes("state = 'registered'")) {
+    if (normalized.startsWith("UPDATE device_execution_operations") &&
+        normalized.includes("WHERE root_id = $1") &&
+        normalized.includes('"initial":true')) {
       const [rootId, ownerGeneration, metadata] = params as [string, number, string];
       const found = this.operations.filter((item) => item.root_id === rootId && item.state === "registered");
       for (const item of found) {
         item.state = "cancelled";
+        item.terminal_at = new Date("2026-07-15T19:31:00.000Z");
         item.owner_generation = ownerGeneration;
         item.metadata = { ...item.metadata, ...(JSON.parse(metadata) as Record<string, unknown>) };
         item.updated_at = new Date("2026-07-15T19:31:00.000Z");
@@ -308,6 +391,16 @@ class FakeClient {
       const found = this.operations.find((item) => item.operation_kind === operationKind && item.operation_id === operationId && fromStates.includes(item.state));
       if (!found) return { rows: [], rowCount: 0 };
       found.state = toState;
+      if (toState === "dispatching") {
+        found.dispatching_at = new Date("2026-07-15T19:31:00.000Z");
+      }
+      if (toState === "dispatched") {
+        found.dispatching_at ??= new Date("2026-07-15T19:31:00.000Z");
+        found.dispatched_at = new Date("2026-07-15T19:31:00.000Z");
+      }
+      if (["completed", "failed", "cancelled"].includes(toState)) {
+        found.terminal_at = new Date("2026-07-15T19:31:00.000Z");
+      }
       if (ownerGeneration !== null) found.owner_generation = ownerGeneration;
       if (wireHandle !== null) found.wire_handle = JSON.parse(wireHandle) as Record<string, unknown>;
       found.metadata = { ...found.metadata, ...(JSON.parse(metadata) as Record<string, unknown>) };
@@ -320,6 +413,9 @@ class FakeClient {
       const found = this.roots.find((item) => item.id === rootId && fromStates.includes(item.state));
       if (!found) return { rows: [], rowCount: 0 };
       found.state = toState;
+      if (toState === "claimed") found.claimed_at = new Date("2026-07-15T19:31:00.000Z");
+      if (toState === "dispatching") found.dispatching_at = new Date("2026-07-15T19:31:00.000Z");
+      if (toState === "dispatched") found.dispatched_at = new Date("2026-07-15T19:31:00.000Z");
       found.owner_generation += increment;
       found.metadata = { ...found.metadata, ...(JSON.parse(metadata) as Record<string, unknown>) };
       found.updated_at = new Date("2026-07-15T19:31:00.000Z");
@@ -350,7 +446,9 @@ class FakeClient {
       return { rows: [], rowCount: 1 };
     }
 
-    if (normalized.startsWith("WITH candidates AS ( SELECT id, device_id, state AS previous_state FROM device_execution_roots WHERE state IN ('claimed', 'dispatching', 'dispatched')")) {
+    if (normalized.startsWith("WITH candidates AS ( SELECT id, device_id, state AS previous_state") &&
+        normalized.includes("lifecycle_transition_target(") &&
+        normalized.includes("startup_reconciled_root")) {
       const [reason, actor, metadata] = params as [string, string, string];
       const patch = JSON.parse(metadata) as Record<string, unknown>;
       const candidates = this.roots.filter((item) => ["claimed", "dispatching", "dispatched"].includes(item.state));
@@ -377,7 +475,8 @@ class FakeClient {
       return { rows: candidates.map((item) => ({ id: item.id })), rowCount: candidates.length };
     }
 
-    if (normalized.startsWith("SELECT COUNT(*)::text AS count FROM device_execution_roots WHERE state IN ('reconciling', 'blocked')")) {
+    if (normalized.startsWith("SELECT COUNT(*)::text AS count FROM device_execution_roots WHERE") &&
+        normalized.includes('"manual":true,"terminal":false')) {
       const count = this.roots.filter((item) => ["reconciling", "blocked"].includes(item.state)).length;
       return { rows: [{ count: String(count) }], rowCount: 1 };
     }
@@ -853,7 +952,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
           status: "completed",
           actor: "test.fast_result",
         });
-        expect(accepted.accepted).toBe(true);
+        expect(accepted.accepted, JSON.stringify(accepted)).toBe(true);
         return true;
       },
     });
@@ -1543,9 +1642,9 @@ describe("DeviceExecutionArbiter schema gate and migration", () => {
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS device_execution_events");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS device_execution_operations");
     expect(sql).toContain("ADD COLUMN IF NOT EXISTS");
-    expect(sql).toContain("idx_device_execution_active_slot");
-    expect(sql).toContain("WHERE state IN ('claimed', 'dispatching', 'dispatched', 'reconciling', 'blocked')");
-    expect(sql).toContain("idx_device_execution_roots_fifo");
+    expect(sql).toContain("DROP INDEX IF EXISTS idx_device_execution_active_slot");
+    expect(sql).toContain("idx_device_execution_roots_state_fifo");
+    expect(sql).not.toContain("WHERE state IN");
     expect(sql).toContain("idx_device_execution_operations_identity");
   });
 });
