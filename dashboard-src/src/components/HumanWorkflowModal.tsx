@@ -102,7 +102,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
       if (isCompileReady(data)) {
         setCompileResult(data);
       } else {
-        setReadyCompileJobId(data.status === "building_segment" ? null : data.compileJobId);
+        setReadyCompileJobId("compileJobId" in data ? data.compileJobId : null);
         setCompileJob(data);
       }
     } catch (err) {
@@ -136,7 +136,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
     const delayMs = pollingDelayMs(compileJob.retryAfterMs, 2_000);
     const timer = setTimeout(async () => {
       try {
-        const data = compileJob.status === "building_segment"
+        const data = "segmentBuildJobId" in compileJob
           ? await agencyApi.humanWorkflow.compile({
               device_id: device.id,
               account_id: accountId || undefined,
@@ -147,11 +147,11 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
         if (isCompileReady(data)) {
           setCompileResult(data);
           setReadyCompileJobId(
-            compileJob.status === "building_segment" ? null : compileJob.compileJobId,
+            "compileJobId" in compileJob ? compileJob.compileJobId : null,
           );
           setCompileJob(null);
           setCompileFailure(null);
-        } else if (data.status === "failed") {
+        } else if ("terminal" in data && data.terminal) {
           setCompileResult(null);
           setCompileJob(null);
           setCompileFailure(data);
@@ -314,12 +314,12 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
               ) : compileJob ? (
                 <>
                   <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }}>
-                    <Badge label={compileJob.status} color="#f59e0b" />
+                    <Badge label="in progress" color="#f59e0b" />
                     <Badge label="polling" color="#60a5fa" />
                   </div>
                   <Metric
                     label="Job"
-                    value={compileJob.status === "building_segment"
+                    value={"segmentBuildJobId" in compileJob
                       ? compileJob.segmentBuildJobId
                       : compileJob.compileJobId}
                   />
@@ -336,13 +336,15 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
                   <div style={{ marginTop: "10px", color: "#fca5a5", fontSize: "12px", lineHeight: 1.45 }}>
                     {compileFailure.error}
                   </div>
-                  <button
-                    onClick={retryCompile}
-                    disabled={compiling}
-                    style={{ ...primaryButtonStyle(compiling ? "#334155" : "#2563eb"), marginTop: "12px" }}
-                  >
-                    Retry compile
-                  </button>
+                  {compileFailure.retryable && (
+                    <button
+                      onClick={retryCompile}
+                      disabled={compiling}
+                      style={{ ...primaryButtonStyle(compiling ? "#334155" : "#2563eb"), marginTop: "12px" }}
+                    >
+                      Retry compile
+                    </button>
+                  )}
                 </>
               ) : (
                 <EmptyText value="Compile to preview the generated plan." />
@@ -405,7 +407,7 @@ function isCompileReady(
     | HumanWorkflowCompileJobPendingResult
     | HumanWorkflowCompileJobFailedResult,
 ): result is HumanWorkflowCompileReadyResult {
-  return result.status === undefined || result.status === "ready";
+  return result.ready === true;
 }
 
 function pollingDelayMs(value: number | undefined, fallback: number): number {

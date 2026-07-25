@@ -161,11 +161,10 @@ async function shortcutKeyForJob(job: HumanWorkflowCompileJobRecord): Promise<st
 
 async function compileJobResponse(job: HumanWorkflowCompileJobRecord): Promise<Record<string, unknown>> {
   const state = await humanWorkflowCompileJobService.state(job);
-  const nextAction = state?.retryable
-    ? "retry_compile"
-    : state && !state.terminal
-      ? "poll_compile_job"
-      : undefined;
+  const ready = state?.terminal === true
+    && state.retryable === false
+    && state.administrative === false
+    && !!job.result;
   const llmDebug = job.result?.llmDebug as { attempts?: Array<{ provider?: string; model?: string }> } | undefined;
   const lastAttempt = llmDebug?.attempts?.at(-1);
   const metadata = {
@@ -179,8 +178,9 @@ async function compileJobResponse(job: HumanWorkflowCompileJobRecord): Promise<R
     createdAt: job.createdAt,
     retryCount: job.retryCount,
     lastRetriedAt: job.lastRetriedAt,
+    ready,
+    terminal: state?.terminal === true,
     retryable: state?.retryable === true,
-    nextAction,
     source: job.source,
     shortcutKey: await shortcutKeyForJob(job),
     platform: job.platform,
@@ -195,7 +195,7 @@ async function compileJobResponse(job: HumanWorkflowCompileJobRecord): Promise<R
     debugHistory: job.result?.llmDebugHistory ?? [],
     retryAfterMs: state && !state.terminal ? ASYNC_COMPILE_RETRY_AFTER_MS : undefined,
   };
-  if (state?.terminal && !state.retryable && !state.administrative && job.result) {
+  if (ready) {
     return { ...job.result, ...metadata };
   }
   return metadata;
@@ -1094,7 +1094,7 @@ router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
       accountId,
       intent,
     });
-    if (data.status === "compiling" || data.status === "building_segment") {
+    if (!data.ready) {
       return res.status(202).json({ ok: true, data });
     }
     const { runtimeInputs: _privateRuntimeInputs, ...publicData } = data;
@@ -1334,11 +1334,6 @@ router.post("/workflows/human/compile-jobs/:id/retry", requireAdminAuth, async (
     const job = await humanWorkflowCompilerService.retryCompileJob(req.params.id);
     if (!job) return res.status(404).json({ ok: false, code: "COMPILE_JOB_NOT_FOUND", error: "compile job not found" });
     const state = await humanWorkflowCompileJobService.state(job);
-    const nextAction = state?.retryable
-      ? "retry_compile"
-      : state && !state.terminal
-        ? "poll_compile_job"
-        : undefined;
     res.json({
       ok: true,
       data: {
@@ -1346,8 +1341,10 @@ router.post("/workflows/human/compile-jobs/:id/retry", requireAdminAuth, async (
         compileJobId: job.id,
         requestKey: job.requestKey,
         retryCount: job.retryCount,
+        ready: false,
+        terminal: state?.terminal === true,
+        retryable: state?.retryable === true,
         retryAfterMs: state && !state.terminal ? ASYNC_COMPILE_RETRY_AFTER_MS : undefined,
-        nextAction,
       },
     });
   } catch (err) {
@@ -1435,19 +1432,17 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
         accountId,
         intent,
       });
-      if (ready.status !== "ready") {
-        const pendingId = ready.status === "building_segment"
-          ? ready.segmentBuildJobId
-          : ready.compileJobId;
+      if (!ready.ready) {
+        const compileJobId = "compileJobId" in ready ? ready.compileJobId : undefined;
+        const segmentBuildJobId = "segmentBuildJobId" in ready ? ready.segmentBuildJobId : undefined;
         return res.status(409).json({
           ok: false,
           code: "COMPILE_NOT_READY",
           error: "compiled workflow is not ready",
-          compileJobId: ready.status === "compiling" ? ready.compileJobId : undefined,
-          segmentBuildJobId: ready.status === "building_segment" ? ready.segmentBuildJobId : undefined,
+          compileJobId,
+          segmentBuildJobId,
           requestKey: useRequestKey,
-          nextAction: ready.status === "building_segment" ? "poll_segment_build_job" : "poll_compile_job",
-          pendingId,
+          pendingId: segmentBuildJobId ?? compileJobId,
         });
       }
       compiled = ready;

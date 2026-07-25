@@ -56,7 +56,7 @@ export interface HumanWorkflowTarget {
 }
 
 export type HumanWorkflowCompileReady = {
-  status: "ready";
+  ready: true;
   requestKey: string;
   cacheHit: boolean;
   cacheKey: string;
@@ -100,7 +100,7 @@ export interface HumanWorkflowLlmDebug {
 }
 
 export type HumanWorkflowCompileAccepted = {
-  status: "compiling";
+  ready: false;
   requestKey: string;
   compileJobId: string;
   retryAfterMs: number;
@@ -108,7 +108,7 @@ export type HumanWorkflowCompileAccepted = {
 };
 
 export type HumanWorkflowSegmentBuildAccepted = {
-  status: "building_segment";
+  ready: false;
   requestKey: string;
   segmentBuildJobId: string;
   retryAfterMs: number;
@@ -320,7 +320,7 @@ function readyFromCache(
     throw compilerControlPlaneError("cached workflow has no valid explicit safety class");
   }
   return {
-    status: "ready",
+    ready: true,
     requestKey,
     cacheHit: source === "cache",
     cacheKey: cached.cacheKey,
@@ -370,7 +370,7 @@ async function readyFromComposition(
     });
   }
   return {
-    status: "ready",
+    ready: true,
     requestKey: composed.requestKey,
     cacheHit: true,
     cacheKey: cached.cacheKey,
@@ -559,7 +559,7 @@ export class HumanWorkflowCompilerService {
       }
       segmentBuildJobService.dispatchInBackground(job);
       return {
-        status: "building_segment",
+        ready: false,
         requestKey,
         segmentBuildJobId: job.id,
         retryAfterMs: ASYNC_COMPILE_RETRY_AFTER_MS,
@@ -588,7 +588,7 @@ export class HumanWorkflowCompilerService {
       });
       segmentBuildJobService.dispatchInBackground(job);
       return {
-        status: "building_segment",
+        ready: false,
         requestKey,
         segmentBuildJobId: job.id,
         retryAfterMs: ASYNC_COMPILE_RETRY_AFTER_MS,
@@ -647,7 +647,7 @@ export class HumanWorkflowCompilerService {
     });
     segmentBuildJobService.dispatchInBackground(segmentJob);
     return {
-      status: "building_segment",
+      ready: false,
       requestKey,
       segmentBuildJobId: segmentJob.id,
       retryAfterMs: ASYNC_COMPILE_RETRY_AFTER_MS,
@@ -655,35 +655,6 @@ export class HumanWorkflowCompilerService {
       reason: "segment_missing",
     };
 
-    /*
-    let existingJob = await humanWorkflowCompileJobService.getByRequestKey(requestKey);
-    if (existingJob?.status === "ready" && existingJob.result) {
-      const jobCacheKey = cacheKeyFromCompileJob(existingJob);
-      const cachedJobArtifact = jobCacheKey ? await workflowService.getGeneratedPlanCache(jobCacheKey) : null;
-      if (cachedJobArtifact && humanWorkflowCacheUsable(cachedJobArtifact, controlPlane.version)) {
-        return readyFromCache(cachedJobArtifact, target, requestKey, "cache");
-      }
-      const requeued = await humanWorkflowCompileJobService.requeueMissingArtifact(existingJob.id);
-      existingJob = requeued ?? { ...existingJob, status: "failed", error: "compile artifact missing; retry compile" };
-    }
-    const job = existingJob ?? await humanWorkflowCompileJobService.createOrGet({
-      requestKey,
-      deviceId: input.deviceId,
-      accountId: input.accountId ?? null,
-      intent,
-      platform: target.account_platform,
-    });
-    if (job.status === "queued" || job.status === "failed") {
-      humanWorkflowCompileJobService.runInProcess(job.id, () => this.compileWithLlm({ requestKey, intent, target }));
-    }
-    return {
-      status: "compiling",
-      requestKey,
-      compileJobId: job.id,
-      retryAfterMs: ASYNC_COMPILE_RETRY_AFTER_MS,
-      source: "llm",
-    };
-    */
   }
 
   async getCompileJob(id: string): Promise<HumanWorkflowCompileJobRecord | null> {
@@ -758,7 +729,7 @@ export class HumanWorkflowCompilerService {
       },
     });
     return {
-      status: "ready",
+      ready: true,
       requestKey: input.requestKey,
       cacheHit: false,
       cacheKey: compiledPlan.cacheKey,
@@ -951,7 +922,7 @@ export class HumanWorkflowCompilerService {
         },
       });
       return {
-        status: "ready",
+        ready: true,
         requestKey: input.requestKey,
         cacheHit: false,
         cacheKey: compiledPlan.cacheKey,

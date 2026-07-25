@@ -111,7 +111,7 @@ export interface HumanWorkflowTarget {
 }
 
 export interface HumanWorkflowCompileReadyResult {
-  status?: "ready";
+  ready: true;
   requestKey: string;
   cacheHit: boolean;
   cacheKey?: string;
@@ -141,7 +141,7 @@ export interface HumanWorkflowCompileReadyResult {
 }
 
 export interface HumanWorkflowCompileCompilingResult {
-  status: "compiling";
+  ready: false;
   requestKey: string;
   compileJobId: string;
   retryAfterMs?: number;
@@ -149,7 +149,7 @@ export interface HumanWorkflowCompileCompilingResult {
 }
 
 export interface HumanWorkflowCompileBuildingSegmentResult {
-  status: "building_segment";
+  ready: false;
   requestKey: string;
   segmentBuildJobId: string;
   retryAfterMs?: number;
@@ -163,23 +163,26 @@ export type HumanWorkflowCompileResult =
   | HumanWorkflowCompileBuildingSegmentResult;
 
 export interface HumanWorkflowCompileJobPendingResult {
-  status: "queued" | "running";
+  ready: false;
+  terminal: false;
+  status: string;
   requestKey: string;
   compileJobId: string;
   retryAfterMs?: number;
 }
 
 export interface HumanWorkflowCompileJobFailedResult {
-  status: "failed";
+  ready: false;
+  terminal: true;
+  status: string;
   requestKey: string;
   compileJobId: string;
   error: string;
   retryable: boolean;
-  nextAction?: string;
 }
 
 export type HumanWorkflowCompileJobResult =
-  | (HumanWorkflowCompileReadyResult & { status: "ready"; compileJobId?: string; retryAfterMs?: number })
+  | (HumanWorkflowCompileReadyResult & { status: string; compileJobId?: string; retryAfterMs?: number })
   | HumanWorkflowCompileJobPendingResult
   | HumanWorkflowCompileJobFailedResult;
 
