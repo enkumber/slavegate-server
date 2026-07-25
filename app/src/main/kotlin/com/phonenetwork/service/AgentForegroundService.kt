@@ -191,7 +191,7 @@ class AgentForegroundService : Service() {
                         Log.i(TAG, "OTA update available: $version (code=$versionCode)")
                         updateNotification("Downloading update $version…")
                         beginOtaAttempt(version, versionCode, apkSha256)
-                        sendOtaResult("started", version, versionCode, apkSha256, null)
+                        sendOtaResult(false, false, version, versionCode, apkSha256, null)
                         serviceScope.launch {
                             try {
                                 val result = otaInstaller.downloadVerifyInstall(
@@ -202,11 +202,11 @@ class AgentForegroundService : Service() {
                                     forceDowngrade   = false
                                 )
                                 Log.i(TAG, "OTA update result: $result")
-                                sendOtaResult("success", version, versionCode, apkSha256, null)
+                                sendOtaResult(true, true, version, versionCode, apkSha256, null)
                                 updateNotification("Update applied — restart to activate")
                             } catch (e: Exception) {
                                 Log.e(TAG, "OTA update error: ${e.message}")
-                                sendOtaResult("failed", version, versionCode, apkSha256, e.message)
+                                sendOtaResult(true, false, version, versionCode, apkSha256, e.message)
                                 updateNotification("Update failed")
                             }
                         }
@@ -321,7 +321,8 @@ class AgentForegroundService : Service() {
     }
 
     private fun sendOtaResult(
-        status: String,
+        terminal: Boolean,
+        successful: Boolean,
         version: String,
         versionCode: Int,
         apkSha256: String,
@@ -329,13 +330,13 @@ class AgentForegroundService : Service() {
     ) {
         val payload = JSONObject().apply {
             put("type", "OTA_RESULT")
-            put("status", status)
+            put("terminal", terminal)
+            put("successful", successful)
             put("version", version)
             put("versionCode", versionCode)
             put("apkSha256", apkSha256)
             if (error != null) put("error", error)
         }
-        val terminal = status == "success" || status == "failed"
         val prefs = getSharedPreferences(OTA_STATUS_PREFS, Context.MODE_PRIVATE)
         if (terminal) {
             prefs.edit()
@@ -388,11 +389,12 @@ class AgentForegroundService : Service() {
 
         when {
             versionCode > 0 && BuildConfig.VERSION_CODE == versionCode -> {
-                sendOtaResult("success", version, versionCode, apkSha256, null)
+                sendOtaResult(true, true, version, versionCode, apkSha256, null)
             }
             startedAt > 0L && System.currentTimeMillis() - startedAt >= OTA_ATTEMPT_STALE_MS -> {
                 sendOtaResult(
-                    "failed",
+                    true,
+                    false,
                     version,
                     versionCode,
                     apkSha256,

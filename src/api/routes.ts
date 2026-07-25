@@ -2626,7 +2626,8 @@ router.post("/ota/push", requireAuth, async (req, res) => {
         mandatory,
       });
       directWsServer.recordOtaStatus(device.deviceId, {
-        status: "sent",
+        terminal: false,
+        successful: false,
         version: manifest.version,
         versionCode: manifest.versionCode,
         apkSha256: manifest.sha256,

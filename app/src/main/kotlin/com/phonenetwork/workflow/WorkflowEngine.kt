@@ -125,10 +125,10 @@ class WorkflowEngine(
             executeWorkflowInternal(templateJson, resumeCheckpoint)
         } catch (e: CancellationException) {
             Log.w(TAG, "Workflow cancelled: ${e.message}")
-            sendStatusUpdate("cancelled", error = e.message)
+            sendStatusUpdate("cancelled", terminal = true, error = e.message)
         } catch (e: Exception) {
             Log.e(TAG, "Workflow failed: ${e.message}", e)
-            sendStatusUpdate("failed", error = e.message)
+            sendStatusUpdate("failed", terminal = true, error = e.message)
         } finally {
             running.release()
             currentJob = null
@@ -270,7 +270,7 @@ class WorkflowEngine(
             } catch (e: Exception) {
                 Log.e(TAG, "Step $i failed: ${e.message}")
                 saveCheckpoint(workflowId, i, "step_failed")
-                sendStatusUpdate("failed", error = "Step $i (${step.id}) failed: ${e.message}")
+                sendStatusUpdate("failed", terminal = true, error = "Step $i (${step.id}) failed: ${e.message}")
                 return
             }
 
@@ -283,7 +283,7 @@ class WorkflowEngine(
 
         // Workflow completed successfully
         clearCheckpoint(workflowId)
-        sendStatusUpdate("completed", stepIndex = totalSteps)
+        sendStatusUpdate("completed", terminal = true, stepIndex = totalSteps)
         Log.i(TAG, "Workflow $workflowId completed successfully")
     }
 
@@ -451,11 +451,11 @@ class WorkflowEngine(
             var jobError: String? = null
             var jobOutput = JSONObject()
             jobExecutor.execute(jobPayload) { result ->
-                val status = result.optString("status")
+                val successful = result.optBoolean("successful", false)
                 val output = result.optJSONObject("output")
-                if (status != "completed") {
+                if (!successful) {
                     val error = result.optString("error", "Unknown error")
-                    Log.w(TAG, "Device action $action result: $status error=$error")
+                    Log.w(TAG, "Device action $action failed: $error")
                     jobError = error
                 } else if (jobType in listOf("a11y_find_tap", "ocr_find_tap")) {
                     val found = output?.optBoolean("found", false) ?: false
@@ -699,9 +699,9 @@ class WorkflowEngine(
         }
 
         val result = withTimeout(timeoutMs + 5_000L) { deferred.await() }
-        val status = result.optString("status")
-        if (status != "completed") {
-            throw IllegalStateException("$type failed: ${result.optString("error", status)}")
+        val successful = result.optBoolean("successful", false)
+        if (!successful) {
+            throw IllegalStateException("$type failed: ${result.optString("error", "execution failed")}")
         }
         return result.optJSONObject("output") ?: JSONObject()
     }
@@ -1275,6 +1275,7 @@ class WorkflowEngine(
 
     private fun sendStatusUpdate(
         status: String,
+        terminal: Boolean = false,
         stepIndex: Int = currentStepIndex,
         error: String? = null,
     ) {
@@ -1294,7 +1295,7 @@ class WorkflowEngine(
         // Running checkpoints may be emitted every second during waits. Posting an
         // Android notification for each heartbeat is another Binder IPC and can
         // itself stall the executor. Only terminal states need a local notification.
-        if (status != "running") notifyWorkflowStatus(status, stepIndex, error)
+        if (terminal) notifyWorkflowStatus(status, stepIndex, error)
         sendStatus(payload)
     }
 

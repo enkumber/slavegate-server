@@ -24,7 +24,7 @@ const rules = [
   {
     id: "migration-semantic-lifecycle-seed",
     scope: (path) => path.includes("/src/db/migrations/"),
-    pattern: /\bINSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions)\b/gi,
+    pattern: /\bINSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions|resource_bindings|resource_policies)\b/gi,
   },
   {
     id: "migration-semantic-state-default",
@@ -50,6 +50,26 @@ const rules = [
     id: "runtime-status-literal-union",
     scope: (path) => /\.(?:ts|tsx)$/.test(path),
     pattern: /\b(?:status|state|lifecycleStatus|candidateState|promotionState|libraryState)\??\s*:\s*["'][A-Za-z][A-Za-z0-9_-]*["'](?:\s*\|\s*["'][A-Za-z][A-Za-z0-9_-]*["'])+/g,
+  },
+  {
+    id: "runtime-decision-literal-union",
+    scope: (path) => /\.(?:ts|tsx)$/.test(path),
+    pattern: /\b(?:decision|phase|outcome|artifactState|validationStage)\??\s*:\s*["'][A-Za-z][A-Za-z0-9_-]*["'](?:\s*\|\s*["'][A-Za-z][A-Za-z0-9_-]*["'])+/g,
+  },
+  {
+    id: "runtime-named-transition-target",
+    scope: (path) => !path.includes("/src/db/migrations/") && /\.(?:ts|tsx)$/.test(path),
+    pattern: /\b(?:toState|targetStatus|fromStatus)\s*:\s*["'][A-Za-z][A-Za-z0-9_-]*["']/g,
+  },
+  {
+    id: "runtime-named-transition-source-set",
+    scope: (path) => !path.includes("/src/db/migrations/") && /\.(?:ts|tsx)$/.test(path),
+    pattern: /\bfromStates\s*:\s*\[\s*["'][A-Za-z][A-Za-z0-9_-]*["']/g,
+  },
+  {
+    id: "runtime-packaged-status-value",
+    scope: (path) => !path.includes("/src/db/migrations/"),
+    pattern: /(?:\bstatus\s*:\s*["'][A-Za-z][A-Za-z0-9_-]*["']|put\(\s*["']status["']\s*,\s*["'][A-Za-z][A-Za-z0-9_-]*["']\s*\))/g,
   },
   {
     id: "runtime-lifecycle-key-literal",

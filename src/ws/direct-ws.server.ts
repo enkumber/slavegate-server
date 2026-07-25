@@ -276,7 +276,8 @@ interface PendingWorkflow {
 
 interface OtaDeviceStatus {
   deviceId: string;
-  status: string;
+  terminal: boolean;
+  successful: boolean;
   version?: string;
   versionCode?: number;
   apkSha256?: string;
@@ -296,13 +297,14 @@ interface DeviceAuthRecord {
 export function otaTerminalStatusFromAuthenticatedVersion(
   current: OtaDeviceStatus | undefined,
   authenticatedAgentVersion: string | undefined,
-): Omit<Partial<OtaDeviceStatus>, "deviceId" | "updatedAt"> & { status: string } | null {
+): Omit<Partial<OtaDeviceStatus>, "deviceId" | "updatedAt"> | null {
   if (!current || !authenticatedAgentVersion) return null;
-  if (current.status === "success" || current.status === "failed") return null;
+  if (current.terminal) return null;
   if (!current.version || current.version !== authenticatedAgentVersion) return null;
 
   return {
-    status: "success",
+    terminal: true,
+    successful: true,
     version: current.version,
     versionCode: current.versionCode,
     apkSha256: current.apkSha256,
@@ -1118,8 +1120,13 @@ export class DirectWsServer {
     return this.getConnectedDeviceIds().map(id => ({ deviceId: id }));
   }
 
-  recordOtaStatus(deviceId: string, patch: Omit<Partial<OtaDeviceStatus>, "deviceId" | "updatedAt"> & { status: string }): void {
-    const existing = this.otaStatuses.get(deviceId) ?? { deviceId, status: "unknown", updatedAt: new Date(0).toISOString() };
+  recordOtaStatus(deviceId: string, patch: Omit<Partial<OtaDeviceStatus>, "deviceId" | "updatedAt">): void {
+    const existing = this.otaStatuses.get(deviceId) ?? {
+      deviceId,
+      terminal: false,
+      successful: false,
+      updatedAt: new Date(0).toISOString(),
+    };
     this.otaStatuses.set(deviceId, {
       ...existing,
       ...patch,
@@ -2174,14 +2181,15 @@ export class DirectWsServer {
   }
 
   private _handleOtaResult(conn: ConnectedDevice, msg: Record<string, unknown>): void {
-    const status = typeof msg.status === "string" ? msg.status : "unknown";
+    const terminal = msg.terminal === true;
+    const successful = msg.successful === true;
     const version = typeof msg.version === "string" ? msg.version : undefined;
     const versionCode = typeof msg.versionCode === "number" ? msg.versionCode : undefined;
     const apkSha256 = typeof msg.apkSha256 === "string" ? msg.apkSha256 : undefined;
     const error = typeof msg.error === "string" ? msg.error : undefined;
-    this.recordOtaStatus(conn.deviceId, { status, version, versionCode, apkSha256, error });
+    this.recordOtaStatus(conn.deviceId, { terminal, successful, version, versionCode, apkSha256, error });
     console.log(
-      `[direct-ws] OTA_RESULT device=${conn.deviceId.slice(0, 8)} status=${status}` +
+      `[direct-ws] OTA_RESULT device=${conn.deviceId.slice(0, 8)} terminal=${terminal} successful=${successful}` +
       `${version ? ` version=${version}` : ""}${versionCode ? ` code=${versionCode}` : ""}` +
       `${error ? ` error=${error}` : ""}`
     );

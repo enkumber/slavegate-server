@@ -82,7 +82,7 @@ class JobExecutor(
     private val ocr by lazy { OcrController() }
 
     @Volatile private var lastJobId: String? = null
-    @Volatile private var lastJobStatus: String? = null
+    @Volatile private var lastJobSuccessful: Boolean? = null
     @Volatile private var currentJobCancelled: Boolean = false
 
     /** C1: Cancel the currently executing job (called from KILL_SWITCH handler) */
@@ -96,7 +96,7 @@ class JobExecutor(
         context.getSharedPreferences("job_idempotency", Context.MODE_PRIVATE)
 
     fun getLastJobId(): String? = lastJobId
-    fun getLastJobStatus(): String? = lastJobStatus
+    fun getLastJobSuccessful(): Boolean? = lastJobSuccessful
 
     /**
      * Execute a job. Calls onResult with the result.
@@ -116,7 +116,7 @@ class JobExecutor(
         // If cancelCurrentJob() was called (KILL_SWITCH received) before this job
         // started executing, reject immediately.
         if (currentJobCancelled) {
-            onResult(buildResult(jobId, "failed", null, "Kill switch active", 0))
+            onResult(buildResult(jobId, false, null, "Kill switch active", 0))
             return@withContext
         }
         currentJobCancelled = false  // reset flag for new job (AFTER the check)
@@ -135,7 +135,7 @@ class JobExecutor(
         }
 
         lastJobId = jobId
-        lastJobStatus = "running"
+        lastJobSuccessful = null
         Log.i(TAG, "Executing job $jobId type=$type strategy=$strategyRaw")
 
         // Build cascade (L1 + L2; null if A11y not connected)
@@ -163,57 +163,57 @@ class JobExecutor(
         val targetRoi = buildRoi(params)
 
         val jobTimeoutMs = payload.optLong("timeoutMs", 30_000L).coerceIn(5_000L, 600_000L) // 10 min max for type_text
-        val (status, output, error) = try {
+        val (successful, output, error) = try {
             withTimeoutOrNull(jobTimeoutMs) {
                 when (type) {
-                    "tap"            -> { executeTap(params);           Triple("completed", null, null) }
-                    "swipe"          -> { executeSwipe(params);         Triple("completed", null, null) }
-                    "long_press"     -> { executeLongPress(params);     Triple("completed", null, null) }
-                    "type_text"      -> { executeTypeText(params);      Triple("completed", null, null) }
-                    "set_focused_text" -> Triple("completed", executeSetFocusedText(params), null)
-                    "scroll"         -> { executeScroll(params);        Triple("completed", null, null) }
-                    "open_app"       -> { executeOpenApp(params);       Triple("completed", null, null) }
-                    "open_app_fresh" -> { executeOpenAppFresh(params);  Triple("completed", null, null) }
-                    "close_app"      -> { executeCloseApp(params);      Triple("completed", null, null) }
-                    "screenshot"     -> Triple("completed", executeScreenshot(params), null)
-                    "screenshot_for_vlm" -> Triple("completed", executeScreenshotForVlm(), null)
-                    "screen_record"  -> Triple("completed", executeScreenRecord(params), null)
-                    "ui_tree_dump"   -> Triple("completed", executeUiTreeDump(params), null)
-                    "ocr_find_tap"   -> Triple("completed", executeOcrFindTap(params), null)
-                    "ocr_full"       -> Triple("completed", executeOcrFull(), null)
-                    "press_key"      -> { executePressKey(params);      Triple("completed", null, null) }
-                    "screen_wake"    -> Triple("completed", executeScreenWake(), null)
-                    "screen_off"     -> Triple("completed", executeScreenOff(), null)
-                    "unlock"         -> Triple("completed", executeUnlock(params), null)
-                    "get_screen_state" -> Triple("completed", executeGetScreenState(), null)
-                    "get_clipboard"  -> Triple("completed", executeGetClipboard(), null)
-                    "set_clipboard"  -> { executeSetClipboard(params);  Triple("completed", null, null) }
-                    "wait_for_idle"  -> Triple("completed", executeWaitForIdle(params), null)
-                    "file_push"      -> Triple("completed", executeFilePush(params), null)
-                    "file_delete"    -> Triple("completed", executeFileDelete(params), null)
-                    "pm_uninstall"   -> { executePmUninstall(params);   Triple("completed", null, null) }
-                    "reboot"         -> { executeReboot();              Triple("completed", null, null) }
-                    "ota_update"     -> { executeOtaUpdate(params);     Triple("completed", null, null) }
-                    "get_foreground_app" -> Triple("completed", executeGetForegroundApp(), null)
+                    "tap"            -> { executeTap(params);           Triple(true, null, null) }
+                    "swipe"          -> { executeSwipe(params);         Triple(true, null, null) }
+                    "long_press"     -> { executeLongPress(params);     Triple(true, null, null) }
+                    "type_text"      -> { executeTypeText(params);      Triple(true, null, null) }
+                    "set_focused_text" -> Triple(true, executeSetFocusedText(params), null)
+                    "scroll"         -> { executeScroll(params);        Triple(true, null, null) }
+                    "open_app"       -> { executeOpenApp(params);       Triple(true, null, null) }
+                    "open_app_fresh" -> { executeOpenAppFresh(params);  Triple(true, null, null) }
+                    "close_app"      -> { executeCloseApp(params);      Triple(true, null, null) }
+                    "screenshot"     -> Triple(true, executeScreenshot(params), null)
+                    "screenshot_for_vlm" -> Triple(true, executeScreenshotForVlm(), null)
+                    "screen_record"  -> Triple(true, executeScreenRecord(params), null)
+                    "ui_tree_dump"   -> Triple(true, executeUiTreeDump(params), null)
+                    "ocr_find_tap"   -> Triple(true, executeOcrFindTap(params), null)
+                    "ocr_full"       -> Triple(true, executeOcrFull(), null)
+                    "press_key"      -> { executePressKey(params);      Triple(true, null, null) }
+                    "screen_wake"    -> Triple(true, executeScreenWake(), null)
+                    "screen_off"     -> Triple(true, executeScreenOff(), null)
+                    "unlock"         -> Triple(true, executeUnlock(params), null)
+                    "get_screen_state" -> Triple(true, executeGetScreenState(), null)
+                    "get_clipboard"  -> Triple(true, executeGetClipboard(), null)
+                    "set_clipboard"  -> { executeSetClipboard(params);  Triple(true, null, null) }
+                    "wait_for_idle"  -> Triple(true, executeWaitForIdle(params), null)
+                    "file_push"      -> Triple(true, executeFilePush(params), null)
+                    "file_delete"    -> Triple(true, executeFileDelete(params), null)
+                    "pm_uninstall"   -> { executePmUninstall(params);   Triple(true, null, null) }
+                    "reboot"         -> { executeReboot();              Triple(true, null, null) }
+                    "ota_update"     -> { executeOtaUpdate(params);     Triple(true, null, null) }
+                    "get_foreground_app" -> Triple(true, executeGetForegroundApp(), null)
                     "intent_send"    -> executeIntentSendJob(params)
                     // Skill system
-                    "skill_tap"      -> Triple("completed", executeSkillTap(params), null)
-                    "a11y_find_tap"  -> Triple("completed", executeA11yFindTap(params), null)
+                    "skill_tap"      -> Triple(true, executeSkillTap(params), null)
+                    "a11y_find_tap"  -> Triple(true, executeA11yFindTap(params), null)
                     // Workflow system — executes workflow JSON locally, consults server for decisions
-                    "workflow_execute" -> Triple("completed", executeWorkflow(params), null)
-                    else             -> Triple("failed", null, "Unknown job type: $type")
+                    "workflow_execute" -> Triple(true, executeWorkflow(params), null)
+                    else             -> Triple(false, null, "Unknown job type: $type")
                 }
-            } ?: Triple("failed", null, "Execution timeout (${jobTimeoutMs}ms)")
+            } ?: Triple(false, null, "Execution timeout (${jobTimeoutMs}ms)")
         } catch (e: Exception) {
             Log.e(TAG, "Job $jobId execution failed: ${e.message}")
-            Triple("failed", null as JSONObject?, e.message)
+            Triple(false, null as JSONObject?, e.message)
         }
 
         val durationMs = System.currentTimeMillis() - startedAt
-        lastJobStatus = status
+        lastJobSuccessful = successful
 
         // POST-ACTION verification — also wrapped: a cascade failure must not swallow JOB_RESULT.
-        val verification = if (status == "completed" && cascade != null && preCtx != null) {
+        val verification = if (successful && cascade != null && preCtx != null) {
             try {
                 cascade.verifyAfterAction(preCtx, targetRoi)
             } catch (e: Exception) {
@@ -225,12 +225,12 @@ class JobExecutor(
         }
 
         // Idempotency cache
-        Log.i(TAG, "Job $jobId: caching result status=$status")
-        cacheResult(jobId, status)
+        Log.i(TAG, "Job $jobId: caching result successful=$successful")
+        cacheResult(jobId, successful)
 
         // Always send JOB_RESULT — server audit log updated from this.
-        Log.i(TAG, "Job $jobId: calling onResult status=$status")
-        onResult(buildResult(jobId, status, output, error, durationMs, verification))
+        Log.i(TAG, "Job $jobId: calling onResult successful=$successful")
+        onResult(buildResult(jobId, successful, output, error, durationMs, verification))
         Log.i(TAG, "Job $jobId: onResult returned")
     }
 
@@ -683,16 +683,16 @@ class JobExecutor(
 
     // ─── Intent/Deep link sending ─────────────────────────────────────────────
 
-    private suspend fun executeIntentSendJob(params: JSONObject): Triple<String, JSONObject, String?> {
+    private suspend fun executeIntentSendJob(params: JSONObject): Triple<Boolean, JSONObject, String?> {
         val output = executeIntentSend(params)
         val launched = output.optBoolean("launched", false)
         if (launched) {
-            return Triple("completed", output, null)
+            return Triple(true, output, null)
         }
 
         val error = output.optString("error", "intent_send did not launch an activity")
             .ifBlank { "intent_send did not launch an activity" }
-        return Triple("failed", output, error)
+        return Triple(false, output, error)
     }
 
     private suspend fun executeIntentSend(params: JSONObject): JSONObject = withContext(Dispatchers.Main) {
@@ -886,7 +886,7 @@ class JobExecutor(
      * Cache format: "$status|$timestampMs" — timestamp used for age-based pruning.
      * SharedPreferences has no ordering; we embed timestamp to sort by age.
      */
-    private fun cacheResult(jobId: String, status: String) {
+    private fun cacheResult(jobId: String, successful: Boolean) {
         try {
             val all = idempotencyPrefs.all
             if (all.size >= MAX_CACHE_SIZE) {
@@ -905,16 +905,15 @@ class JobExecutor(
                 Log.d(TAG, "Idempotency cache pruned ${toRemove.size} entries")
             }
             idempotencyPrefs.edit()
-                .putString(jobId, "$status|${System.currentTimeMillis()}")
+                .putString(jobId, "$successful|${System.currentTimeMillis()}")
                 .apply()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to cache job result: ${e.message}")
         }
     }
 
-    private fun loadCachedResult(jobId: String): String? =
-        // Strip the timestamp suffix before returning status
-        idempotencyPrefs.getString(jobId, null)?.substringBefore('|')
+    private fun loadCachedResult(jobId: String): Boolean? =
+        idempotencyPrefs.getString(jobId, null)?.substringBefore('|')?.toBooleanStrictOrNull()
 
     // ─── Cascade helpers ─────────────────────────────────────────────────────
 
@@ -1137,7 +1136,7 @@ class JobExecutor(
                 "screen_wake" -> {
                     executeScreenWake()
                     completedSteps.add(stepId)
-                    results.put(stepId, JSONObject().put("status", "ok"))
+                    results.put(stepId, JSONObject().put("successful", true))
                 }
                 "unlock" -> {
                     val unlockResult = executeUnlock(step.optJSONObject("params") ?: JSONObject())
@@ -1150,7 +1149,7 @@ class JobExecutor(
                         automation.openApp(pkg)
                     }
                     completedSteps.add(stepId)
-                    results.put(stepId, JSONObject().put("status", "ok"))
+                    results.put(stepId, JSONObject().put("successful", true))
                 }
                 "wait" -> {
                     // Support both {ms: N} and {duration: {min, max, distribution}} formats
@@ -1164,7 +1163,7 @@ class JobExecutor(
                     }
                     waitMs(waitMs)
                     completedSteps.add(stepId)
-                    results.put(stepId, JSONObject().put("status", "ok"))
+                    results.put(stepId, JSONObject().put("successful", true))
                 }
                 "cascade_tap", "tap" -> {
                     val target = step.optString("target")
@@ -1183,7 +1182,7 @@ class JobExecutor(
                             }
                             results.put(stepId, ocrResult)
                         } else {
-                            results.put(stepId, JSONObject().put("status", "failed").put("error", "Element not found: $target"))
+                            results.put(stepId, JSONObject().put("successful", false).put("error", "Element not found: $target"))
                         }
                     }
                     completedSteps.add(stepId)
@@ -1217,7 +1216,7 @@ class JobExecutor(
                 }
                 else -> {
                     Log.w(TAG, "[workflow] Unknown step type: $stepType")
-                    results.put(stepId, JSONObject().put("status", "skipped").put("error", "Unknown type: $stepType"))
+                    results.put(stepId, JSONObject().put("successful", false).put("skipped", true).put("error", "Unknown type: $stepType"))
                     completedSteps.add(stepId)
                 }
             }
@@ -1351,14 +1350,14 @@ class JobExecutor(
 
     private fun buildResult(
         jobId: String,
-        status: String,
+        successful: Boolean,
         output: JSONObject?,
         error: String?,
         durationMs: Long,
         verification: Any = verificationStubPhase1()
     ): JSONObject = JSONObject().apply {
         put("jobId", jobId)
-        put("status", status)
+        put("successful", successful)
         put("output", output ?: JSONObject.NULL)
         put("error", error ?: JSONObject.NULL)
         put("durationMs", durationMs)

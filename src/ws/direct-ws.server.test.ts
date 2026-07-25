@@ -126,7 +126,8 @@ describe("mergeWorkflowStatusVariables", () => {
 describe("OTA terminal reconciliation", () => {
   const started = {
     deviceId: "00000000-0000-4000-8000-000000000002",
-    status: "started",
+    terminal: false,
+    successful: false,
     version: "4.0.60",
     versionCode: 116,
     apkSha256: "abc123",
@@ -135,7 +136,8 @@ describe("OTA terminal reconciliation", () => {
 
   it("marks an in-flight OTA successful when the reauthenticated package version matches", () => {
     expect(otaTerminalStatusFromAuthenticatedVersion(started, "4.0.60")).toEqual({
-      status: "success",
+      terminal: true,
+      successful: true,
       version: "4.0.60",
       versionCode: 116,
       apkSha256: "abc123",
@@ -146,7 +148,7 @@ describe("OTA terminal reconciliation", () => {
   it("does not reconcile mismatched, missing, or already-terminal statuses", () => {
     expect(otaTerminalStatusFromAuthenticatedVersion(started, "4.0.59")).toBeNull();
     expect(otaTerminalStatusFromAuthenticatedVersion(undefined, "4.0.60")).toBeNull();
-    expect(otaTerminalStatusFromAuthenticatedVersion({ ...started, status: "failed" }, "4.0.60")).toBeNull();
+    expect(otaTerminalStatusFromAuthenticatedVersion({ ...started, terminal: true }, "4.0.60")).toBeNull();
   });
 });
 
@@ -275,12 +277,11 @@ describe("PNQ v2 shadow DirectWS side effects", () => {
     await expect(pending).resolves.toMatchObject({
       jobId: expectedHandle.operationId,
       success: true,
-      status: "completed",
       output: { ok: true },
     });
     await expect(handling).resolves.toBeUndefined();
     expect(resolveWorkflowResult).toHaveBeenCalledWith(expectedHandle.operationId, expect.objectContaining({
-      status: "completed",
+      successful: true,
       output: { ok: true },
     }));
     expect(recordShadowResult).not.toHaveBeenCalled();
@@ -351,21 +352,26 @@ describe("PNQ-003 observe-only DirectWS ingress compatibility", () => {
       type: "BATCH_RESULT",
       batchId: "observe-batch",
       workflowId: "observe-workflow",
-      status: "completed",
-      results: [{ id: 1, status: "completed" }],
+      completed: true,
+      partial: false,
+      timedOut: false,
+      results: [{ id: 1, successful: true }],
       totalDurationMs: 42,
     });
 
     await expect(pending).resolves.toMatchObject({
       batchId: "observe-batch",
       workflowId: "observe-workflow",
-      status: "completed",
+      completed: true,
       totalDurationMs: 42,
     });
     expect(observeTerminal).toHaveBeenCalledWith(expect.objectContaining({
       rootKind: "batch",
       externalId: "observe-batch",
-      status: "completed",
+      terminalSelector: expect.objectContaining({
+        targetTerminal: true,
+        targetRetryable: false,
+      }),
       actor: "direct_ws.observe_only",
     }));
   });

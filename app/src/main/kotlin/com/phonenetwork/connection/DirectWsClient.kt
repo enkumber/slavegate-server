@@ -434,12 +434,12 @@ class DirectWsClient(
                     sendRaw(webSocket, JSONObject().apply {
                         put("type", "JOB_RESULT")
                         put("jobId", jobId)
-                        put("success", result.optString("status") == "completed")
+                        put("success", result.optBoolean("successful", false))
                         put("output", result.opt("output"))
                         put("error", result.optString("error", ""))
                         put("durationMs", durationMs)
                     })
-                    Log.i(TAG, "JOB_RESULT sent: $jobId success=${result.optString("status")}")
+                    Log.i(TAG, "JOB_RESULT sent: $jobId success=${result.optBoolean("successful", false)}")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Job execution failed: ${e.message}")
