@@ -5,6 +5,7 @@ import {
   getResourceLifecyclePolicy,
   getResourceLifecycleState,
   selectResourceLifecycleTransition,
+  type LifecycleTransitionSelector,
 } from "../lifecycle/lifecycle.service";
 
 export type DeviceExecutionRootKind = string;
@@ -1875,7 +1876,8 @@ export class DeviceExecutionArbiter {
     rootId?: string;
     handle?: DeviceExecutionHandle;
     ownerGeneration?: number;
-    status: string;
+    status?: string;
+    terminalSelector?: LifecycleTransitionSelector;
     actor?: string;
     reason?: string;
     metadata?: Record<string, unknown>;
@@ -1905,12 +1907,30 @@ export class DeviceExecutionArbiter {
         });
         return { decision: "missing", root: null, reason: "no_matching_root" };
       }
-      const terminalDefinition = await getResourceLifecycleState(
-        "device_execution_roots",
-        input.status,
-        "state",
-        client,
-      );
+      const configuredTransition = input.terminalSelector
+        ? await selectResourceLifecycleTransition(
+            "device_execution_roots",
+            root.state,
+            input.terminalSelector,
+            "state",
+            client,
+          )
+        : null;
+      const terminalDefinition = configuredTransition
+        ? await getResourceLifecycleState(
+            "device_execution_roots",
+            configuredTransition.toStatus,
+            "state",
+            client,
+          )
+        : input.status
+          ? await getResourceLifecycleState(
+              "device_execution_roots",
+              input.status,
+              "state",
+              client,
+            )
+          : null;
       if (!terminalDefinition?.terminal) {
         return { decision: "rejected", root: rowToRoot(root), reason: "unconfigured_terminal_state" };
       }
@@ -2010,7 +2030,7 @@ export class DeviceExecutionArbiter {
             deviceId: input.deviceId,
             ownerGeneration: expectedGeneration,
             toState: terminalState,
-            reason: input.reason ?? input.status,
+            reason: input.reason ?? terminalState,
             metadata: input.metadata,
           });
       if (!terminal) {
@@ -2059,7 +2079,7 @@ export class DeviceExecutionArbiter {
         previousState: root.state,
         newState: terminal.state,
         actor: input.actor ?? "transport",
-        reason: input.reason ?? input.status,
+        reason: input.reason ?? terminalState,
         metadata: { externalId: input.externalId, operationKind, operationId, handle: encodeDeviceExecutionHandle(terminalOperation ? operationRowToHandle(terminalOperation) : handle), ...(input.metadata ?? {}) },
       });
       return {
@@ -2080,7 +2100,7 @@ export class DeviceExecutionArbiter {
     reportedHandle?: DeviceExecutionHandle | null;
     /** Explicit compatibility lane for jobs dispatched before typed PNQ handles existed. */
     allowLegacyMissingHandle?: boolean;
-    status: string;
+    success: boolean;
     actor?: string;
     reason?: string;
     metadata?: Record<string, unknown>;
@@ -2116,12 +2136,26 @@ export class DeviceExecutionArbiter {
         });
         return { accepted: false, decision: "missing", root: null, reason: "no_matching_root" };
       }
-      const terminalDefinition = await getResourceLifecycleState(
+      const terminalTransition = await selectResourceLifecycleTransition(
         "device_execution_roots",
-        input.status,
+        root.state,
+        {
+          targetTerminal: true,
+          targetRetryable: !input.success,
+          targetAdministrative: false,
+          transitionExternalAllowed: true,
+        },
         "state",
         client,
       );
+      const terminalDefinition = terminalTransition
+        ? await getResourceLifecycleState(
+            "device_execution_roots",
+            terminalTransition.toStatus,
+            "state",
+            client,
+          )
+        : null;
       if (!terminalDefinition?.terminal) {
         return {
           accepted: false,
@@ -2235,7 +2269,7 @@ export class DeviceExecutionArbiter {
             deviceId: input.deviceId,
             ownerGeneration: expectedGeneration,
             toState: terminalState,
-            reason: input.reason ?? input.status,
+            reason: input.reason ?? terminalState,
             metadata: input.metadata,
           });
       if (!terminal) {
@@ -2274,7 +2308,7 @@ export class DeviceExecutionArbiter {
         previousState: root.state,
         newState: terminal.state,
         actor: input.actor ?? "transport",
-        reason: input.reason ?? input.status,
+        reason: input.reason ?? terminalState,
         metadata: {
           jobId: input.jobId,
           handle: encodeDeviceExecutionHandle(operationRowToHandle(terminalOperation)),
@@ -2294,7 +2328,7 @@ export class DeviceExecutionArbiter {
   async finishServerWorkflowRoot(input: {
     deviceId: string;
     workflowId: string;
-    status: string;
+    successful: boolean;
     actor?: string;
     reason?: string;
     metadata?: Record<string, unknown>;
@@ -2332,23 +2366,52 @@ export class DeviceExecutionArbiter {
       }
 
       const generation = toNumber(root.owner_generation);
+      const rootTransition = await selectResourceLifecycleTransition(
+        "device_execution_roots",
+        root.state,
+        {
+          targetTerminal: true,
+          targetRetryable: !input.successful,
+          targetAdministrative: false,
+          transitionAutomatic: true,
+        },
+        "state",
+        client,
+      );
+      if (!rootTransition) {
+        return { decision: "rejected", root: rowToRoot(root), reason: "terminal_transition_not_configured" };
+      }
       const terminal = await updateRootTerminal(client, {
         rootId: root.id,
         deviceId: input.deviceId,
         ownerGeneration: generation,
-        toState: input.status,
-        reason: input.reason ?? input.status,
+        toState: rootTransition.toStatus,
+        reason: input.reason ?? rootTransition.actionKey,
         metadata: input.metadata,
       });
       if (!terminal) return { decision: "rejected", root: rowToRoot(root), reason: "terminal_cas_missed" };
 
       const rootOperation = await selectOperationByIdentity(client, "workflow", input.workflowId, true);
-      const terminalOperation = rootOperation
+      const operationTransition = rootOperation
+        ? await selectResourceLifecycleTransition(
+            "device_execution_operations",
+            rootOperation.state,
+            {
+              targetTerminal: true,
+              targetRetryable: !input.successful,
+              targetAdministrative: false,
+              transitionAutomatic: true,
+            },
+            "state",
+            client,
+          )
+        : null;
+      const terminalOperation = rootOperation && operationTransition
         ? await updateOperationState(client, {
             operationKind: "workflow",
             operationId: input.workflowId,
-            fromStates: ["registered", "dispatching", "dispatched", "reconciling", "blocked", "rejected"],
-            toState: input.status,
+            fromStates: [rootOperation.state],
+            toState: operationTransition.toStatus,
             ownerGeneration: generation,
             metadata: input.metadata,
           }) ?? rootOperation
@@ -2360,7 +2423,7 @@ export class DeviceExecutionArbiter {
         previousState: root.state,
         newState: terminal.state,
         actor: input.actor ?? "workflow_executor",
-        reason: input.reason ?? input.status,
+        reason: input.reason ?? rootTransition.actionKey,
         metadata: { workflowId: input.workflowId, ...(input.metadata ?? {}) },
       });
       return {

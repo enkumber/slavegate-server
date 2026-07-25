@@ -514,7 +514,7 @@ export interface PreparedGeneratedChildJobResult {
 }
 
 export interface JobStepResult {
-  status:       string;
+  successful:   boolean;
   output?:      unknown;
   error?:       string;
   durationMs:   number;
@@ -707,7 +707,7 @@ export function startWorkflowWorker(): Worker {
         await deviceExecutionArbiter.finishServerWorkflowRoot({
           deviceId: workflow.deviceId,
           workflowId,
-          status: "failed",
+          successful: false,
           actor: "workflow_worker",
           reason: err.message,
         });
@@ -727,11 +727,11 @@ async function reconcileTerminalWorkflowRoot(
   workflow: WorkflowRecord,
   actor: string,
 ): Promise<void> {
-  if (!workflow.deviceId || !["cancelled", "completed", "failed"].includes(workflow.status)) return;
+  if (!workflow.deviceId || !workflow.lifecycleTerminal) return;
   await deviceExecutionArbiter.finishServerWorkflowRoot({
     deviceId: workflow.deviceId,
     workflowId: workflow.id,
-    status: workflow.status as Extract<WorkflowStatus, "cancelled" | "completed" | "failed">,
+    successful: !workflow.lifecycleRetryable && !workflow.lifecycleAdministrative,
     actor,
     reason: `persisted_workflow_already_${workflow.status}`,
   });
@@ -741,7 +741,7 @@ export async function runWorkflow(workflowId: string, job: import("bullmq").Job)
   const wf = await workflowService.get(workflowId);
   if (!wf) throw new Error(`Workflow ${workflowId} not found`);
 
-  if (["cancelled", "completed", "failed"].includes(wf.status)) {
+  if (wf.lifecycleTerminal) {
     await reconcileTerminalWorkflowRoot(wf, "workflow_executor.retry_reconcile");
     return;
   }
@@ -757,7 +757,7 @@ export async function runWorkflow(workflowId: string, job: import("bullmq").Job)
   // the first child operation is persisted behind that owner. This preserves
   // the task-runner's queued-only cancellation CAS until PNQ grants the turn.
   let admissionDecision: string | null = null;
-  if (wf.status !== "running") {
+  if (wf.lifecycleInitial) {
     const admission = await deviceExecutionArbiter.observeAdmission({
       deviceId: wf.deviceId,
       rootKind: "server_workflow",
@@ -776,12 +776,12 @@ export async function runWorkflow(workflowId: string, job: import("bullmq").Job)
   // the next attempt can resume from its checkpoint. Only claim rows that are
   // not already running; treating a failed claim as success can strand the
   // server_workflow PNQ root forever.
-  if (wf.status !== "running" && (!isDeviceExecutionEnforced() || admissionDecision !== "would_wait")) {
+  if (wf.lifecycleInitial && (!isDeviceExecutionEnforced() || admissionDecision !== "would_wait")) {
     const started = await workflowService.markRunning(workflowId);
     if (!started) {
       const latest = await workflowService.get(workflowId);
       if (!latest) throw new Error(`Workflow ${workflowId} disappeared while transitioning to running`);
-      if (["cancelled", "completed", "failed"].includes(latest.status)) {
+      if (latest.lifecycleTerminal) {
         await reconcileTerminalWorkflowRoot(latest, "workflow_executor.transition_reconcile");
         return;
       }
@@ -820,7 +820,7 @@ export async function runWorkflow(workflowId: string, job: import("bullmq").Job)
   await deviceExecutionArbiter.finishServerWorkflowRoot({
     deviceId: wf.deviceId,
     workflowId,
-    status: "completed",
+    successful: true,
     actor: "workflow_executor",
   });
   console.log(`[workflow] ${workflowId} completed`);
@@ -852,7 +852,7 @@ async function executeSteps(
 
       // Find first failed step in batchResults to resume from
       const firstFailed = batchResults.findIndex(
-        r => r.status === "failed" || r.status === "timeout"
+        (result) => !result.successful && !result.skipped,
       );
 
       if (firstFailed >= 0) {
@@ -887,11 +887,11 @@ async function executeSteps(
       scalabilityConfig.cancelCheckTimeout,
       `workflowService.get(${workflowId}) timeout during cancel check`
     );
-    if (current?.status === "cancelled") {
+    if (current?.lifecycleTerminal) {
       console.log(`[workflow] ${workflowId} cancelled`);
       return;
     }
-    if (current?.status === "paused") {
+    if (current?.lifecycleAdministrative && !current.lifecycleTerminal) {
       throw new Error(`Workflow paused`);
     }
 
@@ -913,8 +913,8 @@ async function executeSteps(
           scalabilityConfig.cancelCheckTimeout,
           `workflowService.get(${workflowId}) timeout at step ${segIdx}`
         );
-        if (cur?.status === "cancelled") { return; }
-        if (cur?.status === "paused") { throw new Error(`Workflow paused at step ${segIdx}`); }
+        if (cur?.lifecycleTerminal) { return; }
+        if (cur?.lifecycleAdministrative && !cur.lifecycleTerminal) { throw new Error(`Workflow paused at step ${segIdx}`); }
 
         try {
           await executeStep(workflowId, deviceId, template, step, checkpoint, segIdx, job);
@@ -1281,10 +1281,10 @@ async function executeActionStep(
     workflowId,
     source: "workflow_executor",
     eventType: "result_accepted",
-    details: { jobType, stepIndex, status: result.status, durationMs: result.durationMs },
+    details: { jobType, stepIndex, successful: result.successful, durationMs: result.durationMs },
   });
 
-  if (result.status === "failed" || result.status === "timeout") {
+  if (!result.successful) {
     const retries = step.retries ?? 0;
     if (retries > 0) {
       console.warn(`[workflow] ${workflowId} step ${stepIndex} failed — retrying (${retries} retries left)`);
@@ -1292,7 +1292,7 @@ async function executeActionStep(
       await executeActionStep(workflowId, deviceId, template, { ...step, retries: retries - 1 }, checkpoint, stepIndex);
       return;
     }
-    throw new Error(`Step ${stepIndex} (${step.action}) failed: ${result.error ?? result.status}`);
+    throw new Error(`Step ${stepIndex} (${step.action}) failed: ${result.error ?? "device reported failure"}`);
   }
 
   if (step.action === "unlock" && result.output && typeof result.output === "object") {
@@ -1542,12 +1542,12 @@ async function executeBatchSegment(
     throw budgetErr ?? err;
   }
 
-  const { status, results } = batchResult;
+  const { completed, partial, timedOut, results } = batchResult;
   const failedStepIdx = results.findIndex(
-    r => r.status === "failed" || r.status === "timeout"
+    (result) => !result.successful && !result.skipped,
   );
 
-  if (status === "completed") {
+  if (completed) {
     // All steps succeeded → checkpoint after last step
     const lastStepIndex = stepIndex + segment.steps.length;
     const stats = executionStats(checkpoint);
@@ -1578,10 +1578,10 @@ async function executeBatchSegment(
     return;
   }
 
-  if (status === "partial_failure") {
+  if (partial) {
     // Some steps failed, but continueOnError=true on device → we got partial results
     // Log failures and continue to next segment
-    const successfulSteps = results.filter(r => r.status === "success").length;
+    const successfulSteps = results.filter((result) => result.successful).length;
     const failedSteps = results.length - successfulSteps;
     const stats = executionStats(checkpoint);
     stats.deterministicSteps += successfulSteps;
@@ -1589,9 +1589,9 @@ async function executeBatchSegment(
     stats.failedSteps += failedSteps;
 
     for (const r of results) {
-      if (r.status === "failed") {
+      if (!r.successful && !r.skipped && !r.timedOut) {
         console.warn(`[workflow] ${workflowId} batch step ${r.id} failed: ${r.error}`);
-      } else if (r.status === "timeout") {
+      } else if (r.timedOut) {
         console.warn(`[workflow] ${workflowId} batch step ${r.id} timed out`);
       }
     }
@@ -1631,7 +1631,7 @@ async function executeBatchSegment(
     checkpoint,
     failedGlobalIndex,
     new Error(
-      status === "timeout"
+      timedOut
         ? `Batch timeout after ${batchTimeoutMs}ms`
         : `Batch failed at step ${failedStepIdx + 1}`,
     ),
@@ -1653,10 +1653,10 @@ async function executeBatchSegment(
   }
 
   const errorMsg =
-    status === "timeout"
+    timedOut
       ? `Batch timeout after ${batchTimeoutMs}ms`
       : `Batch failed at step ${failedStepIdx + 1} (global=${failedGlobalIndex}): ${
-          results.find(r => r.status === "failed" || r.status === "timeout")?.error ?? "Unknown"
+          results.find((result) => !result.successful && !result.skipped)?.error ?? "Unknown"
         }`;
 
   throw budgetErr ?? new Error(errorMsg);
@@ -1709,13 +1709,15 @@ export async function executeBatchSteps(
     (batchPayload.options as Record<string, unknown>).batchTimeoutMs as number + 30_000,
   );
 
-  console.log(`[workflow] Batch ${batchId.slice(0,8)} result: status=${result.status} steps=${result.results.length} totalMs=${result.totalDurationMs}`);
+  console.log(`[workflow] Batch ${batchId.slice(0,8)} result: completed=${result.completed === true} steps=${result.results.length} totalMs=${result.totalDurationMs}`);
 
   return {
     type:       "BATCH_RESULT",
     batchId:    result.batchId,
     workflowId: result.workflowId,
-    status:     result.status as import("../../protocol/batch-types").BatchStatus,
+    completed:  result.completed === true,
+    partial:    result.partial === true,
+    timedOut:   result.timedOut === true,
     results:    result.results as import("../../protocol/batch-types").StepResult[],
     executedAt: result.executedAt,
   };

@@ -284,6 +284,15 @@ interface OtaDeviceStatus {
   updatedAt: string;
 }
 
+interface DeviceAuthRecord {
+  id: string;
+  status: string;
+  device_key: string | null;
+  lifecycleInitial: boolean;
+  lifecycleAdministrative: boolean;
+  lifecycleKnown: boolean;
+}
+
 export function otaTerminalStatusFromAuthenticatedVersion(
   current: OtaDeviceStatus | undefined,
   authenticatedAgentVersion: string | undefined,
@@ -304,7 +313,6 @@ export function otaTerminalStatusFromAuthenticatedVersion(
 interface JobResult {
   jobId:    string;
   success:  boolean;
-  status:   string;
   output:   unknown;
   error?:   string;
 }
@@ -312,7 +320,9 @@ interface JobResult {
 interface BatchResult {
   batchId:         string;
   workflowId:      string;
-  status:          string;
+  completed:       boolean;
+  partial:         boolean;
+  timedOut:        boolean;
   results:         unknown[];
   executedAt:       string;
   totalDurationMs: number;
@@ -1327,12 +1337,26 @@ export class DirectWsServer {
 
     try {
       const db = getDb();
-      let device: { id: string; status: string; device_key: string | null } | null = null;
+      let device: DeviceAuthRecord | null = null;
+      const authProjection = `
+        SELECT d.id,
+               d.status,
+               d.device_key,
+               COALESCE(s.initial, false) AS "lifecycleInitial",
+               COALESCE(s.administrative, false) AS "lifecycleAdministrative",
+               (s.status IS NOT NULL) AS "lifecycleKnown"
+        FROM devices d
+        LEFT JOIN lifecycle_resource_bindings b
+          ON b.resource_table = 'devices'::regclass
+         AND b.state_column = 'status'
+        LEFT JOIN lifecycle_state_definitions s
+          ON s.lifecycle_key = b.lifecycle_key
+         AND s.status = d.status`;
       
       // 1. Normal auth: deviceId + deviceKey
       if (deviceId && deviceKey) {
-        const result = await db.query<{ id: string; status: string; device_key: string | null }>(
-          `SELECT id, status, device_key FROM devices WHERE id = $1 AND device_key = $2`,
+        const result = await db.query<DeviceAuthRecord>(
+          `${authProjection} WHERE d.id = $1 AND d.device_key = $2`,
           [deviceId, deviceKey]
         );
         device = result.rows[0] || null;
@@ -1345,16 +1369,41 @@ export class DirectWsServer {
       //     Device sends stable hardware-derived ID but lost stored deviceKey.
       //     Accept it, generate new key, and re-approve automatically.
       if (!device && deviceId && !deviceKey) {
-        const result = await db.query<{ id: string; status: string; device_key: string | null }>(
-          `SELECT id, status, device_key FROM devices WHERE id = $1`,
+        const result = await db.query<DeviceAuthRecord>(
+          `${authProjection} WHERE d.id = $1`,
           [deviceId]
         );
         if (result.rows[0]) {
           const row = result.rows[0];
           const crypto = require('crypto');
           const newKey = crypto.randomBytes(32).toString('hex');
-          await db.query(`UPDATE devices SET device_key = $1, status = CASE WHEN status = 'pending' THEN 'approved' ELSE status END WHERE id = $2`, [newKey, row.id]);
-          device = { id: row.id, status: row.status === 'blocked' ? 'blocked' : 'approved', device_key: newKey };
+          await db.query(
+            `UPDATE devices
+             SET device_key = $1,
+                 status = CASE
+                   WHEN lifecycle_state_matches(
+                          'devices'::regclass,
+                          status,
+                          '{"initial":true}'::jsonb
+                        )
+                   THEN COALESCE(
+                          lifecycle_transition_target(
+                            'devices'::regclass,
+                            status,
+                            '{"targetDispatchable":true,"automatic":true}'::jsonb
+                          ),
+                          status
+                        )
+                   ELSE status
+                 END
+             WHERE id = $2`,
+            [newKey, row.id],
+          );
+          const refreshed = await db.query<DeviceAuthRecord>(
+            `${authProjection} WHERE d.id = $1`,
+            [row.id],
+          );
+          device = refreshed.rows[0] ?? null;
           console.log(`[direct-ws] Re-auth via stable deviceId: ${row.id.slice(0,8)} (new key issued, was ${row.status})`);
         }
       }
@@ -1364,8 +1413,8 @@ export class DirectWsServer {
         console.log(`[direct-ws] Enrollment attempt with fingerprint: ${fingerprint.slice(0,8)}...`);
         
         // Check if device already enrolled with this fingerprint
-        const existing = await db.query<{ id: string; status: string; device_key: string | null }>(
-          `SELECT id, status, device_key FROM devices WHERE fingerprint = $1`,
+        const existing = await db.query<DeviceAuthRecord>(
+          `${authProjection} WHERE d.fingerprint = $1`,
           [fingerprint]
         );
         
@@ -1379,13 +1428,16 @@ export class DirectWsServer {
           const newDeviceKey = crypto.randomBytes(32).toString('hex');
           
           await db.query(
-            `INSERT INTO devices (id, fingerprint, device_key, status, created_at, last_seen_at) 
-             VALUES ($1, $2, $3, 'pending', NOW(), NOW())`,
+            `INSERT INTO devices (id, fingerprint, device_key, status, created_at, last_seen_at)
+             VALUES ($1, $2, $3, NULL, NOW(), NOW())`,
             [newDeviceId, fingerprint, newDeviceKey]
           );
-          
-          device = { id: newDeviceId, status: 'pending', device_key: newDeviceKey };
-          console.log(`[direct-ws] NEW device created: ${newDeviceId.slice(0,8)} status=pending`);
+          const enrolled = await db.query<DeviceAuthRecord>(
+            `${authProjection} WHERE d.id = $1`,
+            [newDeviceId],
+          );
+          device = enrolled.rows[0] ?? null;
+          console.log(`[direct-ws] NEW device created: ${newDeviceId.slice(0,8)}`);
         }
       }
 
@@ -1396,7 +1448,7 @@ export class DirectWsServer {
         return;
       }
 
-      if (device.status === "blocked") {
+      if (device.lifecycleAdministrative || !device.lifecycleKnown) {
         console.warn(`[direct-ws] AUTH failed: device ${device.id.slice(0,8)} is blocked`);
         this._send(ws, { type: "AUTH_FAIL", reason: "Device blocked" });
         ws.close(4003, "Blocked");
@@ -1563,7 +1615,7 @@ export class DirectWsServer {
         socketEpoch: conn.pnqV2ConnectionEpoch,
         success: Boolean(msg.success),
         result: {
-          status: Boolean(msg.success) ? "completed" : "failed",
+          success: Boolean(msg.success),
           output: msg.output,
           error: msg.error as string | undefined,
           durationMs: (msg.durationMs as number | undefined) ?? 0,
@@ -1571,7 +1623,7 @@ export class DirectWsServer {
       }));
     }
 
-    const status = Boolean(msg.success) ? "completed" : "failed";
+    const success = Boolean(msg.success);
     const durationMs = (msg.durationMs as number | undefined) ?? 0;
     recordJobExecutionEventDetached({
       jobId,
@@ -1579,7 +1631,7 @@ export class DirectWsServer {
       source: "direct_ws",
       eventType: "job_result_received",
       details: {
-        status,
+        success,
         durationMs,
         error: (msg.error as string | undefined) ?? null,
         connectionEpoch: conn.pnqV2ConnectionEpoch,
@@ -1596,7 +1648,20 @@ export class DirectWsServer {
         // Gate A: generated_workflow production compatibility remains the
         // legacy DirectWS JOB/JOB_RESULT contract with no PNQ result authority.
       } else if (!isDeviceExecutionEnforced()) {
-        void deviceExecutionArbiter.observeTerminal({ deviceId: conn.deviceId, rootKind: "job", externalId: jobId, status, actor: "direct_ws.observe_only", reason: (msg.error as string | undefined) ?? status, metadata: { authorityMode: "observe_only" } });
+        void deviceExecutionArbiter.observeTerminal({
+          deviceId: conn.deviceId,
+          rootKind: "job",
+          externalId: jobId,
+          terminalSelector: {
+            targetTerminal: true,
+            targetRetryable: !success,
+            targetAdministrative: false,
+            transitionExternalAllowed: true,
+          },
+          actor: "direct_ws.observe_only",
+          reason: msg.error as string | undefined,
+          metadata: { authorityMode: "observe_only" },
+        });
       } else {
       const accepted = await deviceExecutionArbiter.acceptJobResult({
         deviceId: conn.deviceId,
@@ -1604,9 +1669,9 @@ export class DirectWsServer {
         handle: pending?.permit?.handle,
         reportedHandle,
         allowLegacyMissingHandle: handleResolution?.compatibility === "authenticated_pending_handle",
-        status,
+        success,
         actor: "direct_ws",
-        reason: (msg.error as string | undefined) ?? status,
+        reason: msg.error as string | undefined,
         metadata: {
           durationMs,
           observeSource: "directWsServer.handleJobResult",
@@ -1634,8 +1699,7 @@ export class DirectWsServer {
       this.pendingJobs.delete(jobId);
       pending.resolve({
         jobId,
-        success: Boolean(msg.success),
-        status,
+        success,
         output:  msg.output,
         error:   msg.error as string | undefined,
       });
@@ -1646,7 +1710,7 @@ export class DirectWsServer {
     // A dynamic import here defers the critical workflow wake-up and caused
     // generated workflows to remain pending even after the device replied.
     const resolved = resolveWorkflowExecutorJobResult(jobId, {
-      status,
+      successful: success,
       output:     msg.output,
       error:      msg.error as string | undefined,
       durationMs,
@@ -1659,7 +1723,7 @@ export class DirectWsServer {
     dispatcherService.handleJobResult({
       jobId,
       deviceId:   conn.deviceId,
-      status,
+      success,
       output:     msg.output as Record<string, unknown>,
       error:      msg.error as string | undefined,
       durationMs,
@@ -1684,11 +1748,13 @@ export class DirectWsServer {
       return;
     }
 
-    const status = msg.status as string;
+    const completed = msg.completed === true;
+    const partial = msg.partial === true;
+    const timedOut = msg.timedOut === true;
     const results = (msg.results as unknown[]) ?? [];
     const totalDurationMs = (msg.totalDurationMs as number) ?? 0;
 
-    console.log(`[direct-ws] BATCH_RESULT received: batchId=${batchId.slice(0,8)} status=${status} steps=${results.length} totalMs=${totalDurationMs} device=${conn.deviceId.slice(0,8)}`);
+    console.log(`[direct-ws] BATCH_RESULT received: batchId=${batchId.slice(0,8)} completed=${completed} steps=${results.length} totalMs=${totalDurationMs} device=${conn.deviceId.slice(0,8)}`);
 
     const pending = this.pendingBatches.get(batchId);
     const handleResolution = pending ? resolveDirectWsResultHandle(pending.handle, msg) : null;
@@ -1711,7 +1777,11 @@ export class DirectWsServer {
         deviceId: conn.deviceId,
         rootKind: "batch",
         externalId: batchId,
-        status,
+        terminalSelector: {
+          targetTerminal: true,
+          targetRetryable: !completed,
+          targetAdministrative: false,
+        },
         actor: "direct_ws.observe_only",
         reason: msg.error as string | undefined,
         metadata: { authorityMode: "observe_only", totalDurationMs, resultCount: results.length },
@@ -1722,7 +1792,9 @@ export class DirectWsServer {
         observeOnlyPending.resolve({
           batchId,
           workflowId: msg.workflowId as string ?? "",
-          status,
+          completed,
+          partial,
+          timedOut,
           results,
           executedAt: msg.executedAt as string ?? new Date().toISOString(),
           totalDurationMs,
@@ -1746,7 +1818,11 @@ export class DirectWsServer {
     const terminal = await deviceExecutionArbiter.observeTerminal({
       deviceId: conn.deviceId,
       handle: reportedHandle,
-      status,
+      terminalSelector: {
+        targetTerminal: true,
+        targetRetryable: !completed,
+        targetAdministrative: false,
+      },
       actor: "direct_ws",
       reason: msg.error as string | undefined,
       metadata: { totalDurationMs, resultCount: results.length, handleCompatibility: handleResolution.compatibility },
@@ -1758,7 +1834,9 @@ export class DirectWsServer {
     pending.resolve({
       batchId,
       workflowId: msg.workflowId as string ?? "",
-      status,
+      completed,
+      partial,
+      timedOut,
       results,
       executedAt: msg.executedAt as string ?? new Date().toISOString(),
       totalDurationMs,

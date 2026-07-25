@@ -387,7 +387,7 @@ export class WebSocketGateway {
     dispatcherService.handleJobResult({
       jobId,
       deviceId:   conn.deviceId,
-      status:     success ? "completed" : "failed",
+      success,
       output:     output as Record<string, unknown>,
       error:      error,
       durationMs: 0, // Not provided in simple protocol

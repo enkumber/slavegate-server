@@ -353,8 +353,7 @@ export class WsServer {
     let existing = await authService.findByImei(imei);
 
     if (existing) {
-      // Device exists — check status
-      if (existing.status === "maintenance") {
+      if (existing.lifecycleAdministrative || !existing.lifecycleKnown) {
         this.send(ws, "HELLO_REJECT", { code: "BLOCKED", reason: "Device is blocked" });
         ws.close(4003, "Blocked");
         return;
@@ -371,16 +370,14 @@ export class WsServer {
         ipAddress: ip,
       });
 
-      // APPROVED or ONLINE → issue challenge immediately
-      if (existing.status === "approved" || existing.status === "online") {
+      if (!existing.lifecycleInitial) {
         const nonce = await authService.issueChallenge(existing.deviceId);
         this.send(ws, "CHALLENGE", { deviceId: existing.deviceId, nonce });
         console.log(`[ws] CHALLENGE issued to IMEI ${imei.slice(0, 6)}… deviceId=${existing.deviceId.slice(0, 8)}`);
         return;
       }
 
-      // PENDING → notify and start poll loop
-      if (existing.status === "pending") {
+      if (existing.lifecycleInitial) {
         state.isPending = true;
         this.send(ws, "HELLO_REJECT", {
           code: "AWAITING_APPROVAL",
@@ -388,14 +385,6 @@ export class WsServer {
           deviceId: existing.deviceId,
         });
         await this.pollForApproval(ws, existing.deviceId, imei, state);
-        return;
-      }
-
-      // OFFLINE → treat as approved, issue challenge
-      if (existing.status === "offline") {
-        const nonce = await authService.issueChallenge(existing.deviceId);
-        this.send(ws, "CHALLENGE", { deviceId: existing.deviceId, nonce });
-        console.log(`[ws] CHALLENGE issued to offline device IMEI ${imei.slice(0, 6)}…`);
         return;
       }
     }
@@ -435,9 +424,9 @@ export class WsServer {
       await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
       if (ws.readyState !== WebSocket.OPEN) return;
 
-      const device = await devicesService.getDevice(deviceId);
+      const lifecycle = await authService.findLifecycleStateById(deviceId);
 
-      if (device?.status === "approved" || device?.status === "online") {
+      if (lifecycle?.known && !lifecycle.initial && !lifecycle.administrative) {
         console.log(`[ws] Device ${imei.slice(0, 6)}… approved after ${i + 1} polls`);
         const nonce = await authService.issueChallenge(deviceId);
         this.send(ws, "CHALLENGE", { deviceId, nonce });
@@ -445,7 +434,7 @@ export class WsServer {
         return;
       }
 
-      if (device?.status === "maintenance") {
+      if (lifecycle?.administrative || (lifecycle && !lifecycle.known)) {
         this.send(ws, "HELLO_REJECT", { code: "BLOCKED", reason: "Device was blocked" });
         ws.close(4003, "Blocked");
         return;
@@ -539,9 +528,9 @@ export class WsServer {
       runPnqV2ShadowSideEffect("ws result", () => pnqV2RuntimeService.recordShadowResult({
         legacyJobId: payload.jobId,
         socketEpoch: conn.pnqV2ConnectionEpoch,
-        success: payload.status === "completed",
+        success: payload.success,
         result: {
-          status: payload.status,
+          success: payload.success,
           output: payload.output,
           error: payload.error,
           durationMs: payload.durationMs,
@@ -554,9 +543,9 @@ export class WsServer {
       deviceId,
       jobId: payload.jobId,
       handle,
-      status: payload.status,
+      success: payload.success,
       actor: "ws",
-      reason: payload.error ?? payload.status,
+      reason: payload.error,
       metadata: {
         durationMs: payload.durationMs,
         verification: payload.verification ?? null,
@@ -574,7 +563,7 @@ export class WsServer {
     await dispatcherService.handleJobResult({
       jobId:      payload.jobId,
       deviceId,
-      status:     payload.status,
+      success:    payload.success,
       output:     payload.output,
       error:      payload.error,
       durationMs: payload.durationMs,
@@ -583,7 +572,7 @@ export class WsServer {
     // Resolve awaiting workflow executor
     const { resolveJobResult } = await import("../modules/workflows/workflow.executor");
     resolveJobResult(payload.jobId, {
-      status:       payload.status,
+      successful:   payload.success,
       output:       payload.output,
       error:        payload.error,
       durationMs:   payload.durationMs,
@@ -615,7 +604,12 @@ export class WsServer {
           `SELECT w.account_id, a.platform
            FROM workflows w
            LEFT JOIN accounts a ON a.id = w.account_id
-           WHERE w.device_id = $1 AND w.status = 'running'
+           WHERE w.device_id = $1
+             AND lifecycle_state_matches(
+                   'workflows'::regclass,
+                   w.status,
+                   '{"initial":false,"terminal":false,"dispatchable":true}'::jsonb
+                 )
            ORDER BY w.started_at DESC NULLS LAST
            LIMIT 1`,
           [deviceId]

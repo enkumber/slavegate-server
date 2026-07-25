@@ -18,9 +18,14 @@ export async function evaluateWsJobResultAuthority(
         deviceId: input.deviceId,
         rootKind: "job",
         externalId: input.jobId,
-        status: input.status,
+        terminalSelector: {
+          targetTerminal: true,
+          targetRetryable: !input.success,
+          targetAdministrative: false,
+          transitionExternalAllowed: true,
+        },
         actor: "ws.observe_only",
-        reason: input.reason ?? input.status,
+        reason: input.reason,
         metadata: {
           ...(input.metadata ?? {}),
           authorityMode: "observe_only",

@@ -138,22 +138,22 @@ export interface BATCH_RESULT {
   type: "BATCH_RESULT";
   batchId: string;           // Must match BATCH_START.batchId
   workflowId: string;
-  status: BatchStatus;
+  completed: boolean;
+  partial: boolean;
+  timedOut: boolean;
   results: StepResult[];
   executedAt: string;         // ISO8601 timestamp
 }
 
-export type BatchStatus = "completed" | "partial_failure" | "failed" | "timeout";
-
 export interface StepResult {
   id: number;               // Matches step id from BATCH_START
-  status: StepStatus;
+  successful: boolean;
+  skipped: boolean;
+  timedOut: boolean;
   durationMs: number;
   output: StepOutput;
-  error?: string;            // Error message if status === "failed"
+  error?: string;
 }
-
-export type StepStatus = "success" | "failed" | "skipped" | "timeout";
 
 export interface StepOutput {
   // Actual coordinates tapped (for tap actions)
@@ -227,13 +227,13 @@ export function validateBatchResult(
 }
 
 /**
- * Determine overall batch status from individual step results.
+ * Derive structural batch outcome flags from individual step results.
  */
-export function computeBatchStatus(results: StepResult[]): BatchStatus {
-  if (results.length === 0) return "failed";
-  if (results.every(r => r.status === "success")) return "completed";
-  if (results.every(r => r.status === "failed" || r.status === "skipped")) return "failed";
-  return "partial_failure";
+export function computeBatchOutcome(results: StepResult[]): Pick<BATCH_RESULT, "completed" | "partial" | "timedOut"> {
+  const completed = results.length > 0 && results.every((result) => result.successful);
+  const partial = !completed && results.some((result) => result.successful);
+  const timedOut = results.some((result) => result.timedOut);
+  return { completed, partial, timedOut };
 }
 
 // ─── Type Guards ─────────────────────────────────────────────────────────────

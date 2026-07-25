@@ -35,6 +35,10 @@ const DEVICE_ID = "22222222-2222-4222-8222-222222222222";
 const TEMPLATE_ID = "retry-template";
 
 function workflow(status: WorkflowRecord["status"]): WorkflowRecord {
+  const lifecycleInitial = status === "queued";
+  const lifecycleTerminal = ["completed", "failed", "cancelled"].includes(status);
+  const lifecycleRetryable = status === "failed";
+  const lifecycleAdministrative = status === "cancelled";
   return {
     id: WORKFLOW_ID,
     templateId: TEMPLATE_ID,
@@ -56,6 +60,11 @@ function workflow(status: WorkflowRecord["status"]): WorkflowRecord {
     completedAt: null,
     error: null,
     createdAt: "2026-07-16T00:00:00.000Z",
+    lifecycleInitial,
+    lifecycleTerminal,
+    lifecycleRetryable,
+    lifecycleAdministrative,
+    lifecycleDispatchable: false,
   };
 }
 
@@ -152,14 +161,14 @@ describe("workflow BullMQ retry semantics", () => {
         dispatched.push(command.type);
         if (command.type === "unlock") {
           setTimeout(() => resolveJobResult(command.jobId, {
-            status: "completed",
+            successful: true,
             output: { unlocked: true },
             durationMs: 1,
           }), 0);
         }
         if (command.type === "ui_tree_dump") {
           expect(resolveJobResult(command.jobId, {
-            status: "completed",
+            successful: true,
             output: { tree: [{ text: "Bankroll 638.824 BTC" }] },
             durationMs: 1,
           })).toBe(true);
@@ -204,12 +213,12 @@ describe("workflow BullMQ retry semantics", () => {
     );
 
     expect(resolveJobResult(jobId, {
-      status: "success",
+      successful: true,
       output: { unlocked: true },
       durationMs: 25,
     })).toBe(true);
     await expect(resultPromise).resolves.toMatchObject({
-      status: "success",
+      successful: true,
       output: { unlocked: true },
     });
   });
@@ -242,12 +251,12 @@ describe("workflow BullMQ retry semantics", () => {
       await vi.advanceTimersByTimeAsync(6_001);
       expect(settled).toBe(false);
       expect(resolveJobResult(jobId, {
-        status: "success",
+        successful: true,
         output: { ok: true },
         durationMs: 7,
       })).toBe(true);
       await expect(resultPromise).resolves.toMatchObject({
-        status: "success",
+        successful: true,
         output: { ok: true },
       });
     } finally {
@@ -286,7 +295,7 @@ describe("workflow BullMQ retry semantics", () => {
     expect(finishRoot).toHaveBeenCalledWith({
       deviceId: DEVICE_ID,
       workflowId: WORKFLOW_ID,
-      status: "completed",
+      successful: true,
       actor: "workflow_executor",
     });
   });
@@ -305,7 +314,7 @@ describe("workflow BullMQ retry semantics", () => {
       expect(finishRoot).toHaveBeenCalledWith(expect.objectContaining({
         deviceId: DEVICE_ID,
         workflowId: WORKFLOW_ID,
-        status,
+        successful: status === "completed",
         actor: "workflow_executor.retry_reconcile",
       }));
     },
@@ -327,7 +336,7 @@ describe("workflow BullMQ retry semantics", () => {
     expect(finishRoot).toHaveBeenCalledWith(expect.objectContaining({
       deviceId: DEVICE_ID,
       workflowId: WORKFLOW_ID,
-      status: "cancelled",
+      successful: false,
       actor: "workflow_executor.transition_reconcile",
     }));
   });

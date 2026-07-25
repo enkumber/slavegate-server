@@ -123,7 +123,9 @@ class BatchExecutor(
 
         val batchStartMs = System.currentTimeMillis()
         val results = mutableListOf<JSONObject>()
-        var batchStatus = "completed"
+        var batchCompleted = true
+        var batchPartial = false
+        var batchTimedOut = false
 
         Log.i(TAG, "Batch $batchId: starting ${stepsArray.length()} steps " +
                 "(stepTimeout=${stepTimeoutMs}ms, batchTimeout=${batchTimeoutMs}ms, " +
@@ -149,32 +151,31 @@ class BatchExecutor(
                         executeStep(stepJson)
                     } ?: run {
                         // Step timeout
-                        buildStepResult(stepId, "timeout", System.currentTimeMillis() - stepStartMs,
+                        buildStepResult(stepId, successful = false, skipped = false, timedOut = true, durationMs = System.currentTimeMillis() - stepStartMs,
                             error = "Step timeout after ${stepTimeoutMs}ms")
                     }
                 } catch (e: CancellationException) {
                     throw e  // propagate cancellation
                 } catch (e: Exception) {
                     Log.e(TAG, "Batch $batchId: step $stepId failed: ${e.message}")
-                    buildStepResult(stepId, "failed", System.currentTimeMillis() - stepStartMs,
+                    buildStepResult(stepId, successful = false, skipped = false, timedOut = false, durationMs = System.currentTimeMillis() - stepStartMs,
                         error = e.message ?: "Unknown error")
                 }
 
                 results.add(stepResult)
 
-                val stepStatus = stepResult.optString("status")
-                if (stepStatus != "success") {
+                if (!stepResult.optBoolean("successful", false)) {
+                    batchCompleted = false
                     if (!continueOnError) {
                         // Mark remaining steps as skipped
                         for (j in (i + 1) until stepsArray.length()) {
                             val skippedId = stepsArray.getJSONObject(j).optInt("id", j + 1)
-                            results.add(buildStepResult(skippedId, "skipped", 0))
+                            results.add(buildStepResult(skippedId, successful = false, skipped = true, timedOut = false, durationMs = 0))
                         }
-                        batchStatus = if (results.any { it.optString("status") == "success" })
-                            "partial_failure" else "failed"
+                        batchPartial = results.any { it.optBoolean("successful", false) }
                         break
                     } else {
-                        batchStatus = "partial_failure"
+                        batchPartial = true
                     }
                 }
             }
@@ -182,7 +183,8 @@ class BatchExecutor(
 
         if (completed == null) {
             // Batch timeout — mark remaining steps as skipped
-            batchStatus = "timeout"
+            batchCompleted = false
+            batchTimedOut = true
         }
 
         val totalMs = System.currentTimeMillis() - batchStartMs
@@ -190,12 +192,14 @@ class BatchExecutor(
         val batchResult = buildBatchResult(
             batchId = batchId,
             workflowId = workflowId,
-            status = batchStatus,
+            completed = batchCompleted,
+            partial = batchPartial,
+            timedOut = batchTimedOut,
             results = results,
             totalMs = totalMs,
         )
 
-        Log.i(TAG, "Batch $batchId: done status=$batchStatus steps=${results.size} " +
+        Log.i(TAG, "Batch $batchId: done completed=$batchCompleted steps=${results.size} " +
                 "totalMs=${totalMs}ms")
         onResult(batchResult)
     }
@@ -226,7 +230,7 @@ class BatchExecutor(
             output.put("verificationPassed", verifyResult)
         }
 
-        return buildStepResult(stepId, "success", System.currentTimeMillis() - startMs, output = output)
+        return buildStepResult(stepId, successful = true, skipped = false, timedOut = false, durationMs = System.currentTimeMillis() - startMs, output = output)
     }
 
     // ─── Action dispatch ─────────────────────────────────────────────────────
@@ -628,14 +632,18 @@ class BatchExecutor(
     private fun buildBatchResult(
         batchId: String,
         workflowId: String,
-        status: String,
+        completed: Boolean,
+        partial: Boolean,
+        timedOut: Boolean,
         results: List<JSONObject>,
         totalMs: Long,
     ): JSONObject = JSONObject().apply {
         put("type", "BATCH_RESULT")
         put("batchId", batchId)
         put("workflowId", workflowId)
-        put("status", status)
+        put("completed", completed)
+        put("partial", partial)
+        put("timedOut", timedOut)
         put("results", JSONArray().apply { results.forEach { put(it) } })
         put("executedAt", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
             java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
@@ -645,13 +653,17 @@ class BatchExecutor(
 
     private fun buildStepResult(
         id: Int,
-        status: String,
+        successful: Boolean,
+        skipped: Boolean,
+        timedOut: Boolean,
         durationMs: Long,
         output: JSONObject = JSONObject(),
         error: String? = null,
     ): JSONObject = JSONObject().apply {
         put("id", id)
-        put("status", status)
+        put("successful", successful)
+        put("skipped", skipped)
+        put("timedOut", timedOut)
         put("durationMs", durationMs)
         put("output", output)
         if (error != null) put("error", error)
@@ -664,10 +676,14 @@ class BatchExecutor(
     ): JSONObject = buildBatchResult(
         batchId = batchId,
         workflowId = workflowId,
-        status = "failed",
+        completed = false,
+        partial = false,
+        timedOut = false,
         results = listOf(JSONObject().apply {
             put("id", 0)
-            put("status", "failed")
+            put("successful", false)
+            put("skipped", false)
+            put("timedOut", false)
             put("durationMs", 0)
             put("output", JSONObject())
             put("error", error)

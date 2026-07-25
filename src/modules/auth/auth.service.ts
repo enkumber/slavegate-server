@@ -25,10 +25,27 @@ export class AuthService {
     deviceId: string;
     status: string;
     publicKeyPem: string | null;
+    lifecycleInitial: boolean;
+    lifecycleAdministrative: boolean;
+    lifecycleKnown: boolean;
   } | null> {
     const db = getDb();
     const result = await db.query(
-      "SELECT id, status, public_key_pem FROM devices WHERE imei = $1 LIMIT 1",
+      `SELECT d.id,
+              d.status,
+              d.public_key_pem,
+              COALESCE(s.initial, false) AS lifecycle_initial,
+              COALESCE(s.administrative, false) AS lifecycle_administrative,
+              (s.status IS NOT NULL) AS lifecycle_known
+       FROM devices d
+       LEFT JOIN lifecycle_resource_bindings b
+         ON b.resource_table = 'devices'::regclass
+        AND b.state_column = 'status'
+       LEFT JOIN lifecycle_state_definitions s
+         ON s.lifecycle_key = b.lifecycle_key
+        AND s.status = d.status
+       WHERE d.imei = $1
+       LIMIT 1`,
       [imei]
     );
     if (result.rows.length === 0) return null;
@@ -36,6 +53,37 @@ export class AuthService {
       deviceId:     result.rows[0].id as string,
       status:       result.rows[0].status as string,
       publicKeyPem: (result.rows[0].public_key_pem as string | null) ?? null,
+      lifecycleInitial: result.rows[0].lifecycle_initial === true,
+      lifecycleAdministrative: result.rows[0].lifecycle_administrative === true,
+      lifecycleKnown: result.rows[0].lifecycle_known === true,
+    };
+  }
+
+  async findLifecycleStateById(deviceId: string): Promise<{
+    initial: boolean;
+    administrative: boolean;
+    known: boolean;
+  } | null> {
+    const db = getDb();
+    const result = await db.query(
+      `SELECT COALESCE(s.initial, false) AS initial,
+              COALESCE(s.administrative, false) AS administrative,
+              (s.status IS NOT NULL) AS known
+       FROM devices d
+       LEFT JOIN lifecycle_resource_bindings b
+         ON b.resource_table = 'devices'::regclass
+        AND b.state_column = 'status'
+       LEFT JOIN lifecycle_state_definitions s
+         ON s.lifecycle_key = b.lifecycle_key
+        AND s.status = d.status
+       WHERE d.id = $1`,
+      [deviceId],
+    );
+    if (result.rows.length === 0) return null;
+    return {
+      initial: result.rows[0].initial === true,
+      administrative: result.rows[0].administrative === true,
+      known: result.rows[0].known === true,
     };
   }
 

@@ -25,7 +25,6 @@ import {
   expireStaleJobs,
   transitionJob,
   transitionJobByConfiguredStalePolicy,
-  transitionJobFromExternalStatus,
 } from "./job-lifecycle.service";
 
 // ─── Whitelist ─────────────────────────────────────────────────────────────────
@@ -335,7 +334,7 @@ export class DispatcherService {
   async handleJobResult(payload: {
     jobId: string;
     deviceId: string;
-    status: string;
+    success: boolean;
     output?: unknown;
     error?: string;
     durationMs: number;
@@ -350,14 +349,19 @@ export class DispatcherService {
       ? new Date(completedAt.getTime() - payload.durationMs)
       : null;
 
-    const transitioned = await transitionJobFromExternalStatus(payload.jobId, payload.status, {
+    const transitioned = await transitionJob(payload.jobId, {
+      targetTerminal: true,
+      targetRetryable: !payload.success,
+      targetAdministrative: false,
+      transitionExternalAllowed: true,
+    }, {
       output: payload.output ?? null,
       error: payload.error ?? null,
       durationMs: payload.durationMs,
       startedAt,
     }, db, payload.deviceId);
     if (!transitioned) {
-      throw new Error(`DB lifecycle rejected external job transition to '${payload.status}'`);
+      throw new Error("DB lifecycle rejected external job result transition");
     }
 
     // Update audit log with final result status.
@@ -387,9 +391,14 @@ export class DispatcherService {
       deviceId: payload.deviceId,
       rootKind: "job" as const,
       externalId: payload.jobId,
-      status: transitioned.status,
+      terminalSelector: {
+        targetTerminal: true,
+        targetRetryable: !payload.success,
+        targetAdministrative: false,
+        transitionExternalAllowed: true,
+      },
       actor: "dispatcher_result",
-      reason: payload.error ?? payload.status,
+      reason: payload.error ?? transitioned.status,
       metadata: {
         outputPresent: payload.output !== undefined,
         durationMs: payload.durationMs,

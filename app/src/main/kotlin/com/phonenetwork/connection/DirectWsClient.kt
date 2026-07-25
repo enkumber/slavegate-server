@@ -476,7 +476,9 @@ class DirectWsClient(
                 put("type", "BATCH_RESULT")
                 put("batchId", batchMsg.optString("batchId"))
                 put("workflowId", batchMsg.optString("workflowId"))
-                put("status", "failed")
+                put("completed", false)
+                put("partial", false)
+                put("timedOut", false)
                 put("results", org.json.JSONArray())
                 put("executedAt", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
                     .format(java.util.Date()))
@@ -491,7 +493,7 @@ class DirectWsClient(
                 be.executeBatch(batchMsg) { resultJson ->
                     sendRaw(webSocket, resultJson)
                     Log.i(TAG, "BATCH_RESULT sent: batchId=${resultJson.optString("batchId")} " +
-                            "status=${resultJson.optString("status")}")
+                            "completed=${resultJson.optBoolean("completed")}")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Batch execution failed: ${e.message}")
@@ -499,7 +501,9 @@ class DirectWsClient(
                     put("type", "BATCH_RESULT")
                     put("batchId", batchMsg.optString("batchId"))
                     put("workflowId", batchMsg.optString("workflowId"))
-                    put("status", "failed")
+                    put("completed", false)
+                    put("partial", false)
+                    put("timedOut", false)
                     put("results", org.json.JSONArray())
                     put("executedAt", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
                         .format(java.util.Date()))

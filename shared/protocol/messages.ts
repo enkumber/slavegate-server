@@ -136,7 +136,7 @@ export interface JobResultPayload {
    * Device may omit this field.
    */
   deviceUuid?: string;
-  status: JobStatus;
+  success: boolean;
   output?: unknown;
   error?: string;
   durationMs: number;

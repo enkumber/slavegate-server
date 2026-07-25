@@ -209,6 +209,36 @@ class FakeClient {
       };
     }
 
+    if (normalized.startsWith("SELECT transition.lifecycle_key, transition.action_key") &&
+        normalized.includes("FROM lifecycle_resource_bindings binding")) {
+      const [tableName, fromStatus, selectorJson] = params as [string, string, string];
+      const selector = JSON.parse(selectorJson) as Record<string, unknown>;
+      if (selector.targetTerminal !== true) return { rows: [], rowCount: 0 };
+      const toStatus = selector.targetAdministrative === true
+        ? "cancelled"
+        : selector.targetRetryable === true
+          ? "failed"
+          : "completed";
+      return {
+        rows: [{
+          lifecycle_key: tableName,
+          action_key: `test_${fromStatus}_${toStatus}`,
+          from_status: fromStatus,
+          to_status: toStatus,
+          manual_allowed: true,
+          external_allowed: true,
+          automatic: true,
+          mark_started: false,
+          mark_completed: true,
+          clear_completed: false,
+          clear_failure: selector.targetRetryable !== true,
+          reset_retry: false,
+          metadata: {},
+        }],
+        rowCount: 1,
+      };
+    }
+
     if (normalized.startsWith("SELECT id, device_id, status, lifecycle_key FROM workflows WHERE id = $1 FOR UPDATE")) {
       const [workflowId] = params as [string];
       const found = this.workflows.find((item) => item.id === workflowId);
@@ -917,7 +947,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
         operationKind: "job",
         operationId: "job-accepted",
       },
-      status: "completed",
+      success: true,
       actor: "test",
     });
 
@@ -956,7 +986,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
         operationKind: "job",
         operationId: "job-late",
       },
-      status: "failed",
+      success: false,
       actor: "test",
     });
     const after = JSON.stringify({ roots: client.roots, operations: client.operations });
@@ -985,7 +1015,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
           jobId: "job-fast",
           handle: permit.handle,
           reportedHandle: permit.handle,
-          status: "completed",
+          success: true,
           actor: "test.fast_result",
         });
         expect(accepted.accepted, JSON.stringify(accepted)).toBe(true);
@@ -1025,7 +1055,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
     const missing = await arbiterFor(missingClient).acceptJobResult({
       deviceId: DEVICE_A,
       jobId: "job-handle",
-      status: "completed",
+      success: true,
     });
     expect(missing).toMatchObject({ accepted: false, reason: "job_result_handle_required" });
     expect(missingClient.roots[0].state).toBe("dispatched");
@@ -1046,7 +1076,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
         operationKind: "job",
         operationId: "job-handle",
       },
-      status: "completed",
+      success: true,
     });
     expect(wrong).toMatchObject({ accepted: false, reason: "job_result_reported_handle_mismatch" });
     expect(wrongClient.roots[0].state).toBe("dispatched");
@@ -1114,7 +1144,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
           jobId: "workflow-child-1",
           handle: permit.handle,
           reportedHandle: permit.handle,
-          status: "completed",
+          success: true,
         });
         expect(accepted.accepted).toBe(true);
         return true;
@@ -1159,7 +1189,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
           jobId: "workflow-root-wire-job",
           handle: permit.handle,
           reportedHandle: permit.handle,
-          status: "completed",
+          success: true,
         });
         expect(accepted.accepted).toBe(true);
         return true;
@@ -1227,7 +1257,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
           jobId,
           handle: permit.handle,
           reportedHandle: permit.handle,
-          status: "completed",
+          success: true,
         });
         expect(terminal.accepted).toBe(true);
         return true;
@@ -1269,7 +1299,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
     await expect(arbiter.finishServerWorkflowRoot({
       deviceId: DEVICE_A,
       workflowId: "workflow-mixed",
-      status: "completed",
+      successful: true,
     })).resolves.toMatchObject({ decision: "terminal", root: { state: "completed" } });
   });
 
@@ -1367,7 +1397,7 @@ describe("DeviceExecutionArbiter observe mode", () => {
       const result = await arbiterFor(client).finishServerWorkflowRoot({
         deviceId: DEVICE_A,
         workflowId: `workflow-${state}`,
-        status: "failed",
+        successful: false,
         actor: "test.cleanup",
       });
 

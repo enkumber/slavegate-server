@@ -10,7 +10,7 @@ const authorityInput: WsJobResultAuthorityInput = {
   deviceId: "00000000-0000-4000-8000-000000000001",
   jobId: "legacy-job-1",
   handle: null,
-  status: "completed",
+  success: true,
   actor: "ws",
   reason: "completed",
   metadata: { observeSource: "wsServer.handleJobResult" },

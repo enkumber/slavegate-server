@@ -150,7 +150,7 @@ export async function dispatchWorkflow(params: DispatchParams) {
     const finished = await deviceExecutionArbiter.finishServerWorkflowRoot({
       deviceId,
       workflowId: workflowRootId,
-      status: "completed",
+      successful: true,
       actor: "workflow_dispatch",
       reason: "all_preworkflow_steps_finished",
       metadata: { workflowName: workflow.name, preStepCount: workflow.steps.length },
