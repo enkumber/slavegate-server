@@ -47,6 +47,13 @@ describe("atomic OTA APK releases", () => {
     expect(bundledMetadata.size).toBeGreaterThan(0);
   });
 
+  it("keeps the bundled active manifest consistent with the bundled APK", async () => {
+    await expect(readActiveOtaRelease(path.join(process.cwd(), "apk"))).resolves.toEqual({
+      ...bundledMetadata,
+      filename: "phone-network.apk",
+    });
+  });
+
   it("refuses an active release whose JSON metadata disagrees with its APK", async () => {
     const dir = await tempDir();
     await seedRelease(dir, { version: "4.0.51", versionCode: 107 });
