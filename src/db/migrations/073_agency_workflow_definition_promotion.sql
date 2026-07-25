@@ -3,8 +3,7 @@
 -- and do not change workflow cache or execution paths.
 
 ALTER TABLE agency_workflow_definitions
-  ADD COLUMN IF NOT EXISTS promotion_state TEXT NOT NULL DEFAULT 'review_only'
-    CHECK (promotion_state IN ('review_only', 'limited_reuse', 'revoked')),
+  ADD COLUMN IF NOT EXISTS promotion_state TEXT,
   ADD COLUMN IF NOT EXISTS promotion_scope TEXT NULL,
   ADD COLUMN IF NOT EXISTS promotion_note TEXT NULL,
   ADD COLUMN IF NOT EXISTS promoted_by TEXT NULL,
@@ -36,4 +35,3 @@ CREATE INDEX IF NOT EXISTS idx_agency_workflow_definition_promotion_events_defin
 
 CREATE INDEX IF NOT EXISTS idx_agency_workflow_definition_promotion_events_action
   ON agency_workflow_definition_promotion_events(action, created_at DESC);
-

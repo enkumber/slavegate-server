@@ -5,8 +5,7 @@ CREATE TABLE IF NOT EXISTS agency_workflow_definitions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   definition_key TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,
-  status TEXT NOT NULL DEFAULT 'draft'
-    CHECK (status IN ('draft', 'active', 'deprecated', 'archived')),
+  status TEXT NOT NULL,
   title TEXT NOT NULL,
   description TEXT,
   platform TEXT NOT NULL,

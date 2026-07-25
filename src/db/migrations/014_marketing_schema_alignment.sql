@@ -7,13 +7,8 @@ BEGIN;
 -- CLIENTS — Adaugă status column (Marketer folosește WHERE status = 'active')
 -- ═══════════════════════════════════════════════════════════════════════════════
 
-ALTER TABLE clients 
-  ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active' 
-  CHECK (status IN ('active', 'paused', 'archived'));
-
--- Migrează din active boolean în status text
-UPDATE clients SET status = 'active' WHERE active = true AND status IS NULL;
-UPDATE clients SET status = 'paused' WHERE active = false AND status IS NULL;
+ALTER TABLE clients
+  ADD COLUMN IF NOT EXISTS status TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_clients_status ON clients(status);
 
@@ -44,20 +39,8 @@ CREATE INDEX IF NOT EXISTS idx_materials_tags ON materials USING GIN(tags);
 -- POSTS — Extinde status values pentru Siren workflow
 -- ═══════════════════════════════════════════════════════════════════════════════
 
--- Drop și recreează CHECK constraint cu valori extinse
+-- Product lifecycle policy is provisioned in PostgreSQL outside migrations.
 ALTER TABLE posts DROP CONSTRAINT IF EXISTS posts_status_check;
-
-ALTER TABLE posts 
-  ADD CONSTRAINT posts_status_check 
-  CHECK (status IN (
-    'pending_approval',  -- awaiting Dan approval
-    'pending_review',    -- alias pentru pending_approval (Siren uses this)
-    'approved',          -- ready for scheduling
-    'scheduled',         -- Tactician scheduled it
-    'rejected',          -- Dan rejected
-    'published',         -- posted on platform
-    'failed'             -- posting failed
-  ));
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- ACCOUNTS — Asigură coloanele necesare pentru Marketer

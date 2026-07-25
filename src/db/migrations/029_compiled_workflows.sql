@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS compiled_workflows (
   app_id          TEXT NOT NULL,                -- Target app package name
   app_map_version TEXT,                         -- App map version used for compilation
   compiled_data   JSONB NOT NULL,               -- Full CompiledWorkflow JSON
-  status          TEXT DEFAULT 'compiled',      -- compiled | running | completed | failed | aborted
+  status          TEXT NOT NULL,
   execution_stats JSONB,                        -- Runtime stats after execution
   total_steps     INTEGER,
   steps_completed INTEGER DEFAULT 0,

@@ -2,8 +2,7 @@
 
 CREATE TABLE IF NOT EXISTS agency_compiler_policy_gate_config (
   gate_id TEXT PRIMARY KEY,
-  state TEXT NOT NULL DEFAULT 'blocked'
-    CHECK (state IN ('blocked', 'review_ready', 'enabled')),
+  state TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,
   owner TEXT,
   risk TEXT,

@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS marketer_escalations (
   question        TEXT        NOT NULL,
   context         JSONB       NOT NULL DEFAULT '{}'::jsonb,
   options         JSONB,      -- Array de opțiuni sugerate
-  status          TEXT        NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered', 'skipped')),
+  status          TEXT        NOT NULL,
   answer          JSONB,      -- Răspunsul lui Dan
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   answered_at     TIMESTAMPTZ

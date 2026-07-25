@@ -21,9 +21,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_imei ON devices(imei) WHERE imei I
 -- 2. hardware_uuid becomes nullable (was device identifier, now replaced by imei)
 ALTER TABLE devices ALTER COLUMN hardware_uuid DROP NOT NULL;
 
--- 3. Add 'revoked' to valid device statuses
+-- 3. Device lifecycle policy is provisioned operationally in PostgreSQL.
 ALTER TABLE devices DROP CONSTRAINT IF EXISTS devices_status_check;
-ALTER TABLE devices ADD CONSTRAINT devices_status_check
-  CHECK (status IN ('pending','approved','online','offline','maintenance','revoked'));
 
 COMMIT;

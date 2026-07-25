@@ -45,8 +45,7 @@ CREATE TABLE IF NOT EXISTS canary_rollouts (
   id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   template_id       TEXT        REFERENCES workflow_templates(id) ON DELETE CASCADE,
   canary_device_id  UUID        REFERENCES devices(id) ON DELETE SET NULL,
-  status            TEXT        NOT NULL DEFAULT 'observing'
-                    CHECK (status IN ('observing','passed','failed','promoted','rolled_back')),
+  status            TEXT        NOT NULL,
   observe_until     TIMESTAMPTZ NOT NULL,          -- auto-promote after this if no failures
   error_rate        REAL,                          -- populated on completion
   total_runs        INT         NOT NULL DEFAULT 0,

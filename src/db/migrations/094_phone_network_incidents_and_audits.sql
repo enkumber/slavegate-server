@@ -10,8 +10,7 @@ CREATE TABLE IF NOT EXISTS phone_network_incidents (
     CHECK (category IN ('execution', 'security', 'integrity', 'availability', 'account', 'unknown')),
   severity TEXT NOT NULL DEFAULT 'medium'
     CHECK (severity IN ('low', 'medium', 'high', 'critical')),
-  status TEXT NOT NULL DEFAULT 'open'
-    CHECK (status IN ('open', 'acknowledged', 'investigating', 'resolved', 'closed')),
+  status TEXT NOT NULL,
   assigned_agent TEXT NOT NULL DEFAULT 'kraken',
   error_code TEXT NULL,
   summary TEXT NOT NULL,
@@ -44,7 +43,7 @@ CREATE TABLE IF NOT EXISTS phone_network_audit_runs (
   audit_date DATE NOT NULL,
   timezone TEXT NOT NULL DEFAULT 'Europe/Bucharest',
   actor TEXT NOT NULL DEFAULT 'kraken',
-  status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),
+  status TEXT NOT NULL,
   window_start TIMESTAMPTZ NOT NULL,
   window_end TIMESTAMPTZ NOT NULL,
   summary JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -66,7 +65,7 @@ CREATE TABLE IF NOT EXISTS phone_network_audit_findings (
   summary TEXT NOT NULL,
   evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
   recommended_action TEXT NULL,
-  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'verified', 'dismissed', 'resolved')),
+  status TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (audit_run_id, finding_key)

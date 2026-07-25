@@ -7,14 +7,13 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE IF NOT EXISTS pnq_nodes (
   id                 UUID PRIMARY KEY,
   node_key           TEXT NOT NULL,
-  status             TEXT NOT NULL DEFAULT 'active',
+  status             TEXT NOT NULL,
   next_node_seq      BIGINT NOT NULL DEFAULT 1,
   connection_epoch   BIGINT NOT NULL DEFAULT 0,
   metadata           JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT pnq_nodes_node_key_unique UNIQUE (node_key),
-  CONSTRAINT pnq_nodes_status_check CHECK (status IN ('active', 'draining', 'disabled')),
   CONSTRAINT pnq_nodes_next_node_seq_check CHECK (next_node_seq >= 1),
   CONSTRAINT pnq_nodes_connection_epoch_check CHECK (connection_epoch >= 0)
 );
@@ -25,7 +24,7 @@ CREATE TABLE IF NOT EXISTS pnq_jobs (
   node_seq                   BIGINT NOT NULL,
   request_key                TEXT NOT NULL,
   request_payload            JSONB NOT NULL,
-  status                     TEXT NOT NULL DEFAULT 'PENDING',
+  status                     TEXT NOT NULL,
   job_version                BIGINT NOT NULL DEFAULT 1,
   dispatch_generation        BIGINT NOT NULL DEFAULT 0,
   execution_id               UUID,
@@ -47,26 +46,10 @@ CREATE TABLE IF NOT EXISTS pnq_jobs (
   CONSTRAINT pnq_jobs_node_seq_unique UNIQUE (node_id, node_seq),
   CONSTRAINT pnq_jobs_request_key_unique UNIQUE (node_id, request_key),
   CONSTRAINT pnq_jobs_execution_id_unique UNIQUE (execution_id),
-  CONSTRAINT pnq_jobs_status_check CHECK (
-    status IN ('PENDING', 'DISPATCHING', 'RUNNING', 'DONE', 'STUCK')
-  ),
   CONSTRAINT pnq_jobs_job_version_check CHECK (job_version >= 1),
   CONSTRAINT pnq_jobs_dispatch_generation_check CHECK (dispatch_generation >= 0),
   CONSTRAINT pnq_jobs_claimed_connection_epoch_check CHECK (
     claimed_connection_epoch IS NULL OR claimed_connection_epoch >= 0
-  ),
-  CONSTRAINT pnq_jobs_execution_id_required_check CHECK (
-    (status = 'PENDING' AND execution_id IS NULL AND claimed_connection_epoch IS NULL)
-    OR (
-      status IN ('DISPATCHING', 'RUNNING', 'DONE')
-      AND execution_id IS NOT NULL
-      AND claimed_connection_epoch IS NOT NULL
-    )
-    OR (status = 'STUCK')
-  ),
-  CONSTRAINT pnq_jobs_terminal_state_check CHECK (
-    (status IN ('DONE', 'STUCK') AND terminal_at IS NOT NULL)
-    OR (status IN ('PENDING', 'DISPATCHING', 'RUNNING') AND terminal_at IS NULL)
   ),
   CONSTRAINT pnq_jobs_deadline_order_check CHECK (
     queue_deadline_at < dispatch_deadline_at
@@ -76,12 +59,9 @@ CREATE TABLE IF NOT EXISTS pnq_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS pnq_jobs_fifo_idx
-  ON pnq_jobs(node_id, node_seq)
-  WHERE status = 'PENDING';
+  ON pnq_jobs(node_id, status, node_seq);
 
-CREATE UNIQUE INDEX IF NOT EXISTS pnq_jobs_one_active_per_node_idx
-  ON pnq_jobs(node_id)
-  WHERE status IN ('DISPATCHING', 'RUNNING');
+DROP INDEX IF EXISTS pnq_jobs_one_active_per_node_idx;
 
 CREATE INDEX IF NOT EXISTS pnq_jobs_recovery_idx
   ON pnq_jobs(status, updated_at, result_deadline_at)

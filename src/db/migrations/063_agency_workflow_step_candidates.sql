@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS agency_workflow_step_candidates (
   action TEXT NULL,
   type TEXT NULL,
   step_status TEXT NULL,
-  candidate_state TEXT NOT NULL DEFAULT 'step_candidate',
+  candidate_state TEXT NOT NULL,
   request_key TEXT NULL,
   cache_key TEXT NULL,
   canonical_workflow_id TEXT NULL,
@@ -21,8 +21,6 @@ CREATE TABLE IF NOT EXISTS agency_workflow_step_candidates (
   note TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT chk_agency_workflow_step_candidates_state
-    CHECK (candidate_state IN ('step_candidate', 'validated_step', 'rejected')),
   CONSTRAINT chk_agency_workflow_step_candidates_step_index
     CHECK (step_index >= 0),
   CONSTRAINT chk_agency_workflow_step_candidates_last_good

@@ -5,8 +5,7 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   instruction          TEXT NOT NULL,
   app_id               TEXT NOT NULL,
   device_id            TEXT NOT NULL,
-  status               TEXT NOT NULL DEFAULT 'accepted'
-                         CHECK (status IN ('accepted', 'discovering', 'compiling', 'running', 'completed', 'failed', 'aborted')),
+  status               TEXT NOT NULL,
   discovery_ran        BOOLEAN NOT NULL DEFAULT FALSE,
   app_map_version      TEXT,
   compiled_workflow_id UUID,

@@ -115,8 +115,7 @@ CREATE TABLE IF NOT EXISTS workflow_canary_cohorts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL UNIQUE,
   platform TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'active'
-    CHECK (status IN ('active', 'paused', 'retired')),
+  status TEXT NOT NULL,
   safety_classes JSONB NOT NULL DEFAULT '["read_only","navigation"]'::jsonb,
   required_distinct_devices INT NOT NULL DEFAULT 2 CHECK (required_distinct_devices > 0),
   required_distinct_branches INT NOT NULL DEFAULT 2 CHECK (required_distinct_branches > 0),
@@ -132,8 +131,7 @@ CREATE TABLE IF NOT EXISTS workflow_canary_runs (
   device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   workflow_id UUID NULL REFERENCES workflows(id) ON DELETE SET NULL,
   branch_key TEXT NOT NULL DEFAULT 'default',
-  status TEXT NOT NULL DEFAULT 'queued'
-    CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+  status TEXT NOT NULL,
   postcondition_verified BOOLEAN NOT NULL DEFAULT FALSE,
   recovery_count INT NOT NULL DEFAULT 0,
   evidence JSONB NOT NULL DEFAULT '{}'::jsonb,

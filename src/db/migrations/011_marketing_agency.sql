@@ -73,8 +73,7 @@ CREATE TABLE IF NOT EXISTS posts (
   id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id      UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   platform        TEXT        NOT NULL,
-  status          TEXT        NOT NULL DEFAULT 'pending_approval'
-                              CHECK (status IN ('pending_approval', 'approved', 'rejected', 'published')),
+  status          TEXT        NOT NULL,
   content         JSONB       NOT NULL DEFAULT '{}'::jsonb,
   -- content conține: media_url, caption, hashtags, thumbnail_url
   created_by      TEXT        NOT NULL DEFAULT 'siren',
@@ -209,8 +208,7 @@ CREATE TABLE IF NOT EXISTS skill_update_jobs (
   app             TEXT        NOT NULL,
   elements        JSONB       NOT NULL DEFAULT '[]'::jsonb,
   failure_data    JSONB       NOT NULL DEFAULT '{}'::jsonb,
-  status          TEXT        NOT NULL DEFAULT 'pending'
-                              CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+  status          TEXT        NOT NULL,
   result          JSONB,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   completed_at    TIMESTAMPTZ
