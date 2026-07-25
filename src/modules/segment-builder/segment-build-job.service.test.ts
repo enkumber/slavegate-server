@@ -55,7 +55,7 @@ vi.mock("../../db/client", () => {
       ) {
         const expired = Date.parse(String(state.row.claim_expires_at)) < Date.now();
         const recentlyDispatched = state.row.dispatched_at
-          && Date.parse(String(state.row.dispatched_at)) >= Date.now() - 30_000;
+          && Date.parse(String(state.row.dispatched_at)) >= Date.now() - Number(params[2]);
         if (
           !["claimed", "building", "candidate_ready", "canary_running"].includes(String(state.row.status))
           || !expired
@@ -315,8 +315,10 @@ describe("SegmentBuildJobService dispatch", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 202 })));
 
     const redispatched = await new SegmentBuildJobService().sweepExpiredAgentLeases();
+    const duplicateSweep = await new SegmentBuildJobService().sweepExpiredAgentLeases();
 
     expect(redispatched).toBe(1);
+    expect(duplicateSweep).toBe(0);
     expect(state.row.status).toBe("building");
     expect(state.row.dispatch_attempts).toBe(1);
   });

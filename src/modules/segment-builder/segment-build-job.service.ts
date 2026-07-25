@@ -17,6 +17,7 @@ export type SegmentBuildReason =
 export const SEGMENT_BUILDER_AGENT_ID = "segment-builder";
 const SEGMENT_BUILDER_SWEEP_LIMIT = 25;
 const OFFLINE_QUEUED_CANARY_TIMEOUT_MS = 5 * 60_000;
+const RECOVERY_REDISPATCH_GUARD_MS = 10 * 60_000;
 
 export type SegmentBuildStatus =
   | "pending_agent"
@@ -391,9 +392,12 @@ export class SegmentBuildJobService {
          WHERE id = $1
            AND status IN ('claimed','building','candidate_ready','canary_running')
            AND claim_expires_at < NOW()
-           AND (dispatched_at IS NULL OR dispatched_at < NOW() - INTERVAL '30 seconds')
+           AND (
+             dispatched_at IS NULL
+             OR dispatched_at < NOW() - ($3::bigint * INTERVAL '1 millisecond')
+           )
          RETURNING *`,
-        [job.id, sessionKey],
+        [job.id, sessionKey, RECOVERY_REDISPATCH_GUARD_MS],
       )
       : await getDb().query(
         `UPDATE segment_build_jobs
