@@ -231,15 +231,47 @@ export async function queueHumanAgencyWorkflowRun(input: {
       input.cacheKey
         ? `SELECT * FROM generated_workflow_plan_cache
            WHERE cache_key = $1
-             AND artifact_state = ANY($2::text[])`
+             AND (
+               lifecycle_state_matches(
+                 'generated_workflow_plan_cache'::regclass,
+                 artifact_state,
+                 '{"dispatchable":true}'::jsonb,
+                 'artifact_state'
+               )
+               OR (
+                 $2::boolean
+                 AND lifecycle_state_matches(
+                   'generated_workflow_plan_cache'::regclass,
+                   artifact_state,
+                   '{"initial":true}'::jsonb,
+                   'artifact_state'
+                 )
+               )
+             )`
         : `SELECT * FROM generated_workflow_plan_cache
            WHERE request_key = $1
-             AND artifact_state = ANY($2::text[])
+             AND (
+               lifecycle_state_matches(
+                 'generated_workflow_plan_cache'::regclass,
+                 artifact_state,
+                 '{"dispatchable":true}'::jsonb,
+                 'artifact_state'
+               )
+               OR (
+                 $2::boolean
+                 AND lifecycle_state_matches(
+                   'generated_workflow_plan_cache'::regclass,
+                   artifact_state,
+                   '{"initial":true}'::jsonb,
+                   'artifact_state'
+                 )
+               )
+             )
            ORDER BY updated_at DESC
            LIMIT 1`,
       [
         input.cacheKey ?? input.requestKey,
-        input.allowCandidateArtifact ? ["promoted", "candidate"] : ["promoted"],
+        input.allowCandidateArtifact === true,
       ],
     );
     const cached = cacheResult.rows[0];
@@ -2318,17 +2350,16 @@ async function loadKillSwitchFromDb(): Promise<boolean> {
 async function persistKillSwitch(
   active:      boolean,
   initiatedBy: string,
-  scope        = "fleet",
   reason       = "",
   deviceId?:   string
 ): Promise<void> {
   const db       = getDb();
-  const scopeVal = scope === "device" && deviceId ? `device:${deviceId}` : scope;
+  const scopeVal = deviceId ? `device:${deviceId}` : "all";
 
   // IMPORTANT: Only write fleet-wide system_config flag for fleet-scoped operations.
   // Device-scoped kill switch must NOT set system_config.kill_switch_active = true —
   // if it did, a server restart would boot with fleet-wide kill switch active.
-  if (scope !== "device") {
+  if (!deviceId) {
     await db.query(
       `INSERT INTO system_config (key, value) VALUES ('kill_switch_active', $1)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
@@ -2364,23 +2395,22 @@ router.post("/kill-switch", requireAuth, async (req, res) => {
     activate,
     initiatedBy = "admin",
     reason      = "",
-    scope       = "fleet",    // "fleet" | "device"
-    deviceId,                 // required if scope="device"
+    deviceId,
   } = req.body as { activate: boolean; initiatedBy?: string; reason?: string; scope?: string; deviceId?: string };
 
-  // BUG FIX: previous logic `activate && scope === "fleet"` never updated cache on deactivate
+  // Cache the fleet-wide state whenever no device-specific target is supplied.
   // because `false && anything` = false → ternary returned old cache value unchanged.
   // Fleet jobs remained blocked after deactivating — server restart was required to resume.
-  if (scope === "fleet") {
+  if (!deviceId) {
     _killSwitchCache = activate;
     killSwitchGauge?.set(activate ? 1 : 0);
   }
 
-  await persistKillSwitch(activate, String(initiatedBy), scope, reason, deviceId);
+  await persistKillSwitch(activate, String(initiatedBy), reason, deviceId);
 
   if (activate) {
     const reason_ = reason || "Kill switch activated";
-    if (scope === "device" && deviceId) {
+    if (deviceId) {
       // Per-device kill switch: DirectWs only
       console.warn(`[kill-switch] 🛑 DEVICE ${deviceId} by ${initiatedBy}`);
     } else {
@@ -2425,9 +2455,9 @@ router.post("/kill-switch", requireAuth, async (req, res) => {
       console.error(`[kill-switch] 🛑 FLEET by ${initiatedBy}: ${reason_}`);
     }
   } else {
-    console.log(`[kill-switch] Deactivated by ${initiatedBy} (scope=${scope})`);
+    console.log(`[kill-switch] Deactivated by ${initiatedBy} (deviceId=${deviceId ?? "all"})`);
   }
-  res.json({ ok: true, data: { killSwitchActive: activate, scope, deviceId } });
+  res.json({ ok: true, data: { killSwitchActive: activate, deviceId: deviceId ?? null } });
 });
 
 // Legacy WsServer ref — kept for backward compat

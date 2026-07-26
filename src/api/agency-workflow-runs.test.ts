@@ -326,6 +326,8 @@ describe("agency workflow runs API", () => {
         ? {
             requiresScope: true,
             disallowedScopes: ["global"],
+            minimumReadinessScore: 0.9,
+            allowedReadinessBlockers: ["limited_reuse_not_promoted", "compiler_auto_use_disabled"],
             minimumValidationScore: 60,
             minimumBranchCoverage: 50,
           }
@@ -379,6 +381,24 @@ describe("agency workflow runs API", () => {
       resourceTable: string,
       stateColumn = "status",
     ) => {
+      if (resourceTable === "generated_workflow_plan_cache" && stateColumn === "artifact_state") {
+        return [
+          {
+            ...(await mocks.lifecycle.getState(resourceTable, "candidate")),
+            initial: true,
+            terminal: false,
+            administrative: false,
+            dispatchable: false,
+          },
+          {
+            ...(await mocks.lifecycle.getState(resourceTable, "promoted")),
+            initial: false,
+            terminal: false,
+            administrative: false,
+            dispatchable: true,
+          },
+        ];
+      }
       if (resourceTable === "agency_workflow_step_candidates" && stateColumn === "candidate_state") {
         return Promise.all(["step_candidate", "validated_step", "rejected"].map((status) =>
           mocks.lifecycle.getState(resourceTable, status)
@@ -395,6 +415,20 @@ describe("agency workflow runs API", () => {
       stateColumn = "status",
     ) => {
       if (fromStatus === "rejected") return null;
+      if (_resourceTable === "generated_workflow_plan_cache") {
+        return {
+          lifecycleKey: "test_fixture",
+          actionKey: "publish_fixture",
+          fromStatus,
+          toStatus: "promoted",
+          manualAllowed: true,
+          externalAllowed: false,
+          automatic: false,
+          markStarted: false,
+          markCompleted: false,
+          metadata: {},
+        };
+      }
       return ({
       lifecycleKey: "test_fixture",
       actionKey: selector.targetTerminal ? "revoke" : "validate",
@@ -446,7 +480,8 @@ describe("agency workflow runs API", () => {
     const cacheLookup = mocks.client.query.mock.calls.find(([sql]) =>
       String(sql).includes("generated_workflow_plan_cache")
     );
-    expect(cacheLookup?.[0]).toContain("artifact_state = 'promoted'");
+    expect(cacheLookup?.[0]).toContain("lifecycle_state_matches");
+    expect(cacheLookup?.[0]).toContain('"dispatchable":true');
 
     const taskInsert = mocks.client.query.mock.calls.find(([sql]) =>
       String(sql).includes("INSERT INTO tasks")
@@ -987,6 +1022,7 @@ describe("agency workflow runs API", () => {
       validated_by: null,
       validated_at: null,
       run_status: "completed",
+      run_successful: true,
       run_intent: "reddit_account_health_scan",
       device_name: "Pixel",
       created_at: new Date("2026-05-22T10:06:00.000Z"),
@@ -1050,6 +1086,7 @@ describe("agency workflow runs API", () => {
       validated_by: "dashboard",
       validated_at: new Date("2026-05-22T10:08:00.000Z"),
       run_status: "completed",
+      run_successful: true,
       run_intent: "reddit_account_health_scan",
       device_name: "Pixel",
       created_at: new Date("2026-05-22T10:06:00.000Z"),
@@ -1623,6 +1660,7 @@ describe("agency workflow runs API", () => {
       revoked_by: null,
       revoked_at: null,
       run_status: "completed",
+      run_successful: true,
       run_intent: "reddit_account_health_scan",
       device_name: "Pixel",
       created_at: new Date("2026-05-22T10:06:00.000Z"),
@@ -1704,8 +1742,11 @@ describe("agency workflow runs API", () => {
           compatibility: { test: true },
         },
         validation_evidence: { test: true },
+        step_index: 0,
+        last_good_step_index: 0,
         step_status: "succeeded",
         run_status: "completed",
+        run_successful: true,
       }],
     });
     const response = await patchAgency(
@@ -1714,7 +1755,7 @@ describe("agency workflow runs API", () => {
     );
 
     expect(response.status).toBe(400);
-    expect(response.body.code).toBe("STEP_LIBRARY_GLOBAL_SCOPE_DISABLED");
+    expect(response.body.code).toBe("STEP_LIBRARY_PROMOTION_SCOPE_NOT_ALLOWED");
     expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 
@@ -1759,6 +1800,7 @@ describe("agency workflow runs API", () => {
       revoked_by: null,
       revoked_at: null,
       run_status: "completed",
+      run_successful: true,
       run_intent: "reddit_account_health_scan",
       device_name: "Pixel",
       created_at: new Date("2026-05-22T10:06:00.000Z"),
@@ -2527,9 +2569,7 @@ describe("agency workflow runs API", () => {
       })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
-    mocks.client.query
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [cachedArtifact({
+    const lockedArtifact = cachedArtifact({
         platform: "android",
         cache_key: "0123456789abcdef01234567",
         canonical_workflow_id: "workflow_definition_device_unlock_v1",
@@ -2544,13 +2584,15 @@ describe("agency workflow runs API", () => {
         },
         source_metadata: { source: "workflow_definition_auto_use", safetyClass: "standard", intent: "device_unlock" },
         compiled_plan: { metadata: { safetyClass: "standard", intent: "device_unlock" }, llmBudget: { happyPathRequests: 0 } },
-      })] })
-      .mockResolvedValueOnce({ rows: [{ id: run.id }] })
-      .mockResolvedValueOnce({ rows: [{ id: run.task_id }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [run] })
-      .mockResolvedValueOnce({ rows: [] });
+      });
+    mocks.client.query.mockImplementation(async (sql) => {
+      const text = String(sql);
+      if (text.includes("SELECT * FROM generated_workflow_plan_cache")) return { rows: [lockedArtifact] };
+      if (text.includes("INSERT INTO agency_workflow_runs")) return { rows: [{ id: run.id }] };
+      if (text.includes("INSERT INTO tasks")) return { rows: [{ id: run.task_id }] };
+      if (text.includes("FROM agency_workflow_runs r")) return { rows: [run] };
+      return { rows: [] };
+    });
 
     const response = await postAgency(
       `/api/agency/workflow-definitions/${definition.id}/auto-use-run`,
@@ -2578,8 +2620,8 @@ describe("agency workflow runs API", () => {
         workflowCacheChanging: true,
       }),
     });
-    expect(String(mocks.client.query.mock.calls[3][0])).toContain("INSERT INTO tasks");
-    expect(String(mocks.client.query.mock.calls[5][0])).toContain("agency_workflow_definition_version_events");
+    expect(mocks.client.query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO tasks"))).toBe(true);
+    expect(mocks.client.query.mock.calls.some(([sql]) => String(sql).includes("agency_workflow_definition_version_events"))).toBe(true);
   });
 
   it("promotes an existing generated workflow artifact as a no-code Workflow Definition executable", async () => {
@@ -2612,11 +2654,11 @@ describe("agency workflow runs API", () => {
       .mockResolvedValueOnce({ rows: [definition] })
       .mockResolvedValueOnce({ rows: [artifact] })
       .mockResolvedValueOnce({ rows: [] });
-    mocks.client.query
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [promoted] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
+    mocks.client.query.mockImplementation(async (sql) => {
+      const text = String(sql);
+      if (text.includes("UPDATE generated_workflow_plan_cache")) return { rows: [promoted] };
+      return { rows: [] };
+    });
 
     const response = await postAgency(
       `/api/agency/workflow-definitions/${definition.id}/executable-artifact`,

@@ -57,6 +57,7 @@ vi.mock("../workflows/workflow.service", () => ({
     recordGeneratedPlanCacheOutcome: mocks.recordGeneratedPlanCacheOutcome,
     saveTemplate: mocks.saveTemplate,
     saveGeneratedPlanCache: mocks.saveGeneratedPlanCache,
+    saveCandidateExecutableGeneratedPlanCache: mocks.saveGeneratedPlanCache,
     get: mocks.getWorkflow,
   },
 }));
@@ -855,6 +856,9 @@ describe("task-runner generated_workflow routine", () => {
           failureCount: 1,
           lastOutcome: "failure",
         },
+        repairPolicy: {
+          maximumFailureCount: 3,
+        },
       },
     });
     const repairedWorkflow: WorkflowTemplate = {
@@ -977,17 +981,14 @@ describe("task-runner generated_workflow routine", () => {
       }),
       REQUEST_KEY,
       expect.objectContaining({
-        artifactState: "candidate",
-        replaceRequestKeyArtifacts: false,
-        sourceMetadata: expect.objectContaining({
-          source: "llm_repair",
-          repairOfCacheKey: CACHE_KEY,
-          workflowRepair: expect.objectContaining({
-            nextAction: "retry_task_with_repaired_candidate",
-            reason: "RECOVERY_BUDGET_EXCEEDED",
-          }),
+        source: "llm_repair",
+        repairOfCacheKey: CACHE_KEY,
+        workflowRepair: expect.objectContaining({
+          nextAction: "retry_task_with_repaired_candidate",
+          reason: "RECOVERY_BUDGET_EXCEEDED",
         }),
       }),
+      false,
     );
     const repairedCacheKey = mocks.saveGeneratedPlanCache.mock.calls[0][1].cacheKey;
     expect(mocks.getGeneratedPlanCache).toHaveBeenCalledWith(repairedCacheKey, { includeCandidate: true });

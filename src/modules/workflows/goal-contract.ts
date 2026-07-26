@@ -162,15 +162,6 @@ export function workflowGoalContractReason(
   ) {
     return "workflow.goalContract does not match the capability contract selected from the catalog";
   }
-  if (
-    workflow.safetyClass === "read_only"
-    && contract.allowedEffects.some((effect) =>
-      effect === "business_mutation" || effect === "sensitive" || effect === "destructive"
-    )
-  ) {
-    return "read_only workflow goal contract permits a mutating or sensitive effect";
-  }
-
   const actions = collectActions(workflow.steps);
   const byStage = new Map<string, IndexedAction[]>();
   for (const action of actions) {

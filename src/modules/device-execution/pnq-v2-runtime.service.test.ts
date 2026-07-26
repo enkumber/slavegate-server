@@ -12,7 +12,7 @@ afterEach(() => {
 
 describe("PNQ v2 shadow runtime service", () => {
   it("has zero repository and timer effects when disabled", async () => {
-    setPnqV2RuntimeConfigForTest({ mode: "disabled", sweepIntervalMs: 5 });
+    setPnqV2RuntimeConfigForTest({ enabled: false, sweepIntervalMs: 5 });
     const enqueue = vi.spyOn(PnqV2RuntimeRepository.prototype, "enqueueMappedJob");
     const register = vi.spyOn(PnqV2RuntimeRepository.prototype, "registerNode");
     const result = vi.spyOn(PnqV2RuntimeRepository.prototype, "recordResult");
@@ -45,7 +45,7 @@ describe("PNQ v2 shadow runtime service", () => {
 
   it("uses configured sweep interval and only asks repository to mark expired active jobs", async () => {
     vi.useFakeTimers();
-    setPnqV2RuntimeConfigForTest({ mode: "shadow", sweepIntervalMs: 1234 });
+    setPnqV2RuntimeConfigForTest({ enabled: true, sweepIntervalMs: 1234 });
     const markExpired = vi
       .spyOn(PnqV2RuntimeRepository.prototype, "markExpiredActiveStuck")
       .mockResolvedValue(0);
@@ -60,9 +60,11 @@ describe("PNQ v2 shadow runtime service", () => {
     await service.close();
   });
 
-  it("keeps runtime mode parsing restricted to disabled and shadow", () => {
+  it("loads runtime enablement from PostgreSQL without nominal modes", () => {
     const source = fs.readFileSync(`${process.cwd()}/src/modules/device-execution/pnq-v2-runtime-config.ts`, "utf8");
-    expect(source).toContain('return value === "shadow" ? "shadow" : "disabled"');
+    expect(source).toContain("runtime_semantic_entries");
+    expect(source).toContain("typeof payload.enabled");
+    expect(source).not.toContain("PNQ_V2_RUNTIME_MODE");
   });
 
   it("detaches side effects and handles synchronous throws as telemetry", async () => {

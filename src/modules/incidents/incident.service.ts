@@ -412,7 +412,24 @@ export async function getDailyAuditSnapshot(date: string, timezone = "Europe/Buc
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("date must use YYYY-MM-DD");
   if (!SAFE_TIMEZONES.has(timezone)) throw new Error("unsupported timezone");
   const db = getDb();
-  const params = [date, timezone];
+  const auditPolicyResult = await db.query<{ policy: Record<string, unknown> }>(
+    `SELECT entry.payload->'incidentAuditPolicy' AS policy
+       FROM runtime_semantic_entries entry
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = entry.lifecycle_key
+        AND definition.status = entry.status
+      WHERE definition.dispatchable
+        AND jsonb_typeof(entry.payload->'incidentAuditPolicy') = 'object'
+      ORDER BY entry.priority DESC, entry.id`,
+  );
+  if (auditPolicyResult.rows.length !== 1) {
+    throw new Error("PostgreSQL must expose exactly one active incident audit policy");
+  }
+  const maximumRetryCount = Number(auditPolicyResult.rows[0].policy.maximumRetryCount);
+  if (!Number.isInteger(maximumRetryCount) || maximumRetryCount < 0) {
+    throw new Error("invalid PostgreSQL incident audit policy");
+  }
+  const params = [date, timezone, maximumRetryCount];
   const windowSql = `(SELECT ($1::date::timestamp AT TIME ZONE $2) AS start_at,
                               (($1::date + 1)::timestamp AT TIME ZONE $2) AS end_at)`;
   const [tasks, runs, artifacts, candidates, incidents, findings, changedArtifacts, changedCandidates] = await Promise.all([
@@ -429,15 +446,27 @@ export async function getDailyAuditSnapshot(date: string, timezone = "Europe/Buc
               WHERE last_detected_at >= w.start_at AND last_detected_at < w.end_at GROUP BY status, severity`, params),
     db.query(
       `SELECT 'promoted_without_clean_5_of_5' AS kind, 'high' AS severity,
-              id::text AS subject_id, candidate_key, success_count, failure_count, safety_class
-         FROM ui_graph_learning_candidates, ${windowSql} w
+              candidate.id::text AS subject_id, candidate.candidate_key,
+              candidate.success_count, candidate.failure_count, candidate.safety_class
+         FROM ui_graph_learning_candidates candidate
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('ui_graph_learning_candidates')
+          AND binding.state_column = 'status'::name
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = binding.lifecycle_key
+          AND state.status = candidate.status,
+              ${windowSql} w
         WHERE lifecycle_state_matches(
                 'ui_graph_learning_candidates'::regclass,
-                status,
+                candidate.status,
                 '{"dispatchable":true}'::jsonb
               )
-          AND updated_at >= w.start_at AND updated_at < w.end_at
-          AND (success_count < 5 OR failure_count > 0 OR safety_class NOT IN ('read_only', 'navigation'))
+          AND candidate.updated_at >= w.start_at AND candidate.updated_at < w.end_at
+          AND (
+            candidate.success_count < COALESCE((state.metadata->>'minimumSuccessCount')::int, 0)
+            OR candidate.failure_count > COALESCE((state.metadata->>'maximumFailureCount')::int, 0)
+            OR NOT COALESCE(state.metadata->'allowedSafetyClasses' ? candidate.safety_class, FALSE)
+          )
        UNION ALL
        SELECT 'device_specific_candidate' AS kind, 'medium' AS severity,
               id::text AS subject_id, candidate_key, success_count, failure_count, safety_class
@@ -446,12 +475,12 @@ export async function getDailyAuditSnapshot(date: string, timezone = "Europe/Buc
           AND (payload::text ~* 'device[_-]?id' OR payload::text ~* 'device[_-]?class')
        UNION ALL
        SELECT CASE
-                WHEN vlm_calls > 0 OR retry_count > 2
+                WHEN vlm_calls > 0 OR retry_count > $3::int
                   THEN 'unexpected_recovery_or_vlm'
                 ELSE 'failed_ui_graph_action'
               END AS kind,
               CASE
-                WHEN vlm_calls > 0 OR retry_count > 2 THEN 'high'
+                WHEN vlm_calls > 0 OR retry_count > $3::int THEN 'high'
                 ELSE 'medium'
               END AS severity,
               id::text AS subject_id, COALESCE(step_id, workflow_id, id::text) AS candidate_key,
@@ -459,7 +488,21 @@ export async function getDailyAuditSnapshot(date: string, timezone = "Europe/Buc
               outcome AS safety_class
          FROM ui_graph_action_events, ${windowSql} w
         WHERE created_at >= w.start_at AND created_at < w.end_at
-          AND (retry_count > 2 OR vlm_calls > 0 OR outcome IN ('failed', 'aborted'))
+          AND (
+            retry_count > $3::int
+            OR vlm_calls > 0
+            OR EXISTS (
+              SELECT 1
+                FROM runtime_semantic_entries entry
+                JOIN lifecycle_state_definitions definition
+                  ON definition.lifecycle_key = entry.lifecycle_key
+                 AND definition.status = entry.status
+               WHERE entry.namespace = 'ui_graph_outcome_policy'
+                 AND entry.entry_key = ui_graph_action_events.outcome
+                 AND definition.dispatchable
+                 AND COALESCE((entry.payload->>'failed')::boolean, FALSE)
+            )
+          )
        ORDER BY severity DESC LIMIT 200`,
       params,
     ),

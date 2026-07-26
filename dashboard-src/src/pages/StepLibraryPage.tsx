@@ -369,8 +369,8 @@ export function StepLibraryPage() {
                       <div key={event.id} style={{ border: "1px solid #242424", borderRadius: "6px", padding: "10px", background: "#0d0d0d" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "center", marginBottom: "6px" }}>
                           <Badge
-                            label={event.action === "promote_limited" ? "Promote limited" : "Revoke"}
-                            tone={event.action === "promote_limited" ? "green" : "red"}
+                            label={event.action}
+                            tone="gray"
                           />
                           <span style={{ color: "#777", fontSize: "11px" }}>{formatDate(event.createdAt)}</span>
                         </div>

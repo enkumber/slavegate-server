@@ -87,8 +87,8 @@ interface AgentCandidate {
     aliases?: string[];
     requiredTerms?: string[];
     forbiddenTerms?: string[];
-    safetyClass: "read_only" | "navigation";
-    portabilityScope?: "global" | "contextual" | "device" | "account";
+    safetyClass: string;
+    portabilityScope?: string;
     metadata?: Record<string, unknown>;
   };
   segments: SegmentCandidate[];

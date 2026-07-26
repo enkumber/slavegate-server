@@ -528,7 +528,7 @@ export function WorkflowDefinitionsPage() {
               {promotionEvents.map((event) => (
                 <div key={event.id} style={{ border: "1px solid #242424", borderRadius: "6px", padding: "10px", background: "#0d0d0d" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", marginBottom: "5px" }}>
-                    <Badge label={event.action === "promote_limited" ? "Promote limited" : event.action === "rollback" ? "Rollback" : "Revoke"} tone={event.action === "promote_limited" ? "green" : event.action === "rollback" ? "blue" : "red"} />
+                    <Badge label={event.action} tone="gray" />
                     <span style={{ color: "#777", fontSize: "11px" }}>{event.createdAt ? new Date(event.createdAt).toLocaleString() : "-"}</span>
                   </div>
                   <div style={{ color: "#aaa", fontSize: "12px", overflowWrap: "anywhere" }}>State: {event.previousState ?? "-"} → {event.nextState ?? "-"}</div>

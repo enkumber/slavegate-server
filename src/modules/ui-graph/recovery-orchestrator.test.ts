@@ -8,7 +8,7 @@ const source: StateResolution = {
 };
 
 const proposal: RecoveryProposal = {
-  type: "dismiss_overlay", actions: [{ type: "press_key", key: "back" }], confidence: 0.9,
+  type: "dismiss_overlay", actions: [{ type: "press_key", key: "back", safetyClass: "navigation" }], confidence: 0.9,
   reason: "Dismiss popup", learningEligible: true, sourceStateId: "popup", expectedTargetStateId: "home",
 };
 
@@ -23,6 +23,13 @@ describe("RecoveryOrchestrator", () => {
       executeAction: async () => ({ ok: true }),
       verifyProposal: async () => ({ ok: true, targetStateId: "home", evidence: { verified: true } }),
       recordLearning: learn,
+    }, {
+      maxActions: 3,
+      maxAttempts: 2,
+      maxDurationMs: 1_000,
+      allowedSafetyClasses: ["navigation"],
+      allowedProposalTypes: ["dismiss_overlay"],
+      actionlessProposalTypes: [],
     });
     const result = await orchestrator.recover({
       context: { appId: "app" }, failureReason: "popup", failedAction: { type: "tap" },
@@ -35,7 +42,18 @@ describe("RecoveryOrchestrator", () => {
   });
 
   it("rejects recovery actions that escalate safety", () => {
-    const errors = validateRecoveryProposal({ ...proposal, actions: [{ type: "type_text", text: "secret" }] }, "navigation", { maxActions: 3, maxAttempts: 1, maxDurationMs: 1000 });
+    const errors = validateRecoveryProposal(
+      { ...proposal, actions: [{ type: "type_text", text: "secret", safetyClass: "mutating" }] },
+      "navigation",
+      {
+        maxActions: 3,
+        maxAttempts: 1,
+        maxDurationMs: 1000,
+        allowedSafetyClasses: ["navigation"],
+        allowedProposalTypes: ["dismiss_overlay"],
+        actionlessProposalTypes: [],
+      },
+    );
     expect(errors).toContain("recovery_safety_escalation_forbidden");
   });
 });

@@ -7,8 +7,8 @@
 -- in the dashboard on their next connection (imei column is NULL → registerPending()
 -- inserts a NEW row with their IMEI, separate from the old hardware_uuid-based row).
 -- Admin must re-approve each device from the dashboard once.
--- Old rows (hardware_uuid-based, imei=NULL) remain in DB and can be cleaned up manually:
---   DELETE FROM devices WHERE imei IS NULL AND status != 'online';
+-- Old rows (hardware_uuid-based, imei=NULL) remain in DB and can be cleaned up
+-- manually according to the operator-managed device lifecycle policy.
 --
 -- device_tokens + revoked_tokens are now orphaned — dropped in 006_drop_token_tables.sql.
 

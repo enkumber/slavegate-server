@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { candidateEnvironmentKey, candidateKey, promotionDecision, type CandidateObservation } from "./learning-loop";
+import {
+  candidateEnvironmentKey,
+  candidateKey,
+  promotionDecision,
+  type CandidateObservation,
+  type UiGraphPromotionPolicy,
+} from "./learning-loop";
+
+const POLICY: UiGraphPromotionPolicy = {
+  minimumSuccessCount: 5,
+  minimumDistinctDevices: 2,
+  minimumDistinctBranches: 2,
+  minimumDistinctEnvironments: 2,
+  maximumFailureCount: 0,
+  maximumRecoveryCount: 0,
+  allowedAutomaticSafetyClasses: ["navigation", "read_only"],
+  allowedAutomaticCandidateTypes: ["selector", "transition"],
+};
 
 describe("UI graph learning policy", () => {
   it("generates stable candidate keys independent of object key order", () => {
@@ -27,20 +44,21 @@ describe("UI graph learning policy", () => {
   });
 
   it("requires repeated validation and cross-device/branch coverage", () => {
-    const blocked = promotionDecision({ type: "selector", discoveryMethod: "vlm", safetyClass: "navigation", successCount: 4, failureCount: 0, stateVerified: true });
+    const blocked = promotionDecision({ type: "selector", discoveryMethod: "vlm", safetyClass: "navigation", successCount: 4, failureCount: 0, stateVerified: true, lifecycleState: "configured" }, POLICY);
     expect(blocked.autoPromotable).toBe(false);
     expect(blocked.blockers).toContain("insufficient_successes");
     const ready = promotionDecision({
       type: "selector", discoveryMethod: "vlm", safetyClass: "navigation",
       successCount: 5, failureCount: 0, stateVerified: true,
       distinctDevices: 2, distinctBranches: 2, distinctEnvironments: 2,
-    });
+      lifecycleState: "configured",
+    }, POLICY);
     expect(ready.autoPromotable).toBe(true);
-    expect(ready.validationStage).toBe("global_promoted");
+    expect(ready.validationStage).toBe("configured");
   });
 
   it("requires five clean validations for every automatically promoted selector", () => {
-    const blocked = promotionDecision({ type: "selector", discoveryMethod: "ui_tree", safetyClass: "read_only", successCount: 4, failureCount: 0, stateVerified: true });
+    const blocked = promotionDecision({ type: "selector", discoveryMethod: "ui_tree", safetyClass: "read_only", successCount: 4, failureCount: 0, stateVerified: true, lifecycleState: "configured" }, POLICY);
     expect(blocked.autoPromotable).toBe(false);
     expect(blocked.requiredSuccesses).toBe(5);
 
@@ -48,7 +66,8 @@ describe("UI graph learning policy", () => {
       type: "selector", discoveryMethod: "ui_tree", safetyClass: "read_only",
       successCount: 5, failureCount: 0, stateVerified: true,
       distinctDevices: 2, distinctBranches: 2, distinctEnvironments: 2,
-    });
+      lifecycleState: "configured",
+    }, POLICY);
     expect(ready.autoPromotable).toBe(true);
   });
 
@@ -57,10 +76,11 @@ describe("UI graph learning policy", () => {
       type: "selector", discoveryMethod: "ui_tree", safetyClass: "navigation",
       successCount: 5, failureCount: 1, stateVerified: true,
       distinctDevices: 2, distinctBranches: 2, distinctEnvironments: 2,
-    });
+      lifecycleState: "configured",
+    }, POLICY);
     expect(decision.autoPromotable).toBe(false);
     expect(decision.ready).toBe(true);
-    expect(decision.blockers).toContain("manual_review_required_after_failed_validation");
+    expect(decision.blockers).toContain("failure_policy_exceeded");
   });
 
   it("never auto-promotes mutating knowledge", () => {
@@ -68,7 +88,8 @@ describe("UI graph learning policy", () => {
       type: "transition", discoveryMethod: "ui_tree", safetyClass: "mutating",
       successCount: 10, failureCount: 0, stateVerified: true,
       distinctDevices: 2, distinctBranches: 2, distinctEnvironments: 2,
-    });
+      lifecycleState: "configured",
+    }, POLICY);
     expect(decision.ready).toBe(true);
     expect(decision.autoPromotable).toBe(false);
     expect(decision.blockers).toContain("manual_review_required_for_safety_class");
@@ -79,10 +100,11 @@ describe("UI graph learning policy", () => {
       type: "selector", discoveryMethod: "ui_tree", safetyClass: "navigation",
       successCount: 5, failureCount: 0, stateVerified: true,
       distinctDevices: 1, distinctBranches: 1, distinctEnvironments: 1,
-    });
+      lifecycleState: "configured",
+    }, POLICY);
     expect(decision.ready).toBe(true);
     expect(decision.autoPromotable).toBe(false);
-    expect(decision.validationStage).toBe("device_validated");
+    expect(decision.validationStage).toBe("configured");
     expect(decision.blockers).toContain("insufficient_device_coverage");
   });
 
@@ -91,8 +113,9 @@ describe("UI graph learning policy", () => {
       type: "transition", discoveryMethod: "ui_tree", safetyClass: "navigation",
       successCount: 8, failureCount: 0, stateVerified: true,
       distinctDevices: 2, distinctBranches: 2, distinctEnvironments: 2, recoveryCount: 1,
-    });
+      lifecycleState: "configured",
+    }, POLICY);
     expect(decision.autoPromotable).toBe(false);
-    expect(decision.blockers).toContain("recovery_observed_requires_clean_validation");
+    expect(decision.blockers).toContain("recovery_policy_exceeded");
   });
 });

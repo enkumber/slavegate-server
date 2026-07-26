@@ -195,7 +195,7 @@ export interface WorkflowTemplate {
   /** Business intent for generated/canonical workflows. */
   intent?:      string;
   /** Safety class used by the control plane before task-runner execution. */
-  safetyClass?: "read_only" | "standard";
+  safetyClass?: string;
   /** Structured output contract for read-only marketing workflows. */
   outputSchema?: WorkflowOutputSchema;
   /** Relational success contract evaluated against runtime inputs and outputs. */
@@ -222,7 +222,9 @@ export interface WorkflowRecoveryPolicy {
    * bounded: retry within the local executor only.
    * ai_autopilot: allow a later recovery planner to synthesize a bounded recovery workflow.
    */
-  autonomy?: "bounded" | "ai_autopilot";
+  autonomy?: string;
+  /** Structural permission supplied by the persisted runtime policy. */
+  aiRecoveryEnabled?: boolean;
   /** Maximum failed attempts recorded for the same top-level step before aborting. */
   maxAttemptsPerStep?: number;
   /** Maximum failed attempts recorded for the whole workflow before aborting. */

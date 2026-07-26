@@ -45,9 +45,8 @@ interface SelectorContextRow {
   strategy: string;
   selector: Record<string, unknown>;
   target_state_id: string | null;
+  safety_class?: UiSafetyClass;
 }
-
-const SAFE_LEARNING_ACTIONS = new Set(["a11y_find_tap", "ocr_find_tap", "tap"]);
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -167,9 +166,8 @@ export function bindEdgeLearningCandidates(
   selectorContexts: SelectorContextRow[] = [],
 ): EdgeLearningBinding[] {
   const bindings: EdgeLearningBinding[] = [];
-  if (template.safetyClass !== "read_only") return bindings;
   template.steps.forEach((step, actionStepIndex) => {
-    if (step.type !== "action" || !SAFE_LEARNING_ACTIONS.has(step.action)) return;
+    if (step.type !== "action") return;
     const selector = actionSelector(step);
     const verifiedStepIndex = selector ? verifiedBoundary(template.steps, actionStepIndex) : null;
     if (!selector || verifiedStepIndex === null || step.type !== "action") return;
@@ -181,6 +179,8 @@ export function bindEdgeLearningCandidates(
       const expected = graphSelector(row);
       return expected ? compatibleGraphSelector(selector, expected) : false;
     });
+    const safetyClass = candidate?.safety_class ?? selectorContext?.safety_class;
+    if (!safetyClass) return;
     const verifyStep = template.steps[verifiedStepIndex];
     bindings.push({
       bindingId: bindingId({ template, actionStepIndex, verifiedStepIndex, selector }),
@@ -193,7 +193,7 @@ export function bindEdgeLearningCandidates(
       sourceStateId: candidate?.source_state_id ?? selectorContext?.state_id ?? null,
       targetStateId: candidate?.target_state_id ?? selectorContext?.target_state_id ?? null,
       payload: candidate?.payload ?? selectorPayload(step, selector, selectorContext),
-      safetyClass: candidate?.safety_class ?? (template.safetyClass === "read_only" ? "read_only" : "navigation"),
+      safetyClass,
     });
   });
   return bindings;
@@ -238,7 +238,7 @@ export async function prepareEdgeLearningBindings(template: WorkflowTemplate): P
       [template.platform],
     ),
     getDb().query(
-      `SELECT s.state_id, s.element_key, s.strategy, s.selector,
+      `SELECT s.state_id, s.element_key, s.strategy, s.selector, st.safety_class,
               (SELECT t.target_state_id FROM ui_graph_transitions t
                 WHERE t.app_id=$1 AND t.source_state_id=s.state_id AND t.element_key=s.element_key
                 ORDER BY t.confidence DESC LIMIT 1) AS target_state_id

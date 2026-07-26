@@ -1,15 +1,6 @@
 import { getDb } from "../../db/client";
 
-export const SAFE_MAPPING_ACTIONS = [
-  "open_app",
-  "intent_send",
-  "wait_for_idle",
-  "a11y_find_tap",
-  "scroll",
-  "press_key",
-] as const;
-
-export type SafeMappingAction = typeof SAFE_MAPPING_ACTIONS[number];
+export type SafeMappingAction = string;
 
 export interface RuntimeRecipeTransition {
   sourceStateKey: string;
@@ -38,7 +29,7 @@ export interface AppRuntimeProfile {
   resetRecipe: RuntimeRecipeStep[];
   mappingRecipe: RuntimeRecipeStep[];
   safetyPolicy: {
-    mode: "read_only_navigation";
+    mode?: string;
     allowedActions: SafeMappingAction[];
     allowedUriHosts?: string[];
     blocked?: string[];
@@ -133,8 +124,8 @@ function validateStep(raw: unknown, index: number): RuntimeRecipeStep {
   const id = String(step.id ?? "").trim();
   const type = String(step.type ?? "").trim();
   if (!id || !type) throw new Error(`runtime profile step ${index} requires id and type`);
-  if (type !== "capture" && !(SAFE_MAPPING_ACTIONS as readonly string[]).includes(type)) {
-    throw new Error(`runtime profile step ${id} uses unsafe/unsupported action: ${type}`);
+  if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(type)) {
+    throw new Error(`runtime profile step ${id} uses an invalid action identifier`);
   }
   if (type === "capture" && (!String(step.stateKey ?? "").trim() || !String(step.name ?? "").trim())) {
     throw new Error(`capture step ${id} requires stateKey and name`);
@@ -145,9 +136,6 @@ function validateStep(raw: unknown, index: number): RuntimeRecipeStep {
 export function validateRuntimeProfile(profile: AppRuntimeProfile): AppRuntimeProfile {
   if (!profile.appId || !profile.packageName || !profile.appName) {
     throw new Error("runtime profile requires appId, packageName and appName");
-  }
-  if (profile.safetyPolicy?.mode !== "read_only_navigation") {
-    throw new Error("mapping runtime profiles must be read_only_navigation");
   }
   const allowed = new Set(profile.safetyPolicy.allowedActions ?? []);
   for (const step of [...profile.resetRecipe, ...profile.mappingRecipe]) {

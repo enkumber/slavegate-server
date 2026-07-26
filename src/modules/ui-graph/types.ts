@@ -1,7 +1,6 @@
 import type { UiTreeNode } from "../app-mapping/schema";
 
-export type UiSafetyClass = "read_only" | "navigation" | "mutating" | "sensitive";
-export type UiGraphRuntimeMode = "disabled" | "shadow" | "enforced";
+export type UiSafetyClass = string;
 export type UiStateKind = "screen" | "overlay" | "system" | "unknown";
 export type ResolutionMethod = "exact_hash" | "anchors" | "fuzzy" | "unknown";
 export type TargetResolutionMethod = "direct" | "resource_id" | "content_description" | "semantic_id" | "text" | "structural" | "coord_cache" | "ocr" | "vlm" | "unknown";
@@ -127,7 +126,7 @@ export interface RecoveryProposal {
 }
 
 export interface RuntimeFlags {
-  mode: UiGraphRuntimeMode;
+  enabled: boolean;
   selectorFirst: boolean;
   graphRuntime: boolean;
   aiRecovery: boolean;

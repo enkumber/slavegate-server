@@ -43,7 +43,7 @@ const MAX_HUMAN_WORKFLOW_ASYNC_COMPILE_TIMEOUT_MS = 120_000;
 const HUMAN_WORKFLOW_DEBUG_RESPONSE_MAX_CHARS = 100_000;
 const HUMAN_WORKFLOW_OUTPUT_CONTRACT_VERSION = "required-v1";
 
-export type HumanWorkflowSafetyClass = "read_only" | "standard" | "destructive";
+export type HumanWorkflowSafetyClass = string;
 
 export interface HumanWorkflowTarget {
   device_id: string;
@@ -64,6 +64,9 @@ export type HumanWorkflowCompileReady = {
   compileJobId?: string;
   plan: Record<string, unknown>;
   safetyClass: HumanWorkflowSafetyClass;
+  dashboardExecutionAllowed?: boolean;
+  safetyPresentationColor?: string;
+  dashboardBlockedReason?: string;
   platform: string;
   target: HumanWorkflowTarget;
   llmBudget?: Record<string, unknown>;
@@ -306,6 +309,27 @@ async function annotateGeneratedWorkflowCompiledPlanForCache(
   );
 }
 
+function dashboardExecutionPolicy(metadata: Record<string, unknown> | null | undefined): {
+  dashboardExecutionAllowed?: boolean;
+  safetyPresentationColor?: string;
+  dashboardBlockedReason?: string;
+} {
+  const raw = metadata?.dashboardPolicy;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const policy = raw as Record<string, unknown>;
+  return {
+    ...(typeof policy.executionAllowed === "boolean"
+      ? { dashboardExecutionAllowed: policy.executionAllowed }
+      : {}),
+    ...(typeof policy.presentationColor === "string"
+      ? { safetyPresentationColor: policy.presentationColor }
+      : {}),
+    ...(typeof policy.blockedReason === "string"
+      ? { dashboardBlockedReason: policy.blockedReason }
+      : {}),
+  };
+}
+
 function readyFromCache(
   cached: GeneratedWorkflowPlanCacheRecord,
   target: HumanWorkflowTarget,
@@ -316,7 +340,7 @@ function readyFromCache(
   const workflow = normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata);
   assertHumanWorkflowMeaningful(workflow, cachedIntent);
   const safetyClass = cached.workflow.safetyClass ?? cached.compiledPlan.metadata.safetyClass;
-  if (safetyClass !== "read_only" && safetyClass !== "standard" && safetyClass !== "destructive") {
+  if (typeof safetyClass !== "string" || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(safetyClass)) {
     throw compilerControlPlaneError("cached workflow has no valid explicit safety class");
   }
   return {
@@ -327,6 +351,7 @@ function readyFromCache(
     source,
     plan: humanWorkflowPlanPreview(workflow, cached.compiledPlan),
     safetyClass,
+    ...dashboardExecutionPolicy(cached.sourceMetadata),
     platform: target.account_platform,
     target,
     llmBudget: cached.compiledPlan.llmBudget,
@@ -357,7 +382,6 @@ async function readyFromComposition(
         segmentKeys: composed.segmentKeys,
         segmentRefs: composed.segmentRefs,
         outputContractVersion: HUMAN_WORKFLOW_OUTPUT_CONTRACT_VERSION,
-        portabilityScope: "global",
       },
     );
     cached = await workflowService.getGeneratedPlanCache(compiledPlan.cacheKey, {
@@ -376,7 +400,7 @@ async function readyFromComposition(
     cacheKey: cached.cacheKey,
     source: "composition",
     plan: humanWorkflowPlanPreview(composed.template, compiledPlan),
-    safetyClass: composed.template.safetyClass ?? "read_only",
+    safetyClass: composed.template.safetyClass!,
     platform: target.account_platform,
     target,
     llmBudget: compiledPlan.llmBudget,
@@ -713,9 +737,7 @@ export class HumanWorkflowCompilerService {
     let compiledPlan = compileGeneratedWorkflowTemplate(template);
     compiledPlan = await annotateGeneratedWorkflowCompiledPlanForCache(template, compiledPlan, packageName);
     await workflowService.saveTemplate(template);
-    await workflowService.saveGeneratedPlanCache(template, compiledPlan, input.requestKey, {
-      artifactState: "promoted",
-      sourceMetadata: {
+    await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, input.requestKey, {
         source: "dashboard_human",
         compilerCacheVersion: compilerVersion,
         outputContractVersion: HUMAN_WORKFLOW_OUTPUT_CONTRACT_VERSION,
@@ -726,7 +748,6 @@ export class HumanWorkflowCompilerService {
         accountId: input.target.account_id,
         platform,
         compiledAt: new Date().toISOString(),
-      },
     });
     return {
       ready: true,
@@ -735,7 +756,7 @@ export class HumanWorkflowCompilerService {
       cacheKey: compiledPlan.cacheKey,
       source: "shortcut",
       plan: humanWorkflowPlanPreview(template, compiledPlan),
-      safetyClass: template.safetyClass ?? compiledPlan.metadata.safetyClass ?? "read_only",
+      safetyClass: (template.safetyClass ?? compiledPlan.metadata.safetyClass)!,
       platform,
       target: input.target,
       llmBudget: compiledPlan.llmBudget,
@@ -912,6 +933,7 @@ export class HumanWorkflowCompilerService {
         capabilityKey: retrievalContext.matchedCapabilityKey,
         capabilityRole: "complete",
         goalContract: template.goalContract,
+        dashboardPolicy: retrievalContext.matchedCapabilityMetadata?.dashboardPolicy,
         compilerRetrieval: {
           capabilityKey: retrievalContext.matchedCapabilityKey,
           capabilityScore: retrievalContext.matchedCapabilityScore,
@@ -929,6 +951,7 @@ export class HumanWorkflowCompilerService {
         source: "llm",
         plan: humanWorkflowPlanPreview(template, compiledPlan),
         safetyClass: resolvedSafetyClass,
+        ...dashboardExecutionPolicy(retrievalContext.matchedCapabilityMetadata),
         platform,
         target: input.target,
         llmBudget: compiledPlan.llmBudget,

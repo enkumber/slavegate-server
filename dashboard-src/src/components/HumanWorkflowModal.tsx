@@ -169,7 +169,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
   }, [accountId, compileJob, device.id, intent]);
 
   const run = async () => {
-    if (!compileResult || compileResult.safetyClass === "destructive") return;
+    if (!compileResult?.dashboardExecutionAllowed) return;
     setRunning(true);
     setError(null);
     try {
@@ -191,7 +191,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
 
   const planStepCount = compileResult?.plan.steps?.length ?? compileResult?.plan.compiledPlan?.steps?.length ?? 0;
   const actionCount = compileResult?.plan.actions?.length ?? 0;
-  const canRun = !!compileResult && compileResult.safetyClass !== "destructive" && !running;
+  const canRun = !!compileResult?.dashboardExecutionAllowed && !running;
   const terminalStatus = Boolean(runStatus?.completedAt ?? runStatus?.completed_at);
   const compilePending = compiling || !!compileJob;
 
@@ -285,7 +285,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
               {compileResult ? (
                 <>
                   <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }}>
-                    <Badge label={compileResult.safetyClass} color={safetyColor(compileResult.safetyClass)} />
+                    <Badge label={compileResult.safetyClass} color={compileResult.safetyPresentationColor ?? "#64748b"} />
                     <Badge label={compileResult.cacheHit ? "cache hit" : "compiled"} color="#60a5fa" />
                   </div>
                   <Metric label="Steps" value={String(planStepCount)} />
@@ -305,9 +305,9 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
                       <Metric label="Runtime inputs" value={JSON.stringify(compileResult.publicRuntimeInputs ?? {})} />
                     </>
                   )}
-                  {compileResult.safetyClass === "destructive" && (
+                  {!compileResult.dashboardExecutionAllowed && (
                     <div style={{ marginTop: "10px", color: "#fca5a5", fontSize: "12px" }}>
-                      Destructive plans cannot be launched from the dashboard.
+                      {compileResult.dashboardBlockedReason ?? "This plan is not enabled for dashboard execution by its PostgreSQL policy."}
                     </div>
                   )}
                 </>
@@ -413,12 +413,6 @@ function isCompileReady(
 function pollingDelayMs(value: number | undefined, fallback: number): number {
   if (!Number.isFinite(value) || !value || value <= 0) return fallback;
   return Math.min(Math.max(value, 1_000), 30_000);
-}
-
-function safetyColor(safetyClass: HumanWorkflowCompileReadyResult["safetyClass"]): string {
-  if (safetyClass === "read_only") return "#22c55e";
-  if (safetyClass === "standard") return "#f59e0b";
-  return "#ef4444";
 }
 
 const labelStyle: CSSProperties = {

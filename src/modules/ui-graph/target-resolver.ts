@@ -85,16 +85,6 @@ function match(selector: UiSelectorDefinition, candidate: FlatNode): boolean {
   }
 }
 
-const STRATEGY_ORDER: Record<UiSelectorDefinition["strategy"], number> = {
-  resource_id: 0,
-  content_description: 1,
-  semantic_id: 2,
-  text: 3,
-  text_contains: 4,
-  structural: 5,
-  normalized_coords: 6,
-};
-
 export function resolveUiTarget(
   uiTree: UiTreeNode[],
   selectors: UiSelectorDefinition[],
@@ -104,7 +94,7 @@ export function resolveUiTarget(
   const candidates = flatten(uiTree);
   const eligible = selectors
     .filter((selector) => contextMatches(selector, context))
-    .sort((a, b) => STRATEGY_ORDER[a.strategy] - STRATEGY_ORDER[b.strategy] || a.priority - b.priority || b.confidence - a.confidence);
+    .sort((a, b) => a.priority - b.priority || b.confidence - a.confidence);
 
   for (const selector of eligible.filter((item) => item.strategy !== "normalized_coords")) {
     const method = selectorMethod(selector);

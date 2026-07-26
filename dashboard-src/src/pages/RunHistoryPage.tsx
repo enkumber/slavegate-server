@@ -157,16 +157,21 @@ export function RunHistoryPage() {
       : current);
   }, []);
 
-  const reviewCandidate = useCallback(async (candidate: WorkflowRunStepCandidate, action: "keep_review" | "reject") => {
+  const reviewCandidate = useCallback(async (
+    candidate: WorkflowRunStepCandidate,
+    action: Parameters<typeof agencyApi.workflowRuns.reviewStepCandidate>[1]["action"],
+    note: string,
+    successMessage: string,
+  ) => {
     setCandidateReviewingId(candidate.id);
     setCandidateReviewMessage(null);
     try {
       const updated = await agencyApi.workflowRuns.reviewStepCandidate(candidate.id, {
         action,
-        note: action === "reject" ? "Rejected from dashboard review." : "Kept in manual review.",
+        note,
       });
       updateSelectedCandidate(updated);
-      setCandidateReviewMessage(action === "reject" ? "Candidate rejected." : "Candidate kept in review.");
+      setCandidateReviewMessage(successMessage);
     } catch (err) {
       setCandidateReviewMessage(err instanceof Error ? err.message : "Failed to review candidate");
     } finally {
@@ -481,14 +486,14 @@ export function RunHistoryPage() {
                                 Validate
                               </button>
                               <button
-                                onClick={() => void reviewCandidate(candidate, "keep_review")}
+                                onClick={() => void reviewCandidate(candidate, "keep_review", "Kept in manual review.", "Candidate kept in review.")}
                                 disabled={candidateReviewingId === candidate.id}
                                 style={{ background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "6px 8px", cursor: "pointer", fontSize: "11px" }}
                               >
                                 Keep review
                               </button>
                               <button
-                                onClick={() => void reviewCandidate(candidate, "reject")}
+                                onClick={() => void reviewCandidate(candidate, "reject", "Rejected from dashboard review.", "Candidate rejected.")}
                                 disabled={candidateReviewingId === candidate.id}
                                 style={{ background: "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "6px 8px", cursor: "pointer", fontSize: "11px" }}
                               >

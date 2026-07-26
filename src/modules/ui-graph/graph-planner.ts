@@ -1,14 +1,7 @@
 import type { GraphRoute, UiSafetyClass, UiTransitionDefinition } from "./types";
 
-const SAFETY_RANK: Record<UiSafetyClass, number> = {
-  read_only: 0,
-  navigation: 1,
-  mutating: 2,
-  sensitive: 3,
-};
-
 export interface GraphPlanningPolicy {
-  maxSafetyClass: UiSafetyClass;
+  allowedSafetyClasses: UiSafetyClass[];
   minimumConfidence: number;
   maxTransitions: number;
 }
@@ -24,7 +17,7 @@ export function planGraphRoute(
   const maxTransitions = policy.maxTransitions;
   const eligible = transitions.filter((transition) =>
     transition.confidence >= minimumConfidence
-    && SAFETY_RANK[transition.safetyClass] <= SAFETY_RANK[policy.maxSafetyClass]
+    && policy.allowedSafetyClasses.includes(transition.safetyClass)
   );
 
   const distances = new Map<string, number>([[sourceStateId, 0]]);

@@ -258,8 +258,10 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
     postconditionsPresent: postconditions.length > 0,
     evidencePresent: Object.keys(evidence).length > 0,
     compatibilityDeclared: Object.keys(compatibility).length > 0,
-    successfulSourceStep: row.step_status === "succeeded",
-    successfulSourceRun: row.run_status === "completed",
+    successfulSourceStep: typeof row.step_index === "number"
+      && typeof row.last_good_step_index === "number"
+      && row.step_index <= row.last_good_step_index,
+    successfulSourceRun: row.run_successful === true,
     scopedReuse: contractScope !== "manual_review",
     limitedReusePromoted: limitedReuse,
     compilerAutoUseEnabled: false,
@@ -1184,12 +1186,12 @@ async function findPromotedWorkflowDefinitionArtifact(db: ReturnType<typeof getD
   const rows = await db.query<Record<string, unknown>>(
     `SELECT *
      FROM generated_workflow_plan_cache
-     WHERE artifact_state = 'promoted'
-       AND COALESCE(
-         compiled_plan #>> '{metadata,safetyClass}',
-         workflow ->> 'safetyClass',
-         source_metadata ->> 'safetyClass'
-       ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive')
+     WHERE lifecycle_state_matches(
+             'generated_workflow_plan_cache'::regclass,
+             artifact_state,
+             '{"dispatchable":true}'::jsonb,
+             'artifact_state'
+           )
        AND (
          source_metadata ->> 'definitionId' = $1
          OR (
@@ -1767,10 +1769,20 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
       hasCacheKey
         ? `SELECT * FROM generated_workflow_plan_cache
            WHERE cache_key = $1
-             AND artifact_state = 'promoted'`
+             AND lifecycle_state_matches(
+                   'generated_workflow_plan_cache'::regclass,
+                   artifact_state,
+                   '{"dispatchable":true}'::jsonb,
+                   'artifact_state'
+                 )`
         : `SELECT * FROM generated_workflow_plan_cache
            WHERE request_key = $1
-             AND artifact_state = 'promoted'
+             AND lifecycle_state_matches(
+                   'generated_workflow_plan_cache'::regclass,
+                   artifact_state,
+                   '{"dispatchable":true}'::jsonb,
+                   'artifact_state'
+                 )
            ORDER BY updated_at DESC
            LIMIT 1`,
       [hasCacheKey ? body.cacheKey : body.requestKey]
@@ -1981,6 +1993,11 @@ router.get("/workflow-step-candidates", requireAdminAuth, async (req: Request, r
     db.query(
       `SELECT c.*,
               r.status AS run_status,
+              lifecycle_state_matches(
+                'agency_workflow_runs'::regclass,
+                r.status,
+                '{"terminal":true,"retryable":false,"administrative":false}'::jsonb
+              ) AS run_successful,
               r.intent AS run_intent,
               d.friendly_name AS device_name
        FROM agency_workflow_step_candidates_lifecycle c
@@ -2693,9 +2710,7 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
     if (template) {
       const compiledPlan = compileGeneratedWorkflowTemplate(template);
       await workflowService.saveTemplate(template);
-      await workflowService.saveGeneratedPlanCache(template, compiledPlan, requestKey, {
-        artifactState: "promoted",
-        sourceMetadata: {
+      await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, requestKey, {
           source: "workflow_definition_auto_use",
           definitionId: definition.id,
           definitionKey: definition.key,
@@ -2703,7 +2718,6 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
           promotionScope: scope,
           autoUseEnabled: true,
           safeToAutoApply: true,
-        },
       });
       cached = {
         cache_key: compiledPlan.cacheKey,
@@ -2740,12 +2754,12 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
     const lockedCacheRows = await client.query<Record<string, unknown>>(
       `SELECT * FROM generated_workflow_plan_cache
        WHERE cache_key = $1
-         AND artifact_state = 'promoted'
-         AND COALESCE(
-           compiled_plan #>> '{metadata,safetyClass}',
-           workflow ->> 'safetyClass',
-           source_metadata ->> 'safetyClass'
-         ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive')
+         AND lifecycle_state_matches(
+               'generated_workflow_plan_cache'::regclass,
+               artifact_state,
+               '{"dispatchable":true}'::jsonb,
+               'artifact_state'
+             )
        FOR UPDATE`,
       [cached.cache_key]
     );
@@ -2905,15 +2919,41 @@ router.post("/workflow-definitions/:id/executable-artifact", requireAdminAuth, a
     cacheKey
       ? `SELECT * FROM generated_workflow_plan_cache
          WHERE cache_key = $1
-           AND artifact_state = ANY($2::text[])
+           AND (
+             lifecycle_state_matches(
+               'generated_workflow_plan_cache'::regclass,
+               artifact_state,
+               '{"initial":true}'::jsonb,
+               'artifact_state'
+             )
+             OR lifecycle_state_matches(
+               'generated_workflow_plan_cache'::regclass,
+               artifact_state,
+               '{"dispatchable":true}'::jsonb,
+               'artifact_state'
+             )
+           )
          ORDER BY updated_at DESC
          LIMIT 1`
       : `SELECT * FROM generated_workflow_plan_cache
          WHERE request_key = $1
-           AND artifact_state = ANY($2::text[])
+           AND (
+             lifecycle_state_matches(
+               'generated_workflow_plan_cache'::regclass,
+               artifact_state,
+               '{"initial":true}'::jsonb,
+               'artifact_state'
+             )
+             OR lifecycle_state_matches(
+               'generated_workflow_plan_cache'::regclass,
+               artifact_state,
+               '{"dispatchable":true}'::jsonb,
+               'artifact_state'
+             )
+           )
          ORDER BY updated_at DESC
          LIMIT 1`,
-    [cacheKey ?? requestKey, ["candidate", "promoted"]]
+    [cacheKey ?? requestKey]
   );
   const artifact = artifactRows.rows[0];
   if (!artifact) {
@@ -2963,9 +3003,24 @@ router.post("/workflow-definitions/:id/executable-artifact", requireAdminAuth, a
   let updatedArtifact;
   try {
     await client.query("BEGIN");
+    const transition = await selectResourceLifecycleTransition(
+      "generated_workflow_plan_cache",
+      String(artifact.artifact_state),
+      { targetDispatchable: true, transitionManualAllowed: true },
+      "artifact_state",
+      client,
+    );
+    if (!transition) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({
+        ok: false,
+        code: "WORKFLOW_DEFINITION_ARTIFACT_TRANSITION_NOT_ALLOWED",
+        error: "PostgreSQL does not configure a manual executable-artifact transition",
+      });
+    }
     const updated = await client.query<Record<string, unknown>>(
       `UPDATE generated_workflow_plan_cache
-       SET artifact_state = 'promoted',
+       SET artifact_state = $3,
            source_metadata = source_metadata || $2::jsonb,
            updated_at = NOW()
        WHERE cache_key = $1
@@ -2981,6 +3036,7 @@ router.post("/workflow-definitions/:id/executable-artifact", requireAdminAuth, a
           promotedAt: new Date().toISOString(),
           promotionScope: definition.promotion.scope,
         }),
+        transition.toStatus,
       ]
     );
     updatedArtifact = updated.rows[0];
@@ -3236,7 +3292,21 @@ router.patch("/workflow-definitions/:id/lifecycle", requireAdminAuth, async (req
   const row = (await db.query(`SELECT * FROM agency_workflow_definitions_lifecycle WHERE id = $1`, [req.params.id])).rows[0];
   if (!row) return res.status(404).json({ ok: false, error: "Workflow definition not found", code: "WORKFLOW_DEFINITION_NOT_FOUND" });
   const definition = rowToWorkflowDefinition(row);
-  const nextStatus = parsed.action === "archive" ? "archived" : parsed.action === "deprecate" ? "deprecated" : parsed.action === "activate" ? "active" : "draft";
+  const lifecycleTransition = await getResourceLifecycleTransition(
+    "agency_workflow_definitions",
+    definition.status,
+    parsed.action,
+    "status",
+    db,
+  );
+  if (!lifecycleTransition?.manualAllowed) {
+    return res.status(400).json({
+      ok: false,
+      error: "Requested lifecycle transition is not manually allowed by PostgreSQL policy",
+      code: "WORKFLOW_DEFINITION_LIFECYCLE_TRANSITION_NOT_ALLOWED",
+    });
+  }
+  const nextStatus = lifecycleTransition.toStatus;
   const impactPreview = await workflowDefinitionImpactPreview(db, definition);
   const policy = {
     lifecycleAction: parsed.action,
@@ -3560,9 +3630,9 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
         parsed.note,
         JSON.stringify(promotionPolicy),
         JSON.stringify(validationSnapshot),
-        parsed.action === "promote_limited" ? promotionMetadata.confidence : 0,
-        JSON.stringify(parsed.action === "promote_limited" ? promotionMetadata.readiness : revokedReadiness),
-        JSON.stringify(parsed.action === "promote_limited" ? promotionMetadata.scopeDetails : revokedScopeDetails),
+        enablesReuse ? promotionMetadata.confidence : 0,
+        JSON.stringify(enablesReuse ? promotionMetadata.readiness : revokedReadiness),
+        JSON.stringify(enablesReuse ? promotionMetadata.scopeDetails : revokedScopeDetails),
         JSON.stringify(rollbackPreview),
       ]
     );
@@ -3582,9 +3652,9 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
       previousState: definition.promotion.state,
       nextState,
       validationSnapshot,
-      promotionConfidence: parsed.action === "promote_limited" ? promotionMetadata.confidence : 0,
-      promotionReadiness: parsed.action === "promote_limited" ? promotionMetadata.readiness : revokedReadiness,
-      promotionScopeDetails: parsed.action === "promote_limited" ? promotionMetadata.scopeDetails : revokedScopeDetails,
+      promotionConfidence: enablesReuse ? promotionMetadata.confidence : 0,
+      promotionReadiness: enablesReuse ? promotionMetadata.readiness : revokedReadiness,
+      promotionScopeDetails: enablesReuse ? promotionMetadata.scopeDetails : revokedScopeDetails,
       rollbackPreview,
       policy: {
         ...promotionPolicy,
@@ -4420,6 +4490,11 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
   const existing = await db.query(
     `SELECT c.*,
             r.status AS run_status,
+            lifecycle_state_matches(
+              'agency_workflow_runs'::regclass,
+              r.status,
+              '{"terminal":true,"retryable":false,"administrative":false}'::jsonb
+            ) AS run_successful,
             r.intent AS run_intent,
             d.friendly_name AS device_name
      FROM agency_workflow_step_candidates_lifecycle c
@@ -4472,10 +4547,19 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
     const entry = rowToStepLibraryEntry(existing.rows[0]) as Record<string, any>;
     const readiness = normalizeJsonObject(entry.readiness);
     const readinessScore = typeof readiness.score === "number" ? readiness.score : 0;
-    const readinessThreshold = typeof readiness.threshold === "number" ? readiness.threshold : 0.9;
+    const readinessThreshold = typeof targetPolicy.minimumReadinessScore === "number"
+      ? targetPolicy.minimumReadinessScore
+      : null;
     const blockers = Array.isArray(readiness.blockers) ? readiness.blockers : [];
-    const allowedBlockers = new Set(["limited_reuse_not_promoted", "compiler_auto_use_disabled"]);
+    const allowedBlockers = new Set(nonEmptyStringArray(targetPolicy.allowedReadinessBlockers));
     const hasUnexpectedBlocker = blockers.some((blocker) => typeof blocker !== "string" || !allowedBlockers.has(blocker));
+    if (readinessThreshold === null) {
+      return res.status(500).json({
+        ok: false,
+        error: "Step Library readiness policy is not configured in PostgreSQL",
+        code: "STEP_LIBRARY_PROMOTION_POLICY_INCOMPLETE",
+      });
+    }
     if (readinessScore < readinessThreshold || hasUnexpectedBlocker) {
       return res.status(409).json({
         ok: false,
@@ -4484,11 +4568,15 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
         data: { readiness },
       });
     }
-    if (!parsed.scope || (parsed.scope === "global" && targetPolicy.allowGlobalScope !== true)) {
+    const disallowedScopes = nonEmptyStringArray(targetPolicy.disallowedScopes);
+    if (
+      (targetPolicy.requiresScope === true && !parsed.scope)
+      || (parsed.scope !== null && disallowedScopes.includes(parsed.scope))
+    ) {
       return res.status(400).json({
         ok: false,
-        error: "The configured Step Library state requires a non-global promotion scope",
-        code: "STEP_LIBRARY_GLOBAL_SCOPE_DISABLED",
+        error: "The configured Step Library state does not allow the requested promotion scope",
+        code: "STEP_LIBRARY_PROMOTION_SCOPE_NOT_ALLOWED",
       });
     }
   }
@@ -4509,6 +4597,11 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
      )
      SELECT updated.*,
             r.status AS run_status,
+            lifecycle_state_matches(
+              'agency_workflow_runs'::regclass,
+              r.status,
+              '{"terminal":true,"retryable":false,"administrative":false}'::jsonb
+            ) AS run_successful,
             r.intent AS run_intent,
             d.friendly_name AS device_name
      FROM updated

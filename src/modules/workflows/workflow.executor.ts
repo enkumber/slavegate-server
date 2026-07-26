@@ -57,6 +57,7 @@ import { llmJson } from "../../utils/llm";
 import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 import type { WorkflowRecord } from "./workflow.service";
 import { recordJobExecutionEventDetached } from "../observability/job-execution-events";
+import { getWorkflowQueueRuntimePolicy } from "./workflow-runtime-config";
 
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
@@ -99,7 +100,7 @@ export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED";
 
 export function shouldTerminallyFailWorkflowJob(attemptsMade: number, err: unknown): boolean {
   const typed = err as { code?: unknown; message?: unknown } | null;
-  return attemptsMade >= 3 ||
+  return attemptsMade >= getWorkflowQueueRuntimePolicy().maxAttempts ||
     typed?.code === RECOVERY_BUDGET_EXCEEDED ||
     typed?.message === RECOVERY_BUDGET_EXCEEDED;
 }
@@ -108,7 +109,8 @@ const GENERATED_WORKFLOW_RECOVERY_TOTAL_ATTEMPTS_KEY = "_generatedWorkflowRecove
 const GENERATED_WORKFLOW_RECOVERY_EVENTS_KEY = "_generatedWorkflowRecoveryEvents";
 
 interface GeneratedWorkflowRuntimeRecoveryPolicy {
-  autonomy: "bounded" | "ai_autopilot";
+  autonomy: string | null;
+  aiRecoveryEnabled: boolean;
   maxAttemptsPerStep: number;
   maxAttemptsPerWorkflow: number;
   maxRecoveryActionsPerAttempt: number;
@@ -183,32 +185,20 @@ function setGeneratedWorkflowRecoveryTotalAttempts(checkpoint: WorkflowCheckpoin
 
 function generatedWorkflowRuntimeRecoveryPolicy(template: WorkflowTemplate): GeneratedWorkflowRuntimeRecoveryPolicy {
   const explicit = template.recoveryPolicy;
-  const safetyClass = template.safetyClass ?? "standard";
-  const stepCount = Math.max(template.steps.length, 1);
-  const isReadOnly = safetyClass === "read_only";
-
-  const defaultAllowedRecoveryRequests = isReadOnly
-    ? ["ai_recovery_workflow", "refresh_screen_state", "retry_current_step", "return_to_anchor", "dismiss_transient_ui", "navigate_back_once", "verify_anchor", "abort_read_only_scan"]
-    : ["ai_recovery_workflow", "refresh_screen_state", "retry_current_step", "return_to_anchor", "dismiss_transient_ui", "navigate_back_once", "verify_anchor"];
 
   return {
-    autonomy: explicit?.autonomy ?? "ai_autopilot",
-    maxAttemptsPerStep: Math.max(
-      0,
-      explicit?.maxAttemptsPerStep ?? (isReadOnly ? 3 : 2),
-    ),
-    maxAttemptsPerWorkflow: Math.max(
-      0,
-      explicit?.maxAttemptsPerWorkflow ?? (isReadOnly ? Math.max(4, Math.min(8, Math.ceil(stepCount * 0.6))) : 4),
-    ),
-    maxRecoveryActionsPerAttempt: Math.max(1, explicit?.maxRecoveryActionsPerAttempt ?? (isReadOnly ? 6 : 4)),
+    autonomy: typeof explicit?.autonomy === "string" ? explicit.autonomy : null,
+    aiRecoveryEnabled: explicit?.aiRecoveryEnabled === true,
+    maxAttemptsPerStep: Math.max(0, explicit?.maxAttemptsPerStep ?? 0),
+    maxAttemptsPerWorkflow: Math.max(0, explicit?.maxAttemptsPerWorkflow ?? 0),
+    maxRecoveryActionsPerAttempt: Math.max(0, explicit?.maxRecoveryActionsPerAttempt ?? 0),
     allowedRecoveryRequests: explicit?.allowedRecoveryRequests?.length
       ? explicit.allowedRecoveryRequests
       : template.allowedRecoveryRequests?.length
         ? template.allowedRecoveryRequests
-        : defaultAllowedRecoveryRequests,
-    requireStateVerification: explicit?.requireStateVerification ?? true,
-    learnFromFailure: explicit?.learnFromFailure ?? true,
+        : [],
+    requireStateVerification: explicit?.requireStateVerification === true,
+    learnFromFailure: explicit?.learnFromFailure === true,
   };
 }
 
@@ -432,7 +422,7 @@ async function attemptGeneratedWorkflowAiRecovery(
   job?: import("bullmq").Job,
 ): Promise<boolean> {
   const policy = generatedWorkflowRuntimeRecoveryPolicy(template);
-  if (policy.autonomy !== "ai_autopilot" || !policy.allowedRecoveryRequests.includes("ai_recovery_workflow")) {
+  if (!policy.aiRecoveryEnabled) {
     return true;
   }
 
@@ -665,11 +655,15 @@ let workflowQueue: Queue | null = null;
 
 export function getWorkflowQueue(): Queue {
   if (!workflowQueue) {
+    const queuePolicy = getWorkflowQueueRuntimePolicy();
     workflowQueue = new Queue(WORKFLOW_QUEUE, {
       connection: getRedisConnectionOptions(),
       defaultJobOptions: {
-        attempts:         3,
-        backoff:          { type: "exponential", delay: 5000 },
+        attempts: queuePolicy.maxAttempts,
+        backoff: {
+          type: queuePolicy.backoffType,
+          delay: queuePolicy.backoffDelayMs,
+        },
         // timeout removed — BullMQ v5 removed this option; use worker-level timeout instead
         removeOnComplete: true,
         removeOnFail:     false,      // Keep for debugging
@@ -1180,12 +1174,12 @@ async function executeActionStep(
   // action string → JobType (validated by dispatcher whitelist)
   const jobType = step.action as import("../../../shared/protocol/messages").JobType;
 
-  const { jobId, timeoutMs: dispatchedTimeoutMs } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
+  const { jobId, timeoutMs: dispatchedTimeoutMs, requiresRoot } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
     deviceId,
     type:        jobType,
     params:      finalParams as import("../../../shared/protocol/messages").JobParams,
     timeoutMs,
-    confirmRoot: isRootAction(step.action),
+    confirmRoot: true,
     workflowId,
     stepIndex,
     verificationStrategy: strategy,
@@ -1222,7 +1216,7 @@ async function executeActionStep(
       type:     jobType,
       params:   finalParams as import("../../../shared/protocol/messages").JobParams,
       timeoutMs: dispatchedTimeoutMs,
-      requiresRoot:         isRootAction(step.action),
+      requiresRoot,
       verificationStrategy: strategy,
       l1TimeoutMs:          hbeStep.l1TimeoutMs,
       l2SettleMs:           hbeStep.l2SettleMs,
@@ -1862,10 +1856,6 @@ function mapActionToHbeType(action: string): "tap" | "swipe" | "type" | "scroll"
     open_app: "navigate", close_app: "navigate", intent_send: "navigate",
   };
   return map[action] ?? "tap";
-}
-
-function isRootAction(action: string): boolean {
-  return ["pm_uninstall", "reboot", "ota_update"].includes(action);
 }
 
 async function simulateError(errorType: string | undefined, _deviceId: string): Promise<void> {

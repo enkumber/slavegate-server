@@ -34,7 +34,8 @@ import { deviceExecutionArbiter } from "./modules/device-execution";
 import { isDeviceExecutionEnforced } from "./modules/device-execution/device-execution-authority";
 import { sweepQueuedJobsForOnlineDevices } from "./transport/transport";
 import { pnqV2RuntimeService } from "./modules/device-execution/pnq-v2-runtime.service";
-import { describePnqV2RuntimeConfig, isPnqV2ShadowRuntimeEnabled } from "./modules/device-execution/pnq-v2-runtime-config";
+import { describePnqV2RuntimeConfig, initializePnqV2RuntimeConfig, isPnqV2ShadowRuntimeEnabled } from "./modules/device-execution/pnq-v2-runtime-config";
+import { initializeWorkflowQueueRuntimePolicy } from "./modules/workflows/workflow-runtime-config";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
@@ -68,9 +69,11 @@ async function bootstrap(): Promise<void> {
   // ─── Auto-migrate: ensure all schema + migrations are applied ─────────────
   await runMigrations();
   await ensureSegmentBuilderAgentToken();
+  await initializePnqV2RuntimeConfig();
+  await initializeWorkflowQueueRuntimePolicy();
   console.log("[server] Migrations applied.");
   const uiGraphFlags = describeUiGraphRuntimeFlags();
-  console.log(`[server] UI graph runtime mode=${uiGraphFlags.mode} selectorFirst=${uiGraphFlags.selectorFirst} graphRuntime=${uiGraphFlags.graphRuntime} aiRecovery=${uiGraphFlags.aiRecovery} candidateLearning=${uiGraphFlags.candidateLearning} autoPromotion=${uiGraphFlags.autoPromotion}.`);
+  console.log(`[server] UI graph runtime enabled=${uiGraphFlags.enabled} selectorFirst=${uiGraphFlags.selectorFirst} graphRuntime=${uiGraphFlags.graphRuntime} aiRecovery=${uiGraphFlags.aiRecovery} candidateLearning=${uiGraphFlags.candidateLearning} autoPromotion=${uiGraphFlags.autoPromotion}.`);
   // UI graph data is migration/catalog owned. Startup never imports semantic
   // definitions from repository files.
 
@@ -78,7 +81,7 @@ async function bootstrap(): Promise<void> {
   await deviceExecutionArbiter.validateSchema();
   console.log("[server] Device execution arbiter schema verified.");
   const pnqV2RuntimeConfig = describePnqV2RuntimeConfig();
-  console.log(`[server] Queue v2 runtime mode=${pnqV2RuntimeConfig.mode} (restart required to change).`);
+  console.log(`[server] Queue v2 runtime enabled=${pnqV2RuntimeConfig.enabled} (loaded from PostgreSQL at startup).`);
   if (isPnqV2ShadowRuntimeEnabled()) {
     const summary = await pnqV2RuntimeService.reconcileStartup();
     console.log(`[server] Queue v2 shadow startup reconciliation: ok=${summary.ok} error=${summary.observed_error ?? "none"}.`);

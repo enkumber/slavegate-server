@@ -33,6 +33,46 @@ export interface PromotionDecision {
   blockers: string[];
 }
 
+export interface UiGraphPromotionPolicy {
+  minimumSuccessCount: number;
+  minimumDistinctDevices: number;
+  minimumDistinctBranches: number;
+  minimumDistinctEnvironments: number;
+  maximumFailureCount: number;
+  maximumRecoveryCount: number;
+  allowedAutomaticSafetyClasses: string[];
+  allowedAutomaticCandidateTypes: string[];
+}
+
+function promotionPolicy(metadata: Record<string, unknown>): UiGraphPromotionPolicy {
+  const policy: UiGraphPromotionPolicy = {
+    minimumSuccessCount: Number(metadata.minimumSuccessCount),
+    minimumDistinctDevices: Number(metadata.minimumDistinctDevices),
+    minimumDistinctBranches: Number(metadata.minimumDistinctBranches),
+    minimumDistinctEnvironments: Number(metadata.minimumDistinctEnvironments),
+    maximumFailureCount: Number(metadata.maximumFailureCount),
+    maximumRecoveryCount: Number(metadata.maximumRecoveryCount),
+    allowedAutomaticSafetyClasses: Array.isArray(metadata.allowedAutomaticSafetyClasses)
+      ? metadata.allowedAutomaticSafetyClasses.filter((value): value is string => typeof value === "string")
+      : [],
+    allowedAutomaticCandidateTypes: Array.isArray(metadata.allowedAutomaticCandidateTypes)
+      ? metadata.allowedAutomaticCandidateTypes.filter((value): value is string => typeof value === "string")
+      : [],
+  };
+  const numericPolicy = [
+    policy.minimumSuccessCount,
+    policy.minimumDistinctDevices,
+    policy.minimumDistinctBranches,
+    policy.minimumDistinctEnvironments,
+    policy.maximumFailureCount,
+    policy.maximumRecoveryCount,
+  ];
+  if (numericPolicy.some((value) => !Number.isInteger(value) || value < 0)) {
+    throw new Error("UI graph lifecycle state has invalid promotion policy metadata");
+  }
+  return policy;
+}
+
 async function dispatchableResourceState(
   resourceTable: string,
   db: LifecycleQueryable,
@@ -94,37 +134,27 @@ export function promotionDecision(input: {
   distinctBranches?: number;
   distinctEnvironments?: number;
   recoveryCount?: number;
-}): PromotionDecision {
-  const requiredSuccesses = 5;
+  lifecycleState: string;
+}, policy: UiGraphPromotionPolicy): PromotionDecision {
+  const requiredSuccesses = policy.minimumSuccessCount;
   const distinctDevices = input.distinctDevices ?? 0;
   const distinctBranches = input.distinctBranches ?? 0;
   const distinctEnvironments = input.distinctEnvironments ?? 0;
-  const validationStage = input.successCount < requiredSuccesses || !input.stateVerified
-    ? "candidate"
-    : distinctDevices < 2
-      ? "device_validated"
-      : distinctBranches < 2 || distinctEnvironments < 2
-        ? "cohort_validated"
-        : "global_promoted";
   const blockers: string[] = [];
   if (input.successCount < requiredSuccesses) blockers.push("insufficient_successes");
   if (!input.stateVerified) blockers.push("destination_state_not_verified");
-  if (distinctDevices < 2) blockers.push("insufficient_device_coverage");
-  if (distinctBranches < 2) blockers.push("insufficient_branch_coverage");
-  if (distinctEnvironments < 2) blockers.push("insufficient_environment_coverage");
-  if ((input.recoveryCount ?? 0) > 0) blockers.push("recovery_observed_requires_clean_validation");
-  // Automatic reuse is deliberately a clean 5/5 gate. A candidate with any
-  // failed or unverified execution remains available for manual review, but
-  // is never promoted into the shared fast path automatically.
-  if (input.failureCount > 0) blockers.push("manual_review_required_after_failed_validation");
-  if (["mutating", "sensitive"].includes(input.safetyClass)) blockers.push("manual_review_required_for_safety_class");
-  if (input.type === "state") blockers.push("state_candidates_require_manual_review");
-  if (input.type === "recovery_rule") blockers.push("recovery_rules_require_manual_materialization");
+  if (distinctDevices < policy.minimumDistinctDevices) blockers.push("insufficient_device_coverage");
+  if (distinctBranches < policy.minimumDistinctBranches) blockers.push("insufficient_branch_coverage");
+  if (distinctEnvironments < policy.minimumDistinctEnvironments) blockers.push("insufficient_environment_coverage");
+  if ((input.recoveryCount ?? 0) > policy.maximumRecoveryCount) blockers.push("recovery_policy_exceeded");
+  if (input.failureCount > policy.maximumFailureCount) blockers.push("failure_policy_exceeded");
+  if (!policy.allowedAutomaticSafetyClasses.includes(input.safetyClass)) blockers.push("manual_review_required_for_safety_class");
+  if (!policy.allowedAutomaticCandidateTypes.includes(input.type)) blockers.push("candidate_type_requires_manual_review");
   return {
     ready: input.successCount >= requiredSuccesses && input.stateVerified,
     autoPromotable: blockers.length === 0,
     requiredSuccesses,
-    validationStage,
+    validationStage: input.lifecycleState,
     blockers,
   };
 }
@@ -227,11 +257,6 @@ export class UiGraphLearningLoop {
            success_count = stats.success_count,
            failure_count = stats.failure_count,
            distinct_context_count = stats.distinct_context_count,
-           validation_stage = CASE
-             WHEN stats.success_count < 5 OR NOT stats.state_verified THEN 'candidate'
-             WHEN stats.distinct_devices < 2 THEN 'device_validated'
-             WHEN stats.distinct_branches < 2 OR stats.distinct_environments < 2 OR stats.recovery_count > 0 THEN 'cohort_validated'
-             ELSE 'global_promoted' END,
            confidence = LEAST(0.99, GREATEST(0.05,
              CASE WHEN stats.success_count + stats.failure_count = 0 THEN c.confidence
                   ELSE stats.success_count::double precision / (stats.success_count + stats.failure_count) END)),
@@ -255,11 +280,24 @@ export class UiGraphLearningLoop {
                 ORDER BY target.sort_order
                 LIMIT 1
              ),
-             CASE WHEN stats.failure_count > 0 THEN lifecycle_transition_target(
-               'ui_graph_learning_candidates'::regclass,
-               c.status,
-               '{"targetRetryable":true,"automatic":true}'::jsonb
-             ) END,
+             (
+               SELECT transition.to_status
+                 FROM lifecycle_resource_bindings binding
+                 JOIN lifecycle_transitions transition
+                   ON transition.lifecycle_key=binding.lifecycle_key
+                  AND transition.from_status=c.status
+                 JOIN lifecycle_state_definitions target
+                   ON target.lifecycle_key=transition.lifecycle_key
+                  AND target.status=transition.to_status
+                WHERE binding.resource_table=to_regclass('ui_graph_learning_candidates')
+                  AND binding.state_column='status'
+                  AND transition.automatic
+                  AND target.retryable
+                  AND transition.metadata ? 'maximumFailureCount'
+                  AND stats.failure_count > (transition.metadata->>'maximumFailureCount')::int
+                ORDER BY target.sort_order
+                LIMIT 1
+             ),
              CASE WHEN lifecycle_state_matches(
                'ui_graph_learning_candidates'::regclass,
                c.status,
@@ -375,7 +413,8 @@ export class UiGraphLearningLoop {
         distinctBranches: Number(row.distinct_branches ?? 0),
         distinctEnvironments: Number(row.distinct_environments ?? 0),
         recoveryCount: Number(row.recovery_count ?? 0),
-      });
+        lifecycleState: row.status,
+      }, promotionPolicy(updatedState?.metadata ?? {}));
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -422,7 +461,8 @@ export class UiGraphLearningLoop {
         distinctBranches: Number(validation.distinct_branches ?? 0),
         distinctEnvironments: Number(validation.distinct_environments ?? 0),
         recoveryCount: Number(validation.recovery_count ?? 0),
-      });
+        lifecycleState: candidate.status,
+      }, promotionPolicy(candidateState?.metadata ?? {}));
       if (!decision.ready) throw new Error(`UI_GRAPH_CANDIDATE_NOT_READY:${decision.blockers.join(",")}`);
       if (allowAutomatic && !decision.autoPromotable) throw new Error(`UI_GRAPH_CANDIDATE_MANUAL_REVIEW_REQUIRED:${decision.blockers.join(",")}`);
       const promotionTransition = await selectResourceLifecycleTransition(

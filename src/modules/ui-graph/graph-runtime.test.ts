@@ -29,7 +29,7 @@ describe("GraphRuntimeEngine", () => {
       [state("home"), state("popup"), state("target")],
       [transition("home-target", "home", "target"), transition("dismiss", "popup", "home"), transition("popup-target", "popup", "target")],
       { appId: "app" },
-      { maxSafetyClass: "navigation", minimumConfidence: 0.7, maxTransitions: 20 },
+      { allowedSafetyClasses: ["navigation"], minimumConfidence: 0.7, maxTransitions: 20 },
       {
         captureUiTree: async () => observations.shift() ?? tree("target"),
         executeTransition: execute,
@@ -45,7 +45,7 @@ describe("GraphRuntimeEngine", () => {
 
   it("fails closed on an unknown state", async () => {
     const engine = new GraphRuntimeEngine(
-      [state("home")], [], { appId: "app" }, { maxSafetyClass: "navigation", minimumConfidence: 0.7, maxTransitions: 20 },
+      [state("home")], [], { appId: "app" }, { allowedSafetyClasses: ["navigation"], minimumConfidence: 0.7, maxTransitions: 20 },
       { captureUiTree: async () => tree("unknown"), executeTransition: async () => ({ ok: true }), saveCheckpoint: async () => undefined },
       { maxTransitions: 30, maxReplans: 8, maxDurationMs: 180_000 },
     );

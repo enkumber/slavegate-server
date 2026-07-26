@@ -214,86 +214,6 @@ const GENERATED_WORKFLOW_VERIFICATION_STRATEGIES = [
   "local_with_screenshot",
 ] as const;
 
-const GENERATED_WORKFLOW_ALLOWED_ACTIONS = [
-  "close_app",
-  "get_screen_state",
-  "intent_send",
-  "open_app",
-  "press_key",
-  "screen_wake",
-  "screenshot",
-  "scroll",
-  "detect_current_screen",
-  "a11y_find_tap",
-  "classify_ui_tree",
-  "semantic_tap",
-  "set_variable",
-  "swipe",
-  "tap",
-  "type_text",
-  "ui_tree_dump",
-  "unlock",
-  "wait_for_idle",
-] as const;
-
-// Generic interpreter primitives. Application packages, selectors, text,
-// coordinates, timing and decisions belong to the workflow payload/DB.
-const EDGE_WORKFLOW_V2_ACTIONS = [
-  "a11y_find_tap",
-  "classify_ui_tree",
-  "close_app",
-  "double_tap",
-  "get_foreground_app",
-  "get_screen_state",
-  "intent_send",
-  "keyevent",
-  "long_press",
-  "observe_and_transition",
-  "ocr_find_tap",
-  "open_app",
-  "press_key",
-  "request_llm",
-  "run_state_machine",
-  "screen_off",
-  "screen_wake",
-  "screenshot",
-  "screenshot_for_vlm",
-  "scroll",
-  "set_focused_text",
-  "set_variable",
-  "swipe",
-  "tap",
-  "type_text",
-  "ui_tree_dump",
-  "unlock",
-  "wait_for_idle",
-] as const;
-
-const GENERATED_WORKFLOW_ALLOWED_URI_LESS_INTENT_ACTIONS = [
-  "android.settings.ADD_ACCOUNT_SETTINGS",
-] as const;
-
-const GENERATED_WORKFLOW_SAFETY_CLASSES = [
-  "read_only",
-  "standard",
-] as const;
-
-const GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS = [
-  "abort_read_only_scan",
-  "ai_recovery_workflow",
-  "dismiss_transient_ui",
-  "navigate_back_once",
-  "refresh_screen_state",
-  "retry_current_step",
-  "return_to_anchor",
-  "verify_anchor",
-] as const;
-
-const GENERATED_WORKFLOW_RECOVERY_AUTONOMY = [
-  "bounded",
-  "ai_autopilot",
-] as const;
-
 const WORKFLOW_POSTCONDITION_OPERATORS: WorkflowPostconditionOperator[] = [
   "equals",
   "not_equals",
@@ -399,11 +319,10 @@ export function workflowOutputSchemaErrors(value: unknown): string[] {
   return errors;
 }
 
-function validateGeneratedWorkflowReadOnlySemantics(
+function validateGeneratedWorkflowGoalSemantics(
   candidate: Partial<WorkflowTemplate>,
   errors: string[]
 ): void {
-  if (candidate.safetyClass !== "read_only") return;
   if (candidate.goalContract) {
     const reason = workflowGoalContractReason(candidate as WorkflowTemplate);
     if (reason) errors.push(`workflow goal contract violation: ${reason}`);
@@ -457,8 +376,8 @@ function validateGeneratedWorkflowStepInput(
     case "action": {
       if (typeof step.action !== "string" || step.action.length === 0) {
         errors.push(`${path}.action must be a non-empty string for action steps`);
-      } else if (!runtimeContract && !(GENERATED_WORKFLOW_ALLOWED_ACTIONS as readonly string[]).includes(step.action)) {
-        errors.push(`${path}.action "${step.action}" is not allowed by the legacy validator`);
+      } else if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(step.action)) {
+        errors.push(`${path}.action must be a safe runtime-contract identifier`);
       }
       if (step.params !== undefined && !isRecord(step.params)) {
         errors.push(`${path}.params must be an object when provided`);
@@ -503,8 +422,8 @@ function validateGeneratedWorkflowStepInput(
           const action = params.postcondition.action;
           if (
             typeof action !== "string"
-            || !(EDGE_WORKFLOW_V2_ACTIONS as readonly string[]).includes(action)
-            || ["observe_and_transition", "run_state_machine", "request_llm"].includes(action)
+            || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(action)
+            || action === step.action
           ) {
             errors.push(`${path}.params.postcondition.action must be a non-recursive deterministic edge primitive`);
           }
@@ -611,15 +530,6 @@ function validateGeneratedWorkflowStepInput(
           && params.action.$bind.trim().length > 0;
         if (!uri && !action && !uriBinding && !actionBinding) {
           errors.push(`${path}.params.uri or params.action is required for intent_send actions`);
-        } else if (
-          !uri &&
-          !uriBinding &&
-          !actionBinding &&
-          !GENERATED_WORKFLOW_ALLOWED_URI_LESS_INTENT_ACTIONS.includes(
-            action as typeof GENERATED_WORKFLOW_ALLOWED_URI_LESS_INTENT_ACTIONS[number],
-          )
-        ) {
-          errors.push(`${path}.params.action is not allowed without a uri: ${action}`);
         }
       }
       if (step.retries !== undefined && (typeof step.retries !== "number" || step.retries < 0)) {
@@ -667,8 +577,8 @@ function validateGeneratedWorkflowStepInput(
         if (!isRecord(step.until)) {
           errors.push(`${path}.until must be an object when provided`);
         } else {
-          if (typeof step.until.action !== "string" || !(EDGE_WORKFLOW_V2_ACTIONS as readonly string[]).includes(step.until.action)) {
-            errors.push(`${path}.until.action must be a generic edge primitive`);
+          if (typeof step.until.action !== "string" || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(step.until.action)) {
+            errors.push(`${path}.until.action must be a safe runtime-contract identifier`);
           }
           if (step.until.params !== undefined && !isRecord(step.until.params)) {
             errors.push(`${path}.until.params must be an object when provided`);
@@ -739,9 +649,12 @@ function validateGeneratedWorkflowRecoveryPolicy(
   const candidate = policy as WorkflowRecoveryPolicy;
   if (
     candidate.autonomy !== undefined &&
-    (typeof candidate.autonomy !== "string" || !GENERATED_WORKFLOW_RECOVERY_AUTONOMY.includes(candidate.autonomy as typeof GENERATED_WORKFLOW_RECOVERY_AUTONOMY[number]))
+    (typeof candidate.autonomy !== "string" || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(candidate.autonomy))
   ) {
-    errors.push(`${path}.autonomy must be one of: ${GENERATED_WORKFLOW_RECOVERY_AUTONOMY.join(", ")}`);
+    errors.push(`${path}.autonomy must be a safe policy identifier`);
+  }
+  if (candidate.aiRecoveryEnabled !== undefined && typeof candidate.aiRecoveryEnabled !== "boolean") {
+    errors.push(`${path}.aiRecoveryEnabled must be a boolean`);
   }
 
   for (const key of ["maxAttemptsPerStep", "maxAttemptsPerWorkflow", "maxRecoveryActionsPerAttempt"] as const) {
@@ -759,8 +672,8 @@ function validateGeneratedWorkflowRecoveryPolicy(
       errors.push(`${path}.allowedRecoveryRequests must be an array of non-empty strings`);
     } else {
       for (const recoveryRequest of candidate.allowedRecoveryRequests) {
-        if (!GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS.includes(recoveryRequest as typeof GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS[number])) {
-          errors.push(`${path}.allowedRecoveryRequests must contain only: ${GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS.join(", ")}`);
+        if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(recoveryRequest)) {
+          errors.push(`${path}.allowedRecoveryRequests must contain safe policy identifiers`);
           break;
         }
       }
@@ -861,7 +774,7 @@ export interface GeneratedWorkflowCompiledPlan {
   templateVersion: string;
   metadata: {
     intent: string | null;
-    safetyClass: "read_only" | "standard" | null;
+    safetyClass: string | null;
     outputSchema: WorkflowOutputSchema | null;
     postconditionContract: WorkflowPostconditionContract | null;
     goalContract: WorkflowGoalContract | null;
@@ -936,12 +849,12 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
     }
   }
   if (candidate.safetyClass !== undefined) {
-    if (typeof candidate.safetyClass !== "string" || !GENERATED_WORKFLOW_SAFETY_CLASSES.includes(candidate.safetyClass as typeof GENERATED_WORKFLOW_SAFETY_CLASSES[number])) {
-      errors.push(`workflow.safetyClass must be one of: ${GENERATED_WORKFLOW_SAFETY_CLASSES.join(", ")}`);
+    if (
+      typeof candidate.safetyClass !== "string"
+      || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(candidate.safetyClass)
+    ) {
+      errors.push("workflow.safetyClass must be a safe non-empty policy identifier");
     }
-  }
-  if (candidate.allowedRecoveryRequests && candidate.safetyClass !== "read_only") {
-    errors.push("workflow.allowedRecoveryRequests requires workflow.safetyClass=read_only");
   }
   if (candidate.outputSchema !== undefined) {
     validateGeneratedWorkflowOutputSchema(candidate.outputSchema, "workflow.outputSchema", errors);
@@ -964,8 +877,8 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
       errors.push("workflow.allowedRecoveryRequests must be an array of non-empty strings");
     } else {
       for (const recoveryRequest of candidate.allowedRecoveryRequests) {
-        if (!GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS.includes(recoveryRequest as typeof GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS[number])) {
-          errors.push(`workflow.allowedRecoveryRequests must contain only: ${GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS.join(", ")}`);
+        if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(recoveryRequest)) {
+          errors.push("workflow.allowedRecoveryRequests must contain safe policy identifiers");
           break;
         }
       }
@@ -991,7 +904,7 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
       validateGeneratedWorkflowStepInput(step, `workflow.steps[${index}]`, errors, seenIds, candidate.runtimeContract)
     );
   }
-  validateGeneratedWorkflowReadOnlySemantics(candidate, errors);
+  validateGeneratedWorkflowGoalSemantics(candidate, errors);
 
   return errors.length > 0
     ? { ok: false, errors }
@@ -1401,9 +1314,9 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       optional: ["intent", "safetyClass", "outputSchema", "allowedRecoveryRequests", "recoveryPolicy", "defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
       platforms: "catalog_managed",
       intents: "catalog_managed",
-      safetyClasses: GENERATED_WORKFLOW_SAFETY_CLASSES,
-      allowedRecoveryRequests: GENERATED_WORKFLOW_ALLOWED_RECOVERY_REQUESTS,
-      recoveryAutonomy: GENERATED_WORKFLOW_RECOVERY_AUTONOMY,
+      safetyClasses: "catalog_managed",
+      allowedRecoveryRequests: "catalog_managed",
+      recoveryAutonomy: "catalog_managed",
       defaultVerificationStrategy: GENERATED_WORKFLOW_VERIFICATION_STRATEGIES,
       stepTypes: GENERATED_WORKFLOW_STEP_TYPES,
     },
@@ -1411,7 +1324,7 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       action: {
         required: ["type", "action"],
         optional: ["id", "target", "x", "y", "params", "verification", "retries", "timeoutMs", "expectedScreen"],
-        allowedActions: GENERATED_WORKFLOW_ALLOWED_ACTIONS,
+        allowedActions: "runtime_contract_managed",
       },
       wait: {
         required: ["type", "duration or condition"],

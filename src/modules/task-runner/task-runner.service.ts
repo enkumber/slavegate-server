@@ -786,7 +786,10 @@ function normalizeRepairedWorkflow(candidate: unknown, base: WorkflowTemplate): 
       : `${base.description} Repaired after failed execution.`,
     version: repairedId === base.id && repairedVersion === base.version ? `${major}.${minor}.${patch}` : repairedVersion,
     intent: typeof record.intent === "string" ? record.intent : base.intent,
-    safetyClass: record.safetyClass === "read_only" || record.safetyClass === "standard" ? record.safetyClass : base.safetyClass,
+    safetyClass: typeof record.safetyClass === "string"
+      && /^[a-z0-9][a-z0-9._/-]{0,199}$/.test(record.safetyClass)
+      ? record.safetyClass
+      : base.safetyClass,
     outputSchema: record.outputSchema ?? base.outputSchema,
     allowedRecoveryRequests: Array.isArray(record.allowedRecoveryRequests)
       ? record.allowedRecoveryRequests
@@ -849,8 +852,11 @@ async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerR
 
   const learning = cached.sourceMetadata?.workflowLearning as Record<string, unknown> | undefined;
   const repair = cached.sourceMetadata?.workflowRepair as Record<string, unknown> | undefined;
+  const repairPolicy = cached.sourceMetadata?.repairPolicy as Record<string, unknown> | undefined;
   if (typeof repair?.candidateGeneratedAt === "string" && repair?.sourceCacheKey === cacheKey) return null;
-  if (typeof learning?.failureCount === "number" && learning.failureCount > 3) return null;
+  const maximumFailureCount = Number(repairPolicy?.maximumFailureCount);
+  if (!Number.isFinite(maximumFailureCount) || maximumFailureCount < 0) return null;
+  if (typeof learning?.failureCount === "number" && learning.failureCount > maximumFailureCount) return null;
 
   try {
     const response = await llmJson<WorkflowRepairResponse>(
@@ -869,10 +875,7 @@ async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerR
     }
     const compiledPlan = compileGeneratedWorkflowTemplate(repaired);
     await workflowService.saveTemplate(repaired);
-    await workflowService.saveGeneratedPlanCache(repaired, compiledPlan, cached.requestKey, {
-      artifactState: "candidate",
-      replaceRequestKeyArtifacts: false,
-      sourceMetadata: {
+    await workflowService.saveCandidateExecutableGeneratedPlanCache(repaired, compiledPlan, cached.requestKey, {
         ...cached.sourceMetadata,
         source: "llm_repair",
         repairOfCacheKey: cached.cacheKey,
@@ -894,8 +897,7 @@ async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerR
           confidence: typeof response.confidence === "number" ? response.confidence : null,
           nextAction: "retry_task_with_repaired_candidate",
         },
-      },
-    });
+    }, false);
     console.log(`[task-runner] Generated repaired workflow candidate ${compiledPlan.cacheKey} for failed cache ${cacheKey}`);
     return {
       cacheKey: compiledPlan.cacheKey,

@@ -279,7 +279,7 @@ describe("Generated workflow contract validation", () => {
     expect(result.errors).toContain("workflow.steps[0].params.packageName is blocked for generated workflows: com.android.settings");
   });
 
-  it("rejects generated workflow actions that can trigger root, VLM, file, or mutation paths", async () => {
+  it("leaves generated workflow action authorization to the PostgreSQL runtime contract", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
 
     const result = validateGeneratedWorkflowTemplate({
@@ -296,13 +296,8 @@ describe("Generated workflow contract validation", () => {
       ],
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.errors).toEqual(expect.arrayContaining([
-      expect.stringContaining('workflow.steps[0].action "pm_uninstall" is not allowed by the legacy validator'),
-      expect.stringContaining('workflow.steps[1].action "cascade_tap" is not allowed by the legacy validator'),
-      expect.stringContaining('workflow.steps[2].action "file_delete" is not allowed by the legacy validator'),
-      expect.stringContaining('workflow.steps[3].action "reboot" is not allowed by the legacy validator'),
-    ]));
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
   });
 
   it("normalizes generated workflow platform labels to a bounded set", async () => {
@@ -469,8 +464,8 @@ describe("Generated workflow contract validation", () => {
 
     expect(executorSource).toContain('export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED"');
     expect(executorSource).toContain("generatedWorkflowRuntimeRecoveryPolicy");
-    expect(executorSource).toContain('autonomy: explicit?.autonomy ?? "ai_autopilot"');
-    expect(executorSource).toContain("explicit?.maxAttemptsPerStep ?? (isReadOnly ? 3 : 2)");
+    expect(executorSource).toContain("aiRecoveryEnabled: explicit?.aiRecoveryEnabled === true");
+    expect(executorSource).toContain("explicit?.maxAttemptsPerStep ?? 0");
     expect(executorSource).toContain("GENERATED_WORKFLOW_RECOVERY_TOTAL_ATTEMPTS_KEY");
     expect(executorSource).toContain("recordGeneratedWorkflowRecoveryEvent");
     expect(executorSource).toContain("attemptGeneratedWorkflowAiRecovery");
@@ -602,7 +597,7 @@ describe("Generated workflow contract validation", () => {
     expect(result.errors).toEqual([]);
   });
 
-  it("rejects arbitrary uri-less Android intents", async () => {
+  it("leaves intent action authorization to the PostgreSQL runtime contract", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
     const result = validateGeneratedWorkflowTemplate({
       id: "android_unsafe_intent_v1",
@@ -624,10 +619,8 @@ describe("Generated workflow contract validation", () => {
       ],
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.errors).toContain(
-      "workflow.steps[0].params.action is not allowed without a uri: android.intent.action.DELETE",
-    );
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
   });
 
   it("allows standard edge workflows to generate and type catalog-authored text", async () => {

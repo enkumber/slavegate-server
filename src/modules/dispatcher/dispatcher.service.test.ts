@@ -56,7 +56,15 @@ import { dispatcherService, shouldBlockRootForTimedOutJob, workflowChildTimeoutD
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.dbQuery.mockResolvedValue({ rows: [], rowCount: 1 });
+  mocks.dbQuery.mockImplementation(async (sql: string) => {
+    if (String(sql).includes("jobActionPolicy")) {
+      return {
+        rows: [{ policy: { actionKey: "fixture", allowed: true, requiresRoot: false } }],
+        rowCount: 1,
+      };
+    }
+    return { rows: [], rowCount: 1 };
+  });
   mocks.enqueueShadowJob.mockResolvedValue(undefined);
   mocks.queueAdd.mockResolvedValue(undefined);
 });
@@ -64,28 +72,32 @@ beforeEach(() => {
 describe("server-workflow child timeout clock", () => {
   it("does not consume execution timeout while PNQ still owns the child as queued", () => {
     expect(workflowChildTimeoutDisposition({
-      root_state: "queued",
-      operation_state: "registered",
-    }, false)).toBe("wait_queued");
+      root_initial: true,
+      operation_initial: true,
+      operation_in_flight: false,
+    }, false)).toEqual({ deferred: true, armExecution: false });
   });
 
   it("arms a fresh execution timeout once PNQ advances the child to the wire", () => {
     expect(workflowChildTimeoutDisposition({
-      root_state: "dispatching",
-      operation_state: "dispatched",
-    }, false)).toBe("arm_execution");
+      root_initial: false,
+      operation_initial: false,
+      operation_in_flight: true,
+    }, false)).toEqual({ deferred: false, armExecution: true });
     expect(workflowChildTimeoutDisposition({
-      root_state: "dispatched",
-      operation_state: "dispatched",
-    }, true)).toBe("timeout");
+      root_initial: false,
+      operation_initial: false,
+      operation_in_flight: true,
+    }, true)).toEqual({ deferred: false, armExecution: false });
   });
 
   it("fails closed when ownership is absent or no longer queue-waiting", () => {
-    expect(workflowChildTimeoutDisposition(undefined, false)).toBe("timeout");
+    expect(workflowChildTimeoutDisposition(undefined, false)).toEqual({ deferred: false, armExecution: false });
     expect(workflowChildTimeoutDisposition({
-      root_state: "blocked",
-      operation_state: "blocked",
-    }, false)).toBe("timeout");
+      root_initial: false,
+      operation_initial: false,
+      operation_in_flight: false,
+    }, false)).toEqual({ deferred: false, armExecution: false });
   });
 
   it("leaves a timed-out child under workflow ownership instead of blocking the canonical root", () => {

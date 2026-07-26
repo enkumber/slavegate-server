@@ -27,67 +27,48 @@ import {
   transitionJobByConfiguredStalePolicy,
 } from "./job-lifecycle.service";
 
-// ─── Whitelist ─────────────────────────────────────────────────────────────────
-// DO NOT add generic shell commands here. Extend only with explicit approval.
-// pm_install is NOT in this list — APK install exclusively through ota_update (signed)
-const ALLOWED_JOB_TYPES = new Set<JobType>([
-  "tap",
-  "swipe",
-  "long_press",
-  "type_text",
-  "scroll",
-  "screenshot",
-  "screenshot_for_vlm",  // VLM-optimized screenshot (540x1200, JPEG 85%)
-  "screen_record",
-  "open_app",
-  "open_app_fresh",  // force-stop + am start --activity-clear-task (bypasses singleTask restore)
-  "close_app",
-  "ui_tree_dump",
-  "press_key",       // navigation buttons: back, home, recents
-  "screen_wake",
-  "screen_off",
-  "unlock",
-  "get_screen_state",
-  "get_clipboard",
-  "set_clipboard",
-  "wait_for_idle",
-  "file_push",
-  "file_delete",
-  "pm_uninstall",    // requires confirmRoot=true
-  "reboot",          // requires confirmRoot=true
-  "ota_update",      // signed APK — routes through full audit pipeline
-  "workflow_execute" as unknown as JobType, // server-side workflow engine
-  // Skill system
-  "skill_tap",       // tap at normalized coords from skill
-  "a11y_find_tap",   // find element via A11y and tap
-  "cascade_tap" as unknown as JobType,    // VLM-guided tap: screenshot → VLM coords → tap
-  "ocr_find_tap",    // find text via ML Kit OCR and tap (cascade Level 3)
-  // Screen Detection Cascade (US-SCREEN-CASCADE)
-  "ocr_full", // Full-screen ML Kit OCR → all text blocks (implemented by SPARK S-SD-01)
-  // Extended job types (not in shared protocol type but supported by device agent)
-  "intent_send" as unknown as JobType,  // send explicit intent (am start with specific activity)
-]);
-
-const ROOT_COMMANDS = new Set<JobType>(["pm_uninstall", "reboot", "ota_update"]);
-
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 600_000;
 
+interface JobActionPolicy {
+  allowed: boolean;
+  requiresRoot: boolean;
+}
+
+async function loadJobActionPolicy(type: JobType): Promise<JobActionPolicy> {
+  const result = await getDb().query<{ policy: Record<string, unknown> }>(
+    `SELECT entry.payload->'jobActionPolicy' AS policy
+       FROM runtime_semantic_entries entry
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = entry.lifecycle_key
+        AND definition.status = entry.status
+      WHERE definition.dispatchable
+        AND entry.payload->'jobActionPolicy'->>'actionKey' = $1
+      ORDER BY entry.priority DESC, entry.id`,
+    [type],
+  );
+  if (result.rows.length !== 1) {
+    throw new Error(`PostgreSQL job action policy is missing or ambiguous for '${type}'`);
+  }
+  const policy = result.rows[0].policy;
+  if (typeof policy.allowed !== "boolean" || typeof policy.requiresRoot !== "boolean") {
+    throw new Error(`PostgreSQL job action policy is invalid for '${type}'`);
+  }
+  return { allowed: policy.allowed, requiresRoot: policy.requiresRoot };
+}
+
 export function workflowChildTimeoutDisposition(
-  ownership: { root_state: string; operation_state: string } | undefined,
+  ownership: {
+    root_initial: boolean;
+    operation_initial: boolean;
+    operation_in_flight: boolean;
+  } | undefined,
   observedDispatch: boolean,
-): "wait_queued" | "arm_execution" | "timeout" {
-  if (ownership?.root_state === "queued" && ownership.operation_state === "registered") {
-    return "wait_queued";
-  }
-  if (
-    !observedDispatch &&
-    ownership &&
-    ["dispatching", "dispatched"].includes(ownership.operation_state)
-  ) {
-    return "arm_execution";
-  }
-  return "timeout";
+): { deferred: boolean; armExecution: boolean } {
+  return {
+    deferred: ownership?.root_initial === true && ownership.operation_initial === true,
+    armExecution: !observedDispatch && ownership?.operation_in_flight === true,
+  };
 }
 
 export function shouldBlockRootForTimedOutJob(workflowId?: string): boolean {
@@ -117,31 +98,32 @@ export class DispatcherService {
     return this.queues.get(deviceId)!;
   }
 
-  async dispatch(req: DispatchJobRequest): Promise<{ jobId: string; timeoutMs: number }> {
+  async dispatch(req: DispatchJobRequest): Promise<{ jobId: string; timeoutMs: number; requiresRoot: boolean }> {
     return this.dispatchCore(req, {});
   }
 
-  async dispatchLegacyGeneratedWorkflow(req: DispatchJobRequest): Promise<{ jobId: string; timeoutMs: number }> {
+  async dispatchLegacyGeneratedWorkflow(req: DispatchJobRequest): Promise<{ jobId: string; timeoutMs: number; requiresRoot: boolean }> {
     return this.dispatchCore(req, { legacyCompatibilityLane: true });
   }
 
   private async dispatchCore(
     req: DispatchJobRequest,
     { legacyCompatibilityLane = false }: DispatchCoreOptions,
-  ): Promise<{ jobId: string; timeoutMs: number }> {
+  ): Promise<{ jobId: string; timeoutMs: number; requiresRoot: boolean }> {
 
     // 0. Kill switch — block all dispatches when active (B4 fix)
     if (await isKillSwitchActive()) {
       throw new Error("Kill switch active — job dispatch blocked");
     }
 
-    // 1. Whitelist check
-    if (!ALLOWED_JOB_TYPES.has(req.type)) {
+    // 1. PostgreSQL action authorization.
+    const actionPolicy = await loadJobActionPolicy(req.type);
+    if (!actionPolicy.allowed) {
       throw new Error(`Job type '${req.type}' is not allowed.`);
     }
 
     // 2. Root commands require explicit confirmation
-    if (ROOT_COMMANDS.has(req.type) && !req.confirmRoot) {
+    if (actionPolicy.requiresRoot && !req.confirmRoot) {
       throw new Error(
         `Job type '${req.type}' is a root command and requires confirmRoot=true.`
       );
@@ -259,10 +241,26 @@ export class DispatcherService {
           // ever reaches the phone.
           if (!legacyCompatibilityLane && !shouldBlockRootForTimedOutJob(req.workflowId)) {
             const ownership = await db.query<{
-              root_state: string;
-              operation_state: string;
+              root_initial: boolean;
+              operation_initial: boolean;
+              operation_in_flight: boolean;
             }>(
-              `SELECT roots.state AS root_state, operations.state AS operation_state
+              `SELECT
+                 lifecycle_state_matches(
+                   'device_execution_roots'::regclass,
+                   roots.state,
+                   '{"initial":true}'::jsonb
+                 ) AS root_initial,
+                 lifecycle_state_matches(
+                   'device_execution_operations'::regclass,
+                   operations.state,
+                   '{"initial":true}'::jsonb
+                 ) AS operation_initial,
+                 lifecycle_state_matches(
+                   'device_execution_operations'::regclass,
+                   operations.state,
+                   '{"initial":false,"terminal":false,"administrative":false}'::jsonb
+                 ) AS operation_in_flight
                FROM device_execution_operations operations
                JOIN device_execution_roots roots ON roots.id = operations.root_id
                WHERE operations.operation_kind = 'job'
@@ -272,12 +270,12 @@ export class DispatcherService {
             );
             const current = ownership.rows[0];
             const disposition = workflowChildTimeoutDisposition(current, observedWorkflowChildDispatch);
-            if (disposition === "wait_queued") {
+            if (disposition.deferred) {
               const retry = setTimeout(enforceTimeout, 1_000);
               retry.unref?.();
               return;
             }
-            if (disposition === "arm_execution") {
+            if (disposition.armExecution) {
               observedWorkflowChildDispatch = true;
               const executionTimer = setTimeout(enforceTimeout, timeoutMs + 5_000);
               executionTimer.unref?.();
@@ -324,7 +322,7 @@ export class DispatcherService {
     const timeoutHandle = setTimeout(enforceTimeout, timeoutMs + 5_000); // +5s grace period for network latency
     timeoutHandle.unref?.();
 
-    return { jobId, timeoutMs };
+    return { jobId, timeoutMs, requiresRoot: actionPolicy.requiresRoot };
   }
 
   /**

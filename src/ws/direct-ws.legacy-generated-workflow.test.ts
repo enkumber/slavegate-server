@@ -20,7 +20,7 @@ afterEach(() => {
 
 describe("DirectWS legacy generated workflow lane", () => {
   it("keeps JOB_RESULT off every PNQ result path", async () => {
-    setPnqV2RuntimeConfigForTest({ mode: "shadow", sweepIntervalMs: 30_000 });
+    setPnqV2RuntimeConfigForTest({ enabled: true, sweepIntervalMs: 30_000 });
     setDeviceExecutionAuthorityForTest("enforced");
     const server = new DirectWsServer();
     const send = vi.fn();
@@ -93,7 +93,7 @@ describe("DirectWS legacy generated workflow lane", () => {
 
   it("accepts a legacy JOB_RESULT during the executor grace window", async () => {
     vi.useFakeTimers();
-    setPnqV2RuntimeConfigForTest({ mode: "shadow", sweepIntervalMs: 30_000 });
+    setPnqV2RuntimeConfigForTest({ enabled: true, sweepIntervalMs: 30_000 });
     setDeviceExecutionAuthorityForTest("enforced");
     const server = new DirectWsServer();
     const send = vi.fn();

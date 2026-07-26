@@ -19,7 +19,7 @@ const rules = [
   {
     id: "migration-semantic-status-constraint",
     scope: (path) => path.includes("/src/db/migrations/"),
-    pattern: /\bCHECK\s*\([^;]*(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|event_type|decision|mode|phase|outcome|action|action_key|validation_stage|scope_type|candidate_type|safety_class|portability_scope)\s+IN\s*\(/gi,
+    pattern: /\bCHECK\s*\([^;]*(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|artifact_state|event_type|decision|mode|phase|outcome|action|action_key|validation_stage|scope_type|candidate_type|safety_class|portability_scope)\s+IN\s*\(/gi,
   },
   {
     id: "migration-semantic-lifecycle-seed",
@@ -31,12 +31,12 @@ const rules = [
   {
     id: "migration-semantic-state-default",
     scope: (path) => path.includes("/src/db/migrations/"),
-    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|event_type|decision|mode|phase|outcome|action|action_key|validation_stage|scope_type|candidate_type|safety_class|portability_scope)\b[^,;\n]*\bDEFAULT\s+["'][A-Za-z][A-Za-z0-9_-]*["']/gi,
+    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|artifact_state|event_type|decision|mode|phase|outcome|action|action_key|validation_stage|scope_type|candidate_type|safety_class|portability_scope)\b[^,;\n]*\bDEFAULT\s+["'][A-Za-z][A-Za-z0-9_-]*["']/gi,
   },
   {
     id: "migration-semantic-state-sql",
     scope: (path) => path.includes("/src/db/migrations/"),
-    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|event_type|decision|mode|phase|outcome|action|action_key|validation_stage|scope_type|candidate_type|safety_class|portability_scope)\s*(?:=|(?:NOT\s+)?IN\s*\()\s*["'(][A-Za-z][A-Za-z0-9_-]*/gi,
+    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|artifact_state|event_type|decision|mode|phase|outcome|action|action_key|validation_stage|scope_type|candidate_type|safety_class|portability_scope)\s*(?:=|<>|!=|(?:NOT\s+)?IN\s*\()\s*["'(][A-Za-z][A-Za-z0-9_-]*/gi,
   },
   {
     id: "migration-product-policy-seed",
@@ -51,32 +51,48 @@ const rules = [
   {
     id: "runtime-status-name-branch",
     scope: (path) => !path.includes("/src/db/migrations/"),
-    pattern: /\b(?:status|state|lifecycleStatus|lifecycle_status|candidateState|candidate_state|promotionState|promotion_state|libraryState|library_state)\s*(?:===|!==|==|!=)\s*["'](?!(?:string|number|boolean|object|undefined|null)["'])[A-Za-z][A-Za-z0-9_-]*["']/g,
+    pattern: /\b(?:[A-Za-z][A-Za-z0-9_]*_(?:status|state)|status|state|lifecycleStatus|lifecycle_status|candidateState|candidate_state|promotionState|promotion_state|libraryState|library_state|safetyClass|safety_class|portabilityScope|portability_scope|mode|scope)\s*(?:===|!==|==|!=)\s*["'](?!(?:string|number|boolean|object|undefined|null)["'])[A-Za-z][A-Za-z0-9_.:-]*["']/g,
   },
   {
     id: "runtime-decision-name-branch",
     scope: (path) => !path.includes("/src/db/migrations/"),
-    pattern: /\b(?:decision|phase|outcome|artifactState|artifact_state|validationStage|validation_stage|actionKey|action_key)\s*(?:===|!==|==|!=)\s*["'](?!(?:string|number|boolean|object|undefined|null)["'])[A-Za-z][A-Za-z0-9_-]*["']/g,
+    pattern: /\b(?:decision|phase|outcome|artifactState|artifact_state|validationStage|validation_stage|actionKey|action_key)\s*(?:===|!==|==|!=)\s*["'](?!(?:string|number|boolean|object|undefined|null)["'])[A-Za-z][A-Za-z0-9_.:-]*["']/g,
+  },
+  {
+    id: "runtime-product-action-name-branch",
+    scope: (path) => path.endsWith("/src/api/agency-routes.ts")
+      || path.includes("/dashboard-src/src/pages/"),
+    pattern: /\baction\s*(?:===|!==|==|!=)\s*["'](?!(?:string|number|boolean|object|undefined|null)["'])[A-Za-z][A-Za-z0-9_.:-]*["']/g,
   },
   {
     id: "runtime-status-name-sql",
     scope: (path) => !path.includes("/src/db/migrations/"),
-    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state)\s*(?:=|(?:NOT\s+)?IN\s*\()\s*["'(][A-Za-z][A-Za-z0-9_-]*/gi,
+    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|artifact_state|decision|mode|phase|outcome|action_key|safety_class|portability_scope)\s*(?:=|<>|!=|(?:NOT\s+)?IN\s*\()\s*(?:["'][A-Za-z][A-Za-z0-9_.:-]*|\(\s*["'][A-Za-z][A-Za-z0-9_.:-]*)/gi,
   },
   {
     id: "runtime-semantic-includes-set",
     scope: (path) => !path.includes("/src/db/migrations/") && /\.(?:ts|tsx|kt)$/.test(path),
-    pattern: /\(\s*\[\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'](?:\s*,\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'])+\s*\](?:\s+as\s+[^)]*)?\)\.includes\(\s*(?:status|state|decision|phase|outcome|action|actionKey|boundary|rootKind|operationKind|mode|scope)\b/g,
+    pattern: /(?:\(\s*)?\[\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'](?:\s*,\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'])+\s*\](?:\s+as\s+[^)]*)?\)?\.includes\(\s*(?:[A-Za-z][A-Za-z0-9_]*_(?:status|state)|status|state|decision|phase|outcome|action|actionKey|boundary|rootKind|operationKind|mode|scope)\b/g,
   },
   {
     id: "runtime-semantic-named-set",
     scope: (path) => !path.includes("/src/db/migrations/") && /\.(?:ts|tsx|kt)$/.test(path),
-    pattern: /\b(?:STATUS|STATES|DECISIONS|PHASES|OUTCOMES|ACTIONS|ACTION_KEYS|BOUNDARIES|MODES|SCOPES)\b[^=\n]*=\s*\[\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'](?:\s*,\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'])+/g,
+    pattern: /\b(?:[A-Z][A-Z0-9_]*(?:STATUS(?:ES)?|STATE(?:S)?|DECISION(?:S)?|PHASE(?:S)?|OUTCOME(?:S)?|ACTION_KEYS|BOUNDAR(?:Y|IES)|MODE(?:S)?|SCOPE(?:S)?|SAFETY_CLASSES|PORTABILITY_SCOPES)[A-Z0-9_]*|[A-Z][A-Z0-9_]*(?:ALLOWED|SAFE)[A-Z0-9_]*ACTIONS[A-Z0-9_]*)\s*=\s*(?:new\s+Set\s*\()?\[\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'](?:\s*,\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'])+/g,
+  },
+  {
+    id: "runtime-semantic-rank-map",
+    scope: (path) => !path.includes("/src/db/migrations/") && /\.(?:ts|tsx|kt)$/.test(path),
+    pattern: /\b[A-Z][A-Z0-9_]*(?:RANK|PRIORITY|ORDER)[A-Z0-9_]*\s*:\s*Record<[^>]+>\s*=\s*\{\s*[A-Za-z][A-Za-z0-9_.:-]*\s*:\s*\d+/g,
+  },
+  {
+    id: "runtime-operational-numeric-threshold",
+    scope: (path) => !path.includes("/src/db/migrations/") && /\.(?:ts|tsx|kt)$/.test(path),
+    pattern: /\b(?:attemptsMade|retryCount|retry_count|failureCount|failure_count|successCount|success_count|recoveryCount|recovery_count|distinctDevices|distinct_devices|distinctBranches|distinct_branches)\s*(?:>=|>|<=|<)\s*\d+/g,
   },
   {
     id: "runtime-status-literal-union",
     scope: (path) => /\.(?:ts|tsx)$/.test(path),
-    pattern: /\b(?:status|state|lifecycleStatus|candidateState|promotionState|libraryState)\??\s*:\s*["'][A-Za-z][A-Za-z0-9_-]*["'](?:\s*\|\s*["'][A-Za-z][A-Za-z0-9_-]*["'])+/g,
+    pattern: /\b(?:status|state|lifecycleStatus|candidateState|promotionState|libraryState|safetyClass|portabilityScope|actionKey)\??\s*:\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'](?:\s*\|\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'])+/g,
   },
   {
     id: "runtime-decision-literal-union",

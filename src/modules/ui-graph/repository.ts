@@ -161,9 +161,6 @@ export class UiGraphRepository {
 
   async resolveFlags(context: UiGraphContext): Promise<RuntimeFlags> {
     const fallback = getUiGraphRuntimeFlags();
-    // Environment mode is the global kill switch. DB scopes may narrow or tune
-    // an enabled rollout, but can never activate a runtime disabled at startup.
-    if (fallback.mode === "disabled") return fallback;
     const scopes: Array<[string, string | null | undefined]> = [
       ["device", context.deviceId],
       ["workflow", context.workflowId],
@@ -187,7 +184,7 @@ export class UiGraphRepository {
       const row = result.rows.sort((a, b) => (precedence.get(a.scope_type) ?? 99) - (precedence.get(b.scope_type) ?? 99))[0];
       if (!row) return fallback;
       return {
-        mode: row.mode,
+        enabled: Boolean(row.enabled),
         selectorFirst: Boolean(row.selector_first),
         graphRuntime: Boolean(row.graph_runtime),
         aiRecovery: Boolean(row.ai_recovery),

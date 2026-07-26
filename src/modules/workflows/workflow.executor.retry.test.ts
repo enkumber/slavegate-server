@@ -15,6 +15,7 @@ import {
   shouldTerminallyFailWorkflowJob,
 } from "./workflow.executor";
 import type { WorkflowTemplate } from "./types";
+import { setWorkflowQueueRuntimePolicyForTest } from "./workflow-runtime-config";
 
 vi.mock("../../transport/transport", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../transport/transport")>();
@@ -89,6 +90,7 @@ function job(): Job {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  setWorkflowQueueRuntimePolicyForTest(null);
 });
 
 describe("workflow BullMQ retry semantics", () => {
@@ -98,6 +100,11 @@ describe("workflow BullMQ retry semantics", () => {
   });
 
   it("terminates immediately when the bounded recovery budget is exhausted", () => {
+    setWorkflowQueueRuntimePolicyForTest({
+      maxAttempts: 3,
+      backoffType: "test",
+      backoffDelayMs: 0,
+    });
     expect(shouldTerminallyFailWorkflowJob(1, Object.assign(new Error("RECOVERY_BUDGET_EXCEEDED"), {
       code: "RECOVERY_BUDGET_EXCEEDED",
     }))).toBe(true);
@@ -156,6 +163,7 @@ describe("workflow BullMQ retry semantics", () => {
       vi.spyOn(dispatcherService, "dispatchLegacyGeneratedWorkflow").mockImplementation(async (input) => ({
         jobId: `job-${++jobCounter}-${input.type}`,
         timeoutMs: input.timeoutMs ?? 1,
+        requiresRoot: false,
       }));
       vi.mocked(transport.sendLegacyGeneratedWorkflowJobToDevice).mockImplementation(async (_deviceId, command) => {
         dispatched.push(command.type);

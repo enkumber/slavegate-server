@@ -2,17 +2,13 @@ import type { UiTreeNode } from "../app-mapping/schema";
 import type { RecoveryProposal, StateResolution, UiGraphContext, UiSafetyClass } from "./types";
 import { observeRecovery } from "./telemetry";
 
-const SAFETY_RANK: Record<UiSafetyClass, number> = {
-  read_only: 0,
-  navigation: 1,
-  mutating: 2,
-  sensitive: 3,
-};
-
 export interface RecoveryBudget {
   maxActions: number;
   maxAttempts: number;
   maxDurationMs: number;
+  allowedSafetyClasses: UiSafetyClass[];
+  allowedProposalTypes: string[];
+  actionlessProposalTypes: string[];
 }
 
 export interface RecoveryInput {
@@ -43,32 +39,30 @@ export interface RecoveryResult {
   error?: string;
 }
 
-const DEFAULT_BUDGET: RecoveryBudget = { maxActions: 6, maxAttempts: 3, maxDurationMs: 120_000 };
-
-function actionSafety(action: Record<string, unknown>): UiSafetyClass {
+function actionSafety(action: Record<string, unknown>): UiSafetyClass | null {
   const explicit = action.safetyClass;
-  if (["read_only", "navigation", "mutating", "sensitive"].includes(String(explicit))) return explicit as UiSafetyClass;
-  const type = String(action.type ?? action.action ?? "").toLowerCase();
-  if (["screenshot", "ui_tree_dump", "get_screen_state", "wait", "wait_for_idle"].includes(type)) return "read_only";
-  if (["tap", "a11y_find_tap", "semantic_tap", "scroll", "swipe", "press_key", "open_app", "intent_send"].includes(type)) return "navigation";
-  if (["type", "type_text", "submit", "post", "like", "follow", "unfollow"].includes(type)) return "mutating";
-  return "sensitive";
+  return typeof explicit === "string" && explicit.trim() ? explicit : null;
 }
 
-export function validateRecoveryProposal(proposal: RecoveryProposal, safetyClass: UiSafetyClass, budget: RecoveryBudget): string[] {
+export function validateRecoveryProposal(proposal: RecoveryProposal, _safetyClass: UiSafetyClass, budget: RecoveryBudget): string[] {
   const errors: string[] = [];
-  if (!proposal.type || !["retry", "adapt", "dismiss_overlay", "navigate", "abort"].includes(proposal.type)) errors.push("invalid_recovery_type");
+  if (!proposal.type || !budget.allowedProposalTypes.includes(proposal.type)) errors.push("invalid_recovery_type");
   if (!Number.isFinite(proposal.confidence) || proposal.confidence < 0 || proposal.confidence > 1) errors.push("invalid_confidence");
   if (proposal.actions.length > budget.maxActions) errors.push("recovery_action_budget_exceeded");
-  if (proposal.type !== "abort" && proposal.actions.length === 0) errors.push("recovery_actions_required");
+  if (proposal.actions.length === 0 && !budget.actionlessProposalTypes.includes(proposal.type)) {
+    errors.push("recovery_actions_required");
+  }
   for (const action of proposal.actions) {
-    if (SAFETY_RANK[actionSafety(action)] > SAFETY_RANK[safetyClass]) errors.push("recovery_safety_escalation_forbidden");
+    const actionClass = actionSafety(action);
+    if (!actionClass || !budget.allowedSafetyClasses.includes(actionClass)) {
+      errors.push("recovery_safety_escalation_forbidden");
+    }
   }
   return [...new Set(errors)];
 }
 
 export class RecoveryOrchestrator {
-  constructor(private readonly dependencies: RecoveryDependencies, private readonly budget: RecoveryBudget = DEFAULT_BUDGET) {}
+  constructor(private readonly dependencies: RecoveryDependencies, private readonly budget: RecoveryBudget) {}
 
   async recover(input: RecoveryInput): Promise<RecoveryResult> {
     const startedAt = Date.now();

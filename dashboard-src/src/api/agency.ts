@@ -137,7 +137,10 @@ export interface HumanWorkflowCompileReadyResult {
       llmBudget?: Record<string, unknown>;
     };
   };
-  safetyClass: "read_only" | "standard" | "destructive";
+  safetyClass: string;
+  dashboardExecutionAllowed?: boolean;
+  safetyPresentationColor?: string;
+  dashboardBlockedReason?: string;
   platform: string;
   target: HumanWorkflowTarget;
   llmBudget?: Record<string, unknown>;

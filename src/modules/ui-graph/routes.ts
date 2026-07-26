@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { requireAdminAuth } from "../../api/auth.middleware";
 import { getDb } from "../../db/client";
-import { selectResourceLifecycleTransition } from "../lifecycle/lifecycle.service";
+import { getResourceLifecycleState, selectResourceLifecycleTransition } from "../lifecycle/lifecycle.service";
 import { describeUiGraphRuntimeFlags } from "./config";
 import { uiGraphLearningLoop } from "./learning-loop";
 import { uiGraphRepository } from "./repository";
@@ -9,9 +9,7 @@ import { evaluateCanaryGate, recordCanaryResult } from "./canary.service";
 import { persistStateSnapshot, replaySnapshotCorpus } from "./snapshot-replay.service";
 
 const router = Router();
-const MODES = new Set(["disabled", "shadow", "enforced"]);
 const SCOPE_TYPES = new Set(["global", "app", "workflow", "device"]);
-const CANDIDATE_STATUSES = new Set(["observed", "candidate", "validating", "promoted", "degraded", "quarantined", "retired"]);
 
 function actor(req: Request): string {
   const principal = (req as Request & { authPrincipal?: Record<string, unknown> }).authPrincipal;
@@ -31,7 +29,19 @@ router.get("/status", requireAdminAuth, async (_req: Request, res: Response) => 
          COUNT(*) FILTER (WHERE target_resolution_method IN ('direct','resource_id','content_description','semantic_id','text','structural','coord_cache'))::int AS fast_path_actions,
          COUNT(*) FILTER (WHERE target_resolution_method = 'vlm')::int AS vlm_actions,
          COUNT(*) FILTER (WHERE state_resolution_method = 'unknown')::int AS unknown_state_actions,
-         COUNT(*) FILTER (WHERE outcome = 'recovered')::int AS recovered_actions,
+         COUNT(*) FILTER (
+           WHERE EXISTS (
+             SELECT 1
+               FROM runtime_semantic_entries entry
+               JOIN lifecycle_state_definitions definition
+                 ON definition.lifecycle_key = entry.lifecycle_key
+                AND definition.status = entry.status
+              WHERE entry.namespace = 'ui_graph_outcome_policy'
+                AND entry.entry_key = ui_graph_action_events.outcome
+                AND definition.dispatchable
+                AND COALESCE((entry.payload->>'recovered')::boolean, FALSE)
+           )
+         )::int AS recovered_actions,
          PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latency_ms)::double precision AS p50_latency_ms,
          PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY latency_ms)::double precision AS p95_latency_ms
        FROM ui_graph_action_events WHERE created_at >= NOW() - INTERVAL '24 hours'`,
@@ -68,7 +78,10 @@ router.get("/states", requireAdminAuth, async (req: Request, res: Response) => {
 router.get("/candidates", requireAdminAuth, async (req: Request, res: Response) => {
   const status = typeof req.query.status === "string" ? req.query.status : null;
   const appId = typeof req.query.appId === "string" ? req.query.appId : null;
-  if (status && !CANDIDATE_STATUSES.has(status)) return res.status(400).json({ ok: false, error: "invalid status" });
+  if (status) {
+    const configured = await getResourceLifecycleState("ui_graph_learning_candidates", status);
+    if (!configured) return res.status(400).json({ ok: false, error: "invalid status" });
+  }
   const params: unknown[] = [];
   const where: string[] = [];
   if (status) { params.push(status); where.push(`status = $${params.length}`); }
@@ -243,18 +256,17 @@ router.put("/flags/:scopeType/:scopeValue", requireAdminAuth, async (req: Reques
   const { scopeType, scopeValue } = req.params;
   if (!SCOPE_TYPES.has(scopeType)) return res.status(400).json({ ok: false, error: "invalid scope type" });
   if (!scopeValue.trim()) return res.status(400).json({ ok: false, error: "scope value is required" });
-  const mode = String(req.body?.mode ?? "disabled");
-  if (!MODES.has(mode)) return res.status(400).json({ ok: false, error: "invalid mode" });
+  const enabled = req.body?.enabled === true;
   const result = await getDb().query(
     `INSERT INTO ui_graph_runtime_flags
-       (scope_type, scope_value, mode, selector_first, graph_runtime, ai_recovery, candidate_learning, auto_promotion, config, updated_by)
+       (scope_type, scope_value, enabled, selector_first, graph_runtime, ai_recovery, candidate_learning, auto_promotion, config, updated_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
      ON CONFLICT (scope_type, scope_value) DO UPDATE SET
-       mode=EXCLUDED.mode, selector_first=EXCLUDED.selector_first, graph_runtime=EXCLUDED.graph_runtime,
+       enabled=EXCLUDED.enabled, selector_first=EXCLUDED.selector_first, graph_runtime=EXCLUDED.graph_runtime,
        ai_recovery=EXCLUDED.ai_recovery, candidate_learning=EXCLUDED.candidate_learning,
        auto_promotion=EXCLUDED.auto_promotion, config=EXCLUDED.config, updated_by=EXCLUDED.updated_by, updated_at=NOW()
      RETURNING *`,
-    [scopeType, scopeValue, mode, req.body?.selectorFirst !== false, req.body?.graphRuntime !== false,
+    [scopeType, scopeValue, enabled, req.body?.selectorFirst === true, req.body?.graphRuntime === true,
       req.body?.aiRecovery !== false, req.body?.candidateLearning !== false, req.body?.autoPromotion === true,
       JSON.stringify(req.body?.config ?? {}), actor(req)],
   );

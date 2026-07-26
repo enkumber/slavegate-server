@@ -38,6 +38,7 @@ describe("edge workflow learning bindings", () => {
         id: "candidate-1",
         app_id: "app.example",
         source_state_id: "state-1",
+        safety_class: "catalog_safe",
         payload: { strategy: "resource_id", selector: { value: "search" } },
       }],
     );
@@ -57,6 +58,7 @@ describe("edge workflow learning bindings", () => {
         id: "candidate-1",
         app_id: "app.example",
         source_state_id: "state-1",
+        safety_class: "catalog_safe",
         payload: { strategy: "text", selector: { value: "Search" } },
       }],
     );
@@ -77,6 +79,7 @@ describe("edge workflow learning bindings", () => {
         id: "candidate-coords",
         app_id: "app.example",
         source_state_id: "state-1",
+        safety_class: "catalog_safe",
         payload: { strategy: "normalized_coords", selector: { x: 0.25, y: 0.75 } },
       }],
     );
@@ -98,6 +101,7 @@ describe("edge workflow learning bindings", () => {
       strategy: "resource_id",
       selector: { value: "search_bar_field" },
       target_state_id: "22222222-2222-4222-8222-222222222222",
+      safety_class: "catalog_safe",
     }]);
 
     expect(result).toEqual([expect.objectContaining({
@@ -133,6 +137,7 @@ describe("edge workflow learning bindings", () => {
       strategy: "resource_id",
       selector: { value: "com.example:id/search_bar_field" },
       target_state_id: null,
+      safety_class: "catalog_safe",
     }]);
     expect(result[0]).toEqual(expect.objectContaining({
       candidateId: undefined,

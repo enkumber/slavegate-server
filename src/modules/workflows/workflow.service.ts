@@ -27,6 +27,7 @@ import {
   transitionWorkflow,
   transitionWorkflowWhere,
 } from "./workflow-lifecycle.service";
+import { listResourceLifecycleStates, type LifecycleQueryable } from "../lifecycle/lifecycle.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -109,9 +110,7 @@ export interface GeneratedWorkflowOutcomeInput {
   postconditionVerified?: boolean;
 }
 
-type Queryable = {
-  query: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
-};
+type Queryable = LifecycleQueryable;
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
@@ -494,8 +493,9 @@ export class WorkflowService {
     try {
       await client.query("BEGIN");
       await this.saveTemplateWithDb(client, template);
+      const artifactState = await this.resolveArtifactState(client, { dispatchable: true, terminal: false });
       await this.saveGeneratedPlanCacheWithDb(client, template, compiledPlan, requestKey, {
-        artifactState: "promoted",
+        artifactState,
         sourceMetadata,
       });
       await client.query("COMMIT");
@@ -511,16 +511,19 @@ export class WorkflowService {
     template: WorkflowTemplate,
     compiledPlan: GeneratedWorkflowCompiledPlan,
     requestKey: string | undefined,
-    sourceMetadata: Record<string, unknown>
+    sourceMetadata: Record<string, unknown>,
+    replaceRequestKeyArtifacts = true,
   ): Promise<void> {
     const db = getDb();
     const client = await db.connect();
     try {
       await client.query("BEGIN");
       await this.saveTemplateWithDb(client, template);
+      const artifactState = await this.resolveArtifactState(client, { initial: true });
       await this.saveGeneratedPlanCacheWithDb(client, template, compiledPlan, requestKey, {
-        artifactState: "candidate",
+        artifactState,
         sourceMetadata,
+        replaceRequestKeyArtifacts,
       });
       await client.query("COMMIT");
     } catch (err) {
@@ -539,7 +542,8 @@ export class WorkflowService {
     sourceMetadataOrOptions: Record<string, unknown> | SaveGeneratedPlanCacheOptions = {}
   ): Promise<void> {
     const options = normalizeSaveGeneratedPlanCacheOptions(sourceMetadataOrOptions);
-    const artifactState = options.artifactState ?? "candidate";
+    const artifactState = options.artifactState
+      ?? await this.resolveArtifactState(db, { initial: true });
     const validation = validateGeneratedWorkflowTemplate(template);
     if (!validation.template) {
       throw Object.assign(
@@ -582,7 +586,18 @@ export class WorkflowService {
          canonical_workflow_version = EXCLUDED.canonical_workflow_version,
          compiled_plan_hash = EXCLUDED.compiled_plan_hash,
          artifact_state = CASE
-           WHEN generated_workflow_plan_cache.artifact_state = 'promoted' AND EXCLUDED.artifact_state = 'candidate'
+           WHEN lifecycle_state_matches(
+                  'generated_workflow_plan_cache'::regclass,
+                  generated_workflow_plan_cache.artifact_state,
+                  '{"dispatchable":true}'::jsonb,
+                  'artifact_state'
+                )
+            AND lifecycle_state_matches(
+                  'generated_workflow_plan_cache'::regclass,
+                  EXCLUDED.artifact_state,
+                  '{"initial":true}'::jsonb,
+                  'artifact_state'
+                )
              THEN generated_workflow_plan_cache.artifact_state
            ELSE EXCLUDED.artifact_state
          END,
@@ -616,6 +631,35 @@ export class WorkflowService {
     );
   }
 
+  private async resolveArtifactState(
+    db: Queryable,
+    selector: {
+      initial?: boolean;
+      terminal?: boolean;
+      retryable?: boolean;
+      administrative?: boolean;
+      dispatchable?: boolean;
+      manual?: boolean;
+    },
+  ): Promise<string> {
+    const matches = (await listResourceLifecycleStates(
+      "generated_workflow_plan_cache",
+      "artifact_state",
+      db,
+    )).filter((state) =>
+      (selector.initial === undefined || state.initial === selector.initial)
+      && (selector.terminal === undefined || state.terminal === selector.terminal)
+      && (selector.retryable === undefined || state.retryable === selector.retryable)
+      && (selector.administrative === undefined || state.administrative === selector.administrative)
+      && (selector.dispatchable === undefined || state.dispatchable === selector.dispatchable)
+      && (selector.manual === undefined || state.manual === selector.manual)
+    );
+    if (matches.length !== 1) {
+      throw new Error("generated workflow artifact lifecycle selector is missing or ambiguous");
+    }
+    return matches[0].status;
+  }
+
   private async syncCapabilityCatalogWithDb(
     db: Queryable,
     cacheKey: string,
@@ -631,20 +675,14 @@ export class WorkflowService {
       template.description,
       ...(Array.isArray(sourceMetadata.capabilityAliases) ? sourceMetadata.capabilityAliases : []),
     ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
-    const safetyClass = [
-      "read_only",
-      "navigation",
-      "standard",
-      "mutating",
-      "sensitive",
-      "destructive",
-    ].includes(String(sourceMetadata.safetyClass ?? template.safetyClass))
-      ? String(sourceMetadata.safetyClass ?? template.safetyClass)
-      : "read_only";
-    const portabilityScope = ["global", "contextual", "device", "account"].includes(String(sourceMetadata.portabilityScope))
-      ? String(sourceMetadata.portabilityScope)
-      : "global";
-    const role = sourceMetadata.capabilityRole === "fragment" ? "fragment" : "complete";
+    const safetyClass = String(sourceMetadata.safetyClass ?? template.safetyClass ?? "");
+    const portabilityScope = String(sourceMetadata.portabilityScope ?? "");
+    const role = String(sourceMetadata.capabilityRole ?? "");
+    if (
+      !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(safetyClass)
+      || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(portabilityScope)
+      || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(role)
+    ) return;
 
     await db.query(
       `INSERT INTO workflow_capabilities (
@@ -711,17 +749,25 @@ export class WorkflowService {
       `UPDATE generated_workflow_plan_cache
        SET hit_count = hit_count + 1, last_used_at = NOW()
        WHERE cache_key = $1
-         AND artifact_state = ANY($2::text[])
          AND (
-           artifact_state <> 'promoted'
-           OR COALESCE(
-             compiled_plan #>> '{metadata,safetyClass}',
-             workflow ->> 'safetyClass',
-             source_metadata ->> 'safetyClass'
-           ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive')
+           lifecycle_state_matches(
+             'generated_workflow_plan_cache'::regclass,
+             artifact_state,
+             '{"dispatchable":true}'::jsonb,
+             'artifact_state'
+           )
+           OR (
+             $2::boolean
+             AND lifecycle_state_matches(
+               'generated_workflow_plan_cache'::regclass,
+               artifact_state,
+               '{"initial":true}'::jsonb,
+               'artifact_state'
+             )
+           )
          )
        RETURNING *`,
-      [cacheKey, allowedArtifactStates(options)]
+      [cacheKey, options.includeCandidate === true]
     );
     if (result.rows.length === 0) return null;
     return rowToGeneratedPlanCache(result.rows[0]);
@@ -738,20 +784,28 @@ export class WorkflowService {
        WHERE cache_key = (
          SELECT cache_key FROM generated_workflow_plan_cache
          WHERE request_key = $1
-           AND artifact_state = ANY($2::text[])
            AND (
-             artifact_state <> 'promoted'
-             OR COALESCE(
-               compiled_plan #>> '{metadata,safetyClass}',
-               workflow ->> 'safetyClass',
-               source_metadata ->> 'safetyClass'
-             ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive')
+             lifecycle_state_matches(
+               'generated_workflow_plan_cache'::regclass,
+               artifact_state,
+               '{"dispatchable":true}'::jsonb,
+               'artifact_state'
+             )
+             OR (
+               $2::boolean
+               AND lifecycle_state_matches(
+                 'generated_workflow_plan_cache'::regclass,
+                 artifact_state,
+                 '{"initial":true}'::jsonb,
+                 'artifact_state'
+               )
+             )
            )
          ORDER BY updated_at DESC
          LIMIT 1
        )
        RETURNING *`,
-      [requestKey, allowedArtifactStates(options)]
+      [requestKey, options.includeCandidate === true]
     );
     if (result.rows.length === 0) return null;
     return rowToGeneratedPlanCache(result.rows[0]);
@@ -763,20 +817,19 @@ export class WorkflowService {
   ): Promise<GeneratedWorkflowPlanCacheRecord[]> {
     const db = getDb();
     const result = await db.query(
-      `SELECT *
+       `SELECT *
        FROM generated_workflow_plan_cache
-       WHERE artifact_state = 'promoted'
+       WHERE lifecycle_state_matches(
+               'generated_workflow_plan_cache'::regclass,
+               artifact_state,
+               '{"dispatchable":true}'::jsonb,
+               'artifact_state'
+             )
          AND (
            LOWER(platform) = LOWER($1)
            OR source_metadata -> 'supportedPlatforms' ? $1
          )
-         AND COALESCE(source_metadata ->> 'portable', 'true') <> 'false'
-         AND COALESCE(source_metadata ->> 'portabilityScope', 'global') NOT IN ('device', 'account', 'contextual')
-         AND COALESCE(
-           compiled_plan #>> '{metadata,safetyClass}',
-           workflow ->> 'safetyClass',
-           source_metadata ->> 'safetyClass'
-         ) IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive')
+         AND (source_metadata ->> 'portable')::boolean IS TRUE
        ORDER BY updated_at DESC
        LIMIT $2`,
       [platform, Math.max(1, Math.min(limit, 500))]
@@ -799,14 +852,17 @@ export class WorkflowService {
        SET source_metadata = source_metadata || jsonb_build_object(
              'capabilityKey', $2::text,
              'portable', true,
-             'portabilityScope', 'global',
              'capabilityResolvedAt', NOW()
            ),
            updated_at = NOW()
        WHERE cache_key = $1
-         AND artifact_state = 'promoted'
-         AND COALESCE(source_metadata ->> 'portable', 'true') <> 'false'
-         AND COALESCE(source_metadata ->> 'portabilityScope', 'global') NOT IN ('device', 'account', 'contextual')
+         AND lifecycle_state_matches(
+               'generated_workflow_plan_cache'::regclass,
+               artifact_state,
+               '{"dispatchable":true}'::jsonb,
+               'artifact_state'
+             )
+         AND (source_metadata ->> 'portable')::boolean IS TRUE
        RETURNING *`,
       [cacheKey, capabilityKey]
     );
@@ -872,38 +928,71 @@ export class WorkflowService {
         ],
       );
     const coverage = await db.query(
-        `SELECT COUNT(DISTINCT device_id) FILTER (WHERE success_count > 0 AND postcondition_verified)::int AS distinct_devices,
-                COUNT(DISTINCT branch_key) FILTER (WHERE success_count > 0 AND postcondition_verified)::int AS distinct_branches,
+        `SELECT COUNT(DISTINCT device_id) FILTER (WHERE postcondition_verified)::int AS distinct_devices,
+                COUNT(DISTINCT branch_key) FILTER (WHERE postcondition_verified)::int AS distinct_branches,
                 COALESCE(SUM(failure_count),0)::int AS failures,
                 COALESCE(SUM(recovery_count),0)::int AS recoveries
            FROM workflow_artifact_coverage WHERE cache_key=$1`,
         [input.cacheKey],
       );
     const stats = coverage.rows[0] ?? {};
-    const globalCoverage = Number(stats.distinct_devices ?? 0) >= 2
-      && Number(stats.distinct_branches ?? 0) >= 2
-      && Number(stats.failures ?? 0) === 0
-      && Number(stats.recoveries ?? 0) === 0;
+    const policyResult = await db.query(
+      `SELECT definition.metadata, cache.artifact_state
+         FROM generated_workflow_plan_cache cache
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('generated_workflow_plan_cache')
+          AND binding.state_column = 'artifact_state'::name
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key = binding.lifecycle_key
+          AND definition.status = cache.artifact_state
+        WHERE cache.cache_key = $1`,
+      [input.cacheKey],
+    );
+    const stateMetadata = (policyResult.rows[0]?.metadata ?? {}) as Record<string, unknown>;
+    const minimumDistinctDevices = Number(stateMetadata.minimumDistinctDevices);
+    const minimumDistinctBranches = Number(stateMetadata.minimumDistinctBranches);
+    const maximumFailures = Number(stateMetadata.maximumFailures);
+    const maximumRecoveries = Number(stateMetadata.maximumRecoveries);
+    const coveragePolicyConfigured = [
+      minimumDistinctDevices,
+      minimumDistinctBranches,
+      maximumFailures,
+      maximumRecoveries,
+    ].every(Number.isFinite);
+    const coverageSatisfied = coveragePolicyConfigured
+      && Number(stats.distinct_devices ?? 0) >= minimumDistinctDevices
+      && Number(stats.distinct_branches ?? 0) >= minimumDistinctBranches
+      && Number(stats.failures ?? 0) <= maximumFailures
+      && Number(stats.recoveries ?? 0) <= maximumRecoveries;
+    const transitionResult = await db.query(
+      `SELECT transition.to_status
+         FROM generated_workflow_plan_cache cache
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('generated_workflow_plan_cache')
+          AND binding.state_column = 'artifact_state'::name
+         JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = binding.lifecycle_key
+          AND transition.from_status = cache.artifact_state
+          AND transition.automatic
+        WHERE cache.cache_key = $1
+          AND (transition.metadata->>'onSuccess')::boolean = $2
+          AND (
+            COALESCE((transition.metadata->>'requiresCoverage')::boolean, FALSE) = FALSE
+            OR $3::boolean
+          )
+        ORDER BY transition.action_key`,
+      [input.cacheKey, input.success, coverageSatisfied],
+    );
+    if (transitionResult.rows.length > 1) {
+      throw new Error("generated workflow artifact outcome transition is ambiguous");
+    }
+    const nextArtifactState = typeof transitionResult.rows[0]?.to_status === "string"
+      ? transitionResult.rows[0].to_status as string
+      : null;
     const result = await db.query(
         `/* recordGeneratedPlanCacheOutcome */
        UPDATE generated_workflow_plan_cache
-       SET artifact_state = CASE
-             WHEN $2::int = 1
-              AND artifact_state IN ('candidate', 'promoted')
-              AND $10::boolean
-              AND COALESCE(compiled_plan #>> '{llmBudget,happyPathRequests}', '') = '0'
-              AND COALESCE(
-                compiled_plan #>> '{metadata,safetyClass}',
-                workflow ->> 'safetyClass',
-                source_metadata ->> 'safetyClass'
-              ) IN ('read_only', 'navigation')
-               THEN 'promoted'
-             WHEN $3::int = 1 AND artifact_state = 'candidate'
-               THEN 'failed'
-             WHEN $3::int = 1 AND artifact_state = 'promoted'
-               THEN 'quarantined'
-             ELSE artifact_state
-           END,
+       SET artifact_state = COALESCE($11::text, artifact_state),
            source_metadata = source_metadata || jsonb_build_object(
              'workflowLearning',
              jsonb_build_object(
@@ -917,18 +1006,9 @@ export class WorkflowService {
                'lastStepsCompleted', $8::int,
                'lastTotalSteps', $9::int,
                'lastEvaluatedAt', NOW(),
-               'validationStage', CASE
-                 WHEN $10::boolean THEN 'global_promoted'
-                 WHEN $2::int = 1 THEN 'device_validated'
-                 ELSE 'candidate'
-               END,
-               'decision', CASE
-                 WHEN $2::int = 1 AND $10::boolean THEN 'auto_promote_or_keep'
-                 WHEN $2::int = 1 THEN 'retain_candidate_until_coverage'
-                 WHEN artifact_state = 'promoted' THEN 'quarantine_promoted_after_failure'
-                 WHEN artifact_state = 'candidate' THEN 'mark_candidate_failed'
-                 ELSE 'record_learning_only'
-               END
+               'successful', $2::int = 1,
+               'coverageSatisfied', $10::boolean,
+               'lifecycleTransitionApplied', $11::text IS NOT NULL
              )
            ),
            updated_at = NOW()
@@ -944,7 +1024,8 @@ export class WorkflowService {
         input.agencyWorkflowRunId ?? null,
         input.stepsCompleted ?? null,
         input.totalSteps ?? null,
-        globalCoverage,
+        coverageSatisfied,
+        nextArtifactState,
       ]
     );
     if (result.rows.length === 0) return null;
@@ -987,7 +1068,7 @@ function rowToGeneratedPlanCache(row: Record<string, unknown>): GeneratedWorkflo
     canonicalWorkflowId: (row.canonical_workflow_id as string) ?? (row.template_id as string),
     canonicalWorkflowVersion: (row.canonical_workflow_version as string) ?? (row.template_version as string),
     compiledPlanHash: (row.compiled_plan_hash as string) ?? (row.cache_key as string),
-    artifactState: (row.artifact_state as GeneratedWorkflowArtifactState) ?? "promoted",
+    artifactState: String(row.artifact_state ?? ""),
     sourceMetadata: (row.source_metadata as Record<string, unknown>) ?? {},
     templateId: row.template_id as string,
     platform: row.platform as string,
@@ -1011,10 +1092,4 @@ function normalizeSaveGeneratedPlanCacheOptions(
     return value as SaveGeneratedPlanCacheOptions;
   }
   return { sourceMetadata: value as Record<string, unknown> };
-}
-
-function allowedArtifactStates(options: GeneratedWorkflowCacheLookupOptions): GeneratedWorkflowArtifactState[] {
-  const states: GeneratedWorkflowArtifactState[] = ["promoted"];
-  if (options.includeCandidate) states.push("candidate");
-  return states;
 }

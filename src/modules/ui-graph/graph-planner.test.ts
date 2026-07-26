@@ -23,7 +23,7 @@ describe("planGraphRoute", () => {
       transition("direct", "home", "comments", { cost: 4 }),
       transition("open-post", "home", "post"),
       transition("open-comments", "post", "comments"),
-    ], { maxSafetyClass: "navigation", minimumConfidence: 0.7, maxTransitions: 20 });
+    ], { allowedSafetyClasses: ["navigation"], minimumConfidence: 0.7, maxTransitions: 20 });
     expect(route.found).toBe(true);
     expect(route.transitions.map((item) => item.id)).toEqual(["open-post", "open-comments"]);
   });
@@ -31,7 +31,7 @@ describe("planGraphRoute", () => {
   it("rejects transitions above the workflow safety class", () => {
     const route = planGraphRoute("home", "posted", [
       transition("submit", "home", "posted", { safetyClass: "mutating" }),
-    ], { maxSafetyClass: "navigation", minimumConfidence: 0.7, maxTransitions: 20 });
+    ], { allowedSafetyClasses: ["navigation"], minimumConfidence: 0.7, maxTransitions: 20 });
     expect(route.found).toBe(false);
   });
 

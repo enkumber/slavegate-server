@@ -196,7 +196,7 @@ describe("DirectWS Android result handle compatibility", () => {
 
 describe("PNQ v2 shadow DirectWS side effects", () => {
   it("does not await shadow result bookkeeping before legacy result admission", async () => {
-    setPnqV2RuntimeConfigForTest({ mode: "shadow", sweepIntervalMs: 30_000 });
+    setPnqV2RuntimeConfigForTest({ enabled: true, sweepIntervalMs: 30_000 });
     setDeviceExecutionAuthorityForTest("enforced");
     const server = new DirectWsServer();
     const send = vi.fn();
@@ -238,7 +238,7 @@ describe("PNQ v2 shadow DirectWS side effects", () => {
   });
 
   it("bypasses Queue v2 result bookkeeping completely while runtime is disabled", async () => {
-    setPnqV2RuntimeConfigForTest({ mode: "disabled", sweepIntervalMs: 30_000 });
+    setPnqV2RuntimeConfigForTest({ enabled: false, sweepIntervalMs: 30_000 });
     setDeviceExecutionAuthorityForTest("observe_only");
     const server = new DirectWsServer();
     const send = vi.fn();
