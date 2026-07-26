@@ -236,7 +236,7 @@ export async function sendDeviceExecutionJobToDevice(
     handle: result.handle,
     reason: result.reason,
     sent: result.sent,
-    queued: result.decision === "would_wait" || (result.root?.state === "queued" && !result.sent),
+    queued: !result.sent && result.decision === "would_wait",
   };
 }
 
@@ -421,7 +421,7 @@ export async function sendEdgeWorkflowToDeviceEnforced(
     handle: dispatch.handle,
     reason: dispatch.reason,
     sent: dispatch.sent,
-    queued: dispatch.decision === "would_wait" || (dispatch.root?.state === "queued" && !dispatch.sent),
+    queued: !dispatch.sent && dispatch.decision === "would_wait",
   };
 }
 
@@ -439,10 +439,33 @@ async function cancelUnreplayableObservedAttempt(
   handle: import("../modules/device-execution").DeviceExecutionHandle,
   reason: string,
 ): Promise<void> {
+  const target = await getDb().query<{ status: string }>(
+    `SELECT target.status
+       FROM device_execution_roots root
+       JOIN lifecycle_resource_bindings binding
+         ON binding.resource_table = to_regclass('device_execution_roots')
+        AND binding.state_column = 'state'::name
+       JOIN lifecycle_transitions transition
+         ON transition.lifecycle_key = binding.lifecycle_key
+        AND transition.from_status = root.state
+       JOIN lifecycle_state_definitions target
+         ON target.lifecycle_key = transition.lifecycle_key
+        AND target.status = transition.to_status
+      WHERE root.id = $1
+        AND target.terminal
+        AND target.administrative
+      ORDER BY target.sort_order, transition.action_key
+      LIMIT 1`,
+    [handle.rootId],
+  );
+  const terminalStatus = target.rows[0]?.status;
+  if (!terminalStatus) {
+    throw new Error(`No administrative terminal transition is configured for PNQ attempt ${handle.operationId}`);
+  }
   const cancelled = await deviceExecutionArbiter.observeTerminal({
     deviceId: handle.deviceId,
     handle,
-    status: "cancelled",
+    status: terminalStatus,
     actor: "transport.unreplayable_observed_attempt",
     reason,
     metadata: { queueDisposition: "cancelled_before_fallback", handle: encodeDeviceExecutionHandle(handle) },
@@ -522,9 +545,16 @@ async function nextQueuedDispatchEnvelope(deviceId: string): Promise<QueuedDispa
            operations.metadata
     FROM device_execution_roots roots
     JOIN device_execution_operations operations ON operations.root_id = roots.id
+    JOIN lifecycle_resource_bindings root_binding
+      ON root_binding.resource_table = to_regclass('device_execution_roots')
+     AND root_binding.state_column = 'state'::name
+    JOIN lifecycle_state_definitions root_state
+      ON root_state.lifecycle_key = root_binding.lifecycle_key
+     AND root_state.status = roots.state
     WHERE roots.device_id = $1
       AND roots.root_kind IN ('job', 'server_workflow', 'edge_workflow')
-      AND roots.state = 'queued'
+      AND root_state.initial
+      AND NOT root_state.terminal
       AND operations.operation_kind IN ('job', 'workflow')
     ORDER BY roots.fifo_sequence ASC
     LIMIT 1

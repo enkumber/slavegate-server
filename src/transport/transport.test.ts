@@ -229,6 +229,8 @@ describe("PNQ unreplayable observed-root disposition", () => {
 
   it("cancels and audits a queued standalone batch before caller fallback", async () => {
     const observeTerminal = mockWouldWait(handle);
+    const query = vi.fn().mockResolvedValue({ rows: [{ status: "cancelled" }] });
+    vi.spyOn(dbClient, "getDb").mockReturnValue({ query } as never);
     await expect(sendBatchToDeviceEnforced(DEVICE_ID, {
       type: "BATCH_START",
       batchId: handle.operationId,
@@ -240,6 +242,7 @@ describe("PNQ unreplayable observed-root disposition", () => {
       status: "cancelled",
       reason: "queued_edge_batch_not_replayable",
     }));
+    expect(String(query.mock.calls[0]?.[0])).toContain("target.administrative");
   });
 
   it("keeps a queued edge workflow replayable instead of cancelling before fallback", async () => {
