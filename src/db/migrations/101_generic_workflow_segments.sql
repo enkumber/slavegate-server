@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS workflow_segment_versions (
   PRIMARY KEY (segment_key, version)
 );
 
+-- Older installations already have workflow_segment_versions from an earlier
+-- revision of this migration. CREATE TABLE IF NOT EXISTS does not evolve that
+-- table, so add the resolution mechanism explicitly before indexing it.
+ALTER TABLE workflow_segment_versions
+  ADD COLUMN IF NOT EXISTS active_for_resolution BOOLEAN NOT NULL DEFAULT FALSE;
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_segment_active_resolution
   ON workflow_segment_versions(segment_key)
   WHERE active_for_resolution;
@@ -146,3 +152,58 @@ CREATE TABLE IF NOT EXISTS workflow_control_plane_events (
 
 CREATE INDEX IF NOT EXISTS idx_workflow_control_plane_events_entity
   ON workflow_control_plane_events(entity_type, entity_key, entity_version, created_at DESC);
+
+-- Remove packaged policy left by older revisions of this migration. The
+-- targeted columns are schema mechanics; state/action values remain entirely
+-- data-driven. Constraint and partial-index discovery is structural so this
+-- upgrade does not embed any legacy state or action names.
+DO $$
+DECLARE
+  target RECORD;
+  constraint_row RECORD;
+  index_row RECORD;
+BEGIN
+  FOR target IN
+    SELECT *
+      FROM (VALUES
+        ('workflow_segments'::REGCLASS, 'status'::NAME),
+        ('workflow_segment_versions'::REGCLASS, 'lifecycle_status'::NAME),
+        ('workflow_compositions'::REGCLASS, 'lifecycle_status'::NAME),
+        ('workflow_execution_bindings'::REGCLASS, 'status'::NAME),
+        ('workflow_control_plane_events'::REGCLASS, 'action'::NAME)
+      ) configured(resource_table, policy_column)
+  LOOP
+    EXECUTE format(
+      'ALTER TABLE %s ALTER COLUMN %I DROP DEFAULT',
+      target.resource_table,
+      target.policy_column
+    );
+
+    FOR constraint_row IN
+      SELECT definition.conname
+        FROM pg_constraint definition
+       WHERE definition.conrelid = target.resource_table
+         AND definition.contype = 'c'
+         AND pg_get_constraintdef(definition.oid) ~
+             ('(^|[^a-zA-Z0-9_])' || target.policy_column || '([^a-zA-Z0-9_]|$)')
+    LOOP
+      EXECUTE format(
+        'ALTER TABLE %s DROP CONSTRAINT %I',
+        target.resource_table,
+        constraint_row.conname
+      );
+    END LOOP;
+
+    FOR index_row IN
+      SELECT index_definition.indexrelid::REGCLASS AS index_relation
+        FROM pg_index index_definition
+       WHERE index_definition.indrelid = target.resource_table
+         AND index_definition.indpred IS NOT NULL
+         AND pg_get_expr(index_definition.indpred, index_definition.indrelid) ~
+             ('(^|[^a-zA-Z0-9_])' || target.policy_column || '([^a-zA-Z0-9_]|$)')
+    LOOP
+      EXECUTE format('DROP INDEX %s', index_row.index_relation);
+    END LOOP;
+  END LOOP;
+END;
+$$;

@@ -52,6 +52,40 @@ describe("generic workflow segment PostgreSQL migration", () => {
   });
 
   it("creates only generic segment/composition lifecycle schema and is idempotent", async () => {
+    // Reproduce the table shape installed by the earlier revision of migration
+    // 101. The current migration must evolve it rather than assuming a fresh
+    // schema created from the latest file.
+    await pool.query(`
+      CREATE TABLE workflow_segments (
+        segment_key TEXT PRIMARY KEY,
+        description TEXT NULL,
+        status TEXT NOT NULL DEFAULT 'legacy_initial'
+          CHECK (status IN ('legacy_initial', 'legacy_retired')),
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE TABLE workflow_segment_versions (
+        segment_key TEXT NOT NULL REFERENCES workflow_segments(segment_key) ON DELETE CASCADE,
+        version TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        lifecycle_status TEXT NOT NULL DEFAULT 'legacy_candidate'
+          CHECK (lifecycle_status IN ('legacy_candidate', 'legacy_selected')),
+        template JSONB NOT NULL,
+        input_schema JSONB NOT NULL,
+        output_schema JSONB NULL,
+        postcondition_contract JSONB NULL,
+        compatibility JSONB NOT NULL DEFAULT '{}'::jsonb,
+        fingerprint TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (segment_key, version)
+      );
+      CREATE UNIQUE INDEX legacy_segment_resolution_policy
+        ON workflow_segment_versions(segment_key, platform)
+        WHERE lifecycle_status = 'legacy_selected';
+    `);
+
     const migrations = [
       "099_db_authoritative_workflow_semantics.sql",
       "100_postgres_compiler_control_plane.sql",
@@ -79,6 +113,22 @@ describe("generic workflow segment PostgreSQL migration", () => {
       "workflow_segment_coverage",
       "workflow_control_plane_events",
     ]));
+    const upgradedColumn = await pool.query(
+      `SELECT is_nullable, column_default
+         FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'workflow_segment_versions'
+          AND column_name = 'active_for_resolution'`,
+    );
+    expect(upgradedColumn.rows).toHaveLength(1);
+    expect(upgradedColumn.rows[0].is_nullable).toBe("NO");
+    const legacyPolicy = await pool.query(
+      `SELECT COUNT(*)::int AS count
+         FROM pg_indexes
+        WHERE schemaname = current_schema()
+          AND indexname = 'legacy_segment_resolution_policy'`,
+    );
+    expect(legacyPolicy.rows[0].count).toBe(0);
     const builderTables = await pool.query(
       `SELECT table_name
        FROM information_schema.tables

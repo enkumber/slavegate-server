@@ -9,6 +9,12 @@ CREATE TABLE IF NOT EXISTS lifecycle_resource_bindings (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Upgrade bindings created by the earlier two-column contract. Existing
+-- bindings used the generic status-column convention, while callers may
+-- override it explicitly after this structural upgrade.
+ALTER TABLE lifecycle_resource_bindings
+  ADD COLUMN IF NOT EXISTS state_column NAME NOT NULL DEFAULT 'status';
+
 ALTER TABLE lifecycle_resource_bindings
   DROP CONSTRAINT IF EXISTS lifecycle_resource_bindings_lifecycle_key_key;
 
