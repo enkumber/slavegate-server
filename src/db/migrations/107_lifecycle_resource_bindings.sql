@@ -57,11 +57,20 @@ BEGIN
     ) INTO discovered_key, discovered_count;
 
     IF discovered_count = 1 THEN
-      INSERT INTO lifecycle_resource_bindings(resource_table, lifecycle_key)
-      VALUES (resource.table_oid, discovered_key)
-      ON CONFLICT (resource_table) DO UPDATE
-        SET lifecycle_key = EXCLUDED.lifecycle_key,
-            updated_at = NOW();
+      UPDATE lifecycle_resource_bindings
+         SET lifecycle_key = discovered_key,
+             updated_at = NOW()
+       WHERE resource_table = resource.table_oid
+         AND state_column = 'status';
+
+      IF NOT FOUND THEN
+        INSERT INTO lifecycle_resource_bindings(
+          resource_table,
+          lifecycle_key,
+          state_column
+        )
+        VALUES (resource.table_oid, discovered_key, 'status');
+      END IF;
     END IF;
   END LOOP;
 END;
@@ -148,12 +157,20 @@ BEGIN
     RAISE EXCEPTION 'configured lifecycle state column does not exist';
   END IF;
 
-  INSERT INTO lifecycle_resource_bindings(resource_table, lifecycle_key, state_column)
-  VALUES (target_table, target_lifecycle_key, target_state_column)
-  ON CONFLICT (resource_table) DO UPDATE
-    SET lifecycle_key = EXCLUDED.lifecycle_key,
-        state_column = EXCLUDED.state_column,
-        updated_at = NOW();
+  UPDATE lifecycle_resource_bindings
+     SET lifecycle_key = target_lifecycle_key,
+         updated_at = NOW()
+   WHERE resource_table = target_table
+     AND state_column = target_state_column;
+
+  IF NOT FOUND THEN
+    INSERT INTO lifecycle_resource_bindings(
+      resource_table,
+      lifecycle_key,
+      state_column
+    )
+    VALUES (target_table, target_lifecycle_key, target_state_column);
+  END IF;
 
   trigger_name := format('trg_lifecycle_initial_%s', target_table::oid);
   EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_name, target_table);

@@ -2,12 +2,51 @@
 -- columns. This is generic mechanism only; no resource, lifecycle, state,
 -- transition, action, or policy is named or seeded here.
 
-ALTER TABLE lifecycle_resource_bindings
-  DROP CONSTRAINT IF EXISTS lifecycle_resource_bindings_pkey;
+DO $$
+DECLARE
+  current_primary_key NAME;
+  expected_primary_key_exists BOOLEAN;
+BEGIN
+  SELECT constraint_definition.conname
+    INTO current_primary_key
+    FROM pg_constraint constraint_definition
+   WHERE constraint_definition.conrelid =
+         'lifecycle_resource_bindings'::regclass
+     AND constraint_definition.contype = 'p'
+   LIMIT 1;
 
-ALTER TABLE lifecycle_resource_bindings
-  ADD CONSTRAINT lifecycle_resource_bindings_pkey
-  PRIMARY KEY (resource_table, state_column);
+  SELECT EXISTS (
+    SELECT 1
+      FROM pg_constraint constraint_definition
+      JOIN pg_attribute resource_attribute
+        ON resource_attribute.attrelid = constraint_definition.conrelid
+       AND resource_attribute.attname = 'resource_table'
+      JOIN pg_attribute state_attribute
+        ON state_attribute.attrelid = constraint_definition.conrelid
+       AND state_attribute.attname = 'state_column'
+     WHERE constraint_definition.conrelid =
+           'lifecycle_resource_bindings'::regclass
+       AND constraint_definition.contype = 'p'
+       AND constraint_definition.conkey = ARRAY[
+         resource_attribute.attnum,
+         state_attribute.attnum
+       ]::SMALLINT[]
+  ) INTO expected_primary_key_exists;
+
+  IF NOT expected_primary_key_exists THEN
+    IF current_primary_key IS NOT NULL THEN
+      EXECUTE format(
+        'ALTER TABLE lifecycle_resource_bindings DROP CONSTRAINT %I',
+        current_primary_key
+      );
+    END IF;
+
+    ALTER TABLE lifecycle_resource_bindings
+      ADD CONSTRAINT lifecycle_resource_bindings_pkey
+      PRIMARY KEY (resource_table, state_column);
+  END IF;
+END;
+$$;
 
 CREATE OR REPLACE FUNCTION set_initial_resource_lifecycle_status()
 RETURNS TRIGGER
