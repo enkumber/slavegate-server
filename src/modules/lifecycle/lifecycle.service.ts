@@ -360,6 +360,31 @@ export async function getResourceLifecycleTransitionToState(
   return result.rows[0] ? rowToTransition(result.rows[0]) : null;
 }
 
+export async function getResourceLifecycleTransition(
+  resourceTable: string,
+  fromStatus: string,
+  actionKey: string,
+  stateColumn = "status",
+  db: LifecycleQueryable = getDb(),
+): Promise<LifecycleTransition | null> {
+  const result = await db.query(
+    `SELECT transition.lifecycle_key, transition.action_key, transition.from_status,
+            transition.to_status, transition.manual_allowed, transition.external_allowed,
+            transition.automatic, transition.mark_started, transition.mark_completed,
+            transition.clear_completed, transition.clear_failure, transition.reset_retry,
+            transition.metadata
+       FROM lifecycle_resource_bindings binding
+       JOIN lifecycle_transitions transition
+         ON transition.lifecycle_key = binding.lifecycle_key
+        AND transition.from_status = $2
+        AND transition.action_key = $3
+      WHERE binding.resource_table = to_regclass($1)
+        AND binding.state_column = $4::name`,
+    [resourceTable, fromStatus, actionKey, stateColumn],
+  );
+  return result.rows[0] ? rowToTransition(result.rows[0]) : null;
+}
+
 function rowToState(row: Record<string, unknown>): LifecycleStateDefinition {
   return {
     lifecycleKey: String(row.lifecycle_key),

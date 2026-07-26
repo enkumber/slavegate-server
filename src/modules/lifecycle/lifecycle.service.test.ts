@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   getResourceLifecycleExecutionStatusContract,
+  getResourceLifecycleTransition,
   updateLifecycleStalePolicy,
 } from "./lifecycle.service";
 
@@ -142,5 +143,44 @@ describe("resource lifecycle execution status contract", () => {
       "state",
       { query } as never,
     )).rejects.toThrow("exactly one configured state");
+  });
+});
+
+describe("resource lifecycle transition lookup", () => {
+  it("resolves caller-supplied actions through the configured resource binding", async () => {
+    const query = vi.fn().mockResolvedValue({
+      rows: [{
+        lifecycle_key: "custom_lifecycle",
+        action_key: "operator_action",
+        from_status: "source",
+        to_status: "target",
+        manual_allowed: true,
+        external_allowed: false,
+        automatic: false,
+        mark_started: false,
+        mark_completed: false,
+        clear_completed: false,
+        clear_failure: true,
+        reset_retry: false,
+        metadata: {},
+      }],
+    });
+    await expect(getResourceLifecycleTransition(
+      "custom_resources",
+      "source",
+      "operator_action",
+      "state",
+      { query } as never,
+    )).resolves.toMatchObject({
+      fromStatus: "source",
+      toStatus: "target",
+      manualAllowed: true,
+    });
+    expect(query.mock.calls[0][1]).toEqual([
+      "custom_resources",
+      "source",
+      "operator_action",
+      "state",
+    ]);
   });
 });

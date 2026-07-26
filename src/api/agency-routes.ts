@@ -40,6 +40,7 @@ import { transitionWorkflow } from "../modules/workflows/workflow-lifecycle.serv
 import { transitionAgencyWorkflowRun } from "../modules/workflows/agency-workflow-run-lifecycle.service";
 import {
   getResourceLifecycleState,
+  getResourceLifecycleTransition,
   getResourceLifecycleTransitionToState,
   listResourceLifecycleStates,
   selectResourceLifecycleTransition,
@@ -58,6 +59,7 @@ function publishAgencyWorkflowQueued(input: {
   deviceId: string;
   intent: string;
   platform?: string;
+  status: string;
 }): void {
   workflowEvents.publish({
     source: "agency",
@@ -68,7 +70,7 @@ function publishAgencyWorkflowQueued(input: {
     accountId: input.accountId ?? undefined,
     deviceId: input.deviceId,
     mode: "edge",
-    status: "queued",
+    status: input.status,
     message: "Generated workflow task queued",
     details: {
       intent: input.intent,
@@ -298,7 +300,7 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
     name: row.label,
     action: row.action ?? null,
     type: row.type ?? null,
-    status: "validated_step",
+    status: String(row.candidate_state),
     libraryState,
     reuseScope: effectiveScope,
     promotionScope,
@@ -986,8 +988,8 @@ function workflowDefinitionHardeningPreview(definition: ReturnType<typeof rowToW
   const scopeMatched = scope ? scope === definition.promotion.scope : !!definition.promotion.scope;
   const executionEnabled = definition.policy.executionChanging === true && definition.policy.autoUseEnabled === true;
   const blockers = [
-    ...(definition.promotion.state !== "limited_reuse" ? ["workflow_definition_not_limited_reuse"] : []),
-    ...(definition.status !== "active" ? ["workflow_definition_not_active"] : []),
+    ...(definition.promotion.stateCapabilities.dispatchable !== true ? ["workflow_definition_not_reusable"] : []),
+    ...(definition.statusCapabilities.dispatchable !== true ? ["workflow_definition_not_dispatchable"] : []),
     ...(!scopeMatched ? ["limited_reuse_scope_mismatch"] : []),
     ...(decayedConfidence < 0.6 ? ["confidence_below_controlled_threshold"] : []),
     ...(!executionEnabled ? ["execution_changing_disabled"] : []),
@@ -1898,6 +1900,7 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
       deviceId: body.deviceId,
       intent: body.intent,
       platform,
+      status: String(hydrated.rows[0].status),
     });
     res.status(201).json({ ok: true, data: rowToAgencyWorkflowRun(hydrated.rows[0]) });
   } catch (err) {
@@ -1967,15 +1970,26 @@ router.get("/workflow-runs", async (req: Request, res: Response) => {
 router.get("/workflow-step-candidates", requireAdminAuth, async (req: Request, res: Response) => {
   const db = getDb();
   const { page, pageSize, offset } = parsePagination(req.query);
-  const rawState = typeof req.query.state === "string" ? req.query.state : "step_candidate";
-  const state = ["step_candidate", "validated_step", "rejected", "all"].includes(rawState) ? rawState : "step_candidate";
+  const requestedFilter = typeof req.query.state === "string" ? req.query.state : null;
+  const configuredStates = await listResourceLifecycleStates(
+    "agency_workflow_step_candidates",
+    "candidate_state",
+    db,
+  );
+  const defaultFilter = configuredStates.find((definition) => definition.initial)?.status
+    ?? configuredStates[0]?.status;
+  const candidateFilter = requestedFilter === "all"
+    ? null
+    : configuredStates.some((definition) => definition.status === requestedFilter)
+      ? requestedFilter
+      : defaultFilter;
   const conditions: string[] = [];
   const values: unknown[] = [];
   let idx = 1;
 
-  if (state !== "all") {
+  if (candidateFilter) {
     conditions.push(`c.candidate_state = $${idx++}`);
-    values.push(state);
+    values.push(candidateFilter);
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -2544,36 +2558,33 @@ router.get("/workflow-definitions", requireAdminAuth, async (req: Request, res: 
   let idx = 1;
 
   if (status) {
-    conditions.push(`status = $${idx++}`);
+    conditions.push(`definition.status = $${idx++}`);
     values.push(status);
   }
   if (platform) {
-    conditions.push(`platform = $${idx++}`);
+    conditions.push(`definition.platform = $${idx++}`);
     values.push(platform);
   }
   if (intent) {
-    conditions.push(`intent = $${idx++}`);
+    conditions.push(`definition.intent = $${idx++}`);
     values.push(intent);
   }
   if (key) {
-    conditions.push(`definition_key = $${idx++}`);
+    conditions.push(`definition.definition_key = $${idx++}`);
     values.push(key);
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = await db.query(
-    `SELECT *
-     FROM agency_workflow_definitions_lifecycle
+    `SELECT definition.*
+     FROM agency_workflow_definitions_lifecycle definition
+     JOIN lifecycle_state_definitions state
+       ON state.lifecycle_key = definition.lifecycle_key
+      AND state.status = definition.status
      ${where}
-     ORDER BY
-       CASE status
-         WHEN 'active' THEN 1
-         WHEN 'draft' THEN 2
-         WHEN 'deprecated' THEN 3
-         ELSE 4
-       END,
-       definition_key ASC,
-       version DESC`,
+     ORDER BY state.sort_order,
+       definition.definition_key ASC,
+       definition.version DESC`,
     values
   );
   const items = rows.rows.map(rowToWorkflowDefinition);
@@ -2584,12 +2595,10 @@ router.get("/workflow-definitions", requireAdminAuth, async (req: Request, res: 
       items,
       total: items.length,
       policy: workflowDefinitionRegistryPolicy(),
-      summary: {
-        active: items.filter((item) => item.status === "active").length,
-        draft: items.filter((item) => item.status === "draft").length,
-        deprecated: items.filter((item) => item.status === "deprecated").length,
-        archived: items.filter((item) => item.status === "archived").length,
-      },
+      summary: Object.fromEntries(
+        items.map((item) => item.status).filter((value, index, all) => all.indexOf(value) === index)
+          .map((value) => [value, items.filter((item) => item.status === value).length]),
+      ),
     },
   });
 });
@@ -2614,10 +2623,13 @@ router.get("/workflow-definitions/resolve", requireAdminAuth, async (req: Reques
 
   const [definitions, gates] = await Promise.all([
     db.query(
-      `SELECT *
-       FROM agency_workflow_definitions_lifecycle
-       WHERE status IN ('active', 'draft')
-       ORDER BY definition_key ASC, version DESC`
+      `SELECT definition.*
+       FROM agency_workflow_definitions_lifecycle definition
+       JOIN lifecycle_state_definitions state
+         ON state.lifecycle_key = definition.lifecycle_key
+        AND state.status = definition.status
+       WHERE NOT state.terminal
+       ORDER BY state.sort_order, definition.definition_key ASC, definition.version DESC`
     ),
     getCompilerPolicyGates(db),
   ]);
@@ -2852,6 +2864,7 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
       deviceId,
       intent: definition.intent,
       platform: definition.platform,
+      status: String(hydrated!.status),
     });
     taskRunnerService.pollNow().catch((err) => console.error("[workflow-definition-auto-use] immediate task runner poll failed:", err));
     return res.status(201).json({
@@ -3338,6 +3351,34 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
   }
 
   const definition = rowToWorkflowDefinition(currentRow);
+  const promotionTransition = await getResourceLifecycleTransition(
+    "agency_workflow_definitions",
+    definition.promotion.state,
+    parsed.action,
+    "promotion_state",
+    db,
+  );
+  if (!promotionTransition?.manualAllowed) {
+    return res.status(400).json({
+      ok: false,
+      error: "Requested promotion transition is not manually allowed by PostgreSQL policy",
+      code: "WORKFLOW_DEFINITION_PROMOTION_TRANSITION_NOT_ALLOWED",
+    });
+  }
+  const promotionTarget = await getResourceLifecycleState(
+    "agency_workflow_definitions",
+    promotionTransition.toStatus,
+    "promotion_state",
+    db,
+  );
+  if (!promotionTarget) {
+    return res.status(500).json({
+      ok: false,
+      error: "Promotion transition target is not configured",
+      code: "WORKFLOW_DEFINITION_PROMOTION_TARGET_MISSING",
+    });
+  }
+  const enablesReuse = promotionTarget.dispatchable && !promotionTarget.terminal;
   const pipeline = buildWorkflowValidationPipeline({
     definitions: [definition],
     policyGates: gates,
@@ -3353,15 +3394,15 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
   const staticErrors = Number(staticValidation.errors ?? 0);
   const branchCoverage = Number(((dryRun.branchCoverage ?? {}) as Record<string, any>).coveragePercent ?? 0);
 
-  if (parsed.action === "promote_limited") {
-    if (!["active", "draft"].includes(definition.status)) {
+  if (enablesReuse) {
+    if (definition.statusCapabilities.terminal) {
       return res.status(400).json({
         ok: false,
         error: "Only active or draft workflow definitions can enter limited promotion review",
         code: "WORKFLOW_DEFINITION_STATUS_NOT_PROMOTABLE",
       });
     }
-    if (definition.promotion.state === "limited_reuse") {
+    if (definition.promotion.stateCapabilities.dispatchable) {
       return res.status(400).json({
         ok: false,
         error: "Workflow definition is already promoted for limited reuse",
@@ -3385,33 +3426,19 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
     }
   }
 
-  const nextState = parsed.action === "promote_limited" ? "limited_reuse" : "revoked";
-  const updateSql = parsed.action === "promote_limited"
-    ? `UPDATE agency_workflow_definitions
-       SET promotion_state = 'limited_reuse',
-           promotion_scope = $2,
-           promotion_note = $3,
-           promotion_confidence = $4,
-           promotion_readiness = $5,
-           promotion_scope_details = $6,
-           rollback_preview = $7,
-           promoted_by = 'dashboard',
-           promoted_at = NOW(),
-           revoked_by = NULL,
-           revoked_at = NULL,
-           updated_at = NOW()
-       WHERE id = $1
-       RETURNING *`
-    : `UPDATE agency_workflow_definitions
-       SET promotion_state = 'revoked',
-           promotion_scope = NULL,
-           promotion_note = $2,
-           promotion_confidence = 0,
-           promotion_readiness = $3,
-           promotion_scope_details = $4,
-           rollback_preview = $5,
-           revoked_by = 'dashboard',
-           revoked_at = NOW(),
+  const nextState = promotionTransition.toStatus;
+  const updateSql = `UPDATE agency_workflow_definitions
+       SET promotion_state = $2,
+           promotion_scope = CASE WHEN $3 THEN $4 ELSE NULL END,
+           promotion_note = $5,
+           promotion_confidence = CASE WHEN $3 THEN $6 ELSE 0 END,
+           promotion_readiness = $7,
+           promotion_scope_details = $8,
+           rollback_preview = $9,
+           promoted_by = CASE WHEN $3 THEN 'dashboard' ELSE NULL END,
+           promoted_at = CASE WHEN $3 THEN NOW() ELSE NULL END,
+           revoked_by = CASE WHEN $3 THEN NULL ELSE 'dashboard' END,
+           revoked_at = CASE WHEN $3 THEN NULL ELSE NOW() END,
            updated_at = NOW()
        WHERE id = $1
        RETURNING *`;
@@ -3453,23 +3480,17 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
     ],
   };
   const revokedScopeDetails = workflowDefinitionScopeDetails(null);
-  const updateValues = parsed.action === "promote_limited"
-    ? [
-        definition.id,
-        parsed.scope,
-        parsed.note,
-        promotionMetadata.confidence,
-        JSON.stringify(promotionMetadata.readiness),
-        JSON.stringify(promotionMetadata.scopeDetails),
-        JSON.stringify(rollbackPreview),
-      ]
-    : [
-        definition.id,
-        parsed.note,
-        JSON.stringify(revokedReadiness),
-        JSON.stringify(revokedScopeDetails),
-        JSON.stringify(rollbackPreview),
-      ];
+  const updateValues = [
+    definition.id,
+    nextState,
+    enablesReuse,
+    parsed.scope,
+    parsed.note,
+    promotionMetadata.confidence,
+    JSON.stringify(enablesReuse ? promotionMetadata.readiness : revokedReadiness),
+    JSON.stringify(enablesReuse ? promotionMetadata.scopeDetails : revokedScopeDetails),
+    JSON.stringify(rollbackPreview),
+  ];
 
   const promotionPolicy = {
     manualOnly: true,
@@ -5201,15 +5222,18 @@ router.get("/reports/stats", async (_req: Request, res: Response) => {
                  FILTER (WHERE state.status IS NOT NULL),
                '{}'::jsonb
              ) AS statuses
-      FROM lifecycle_state_definitions state
+      FROM lifecycle_resource_bindings binding
+      JOIN lifecycle_state_definitions state
+        ON state.lifecycle_key = binding.lifecycle_key
       LEFT JOIN LATERAL (
         SELECT COUNT(*)::int AS count
         FROM tasks task
         WHERE task.lifecycle_key = state.lifecycle_key
           AND task.status = state.status
       ) state_count ON TRUE
-      WHERE state.lifecycle_key = 'task'
-      GROUP BY state.lifecycle_key
+      WHERE binding.resource_table = to_regclass('tasks')
+        AND binding.state_column = 'status'::name
+      GROUP BY binding.lifecycle_key
     `),
     db.query(`
       SELECT 
