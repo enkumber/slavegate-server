@@ -22,7 +22,7 @@ export interface PromotionDecision {
   ready: boolean;
   autoPromotable: boolean;
   requiredSuccesses: number;
-  validationStage: "candidate" | "device_validated" | "cohort_validated" | "global_promoted";
+  validationStage: string;
   blockers: string[];
 }
 
@@ -226,7 +226,8 @@ export class UiGraphLearningLoop {
            FROM ui_graph_candidate_validations WHERE candidate_id = $1 GROUP BY candidate_id
          ) stats
          WHERE c.id = stats.candidate_id
-         RETURNING c.*`,
+         RETURNING c.*, stats.distinct_devices, stats.distinct_branches,
+                   stats.distinct_environments, stats.recovery_count`,
         [input.candidateId],
       );
       const updatedCandidate = updated.rows[0];
@@ -251,8 +252,6 @@ export class UiGraphLearningLoop {
       }
       await client.query("COMMIT");
       const row = updatedCandidate;
-      const globalCoverage = row.validation_stage === "global_promoted";
-      const cohortCoverage = globalCoverage || row.validation_stage === "cohort_validated";
       return promotionDecision({
         type: row.candidate_type,
         discoveryMethod: row.discovery_method,
@@ -260,10 +259,10 @@ export class UiGraphLearningLoop {
         successCount: Number(row.success_count),
         failureCount: Number(row.failure_count),
         stateVerified: input.stateVerified,
-        distinctDevices: cohortCoverage ? 2 : row.validation_stage === "device_validated" ? 1 : 0,
-        distinctBranches: globalCoverage ? 2 : 1,
-        distinctEnvironments: globalCoverage ? 2 : 1,
-        recoveryCount: Number(input.context.recoveryCount ?? 0),
+        distinctDevices: Number(row.distinct_devices ?? 0),
+        distinctBranches: Number(row.distinct_branches ?? 0),
+        distinctEnvironments: Number(row.distinct_environments ?? 0),
+        recoveryCount: Number(row.recovery_count ?? 0),
       });
     } catch (error) {
       await client.query("ROLLBACK");
