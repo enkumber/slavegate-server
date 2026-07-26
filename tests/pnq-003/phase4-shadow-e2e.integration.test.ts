@@ -52,10 +52,34 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
       "src/db/migrations/083_pnq_v2_runtime_shadow.sql",
       "src/db/migrations/105_generic_resource_lifecycle.sql",
       "src/db/migrations/107_lifecycle_resource_bindings.sql",
+      "src/db/migrations/099_db_authoritative_workflow_semantics.sql",
     ]) {
       await applySql(file);
     }
     await configurePnqV2LifecycleFixture(pool, repoRoot);
+    await pool.query(`
+      ALTER TABLE runtime_semantic_entries
+        ADD COLUMN IF NOT EXISTS lifecycle_key TEXT;
+      INSERT INTO lifecycle_state_definitions
+        (lifecycle_key, status, initial, terminal, retryable, administrative,
+         dispatchable, manual, sort_order)
+      VALUES
+        ('phase4_runtime_policy_fixture', 'enabled_fixture', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 10);
+      SELECT configure_lifecycle_resource_binding(
+        'runtime_semantic_entries'::regclass,
+        'phase4_runtime_policy_fixture',
+        'status'
+      );
+      INSERT INTO runtime_semantic_entries
+        (namespace, entry_key, status, lifecycle_key, payload)
+      VALUES (
+        'phase4_job_policy',
+        'screenshot_fixture',
+        'enabled_fixture',
+        'phase4_runtime_policy_fixture',
+        '{"jobActionPolicy":{"actionKey":"screenshot","allowed":true,"requiresRoot":false}}'::jsonb
+      );
+    `);
     await applySql("src/db/migrations/114_lifecycle_resource_policies.sql");
     await pool.query(`
       INSERT INTO lifecycle_state_definitions
@@ -161,7 +185,7 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
   });
 
   beforeEach(async () => {
-    setPnqV2RuntimeConfigForTest({ mode: "shadow", sweepIntervalMs: 30_000 });
+    setPnqV2RuntimeConfigForTest({ enabled: true, sweepIntervalMs: 30_000 });
     // This suite validates the Queue v2 shadow lifecycle, not the workflow
     // executor's CommonJS cycle. Production keeps the original synchronous
     // resolver; inject a no-op here so Vitest does not try to require a TS

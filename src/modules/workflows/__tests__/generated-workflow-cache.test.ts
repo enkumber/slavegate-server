@@ -101,7 +101,43 @@ function cacheRow(overrides: Record<string, unknown> = {}) {
 }
 
 function mockDbQuery(rows: unknown[] = []) {
-  const query = vi.fn().mockResolvedValue({ rows });
+  const query = vi.fn().mockImplementation(async (sql: string) => {
+    if (String(sql).includes("ORDER BY state.sort_order, state.status")) {
+      return {
+        rows: [
+          {
+            lifecycle_key: "fixture",
+            status: "candidate",
+            initial: true,
+            terminal: false,
+            retryable: false,
+            administrative: false,
+            dispatchable: false,
+            manual: true,
+            stale_after_ms: null,
+            stale_action_key: null,
+            description: null,
+            metadata: {},
+          },
+          {
+            lifecycle_key: "fixture",
+            status: "promoted",
+            initial: false,
+            terminal: false,
+            retryable: false,
+            administrative: false,
+            dispatchable: true,
+            manual: false,
+            stale_after_ms: null,
+            stale_action_key: null,
+            description: null,
+            metadata: {},
+          },
+        ],
+      };
+    }
+    return { rows };
+  });
   vi.mocked(getDb).mockReturnValue({ query } as any);
   return query;
 }
@@ -123,10 +159,9 @@ describe("generated workflow plan cache service", () => {
       portabilityScope: "global",
     });
 
-    expect(query).toHaveBeenCalledTimes(4);
-    expect(query.mock.calls[0][0]).toContain("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1");
-    expect(query.mock.calls[0][1]).toEqual(["c02c59dfbe512562f8c65c97", compiledPlan.cacheKey]);
-    const [sql, values] = query.mock.calls[1];
+    const deleteCall = query.mock.calls.find(([sql]) => String(sql).includes("DELETE FROM generated_workflow_plan_cache"));
+    expect(deleteCall?.[1]).toEqual(["c02c59dfbe512562f8c65c97", compiledPlan.cacheKey]);
+    const [sql, values] = query.mock.calls.find(([candidate]) => String(candidate).includes("INSERT INTO generated_workflow_plan_cache"))!;
     expect(sql).toContain("INSERT INTO generated_workflow_plan_cache");
     expect(sql).toContain("ON CONFLICT (cache_key) DO UPDATE");
     expect(sql).toContain("request_key      = COALESCE(EXCLUDED.request_key");
@@ -152,8 +187,8 @@ describe("generated workflow plan cache service", () => {
     expect(values[9]).toBe("1.0.0");
     expect(values[10]).toBe(JSON.stringify(workflow));
     expect(values[11]).toBe(JSON.stringify(compiledPlan));
-    expect(query.mock.calls[2][0]).toContain("INSERT INTO workflow_capabilities");
-    expect(query.mock.calls[3][0]).toContain("INSERT INTO workflow_capability_artifacts");
+    expect(query.mock.calls.some(([candidate]) => String(candidate).includes("INSERT INTO workflow_capabilities"))).toBe(false);
+    expect(query.mock.calls.some(([candidate]) => String(candidate).includes("INSERT INTO workflow_capability_artifacts"))).toBe(false);
   });
 
   it("replaces an existing canonical requestKey with the freshly compiled artifact", async () => {
@@ -166,9 +201,8 @@ describe("generated workflow plan cache service", () => {
       capabilityKey: "reddit_home_smoke",
     });
 
-    expect(query).toHaveBeenCalledTimes(4);
-    expect(query.mock.calls[0][0]).toContain("DELETE FROM generated_workflow_plan_cache WHERE request_key = $1");
-    expect(query.mock.calls[1][0]).toContain("INSERT INTO generated_workflow_plan_cache");
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("DELETE FROM generated_workflow_plan_cache"))).toBe(true);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO generated_workflow_plan_cache"))).toBe(true);
   });
 
   it("can promote the same candidate artifact for an existing requestKey", async () => {
@@ -189,8 +223,7 @@ describe("generated workflow plan cache service", () => {
       },
     });
 
-    expect(query).toHaveBeenCalledTimes(4);
-    const [sql, values] = query.mock.calls[1];
+    const [sql, values] = query.mock.calls.find(([candidate]) => String(candidate).includes("INSERT INTO generated_workflow_plan_cache"))!;
     expect(sql).toContain("ON CONFLICT (cache_key) DO UPDATE");
     expect(values[0]).toBe(compiledPlan.cacheKey);
     expect(values[5]).toBe("promoted");
@@ -209,7 +242,7 @@ describe("generated workflow plan cache service", () => {
       portabilityScope: "global",
     });
 
-    const [, values] = query.mock.calls[1];
+    const [, values] = query.mock.calls.find(([candidate]) => String(candidate).includes("INSERT INTO generated_workflow_plan_cache"))!;
     expect(JSON.parse(values[6] as string)).toEqual({
       intent: "reddit_account_health_scan",
       safetyClass: "read_only",
@@ -241,8 +274,8 @@ describe("generated workflow plan cache service", () => {
     expect(sql).toContain("UPDATE generated_workflow_plan_cache");
     expect(sql).toContain("SET hit_count = hit_count + 1, last_used_at = NOW()");
     expect(sql).toContain("WHERE cache_key = $1");
-    expect(sql).toContain("artifact_state = ANY($2::text[])");
-    expect(values).toEqual(["56d91a7aa0e90314241896a2", ["promoted"]]);
+    expect(sql).toContain("lifecycle_state_matches");
+    expect(values).toEqual(["56d91a7aa0e90314241896a2", false]);
   });
 
   it("rejects unsafe compiled plans before canonical cache persistence", async () => {
@@ -333,10 +366,10 @@ describe("generated workflow plan cache service", () => {
     const [sql, values] = query.mock.calls[0];
     expect(sql).toContain("WHERE cache_key = (");
     expect(sql).toContain("WHERE request_key = $1");
-    expect(sql).toContain("artifact_state = ANY($2::text[])");
+    expect(sql).toContain("lifecycle_state_matches");
     expect(sql).toContain("ORDER BY updated_at DESC");
     expect(sql).toContain("LIMIT 1");
-    expect(values).toEqual(["c02c59dfbe512562f8c65c97", ["promoted"]]);
+    expect(values).toEqual(["c02c59dfbe512562f8c65c97", false]);
   });
 
   it("lists only promoted portable capability candidates for the runtime platform", async () => {
@@ -357,8 +390,8 @@ describe("generated workflow plan cache service", () => {
     expect(result).toHaveLength(1);
     expect(result[0]?.cacheKey).toBe(row.cache_key);
     const [sql, values] = query.mock.calls[0];
-    expect(sql).toContain("artifact_state = 'promoted'");
-    expect(sql).toContain("portabilityScope");
+    expect(sql).toContain("lifecycle_state_matches");
+    expect(sql).toContain("'portable'");
     expect(sql).toContain("ORDER BY updated_at DESC");
     expect(values).toEqual(["android", 200]);
   });
@@ -375,8 +408,7 @@ describe("generated workflow plan cache service", () => {
     const [sql, values] = query.mock.calls[0];
     expect(sql).toContain("'capabilityKey'");
     expect(sql).toContain("'portable', true");
-    expect(sql).toContain("'portabilityScope', 'global'");
-    expect(sql).toContain("artifact_state = 'promoted'");
+    expect(sql).toContain("lifecycle_state_matches");
     expect(values).toEqual([
       "9298138bc0d3174e92fc526e",
       "remote_support_enable_screen_share",
@@ -392,8 +424,8 @@ describe("generated workflow plan cache service", () => {
 
     expect(result?.artifactState).toBe("candidate");
     const [sql, values] = query.mock.calls[0];
-    expect(sql).toContain("artifact_state = ANY($2::text[])");
-    expect(values).toEqual([row.cache_key, ["promoted", "candidate"]]);
+    expect(sql).toContain("lifecycle_state_matches");
+    expect(values).toEqual([row.cache_key, true]);
   });
 
   it("records successful artifact learning and applies the coverage promotion gate", async () => {
@@ -422,10 +454,8 @@ describe("generated workflow plan cache service", () => {
     });
 
     expect(result?.artifactState).toBe("promoted");
-    const [sql, values] = query.mock.calls[2];
+    const [sql, values] = query.mock.calls.find(([candidate]) => String(candidate).includes("/* recordGeneratedPlanCacheOutcome */"))!;
     expect(sql).toContain("recordGeneratedPlanCacheOutcome");
-    expect(sql).toContain("WHEN $2::int = 1");
-    expect(sql).toContain("THEN 'promoted'");
     expect(sql).toContain("workflowLearning");
     expect(values).toEqual([
       row.cache_key,
@@ -438,6 +468,7 @@ describe("generated workflow plan cache service", () => {
       5,
       5,
       false,
+      null,
     ]);
   });
 
@@ -467,9 +498,8 @@ describe("generated workflow plan cache service", () => {
     });
 
     expect(result?.artifactState).toBe("quarantined");
-    const [sql, values] = query.mock.calls[2];
-    expect(sql).toContain("WHEN $3::int = 1 AND artifact_state = 'promoted'");
-    expect(sql).toContain("THEN 'quarantined'");
+    const [sql, values] = query.mock.calls.find(([candidate]) => String(candidate).includes("/* recordGeneratedPlanCacheOutcome */"))!;
+    expect(sql).toContain("artifact_state = COALESCE");
     expect(values[1]).toBe(0);
     expect(values[2]).toBe(1);
     expect(values[3]).toBe("RECOVERY_BUDGET_EXCEEDED");

@@ -64,6 +64,60 @@ describe("generated workflow cache PostgreSQL contract", () => {
         [DEVICE_ID, "pg-cache-device", "pg-cache-imei"],
       );
       await pool.query(`
+        CREATE TABLE lifecycle_state_definitions (
+          lifecycle_key TEXT NOT NULL,
+          status TEXT NOT NULL,
+          initial BOOLEAN NOT NULL,
+          terminal BOOLEAN NOT NULL,
+          retryable BOOLEAN NOT NULL,
+          administrative BOOLEAN NOT NULL,
+          dispatchable BOOLEAN NOT NULL,
+          manual BOOLEAN NOT NULL,
+          stale_after_ms BIGINT,
+          stale_action_key TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          description TEXT,
+          metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+          PRIMARY KEY (lifecycle_key, status)
+        );
+        CREATE TABLE lifecycle_transitions (
+          lifecycle_key TEXT NOT NULL,
+          action_key TEXT NOT NULL,
+          from_status TEXT NOT NULL,
+          to_status TEXT NOT NULL,
+          manual_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+          external_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+          automatic BOOLEAN NOT NULL DEFAULT FALSE,
+          mark_started BOOLEAN NOT NULL DEFAULT FALSE,
+          mark_completed BOOLEAN NOT NULL DEFAULT FALSE,
+          clear_completed BOOLEAN NOT NULL DEFAULT FALSE,
+          clear_failure BOOLEAN NOT NULL DEFAULT FALSE,
+          reset_retry BOOLEAN NOT NULL DEFAULT FALSE,
+          metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+        );
+        CREATE TABLE lifecycle_resource_bindings (
+          resource_table REGCLASS PRIMARY KEY,
+          lifecycle_key TEXT NOT NULL,
+          state_column NAME NOT NULL
+        );
+      `);
+      await pool.query(fs.readFileSync(
+        path.join(repoRoot, "src/db/migrations/110_generic_lifecycle_queries.sql"),
+        "utf8",
+      ));
+      await pool.query(`
+        INSERT INTO lifecycle_state_definitions
+          (lifecycle_key, status, initial, terminal, retryable, administrative, dispatchable, manual, sort_order)
+        VALUES
+          ('generated_cache_fixture', 'candidate_fixture', TRUE, FALSE, FALSE, FALSE, FALSE, TRUE, 10),
+          ('generated_cache_fixture', 'executable_fixture', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 20);
+        INSERT INTO lifecycle_resource_bindings(resource_table, lifecycle_key, state_column)
+        VALUES (
+          'generated_workflow_plan_cache'::regclass,
+          'generated_cache_fixture',
+          'artifact_state'
+        );
+
         INSERT INTO workflow_runtime_contracts
           (contract_id, schema_version, allowed_actions, limits, metadata)
         VALUES (
@@ -100,7 +154,7 @@ describe("generated workflow cache PostgreSQL contract", () => {
     expect(persisted.status, JSON.stringify(persisted.body)).toBe(200);
     expect(persisted.body.data).toMatchObject({
       persisted: true,
-      artifactState: "promoted",
+      artifactState: "executable_fixture",
       requestKey: REQUEST_KEY,
       canExecuteFromCache: true,
     });
@@ -112,7 +166,7 @@ describe("generated workflow cache PostgreSQL contract", () => {
     expect(cached.body.data).toMatchObject({
       cacheKey,
       requestKey: REQUEST_KEY,
-      artifactState: "promoted",
+      artifactState: "executable_fixture",
       canonicalWorkflowId: "pg_generated_cache_contract_v1",
     });
 

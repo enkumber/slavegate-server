@@ -236,7 +236,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
                  'generated_workflow_plan_cache'::regclass,
                  artifact_state,
                  '{"dispatchable":true}'::jsonb,
-                 'artifact_state'
+                 'artifact_state'::name
                )
                OR (
                  $2::boolean
@@ -244,7 +244,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
                    'generated_workflow_plan_cache'::regclass,
                    artifact_state,
                    '{"initial":true}'::jsonb,
-                   'artifact_state'
+                   'artifact_state'::name
                  )
                )
              )`
@@ -255,7 +255,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
                  'generated_workflow_plan_cache'::regclass,
                  artifact_state,
                  '{"dispatchable":true}'::jsonb,
-                 'artifact_state'
+                 'artifact_state'::name
                )
                OR (
                  $2::boolean
@@ -263,7 +263,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
                    'generated_workflow_plan_cache'::regclass,
                    artifact_state,
                    '{"initial":true}'::jsonb,
-                   'artifact_state'
+                   'artifact_state'::name
                  )
                )
              )
@@ -1907,8 +1907,9 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
 
     if (dryRun) {
       const shouldPersist = persist === true;
+      let persistedArtifactState: string | null = null;
       if (shouldPersist && !resolvedCache) {
-        await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, requestKey, {
+        persistedArtifactState = await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, requestKey, {
           source: "generated_workflow_execute_dry_run",
           persisted: true,
         });
@@ -1925,7 +1926,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
           canonicalWorkflowId: resolvedCache?.canonicalWorkflowId ?? template.id,
           canonicalWorkflowVersion: resolvedCache?.canonicalWorkflowVersion ?? template.version,
           compiledPlanHash: resolvedCache?.compiledPlanHash ?? null,
-          artifactState: resolvedCache?.artifactState ?? (shouldPersist ? "promoted" : null),
+          artifactState: resolvedCache?.artifactState ?? persistedArtifactState,
           controlPlaneContext,
           ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist, compiledPlan }),
         },

@@ -83,7 +83,9 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
         ('phase1_task_fixture', 'running', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
         ('phase1_task_fixture', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 30),
         ('phase1_task_fixture', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40),
-        ('phase1_task_fixture', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50);
+        ('phase1_task_fixture', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50),
+        ('phase1_artifact_fixture', 'candidate_fixture', TRUE, FALSE, FALSE, FALSE, FALSE, TRUE, 10),
+        ('phase1_artifact_fixture', 'executable_fixture', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 20);
       INSERT INTO lifecycle_transitions
         (lifecycle_key, action_key, from_status, to_status, external_allowed,
          automatic, manual_allowed, mark_started, mark_completed)
@@ -110,6 +112,11 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
       SELECT configure_lifecycle_resource_binding('workflows'::regclass, 'phase1_workflow_fixture');
       SELECT configure_lifecycle_resource_binding('jobs'::regclass, 'phase1_job_fixture');
       SELECT configure_lifecycle_resource_binding('tasks'::regclass, 'phase1_task_fixture');
+      SELECT configure_lifecycle_resource_binding(
+        'generated_workflow_plan_cache'::regclass,
+        'phase1_artifact_fixture',
+        'artifact_state'
+      );
     `);
     await pool.query(`
       INSERT INTO workflow_runtime_contracts (
@@ -314,7 +321,7 @@ async function seedRows(): Promise<void> {
     `INSERT INTO generated_workflow_plan_cache
        (cache_key, request_key, template_id, platform, template_version, workflow, compiled_plan,
         canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, source_metadata, artifact_state)
-     VALUES ($1, $2, $3, 'reddit', $4, $5, $6, $3, $4, $7, $8, 'promoted')`,
+     VALUES ($1, $2, $3, 'reddit', $4, $5, $6, $3, $4, $7, $8, 'executable_fixture')`,
     [
       CACHE_KEY,
       REQUEST_KEY,

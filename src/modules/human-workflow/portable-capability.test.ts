@@ -47,7 +47,6 @@ describe("portable workflow capability identity", () => {
     const record = artifact();
     expect(portableCapabilityMetadata(record.workflow, record.sourceMetadata)).toEqual({
       portable: false,
-      portabilityScope: "contextual",
     });
   });
 
@@ -91,7 +90,7 @@ describe("portable workflow capability identity", () => {
     expect(portableCapabilityMetadata(bound.workflow, bound.sourceMetadata)).toEqual({
       capabilityKey: "remote_support_enable_screen_share",
       portable: false,
-      portabilityScope: "contextual",
+      portabilityScope: "device",
     });
   });
 });

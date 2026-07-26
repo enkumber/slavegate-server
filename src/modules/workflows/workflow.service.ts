@@ -487,7 +487,7 @@ export class WorkflowService {
     compiledPlan: GeneratedWorkflowCompiledPlan,
     requestKey: string | undefined,
     sourceMetadata: Record<string, unknown>
-  ): Promise<void> {
+  ): Promise<string> {
     const db = getDb();
     const client = await db.connect();
     try {
@@ -499,6 +499,7 @@ export class WorkflowService {
         sourceMetadata,
       });
       await client.query("COMMIT");
+      return artifactState;
     } catch (err) {
       await client.query("ROLLBACK").catch(() => {});
       throw err;
@@ -542,8 +543,6 @@ export class WorkflowService {
     sourceMetadataOrOptions: Record<string, unknown> | SaveGeneratedPlanCacheOptions = {}
   ): Promise<void> {
     const options = normalizeSaveGeneratedPlanCacheOptions(sourceMetadataOrOptions);
-    const artifactState = options.artifactState
-      ?? await this.resolveArtifactState(db, { initial: true });
     const validation = validateGeneratedWorkflowTemplate(template);
     if (!validation.template) {
       throw Object.assign(
@@ -557,6 +556,8 @@ export class WorkflowService {
         { code: "GENERATED_WORKFLOW_CACHE_LLM_BUDGET_UNSAFE" }
       );
     }
+    const artifactState = options.artifactState
+      ?? await this.resolveArtifactState(db, { initial: true });
     const compiledPlanHash = computeGeneratedWorkflowCompiledPlanHash(compiledPlan);
     const sourceMetadata = {
       intent: compiledPlan.metadata.intent,
@@ -590,13 +591,13 @@ export class WorkflowService {
                   'generated_workflow_plan_cache'::regclass,
                   generated_workflow_plan_cache.artifact_state,
                   '{"dispatchable":true}'::jsonb,
-                  'artifact_state'
+                  'artifact_state'::name
                 )
             AND lifecycle_state_matches(
                   'generated_workflow_plan_cache'::regclass,
                   EXCLUDED.artifact_state,
                   '{"initial":true}'::jsonb,
-                  'artifact_state'
+                  'artifact_state'::name
                 )
              THEN generated_workflow_plan_cache.artifact_state
            ELSE EXCLUDED.artifact_state
@@ -754,7 +755,7 @@ export class WorkflowService {
              'generated_workflow_plan_cache'::regclass,
              artifact_state,
              '{"dispatchable":true}'::jsonb,
-             'artifact_state'
+             'artifact_state'::name
            )
            OR (
              $2::boolean
@@ -762,7 +763,7 @@ export class WorkflowService {
                'generated_workflow_plan_cache'::regclass,
                artifact_state,
                '{"initial":true}'::jsonb,
-               'artifact_state'
+               'artifact_state'::name
              )
            )
          )
@@ -789,7 +790,7 @@ export class WorkflowService {
                'generated_workflow_plan_cache'::regclass,
                artifact_state,
                '{"dispatchable":true}'::jsonb,
-               'artifact_state'
+               'artifact_state'::name
              )
              OR (
                $2::boolean
@@ -797,7 +798,7 @@ export class WorkflowService {
                  'generated_workflow_plan_cache'::regclass,
                  artifact_state,
                  '{"initial":true}'::jsonb,
-                 'artifact_state'
+                 'artifact_state'::name
                )
              )
            )
@@ -823,7 +824,7 @@ export class WorkflowService {
                'generated_workflow_plan_cache'::regclass,
                artifact_state,
                '{"dispatchable":true}'::jsonb,
-               'artifact_state'
+               'artifact_state'::name
              )
          AND (
            LOWER(platform) = LOWER($1)
@@ -860,7 +861,7 @@ export class WorkflowService {
                'generated_workflow_plan_cache'::regclass,
                artifact_state,
                '{"dispatchable":true}'::jsonb,
-               'artifact_state'
+               'artifact_state'::name
              )
          AND (source_metadata ->> 'portable')::boolean IS TRUE
        RETURNING *`,

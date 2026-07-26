@@ -100,13 +100,13 @@ describe("data-driven workflow goal contracts", () => {
     expect(workflowGoalContractReason(workflow, contract)).toContain("disallowed effect");
   });
 
-  it("rejects a read-only contract that authorizes business mutation", () => {
+  it("leaves safety-class effect authorization to PostgreSQL policy", () => {
     const workflow = candidate();
     workflow.goalContract = {
       ...contract,
       allowedEffects: [...contract.allowedEffects, "business_mutation"],
     };
-    expect(workflowGoalContractReason(workflow)).toContain("read_only");
+    expect(workflowGoalContractReason(workflow)).toBeNull();
   });
 
   it("rejects malformed LLM goal contracts without throwing", () => {

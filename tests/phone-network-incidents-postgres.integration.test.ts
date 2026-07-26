@@ -84,7 +84,7 @@ describe("Phone Network incident and audit migration", () => {
     ]);
   });
 
-  it("applies reconciliation ownership and safety migration idempotently", async () => {
+  it("applies reconciliation ownership schema without product-semantic artifact rewrites", async () => {
     const baseSql = fs.readFileSync(
       path.join(repoRoot, "src/db/migrations/094_phone_network_incidents_and_audits.sql"),
       "utf8",
@@ -117,9 +117,9 @@ describe("Phone Network incident and audit migration", () => {
       ORDER BY cache_key
     `);
     expect(artifacts.rows).toEqual([
-      { cache_key: "navigation", artifact_state: "promoted", safety_class: "navigation" },
-      { cache_key: "read-only", artifact_state: "promoted", safety_class: "read_only" },
-      { cache_key: "unsafe", artifact_state: "quarantined", safety_class: null },
+      { cache_key: "navigation", artifact_state: "promoted", safety_class: null },
+      { cache_key: "read-only", artifact_state: "promoted", safety_class: null },
+      { cache_key: "unsafe", artifact_state: "promoted", safety_class: null },
     ]);
 
     const columns = await pool.query(`

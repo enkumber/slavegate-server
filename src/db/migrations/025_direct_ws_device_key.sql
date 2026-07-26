@@ -12,7 +12,7 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS device_key TEXT UNIQUE;
 
 -- Backfill: generate random keys for existing devices (hex 32 bytes)
 UPDATE devices
-SET device_key = encode(gen_random_bytes(32), 'hex')
+SET device_key = encode(public.gen_random_bytes(32), 'hex')
 WHERE device_key IS NULL;
 
 -- Index for fast lookup
