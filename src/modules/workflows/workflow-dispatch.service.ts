@@ -50,11 +50,11 @@ async function runPreWorkflowSteps(
           console.log(`[workflow-dispatch] Pre-step ${step.type}: ${result?.success ? "ok" : JSON.stringify(result)?.slice(0, 100)}`);
         } catch (e: any) {
           console.warn(`[workflow-dispatch] Pre-step ${step.type} timed out: ${e.message}`);
-          preResults[step.id ?? step.type] = { status: "timeout" };
+          preResults[step.id ?? step.type] = { outcome: "timeout" };
         }
       } else {
         console.warn(`[workflow-dispatch] Pre-step ${step.type}: device offline`);
-        preResults[step.id ?? step.type] = { status: "device_offline" };
+        preResults[step.id ?? step.type] = { outcome: "device_offline" };
       }
 
       // Insert a wait step after unlock for the device to settle
@@ -102,7 +102,6 @@ interface ActiveWorkflow {
   workflowRootId: string;
   workflowName: string;
   dispatchedAt: number;
-  status: "queued" | "dispatched";
 }
 const activeWorkflows = new Map<string, ActiveWorkflow>();
 
@@ -159,7 +158,12 @@ export async function dispatchWorkflow(params: DispatchParams) {
       throw new Error(`Failed to finish all-presteps workflow root: ${finished.reason ?? finished.decision}`);
     }
     const jobId = `pre-${Date.now()}`;
-    return { jobId, workflowName: workflow.name, status: "completed", preResults };
+    return {
+      jobId,
+      workflowName: workflow.name,
+      status: finished.root?.state ?? finished.decision,
+      preResults,
+    };
   }
 
   // 2. Create DB record for the remaining workflow steps
@@ -189,14 +193,14 @@ export async function dispatchWorkflow(params: DispatchParams) {
     },
   });
 
-  const status = dispatch.sent ? "dispatched" : dispatch.decision === "would_wait" ? "queued" : null;
-  if (!status) {
+  const accepted = dispatch.sent || dispatch.decision === "would_wait";
+  if (!accepted) {
     throw Object.assign(
       new Error(`Workflow dispatch failed (${dispatch.decision}${dispatch.reason ? `: ${dispatch.reason}` : ""})`),
       { code: "WORKFLOW_DISPATCH_FAILED" },
     );
   }
-  if (status === "queued") {
+  if (!dispatch.sent) {
     console.log(`[workflow-dispatch] Queued job ${job.jobId} behind the active device root`);
   }
 
@@ -207,14 +211,17 @@ export async function dispatchWorkflow(params: DispatchParams) {
     workflowRootId,
     workflowName: workflow.name,
     dispatchedAt: Date.now(),
-    status,
   });
 
   // Auto-cleanup after timeout
   const cleanupTimer = setTimeout(() => activeWorkflows.delete(job.jobId), timeoutMs + 30_000);
   cleanupTimer.unref?.();
 
-  return { jobId: job.jobId, workflowName: workflow.name, status };
+  return {
+    jobId: job.jobId,
+    workflowName: workflow.name,
+    status: dispatch.root?.state ?? dispatch.decision,
+  };
 }
 
 // ── Cancellation ────────────────────────────────────────────────────────────
@@ -234,14 +241,13 @@ export async function cancelWorkflow(jobId: string) {
   if (cancelled.decision === "terminal") {
     activeWorkflows.delete(jobId);
     console.log(`[workflow-dispatch] Cancelled queued job ${jobId} (${entry.workflowName})`);
-    return { jobId, status: "cancelled" };
+    return { jobId, status: cancelled.root?.state ?? cancelled.decision };
   }
 
   if (cancelled.reason === "root_not_queued") {
     // The queue pump may have dispatched after the original API response. Do
     // not send WORKFLOW_CANCEL: workflow_execute is a JOB wire operation and
     // that signal would falsely claim cancellation while releasing ownership.
-    entry.status = "dispatched";
     await deviceExecutionArbiter.recordRejectedEgress({
       deviceId: entry.deviceId,
       operationId: jobId,

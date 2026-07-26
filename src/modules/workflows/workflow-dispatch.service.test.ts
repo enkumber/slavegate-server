@@ -37,7 +37,10 @@ describe("workflow dispatch PNQ lifecycle", () => {
     vi.clearAllMocks();
     mocks.isDeviceOnline.mockReturnValue(true);
     mocks.observeAdmission.mockResolvedValue({ decision: "admitted" });
-    mocks.finishServerWorkflowRoot.mockResolvedValue({ decision: "terminal" });
+    mocks.finishServerWorkflowRoot.mockResolvedValue({
+      decision: "terminal",
+      root: { state: "completed" },
+    });
     mocks.recordRejectedEgress.mockResolvedValue(undefined);
     mocks.waitForResult.mockResolvedValue({ success: true });
   });
@@ -47,6 +50,7 @@ describe("workflow dispatch PNQ lifecycle", () => {
     mocks.sendDeviceExecutionJobToDevice.mockResolvedValueOnce({
       sent: true,
       decision: "dispatched",
+      root: { state: "dispatched" },
     });
 
     const result = await dispatchWorkflow({
@@ -56,7 +60,7 @@ describe("workflow dispatch PNQ lifecycle", () => {
 
     expect(result).toMatchObject({ status: "completed" });
     expect(mocks.finishServerWorkflowRoot).toHaveBeenCalledWith(expect.objectContaining({
-      status: "completed",
+      successful: true,
       reason: "all_preworkflow_steps_finished",
     }));
   });
@@ -68,6 +72,7 @@ describe("workflow dispatch PNQ lifecycle", () => {
       queued: true,
       decision: "would_wait",
       reason: "device_slot_already_active",
+      root: { state: "queued" },
     });
     mocks.cancelQueuedServerWorkflowRoot.mockResolvedValueOnce({
       decision: "terminal",
@@ -97,6 +102,7 @@ describe("workflow dispatch PNQ lifecycle", () => {
       sent: true,
       queued: false,
       decision: "dispatched",
+      root: { state: "dispatched" },
     });
     mocks.cancelQueuedServerWorkflowRoot.mockResolvedValueOnce({
       decision: "rejected",
