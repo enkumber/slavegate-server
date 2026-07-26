@@ -12,6 +12,16 @@ vi.mock("./workflow.service", () => ({
   },
 }));
 
+vi.mock("../lifecycle/lifecycle.service", () => ({
+  getResourceLifecycleExecutionStatusContract: vi.fn().mockResolvedValue({
+    initial: "queued",
+    active: "running",
+    succeeded: "completed",
+    failed: "failed",
+    cancelled: "cancelled",
+  }),
+}));
+
 vi.mock("../device-execution", () => ({
   deviceExecutionArbiter: {
     cancelQueuedPersistedWorkflow: mocks.cancelQueuedPersistedWorkflow,
@@ -25,6 +35,7 @@ const workflow = {
   id: "11111111-1111-4111-8111-111111111111",
   deviceId: "22222222-2222-4222-8222-222222222222",
   status: "queued",
+  lifecycleInitial: true,
 };
 
 describe("persisted workflow cancellation safety", () => {
@@ -71,7 +82,7 @@ describe("persisted workflow cancellation safety", () => {
   });
 
   it("rejects running cancellation without changing workflow or PNQ state", async () => {
-    mocks.get.mockResolvedValue({ ...workflow, status: "running" });
+    mocks.get.mockResolvedValue({ ...workflow, status: "running", lifecycleInitial: false });
 
     await expect(cancelPersistedWorkflowSafely(workflow.id)).rejects.toMatchObject({
       code: "CANCELLATION_UNSUPPORTED_IN_FLIGHT",

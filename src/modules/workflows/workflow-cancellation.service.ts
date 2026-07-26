@@ -1,6 +1,7 @@
 import { deviceExecutionArbiter } from "../device-execution";
 import { isDeviceExecutionEnforced } from "../device-execution/device-execution-authority";
 import { workflowService } from "./workflow.service";
+import { getResourceLifecycleExecutionStatusContract } from "../lifecycle/lifecycle.service";
 
 function cancellationError(code: string, message: string, status: number): Error & { code: string; status: number } {
   return Object.assign(new Error(message), { code, status });
@@ -31,12 +32,13 @@ async function auditUnsupportedInFlight(
  * and terminalized in one database transaction so neither side can win only
  * half of the cancellation race.
  */
-export async function cancelPersistedWorkflowSafely(workflowId: string): Promise<{ workflowId: string; status: "cancelled" }> {
+export async function cancelPersistedWorkflowSafely(workflowId: string): Promise<{ workflowId: string; status: string }> {
   const workflow = await workflowService.get(workflowId);
   if (!workflow) throw cancellationError("NOT_FOUND", "Workflow not found", 404);
   if (!workflow.deviceId) throw cancellationError("CANCELLATION_REJECTED", "Workflow has no device", 409);
+  const lifecycleStatusContract = await getResourceLifecycleExecutionStatusContract("workflows");
 
-  if (workflow.status !== "queued") {
+  if (workflow.lifecycleInitial !== true) {
     await auditUnsupportedInFlight(workflowId, workflow.deviceId, workflow.status);
     throw cancellationError(
       "CANCELLATION_UNSUPPORTED_IN_FLIGHT",
@@ -54,12 +56,12 @@ export async function cancelPersistedWorkflowSafely(workflowId: string): Promise
       deviceId: workflow.deviceId,
       rootKind: "server_workflow",
       externalId: workflowId,
-      status: "cancelled",
+      status: lifecycleStatusContract.cancelled,
       actor: "workflow_api.cancel.observe_only",
       reason: "api_cancelled_before_dispatch",
       metadata: { authorityMode: "observe_only" },
     });
-    return { workflowId, status: "cancelled" };
+    return { workflowId, status: lifecycleStatusContract.cancelled };
   }
 
   const pnq = await deviceExecutionArbiter.cancelQueuedPersistedWorkflow({
@@ -77,5 +79,5 @@ export async function cancelPersistedWorkflowSafely(workflowId: string): Promise
       409,
     );
   }
-  return { workflowId, status: "cancelled" };
+  return { workflowId, status: lifecycleStatusContract.cancelled };
 }
