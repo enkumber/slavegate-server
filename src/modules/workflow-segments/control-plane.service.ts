@@ -413,7 +413,7 @@ export class WorkflowSegmentControlPlaneService {
     };
   }
 
-  async validate(entityType: EntityType, key: string, version: string, actor?: string | null): Promise<void> {
+  async validate(entityType: EntityType, key: string, version: string, actor?: string | null): Promise<string> {
     const db = getDb();
     const transition = await transitionVersion(entityType, key, version, {
       targetTerminal: false,
@@ -435,6 +435,7 @@ export class WorkflowSegmentControlPlaneService {
       toStatus: transition.toStatus,
       actor,
     });
+    return transition.toStatus;
   }
 
   async recordCanary(
@@ -443,7 +444,7 @@ export class WorkflowSegmentControlPlaneService {
     version: string,
     evidence: Record<string, unknown>,
     actor?: string | null,
-  ): Promise<void> {
+  ): Promise<string> {
     if (
       evidence.passed !== true
       || evidence.postconditionVerified !== true
@@ -537,9 +538,10 @@ export class WorkflowSegmentControlPlaneService {
       actor,
       evidence,
     });
+    return String(result.rows[0].lifecycle_status);
   }
 
-  async promote(entityType: EntityType, key: string, version: string, actor?: string | null): Promise<void> {
+  async promote(entityType: EntityType, key: string, version: string, actor?: string | null): Promise<string> {
     const { table, keyColumn } = resourceSpec(entityType);
     const db = getDb();
     const client = await db.connect();
@@ -634,6 +636,7 @@ export class WorkflowSegmentControlPlaneService {
         actor,
       }, client);
       await client.query("COMMIT");
+      return promoted.toStatus;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => {});
       throw error;
@@ -642,7 +645,7 @@ export class WorkflowSegmentControlPlaneService {
     }
   }
 
-  async rollback(entityType: EntityType, key: string, toVersion: string, actor?: string | null): Promise<void> {
+  async rollback(entityType: EntityType, key: string, toVersion: string, actor?: string | null): Promise<string> {
     const { table, keyColumn } = resourceSpec(entityType);
     const db = getDb();
     const client = await db.connect();
@@ -721,6 +724,7 @@ export class WorkflowSegmentControlPlaneService {
         actor,
       }, client);
       await client.query("COMMIT");
+      return target.toStatus;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => {});
       throw error;

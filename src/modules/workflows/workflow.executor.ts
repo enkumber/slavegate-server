@@ -1622,7 +1622,7 @@ async function executeBatchSegment(
     return;
   }
 
-  // status === "failed" or "timeout": abort the workflow
+  // Any non-partial terminal batch result aborts the workflow.
   // Save batch state for retry (resume from failed step on next attempt)
   const failedGlobalIndex = stepIndex + (failedStepIdx >= 0 ? failedStepIdx : 0);
   executionStats(checkpoint).failedSteps++;
@@ -1834,8 +1834,7 @@ function evaluateCondition(step: ConditionStep, checkpoint: WorkflowCheckpoint):
     }
 
     case "account_warmup": {
-      // hbeParams.drift is a DriftProfile object: { phase: "warmup"|"growth"|"mature" }
-      // NOT a flat "driftPhase" key.
+      // hbeParams.drift is a DriftProfile object, not a flat phase key.
       const drift = (checkpoint.hbeParams as Record<string, unknown>)?.["drift"] as Record<string, unknown> | undefined;
       return drift?.["phase"] === "warmup";
     }

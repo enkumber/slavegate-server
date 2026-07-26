@@ -206,6 +206,21 @@ class ResearchService {
     return result.rows.map(this.rowToJob);
   }
 
+  async getJobsByConfiguredStatus(status: string, limit: number = 50): Promise<ResearchJob[]> {
+    const result = await getDb().query(
+      `SELECT job.*
+         FROM research_jobs job
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key=job.lifecycle_key
+          AND state.status=job.status
+        WHERE state.status=$1
+        ORDER BY job.priority DESC, job.created_at ASC
+        LIMIT $2`,
+      [status, limit],
+    );
+    return result.rows.map(this.rowToJob);
+  }
+
   /**
    * Schedule a job for execution on a device.
    * Called by Kraken when assigning work.

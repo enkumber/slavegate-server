@@ -755,7 +755,6 @@ router.post("/devices/:id/block", requireAuth, async (req, res) => {
   const { reason = "Blocked by admin" } = req.body as { reason?: string };
   const device = await devicesService.getDevice(req.params.id);
   if (!device) return res.status(404).json({ ok: false, error: "Not found" });
-  // Set status=revoked — next HELLO will receive HELLO_REJECT[BLOCKED]
   await authService.revokeDevice(req.params.id);
   console.log(`[admin] Device ${req.params.id} blocked (revoked): ${reason}`);
   res.json({ ok: true, data: { blocked: true } });
@@ -771,7 +770,6 @@ router.post("/devices/:id/revoke", async (req, res) => {
   const device = await devicesService.getDevice(req.params.id);
   if (!device) return res.status(404).json({ ok: false, error: "Not found" });
 
-  // Sets status='revoked' — device gets HELLO_REJECT[BLOCKED] on next connect
   await authService.revokeDevice(req.params.id);
 
   res.json({ ok: true, data: { revoked: true } });
@@ -779,7 +777,7 @@ router.post("/devices/:id/revoke", async (req, res) => {
 
 router.delete("/devices/:id", async (req, res) => {
   try {
-    // Revoke first (sets status='revoked'), then hard-delete
+    // Revoke first so connected agents are rejected before hard deletion.
     await authService.revokeDevice(req.params.id).catch(() => {});
 
     const deleted = await devicesService.deleteDevice(req.params.id);
@@ -1027,7 +1025,8 @@ router.post("/jobs", async (req, res) => {
     // Audit log INSERT is done by dispatcherService.dispatch() — do NOT insert here.
     // Double INSERT was a bug: dispatcher writes the row; ws.server.handleJobResult() UPDATEs it.
 
-    res.status(202).json({ ok: true, data: { jobId, status: "queued" } });
+    const job = await dispatcherService.getJob(jobId);
+    res.status(202).json({ ok: true, data: { jobId, status: job?.status } });
   } catch (err) {
     res.status(400).json({ ok: false, error: (err as Error).message });
   }
@@ -1272,13 +1271,13 @@ for (const entity of ["segments", "compositions"] as const) {
   const entityType = entity === "segments" ? "segment" : "composition";
   router.post(`/workflow-${entity}/:key/:version/validate`, requireAdminAuth, async (req, res) => {
     try {
-      await workflowSegmentControlPlaneService.validate(
+      const status = await workflowSegmentControlPlaneService.validate(
         entityType,
         req.params.key,
         req.params.version,
         (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId ?? null,
       );
-      res.json({ ok: true, data: { status: "candidate" } });
+      res.json({ ok: true, data: { status } });
     } catch (err) {
       const typed = err as Error & { status?: number; code?: string };
       res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
@@ -1286,14 +1285,14 @@ for (const entity of ["segments", "compositions"] as const) {
   });
   router.post(`/workflow-${entity}/:key/:version/canary`, requireAdminAuth, async (req, res) => {
     try {
-      await workflowSegmentControlPlaneService.recordCanary(
+      const status = await workflowSegmentControlPlaneService.recordCanary(
         entityType,
         req.params.key,
         req.params.version,
         (req.body?.evidence && typeof req.body.evidence === "object" ? req.body.evidence : {}) as Record<string, unknown>,
         (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId ?? null,
       );
-      res.json({ ok: true, data: { status: "candidate", canaryRecorded: true } });
+      res.json({ ok: true, data: { status, canaryRecorded: true } });
     } catch (err) {
       const typed = err as Error & { status?: number; code?: string };
       res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
@@ -1301,13 +1300,13 @@ for (const entity of ["segments", "compositions"] as const) {
   });
   router.post(`/workflow-${entity}/:key/:version/promote`, requireAdminAuth, async (req, res) => {
     try {
-      await workflowSegmentControlPlaneService.promote(
+      const status = await workflowSegmentControlPlaneService.promote(
         entityType,
         req.params.key,
         req.params.version,
         (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId ?? null,
       );
-      res.json({ ok: true, data: { status: "promoted" } });
+      res.json({ ok: true, data: { status } });
     } catch (err) {
       const typed = err as Error & { status?: number; code?: string };
       res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
@@ -1318,13 +1317,13 @@ for (const entity of ["segments", "compositions"] as const) {
       if (typeof req.body?.toVersion !== "string") {
         return res.status(400).json({ ok: false, code: "ROLLBACK_VERSION_REQUIRED", error: "toVersion is required" });
       }
-      await workflowSegmentControlPlaneService.rollback(
+      const status = await workflowSegmentControlPlaneService.rollback(
         entityType,
         req.params.key,
         req.body.toVersion,
         (req as any).dashboardUser?.sub ?? (req as any).authPrincipal?.userId ?? null,
       );
-      res.json({ ok: true, data: { status: "promoted", version: req.body.toVersion } });
+      res.json({ ok: true, data: { status, version: req.body.toVersion } });
     } catch (err) {
       const typed = err as Error & { status?: number; code?: string };
       res.status(typed.status ?? 500).json({ ok: false, code: typed.code, error: typed.message });
@@ -2132,13 +2131,30 @@ async function requireDeviceModelConfigAuth(req: Request, res: Response, next: N
 
   try {
     const result = await getDb().query(
-      `SELECT id, device_key, status FROM devices WHERE id = $1`,
+      `SELECT device.id, device.device_key, device.status,
+              state.initial, state.administrative,
+              (state.status IS NOT NULL) AS lifecycle_known
+         FROM devices device
+         LEFT JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table=to_regclass('devices')
+          AND binding.state_column='status'
+         LEFT JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key=binding.lifecycle_key
+          AND state.status=device.status
+        WHERE device.id = $1`,
       [deviceId]
     );
-    const row = result.rows[0] as { id: string; device_key: string | null; status: string } | undefined;
-    const approved = row && ["approved", "online", "offline"].includes(row.status);
+    const row = result.rows[0] as {
+      id: string;
+      device_key: string | null;
+      status: string;
+      initial: boolean;
+      administrative: boolean;
+      lifecycle_known: boolean;
+    } | undefined;
+    const approved = row?.lifecycle_known && !row.initial && !row.administrative;
     if (!row || !approved || !row.device_key || !safeEqualString(deviceKey, row.device_key)) {
-      res.status(row?.status === "blocked" ? 403 : 401).json({ ok: false, error: "Device not authorized" });
+      res.status(row?.administrative ? 403 : 401).json({ ok: false, error: "Device not authorized" });
       return;
     }
     (req as any).deviceId = row.id;
@@ -2453,7 +2469,7 @@ router.post("/alerts/webhook", async (req, res) => {
       const name     = alert.labels.alertname ?? "UnknownAlert";
       const severity = alert.labels.severity ?? "info";
       const summary  = alert.annotations.summary ?? name;
-      const status   = alert.status === "resolved" ? "✅ RESOLVED" : (severity === "critical" ? "🔴 CRITICAL" : "⚠️ WARNING");
+      const status = `[${alert.status.toUpperCase()}][${severity.toUpperCase()}]`;
       // Forward to Telegram via alerting.send() bypass (direct Telegram call)
       const text = `${status} *${name}*\n${summary}\n${alert.annotations.description ?? ""}`.trim();
       // Use internal sendTelegram directly — avoids AlertType enum mismatch
@@ -2680,9 +2696,9 @@ router.get("/health", (_req, res) => {
 router.get("/research-jobs", requireAuth, async (req, res) => {
   try {
     const { researchService } = await import("../modules/research/research.service");
-    if (req.query.status === "pending") {
+    if (typeof req.query.status === "string" && req.query.status.trim()) {
       const limit = parseInt(req.query.limit as string) || 50;
-      const jobs = await researchService.getPendingJobs(limit);
+      const jobs = await researchService.getJobsByConfiguredStatus(req.query.status.trim(), limit);
       return res.json({ ok: true, data: jobs });
     }
     const stats = await researchService.getStats();
