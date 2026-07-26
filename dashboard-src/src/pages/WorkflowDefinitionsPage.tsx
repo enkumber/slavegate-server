@@ -8,6 +8,7 @@ import {
   WorkflowDefinitionRollbackPreviewResponse,
   WorkflowDefinitionVersionEvent,
 } from "../api/agency";
+import { statusTone as genericStatusTone } from "../utils/statusPresentation";
 
 function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gray" | "red" | "blue" }) {
   const palette = {
@@ -24,11 +25,13 @@ function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gra
   );
 }
 
-function statusTone(status: string): "green" | "yellow" | "gray" | "red" {
-  if (status === "active") return "green";
-  if (status === "draft") return "yellow";
-  if (status === "deprecated") return "red";
-  return "gray";
+function statusTone(definition: WorkflowDefinition): "green" | "yellow" | "gray" | "red" {
+  if (definition.statusCapabilities.terminal) {
+    return definition.statusCapabilities.retryable ? "red" : "gray";
+  }
+  if (definition.statusCapabilities.dispatchable) return "green";
+  const tone = genericStatusTone(definition.status);
+  return tone === "blue" ? "gray" : tone;
 }
 
 function shortList(values: unknown[], limit = 3) {
@@ -57,13 +60,13 @@ function DefinitionCard({ definition }: { definition: WorkflowDefinition }) {
           <div style={{ color: "#e5e7eb", fontSize: "14px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{definition.title}</div>
           <div style={{ color: "#666", fontSize: "11px", marginTop: "3px" }}>{definition.key}@v{definition.version}</div>
         </div>
-        <Badge label={definition.status} tone={statusTone(definition.status)} />
+        <Badge label={definition.status} tone={statusTone(definition)} />
       </div>
       <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "10px" }}>
         <Badge label={definition.platform} tone="blue" />
         <Badge label={definition.intent} tone="gray" />
         <Badge label={definition.source} tone="gray" />
-        <Badge label={`promotion: ${definition.promotion?.state ?? "review_only"}`} tone={definition.promotion?.state === "limited_reuse" ? "green" : definition.promotion?.state === "revoked" ? "red" : "gray"} />
+        <Badge label={`promotion: ${definition.promotion?.state ?? "-"}`} tone={definition.promotion?.stateCapabilities?.terminal ? "red" : definition.promotion?.reusable ? "green" : "gray"} />
         <Badge label={`confidence: ${Math.round(numberValue(definition.promotion?.confidence) * 100)}%`} tone="blue" />
       </div>
       <div style={{ color: "#aaa", fontSize: "12px", lineHeight: 1.55, marginBottom: "10px" }}>{definition.goal}</div>
@@ -256,7 +259,6 @@ export function WorkflowDefinitionsPage() {
     setError(null);
     try {
       const response = await agencyApi.workflowDefinitions.createVersion(selected.id, {
-        status: "draft",
         title: `${selected.title} v${selected.version + 1}`,
         note: promotionNote || "Manual dashboard version",
       });
@@ -408,8 +410,8 @@ export function WorkflowDefinitionsPage() {
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginBottom: "12px" }}>
               <input value={promotionScope} onChange={(event) => setPromotionScope(event.target.value)} placeholder="scope, e.g. definition:..." style={{ background: "#0a0a0a", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", minWidth: "260px" }} />
               <input value={promotionNote} onChange={(event) => setPromotionNote(event.target.value)} placeholder="review note" style={{ background: "#0a0a0a", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", minWidth: "260px" }} />
-              <button onClick={() => void promoteSelected()} disabled={promotionBusy || selected.promotion?.state === "limited_reuse"} style={{ background: selected.promotion?.state === "limited_reuse" ? "#1f1f1f" : "#166534", border: "1px solid #15803d", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.promotion?.state === "limited_reuse" ? "not-allowed" : "pointer" }}>Promote limited</button>
-              <button onClick={() => void revokeSelected()} disabled={promotionBusy || selected.promotion?.state === "revoked"} style={{ background: selected.promotion?.state === "revoked" ? "#1f1f1f" : "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.promotion?.state === "revoked" ? "not-allowed" : "pointer" }}>Revoke</button>
+              <button onClick={() => void promoteSelected()} disabled={promotionBusy || selected.promotion.reusable} style={{ background: selected.promotion.reusable ? "#1f1f1f" : "#166534", border: "1px solid #15803d", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.promotion.reusable ? "not-allowed" : "pointer" }}>Promote limited</button>
+              <button onClick={() => void revokeSelected()} disabled={promotionBusy || selected.promotion.stateCapabilities.terminal} style={{ background: selected.promotion.stateCapabilities.terminal ? "#1f1f1f" : "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.promotion.stateCapabilities.terminal ? "not-allowed" : "pointer" }}>Revoke</button>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(180px, 1fr))", gap: "8px", marginBottom: "12px" }}>
               <div style={{ background: "#0a0a0a", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
@@ -471,9 +473,9 @@ export function WorkflowDefinitionsPage() {
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginBottom: "10px" }}>
                 <button onClick={() => void createVersionSelected()} disabled={promotionBusy} style={{ background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}>Create draft version</button>
-                <button onClick={() => void lifecycleSelected("activate")} disabled={promotionBusy || selected.status === "active"} style={{ background: "#0f3323", border: "1px solid #166534", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.status === "active" ? "not-allowed" : "pointer" }}>Activate</button>
-                <button onClick={() => void lifecycleSelected("deprecate")} disabled={promotionBusy || selected.status === "deprecated"} style={{ background: "#332b12", border: "1px solid #854d0e", color: "#fef3c7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.status === "deprecated" ? "not-allowed" : "pointer" }}>Deprecate</button>
-                <button onClick={() => void lifecycleSelected("archive")} disabled={promotionBusy || selected.status === "archived"} style={{ background: "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.status === "archived" ? "not-allowed" : "pointer" }}>Archive</button>
+                <button onClick={() => void lifecycleSelected("activate")} disabled={promotionBusy} style={{ background: "#0f3323", border: "1px solid #166534", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}>Activate</button>
+                <button onClick={() => void lifecycleSelected("deprecate")} disabled={promotionBusy} style={{ background: "#332b12", border: "1px solid #854d0e", color: "#fef3c7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}>Deprecate</button>
+                <button onClick={() => void lifecycleSelected("archive")} disabled={promotionBusy} style={{ background: "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}>Archive</button>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(160px, 1fr))", gap: "8px", marginBottom: "10px" }}>
                 <div style={{ background: "#050505", border: "1px solid #1f1f1f", borderRadius: "6px", padding: "10px" }}>
@@ -502,7 +504,7 @@ export function WorkflowDefinitionsPage() {
                     {versions.slice(0, 5).map((version) => (
                       <div key={version.id} style={{ display: "flex", justifyContent: "space-between", gap: "8px", background: "#050505", border: "1px solid #1f1f1f", borderRadius: "6px", padding: "8px" }}>
                         <span style={{ color: "#ddd", fontSize: "12px" }}>{version.key}@v{version.version}</span>
-                        <Badge label={version.status} tone={statusTone(version.status)} />
+                        <Badge label={version.status} tone={statusTone(version)} />
                       </div>
                     ))}
                   </div>

@@ -61,6 +61,7 @@ export interface Task {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  completedAt?: string | null;
   account_username?: string;
   account_platform?: string;
   device_name?: string;
@@ -221,6 +222,7 @@ export interface AgencyWorkflowRun {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  completedAt?: string | null;
 }
 
 export interface WorkflowRunTimelineStep {
@@ -720,6 +722,14 @@ export interface WorkflowDefinition {
   key: string;
   version: number;
   status: string;
+  statusCapabilities: {
+    initial: boolean;
+    terminal: boolean;
+    retryable: boolean;
+    administrative: boolean;
+    dispatchable: boolean;
+    manual: boolean;
+  };
   title: string;
   description: string | null;
   platform: string;
@@ -741,6 +751,14 @@ export interface WorkflowDefinition {
   promotionHardening: Record<string, unknown>;
   promotion: {
     state: string;
+    stateCapabilities: {
+      initial: boolean;
+      terminal: boolean;
+      retryable: boolean;
+      administrative: boolean;
+      dispatchable: boolean;
+      manual: boolean;
+    };
     scope: string | null;
     note: string | null;
     promotedBy: string | null;

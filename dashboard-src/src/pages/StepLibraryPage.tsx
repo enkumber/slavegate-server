@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
 import { agencyApi, StepLibraryEntry, StepLibraryPromotionEvent } from "../api/agency";
+import { statusLabel, statusTone } from "../utils/statusPresentation";
 
 function formatDate(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString() : "-";
@@ -32,6 +33,11 @@ function listPreview(items: string[]) {
 
 function formatPercent(value: number | null | undefined) {
   return typeof value === "number" ? `${Math.round(value * 100)}%` : "-";
+}
+
+function badgeTone(value: unknown): "green" | "yellow" | "gray" | "red" {
+  const tone = statusTone(value);
+  return tone === "blue" ? "gray" : tone;
 }
 
 export function StepLibraryPage() {
@@ -148,10 +154,10 @@ export function StepLibraryPage() {
     }
   };
 
-  const validatedCount = entries.filter((entry) => entry.status === "validated_step").length;
+  const validatedCount = entries.filter((entry) => Boolean(entry.validatedAt)).length;
   const compilerEligibleCount = entries.filter((entry) => entry.compilerEligible).length;
-  const reviewReadyCount = entries.filter((entry) => entry.readiness?.state === "review_ready").length;
-  const limitedReuseCount = entries.filter((entry) => entry.libraryState === "limited_reuse").length;
+  const reviewReadyCount = entries.filter((entry) => entry.readiness.score >= entry.readiness.threshold).length;
+  const limitedReuseCount = entries.filter((entry) => entry.reusable).length;
 
   return (
     <AgencyLayout currentRoute="#/agency/step-library">
@@ -238,11 +244,11 @@ export function StepLibraryPage() {
                 <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
                   <Badge label="Validated" tone="green" />
                   <Badge
-                    label={entry.libraryState === "limited_reuse" ? "Limited" : entry.compilerEligible ? "Compiler" : "Review-only"}
-                    tone={entry.libraryState === "limited_reuse" || entry.compilerEligible ? "green" : "yellow"}
+                    label={statusLabel(entry.libraryState)}
+                    tone={entry.reusable || entry.compilerEligible ? "green" : "yellow"}
                   />
                 </div>
-                <div style={{ color: entry.readiness?.state === "review_ready" ? "#60a5fa" : "#fbbf24", fontSize: "12px" }}>
+                <div style={{ color: entry.readiness.score >= entry.readiness.threshold ? "#60a5fa" : "#fbbf24", fontSize: "12px" }}>
                   {formatPercent(entry.readiness?.score ?? entry.confidence)}
                 </div>
                 <div style={{ color: "#aaa", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.reuseScope}</div>
@@ -261,10 +267,10 @@ export function StepLibraryPage() {
                   <div style={{ color: "#777", fontSize: "12px" }}>{selected.id}</div>
                 </div>
                 <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end" }}>
-                  <Badge label={selected.libraryState === "review_only" ? "Review-only" : selected.libraryState} tone="yellow" />
+                  <Badge label={statusLabel(selected.libraryState)} tone={badgeTone(selected.libraryState)} />
                   <Badge
-                    label={selected.readiness?.state === "limited_reuse_ready" ? "Limited ready" : selected.readiness?.state === "review_ready" ? "Review ready" : "Needs review"}
-                    tone={selected.readiness?.state === "needs_review" ? "yellow" : "green"}
+                    label={statusLabel(selected.readiness.state)}
+                    tone={selected.readiness.score >= selected.readiness.threshold ? "green" : "yellow"}
                   />
                   <Badge label={selected.reusable ? "Reusable" : "Not reusable"} tone={selected.reusable ? "green" : "gray"} />
                   <Badge label={selected.compilerEligible ? "Compiler eligible" : "Compiler disabled"} tone={selected.compilerEligible ? "green" : "gray"} />
@@ -325,15 +331,15 @@ export function StepLibraryPage() {
                 <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                   <button
                     onClick={() => void promoteLimited()}
-                    disabled={promotionBusy || selected.libraryState === "limited_reuse"}
-                    style={{ background: selected.libraryState === "limited_reuse" ? "#1f1f1f" : "#166534", border: "1px solid #15803d", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.libraryState === "limited_reuse" ? "not-allowed" : "pointer" }}
+                    disabled={promotionBusy || selected.reusable}
+                    style={{ background: selected.reusable ? "#1f1f1f" : "#166534", border: "1px solid #15803d", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.reusable ? "not-allowed" : "pointer" }}
                   >
                     Promote limited
                   </button>
                   <button
                     onClick={() => void revokeLimited()}
-                    disabled={promotionBusy || selected.libraryState === "revoked"}
-                    style={{ background: selected.libraryState === "revoked" ? "#1f1f1f" : "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.libraryState === "revoked" ? "not-allowed" : "pointer" }}
+                    disabled={promotionBusy || !selected.reusable}
+                    style={{ background: !selected.reusable ? "#1f1f1f" : "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || !selected.reusable ? "not-allowed" : "pointer" }}
                   >
                     Revoke
                   </button>

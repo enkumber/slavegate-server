@@ -7,6 +7,7 @@
 import { useState, useRef, useEffect } from "react";
 import { api } from "../api/client";
 import type { Device } from "../../../shared/protocol/api-types";
+import { statusLabel, statusStyle } from "../utils/statusPresentation";
 
 type DeviceCardHealth = NonNullable<Device["health"]> & {
   publicIp?: string;
@@ -28,25 +29,9 @@ interface Props {
   onAccountsClick?: (device: Device) => void;  // open accounts modal
 }
 
-const STATUS_COLOR: Record<string, string> = {
-  online:      "#22c55e",
-  offline:     "#6b7280",
-  approved:    "#3b82f6",
-  pending:     "#f59e0b",
-  maintenance: "#ef4444",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  online:      "Online",
-  offline:     "Offline",
-  approved:    "Approved",
-  pending:     "Pending",
-  maintenance: "Maintenance",
-};
-
 export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, onHumanWorkflow, onRevoke, onDelete, onRenamed, onOtaPush, onAccountsClick }: Props) {
   const health = device.health as DeviceCardHealth | undefined;
-  const statusColor = STATUS_COLOR[device.status] ?? "#6b7280";
+  const statusColor = statusStyle(device.status).color;
 
   // ─── Inline rename state ──────────────────────────────────────────────────
   const [editing, setEditing]   = useState(false);
@@ -108,7 +93,7 @@ export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, on
           <span style={{
             width: "10px", height: "10px", borderRadius: "50%", flexShrink: 0,
             background: statusColor, display: "inline-block",
-            boxShadow: device.status === "online" ? `0 0 6px ${statusColor}` : "none",
+            boxShadow: device.statusCapabilities.dispatchable ? `0 0 6px ${statusColor}` : "none",
           }} />
 
           {/* ── Inline rename ────────────────────────────────────────────── */}
@@ -159,7 +144,7 @@ export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, on
           )}
         </div>
         <span style={{ fontSize: "11px", color: "#94a3b8", flexShrink: 0, marginLeft: "8px" }}>
-          {STATUS_LABEL[device.status]}
+          {statusLabel(device.status)}
         </span>
       </div>
 
@@ -227,27 +212,27 @@ export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, on
 
       {/* Actions */}
       <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-        {device.status === "pending" && onApprove && (
+        {device.statusCapabilities.initial && onApprove && (
           <button onClick={() => onApprove(device.id)} style={btnStyle("#22c55e")}>
             Approve
           </button>
         )}
-        {device.status === "online" && onDispatchJob && (
+        {device.statusCapabilities.dispatchable && onDispatchJob && (
           <button onClick={() => onDispatchJob(device)} style={btnStyle("#3b82f6")}>
             Dispatch Job
           </button>
         )}
-        {device.status === "online" && onHumanWorkflow && (
+        {device.statusCapabilities.dispatchable && onHumanWorkflow && (
           <button onClick={() => onHumanWorkflow(device)} style={btnStyle("#0ea5e9")}>
             AI Workflow
           </button>
         )}
-        {device.status === "online" && onOtaPush && (
+        {device.statusCapabilities.dispatchable && onOtaPush && (
           <button onClick={() => onOtaPush(device.id)} style={btnStyle("#8b5cf6")}>
             📦 OTA
           </button>
         )}
-        {device.status !== "maintenance" && onRevoke && (
+        {!device.statusCapabilities.administrative && onRevoke && (
           <button
             onClick={() => { if (confirm(`Revoke ${device.friendlyName}?`)) onRevoke(device.id); }}
             style={btnStyle("#ef4444")}

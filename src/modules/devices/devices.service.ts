@@ -14,6 +14,22 @@ import type {
 } from "../../../shared/protocol/api-types";
 import { getResourceLifecycleTransitionToState } from "../lifecycle/lifecycle.service";
 
+const deviceLifecycleSelect = `
+  SELECT device.*,
+         state.initial AS status_initial,
+         state.terminal AS status_terminal,
+         state.retryable AS status_retryable,
+         state.administrative AS status_administrative,
+         state.dispatchable AS status_dispatchable,
+         state.manual AS status_manual
+    FROM devices device
+    JOIN lifecycle_resource_bindings binding
+      ON binding.resource_table = 'devices'::regclass
+     AND binding.state_column = 'status'::name
+    JOIN lifecycle_state_definitions state
+      ON state.lifecycle_key = binding.lifecycle_key
+     AND state.status = device.status`;
+
 export class DevicesService {
   // ─── Queries ──────────────────────────────────────────────────────────────
 
@@ -21,15 +37,15 @@ export class DevicesService {
     const db = getDb();
     const offset = (page - 1) * pageSize;
 
-    const whereClause = statusFilter ? `WHERE status = $3` : "";
+    const whereClause = statusFilter ? `WHERE device.status = $3` : "";
     const params      = statusFilter
       ? [pageSize, offset, statusFilter]
       : [pageSize, offset];
 
     const [rows, countRow] = await Promise.all([
       db.query(
-        `SELECT * FROM devices ${whereClause}
-         ORDER BY location_id NULLS LAST, friendly_name ASC LIMIT $1 OFFSET $2`,
+        `${deviceLifecycleSelect} ${whereClause}
+         ORDER BY device.location_id NULLS LAST, device.friendly_name ASC LIMIT $1 OFFSET $2`,
         params
       ),
       db.query(
@@ -49,10 +65,10 @@ export class DevicesService {
   async listDevicesByLocation(): Promise<Record<string, Device[]>> {
     const db = getDb();
     const rows = await db.query(
-      `SELECT * FROM devices
+      `${deviceLifecycleSelect}
        WHERE NOT lifecycle_state_matches(
          'devices'::regclass,
-         status,
+         device.status,
          '{"administrative":true}'::jsonb
        )
        ORDER BY location_id NULLS LAST, friendly_name`
@@ -69,7 +85,7 @@ export class DevicesService {
 
   async getDevice(id: string): Promise<Device | null> {
     const db = getDb();
-    const result = await db.query("SELECT * FROM devices WHERE id = $1", [id]);
+    const result = await db.query(`${deviceLifecycleSelect} WHERE device.id = $1`, [id]);
     if (result.rows.length === 0) return null;
     return rowToDevice(result.rows[0]);
   }
@@ -108,7 +124,7 @@ export class DevicesService {
       values
     );
     if (result.rows.length === 0) return null;
-    return rowToDevice(result.rows[0]);
+    return this.getDevice(id);
   }
 
   async deleteDevice(id: string): Promise<boolean> {
@@ -250,6 +266,14 @@ function rowToDevice(row: Record<string, unknown>): Device {
     locationId:     (row.location_id as string) ?? null,
     isCanary:       (row.is_canary as boolean) ?? false,
     status:         row.status as DeviceStatus,
+    statusCapabilities: {
+      initial: row.status_initial === true,
+      terminal: row.status_terminal === true,
+      retryable: row.status_retryable === true,
+      administrative: row.status_administrative === true,
+      dispatchable: row.status_dispatchable === true,
+      manual: row.status_manual === true,
+    },
     lastSeenAt:     row.last_seen_at ? (row.last_seen_at as Date).toISOString() : null,
     lastIp:         (row.last_ip as string) ?? null,
     health:         (row.health as DeviceHealth) ?? null,

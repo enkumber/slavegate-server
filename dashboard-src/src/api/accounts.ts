@@ -12,7 +12,7 @@ export interface Account {
   deviceId: string | null;
   platform: "instagram" | "tiktok" | "facebook" | "twitter" | "reddit";
   username: string;
-  status: "active" | "paused" | "blocked" | "warming" | "cooldown" | "created";
+  status: string;
   type?: "business" | "farming";
   clientId?: string | null;
   strategy?: Record<string, unknown>;

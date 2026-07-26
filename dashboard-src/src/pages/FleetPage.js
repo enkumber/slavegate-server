@@ -126,7 +126,7 @@ export function FleetPage() {
     const handleOtaPushSingle = (deviceId) => handleOtaPush([deviceId]);
     // ─── Stats ──────────────────────────────────────────────────────────────────
     const allDevices = Object.values(grouped).flat();
-    const online = allDevices.filter(d => d.status === "online").length;
+    const online = allDevices.filter(d => d.statusCapabilities.dispatchable).length;
     const total = allDevices.length;
     const locations = Object.keys(grouped).filter(k => k !== "unassigned");
     return (_jsxs("div", { style: { padding: "24px", background: "#0f0f23", minHeight: "100vh", color: "#e2e8f0" }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "24px" }, children: [_jsxs("div", { children: [_jsx("h2", { style: { margin: 0, fontSize: "18px", fontFamily: "monospace", color: "#e2e8f0" }, children: "Fleet Overview" }), _jsxs("div", { style: { fontSize: "12px", color: "#64748b", marginTop: "4px" }, children: [total, " devices \u00B7 ", locations.length, " locations \u00B7 refreshed ", lastRefresh.toLocaleTimeString()] })] }), _jsxs("div", { style: { display: "flex", gap: "12px", alignItems: "center" }, children: [_jsx("button", { onClick: () => handleOtaPush(), disabled: otaPushing || online === 0, style: {
@@ -221,7 +221,7 @@ function ApproveDeviceModal({ device, onApprove, onClose, }) {
 }
 // ─── LocationGroup (unchanged) ────────────────────────────────────────────────
 function LocationGroup({ locationId, devices, accountsCounts, onApprove, onDispatchJob, onHumanWorkflow, onRevoke, onDelete, onRenamed, onOtaPush, onAccountsClick, }) {
-    const online = devices.filter(d => d.status === "online").length;
+    const online = devices.filter(d => d.statusCapabilities.dispatchable).length;
     const label = locationId === "unassigned" ? "Unassigned" : locationId.toUpperCase();
     return (_jsxs("div", { style: { marginBottom: "28px" }, children: [_jsxs("div", { style: {
                     display: "flex", alignItems: "center", gap: "10px",

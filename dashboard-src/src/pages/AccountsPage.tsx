@@ -8,6 +8,7 @@ import { AgencyLayout } from "../components/AgencyLayout";
 import { accountsApi, Account } from "../api/accounts";
 import { agencyApi, Client } from "../api/agency";
 import { api } from "../api/client";
+import { statusCounts, statusLabel, statusStyle } from "../utils/statusPresentation";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -28,19 +29,10 @@ const PLATFORMS: { value: Account["platform"]; label: string; icon: string; colo
   { value: "reddit", label: "Reddit", icon: "🔗", color: "#FF4500" },
 ];
 
-const STATUS_CONFIG: Record<Account["status"], { color: string; bg: string; label: string }> = {
-  created: { color: "#9ca3af", bg: "#1f1f1f", label: "Created" },
-  active: { color: "#4ade80", bg: "#0d3320", label: "Active" },
-  paused: { color: "#fbbf24", bg: "#3d3d00", label: "Paused" },
-  blocked: { color: "#f87171", bg: "#3d1515", label: "Blocked" },
-  warming: { color: "#60a5fa", bg: "#1e3a5f", label: "Warming" },
-  cooldown: { color: "#c4b5fd", bg: "#2e1065", label: "Cooldown" },
-};
-
 // ─── Badges ───────────────────────────────────────────────────────────────────
 
 function StatusBadge({ status }: { status: Account["status"] }) {
-  const config = STATUS_CONFIG[status] || STATUS_CONFIG.active;
+  const config = statusStyle(status);
   return (
     <span
       style={{
@@ -53,7 +45,7 @@ function StatusBadge({ status }: { status: Account["status"] }) {
         textTransform: "uppercase",
       }}
     >
-      {config.label}
+      {statusLabel(status)}
     </span>
   );
 }
@@ -187,7 +179,7 @@ function AddAccountModal({ clients, devices, onAdd, onClose }: AddAccountModalPr
               <option value="">Select device...</option>
               {devices.map((d) => (
                 <option key={d.id} value={d.id}>
-                  {d.friendlyName || d.model} {d.status === "online" ? "🟢" : "⚫"}
+                  {d.friendlyName || d.model} · {statusLabel(d.status)}
                 </option>
               ))}
             </select>
@@ -463,13 +455,7 @@ export function AccountsPage() {
   const [statusFilter, setStatusFilter] = useState("");
 
   // Stats
-  const stats = {
-    total: accounts.length,
-    active: accounts.filter((a) => a.status === "active").length,
-    paused: accounts.filter((a) => a.status === "paused").length,
-    blocked: accounts.filter((a) => a.status === "blocked").length,
-    warming: accounts.filter((a) => a.status === "warming").length,
-  };
+  const stats = statusCounts(accounts, (account) => account.status);
 
   const fetchData = useCallback(async () => {
     try {
@@ -577,11 +563,13 @@ export function AccountsPage() {
         }}
       >
         {[
-          { key: "", label: "All", count: stats.total, color: "#a78bfa" },
-          { key: "active", label: "Active", count: stats.active, color: "#4ade80" },
-          { key: "paused", label: "Paused", count: stats.paused, color: "#fbbf24" },
-          { key: "blocked", label: "Blocked", count: stats.blocked, color: "#f87171" },
-          { key: "warming", label: "Warming", count: stats.warming, color: "#60a5fa" },
+          { key: "", label: "All", count: accounts.length, color: "#a78bfa" },
+          ...stats.map(({ status, count }) => ({
+            key: status,
+            label: statusLabel(status),
+            count,
+            color: statusStyle(status).color,
+          })),
         ].map((stat) => (
           <div
             key={stat.key}

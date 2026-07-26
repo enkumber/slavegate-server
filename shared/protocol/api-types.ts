@@ -22,12 +22,16 @@ export interface PaginatedResponse<T> {
 
 // ─── Devices ─────────────────────────────────────────────────────────────────
 
-export type DeviceStatus =
-  | "pending"    // registered, awaiting approval
-  | "approved"   // approved, not yet connected
-  | "online"     // connected and healthy
-  | "offline"    // was online, lost connection
-  | "maintenance"; // manually set, no jobs dispatched
+export type DeviceStatus = string;
+
+export interface LifecycleCapabilities {
+  initial: boolean;
+  terminal: boolean;
+  retryable: boolean;
+  administrative: boolean;
+  dispatchable: boolean;
+  manual: boolean;
+}
 
 export interface Device {
   id: string;
@@ -40,6 +44,7 @@ export interface Device {
   locationId: string | null;
   isCanary: boolean;
   status: DeviceStatus;
+  statusCapabilities: LifecycleCapabilities;
   lastSeenAt: string | null; // ISO 8601
   lastIp: string | null;
   health: DeviceHealth | null;
@@ -54,7 +59,7 @@ export interface UpdateDeviceRequest {
   friendlyName?: string;
   locationId?: string;
   isCanary?: boolean;
-  status?: Extract<DeviceStatus, "approved" | "maintenance">;
+  status?: DeviceStatus;
 }
 
 // GET /api/devices

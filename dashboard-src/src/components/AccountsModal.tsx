@@ -6,6 +6,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { accountsApi, Account } from "../api/accounts";
 import { agencyApi, Client } from "../api/agency";
+import { statusCounts, statusLabel, statusStyle } from "../utils/statusPresentation";
 
 // ─── Platform Config ──────────────────────────────────────────────────────────
 
@@ -17,19 +18,10 @@ const PLATFORMS: { value: Account["platform"]; label: string; icon: string; colo
   { value: "reddit", label: "Reddit", icon: "🔗", color: "#FF4500" },
 ];
 
-const STATUS_CONFIG: Record<Account["status"], { color: string; bg: string; label: string }> = {
-  created: { color: "#9ca3af", bg: "#1f1f1f", label: "Created" },
-  active: { color: "#4ade80", bg: "#0d3320", label: "Active" },
-  paused: { color: "#fbbf24", bg: "#3d3d00", label: "Paused" },
-  blocked: { color: "#f87171", bg: "#3d1515", label: "Blocked" },
-  warming: { color: "#60a5fa", bg: "#1e3a5f", label: "Warming" },
-  cooldown: { color: "#c4b5fd", bg: "#2e1065", label: "Cooldown" },
-};
-
 // ─── Status Badge ─────────────────────────────────────────────────────────────
 
 function StatusBadge({ status }: { status: Account["status"] }) {
-  const config = STATUS_CONFIG[status] || STATUS_CONFIG.active;
+  const config = statusStyle(status);
   return (
     <span
       style={{
@@ -42,7 +34,7 @@ function StatusBadge({ status }: { status: Account["status"] }) {
         textTransform: "uppercase",
       }}
     >
-      {config.label}
+      {statusLabel(status)}
     </span>
   );
 }
@@ -564,15 +556,11 @@ export function AccountsModal({ deviceId, deviceName, onClose }: AccountsModalPr
             }}
           >
             <span>Total: {accounts.length}</span>
-            <span style={{ color: "#4ade80" }}>
-              Active: {accounts.filter((a) => a.status === "active").length}
-            </span>
-            <span style={{ color: "#fbbf24" }}>
-              Paused: {accounts.filter((a) => a.status === "paused").length}
-            </span>
-            <span style={{ color: "#f87171" }}>
-              Blocked: {accounts.filter((a) => a.status === "blocked").length}
-            </span>
+            {statusCounts(accounts, (account) => account.status).map(({ status, count }) => (
+              <span key={status} style={{ color: statusStyle(status).color }}>
+                {statusLabel(status)}: {count}
+              </span>
+            ))}
           </div>
         )}
       </div>

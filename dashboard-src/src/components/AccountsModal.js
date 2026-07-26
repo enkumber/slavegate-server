@@ -6,6 +6,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useState, useEffect, useCallback } from "react";
 import { accountsApi } from "../api/accounts";
 import { agencyApi } from "../api/agency";
+import { statusCounts, statusLabel, statusStyle } from "../utils/statusPresentation";
 // ─── Platform Config ──────────────────────────────────────────────────────────
 const PLATFORMS = [
     { value: "instagram", label: "Instagram", icon: "📸", color: "#E1306C" },
@@ -14,17 +15,9 @@ const PLATFORMS = [
     { value: "twitter", label: "Twitter", icon: "🐦", color: "#1DA1F2" },
     { value: "reddit", label: "Reddit", icon: "🔗", color: "#FF4500" },
 ];
-const STATUS_CONFIG = {
-    created: { color: "#9ca3af", bg: "#1f1f1f", label: "Created" },
-    active: { color: "#4ade80", bg: "#0d3320", label: "Active" },
-    paused: { color: "#fbbf24", bg: "#3d3d00", label: "Paused" },
-    blocked: { color: "#f87171", bg: "#3d1515", label: "Blocked" },
-    warming: { color: "#60a5fa", bg: "#1e3a5f", label: "Warming" },
-    cooldown: { color: "#c4b5fd", bg: "#2e1065", label: "Cooldown" },
-};
 // ─── Status Badge ─────────────────────────────────────────────────────────────
 function StatusBadge({ status }) {
-    const config = STATUS_CONFIG[status] || STATUS_CONFIG.active;
+    const config = statusStyle(status);
     return (_jsx("span", { style: {
             padding: "2px 8px",
             borderRadius: "4px",
@@ -33,7 +26,7 @@ function StatusBadge({ status }) {
             background: config.bg,
             color: config.color,
             textTransform: "uppercase",
-        }, children: config.label }));
+        }, children: statusLabel(status) }));
 }
 // ─── Platform Badge ───────────────────────────────────────────────────────────
 function PlatformBadge({ platform }) {
@@ -283,5 +276,5 @@ export function AccountsModal({ deviceId, deviceName, onClose }) {
                         gap: "16px",
                         fontSize: "11px",
                         color: "#666",
-                    }, children: [_jsxs("span", { children: ["Total: ", accounts.length] }), _jsxs("span", { style: { color: "#4ade80" }, children: ["Active: ", accounts.filter((a) => a.status === "active").length] }), _jsxs("span", { style: { color: "#fbbf24" }, children: ["Paused: ", accounts.filter((a) => a.status === "paused").length] }), _jsxs("span", { style: { color: "#f87171" }, children: ["Blocked: ", accounts.filter((a) => a.status === "blocked").length] })] }))] }) }));
+                    }, children: [_jsxs("span", { children: ["Total: ", accounts.length] }), statusCounts(accounts, (account) => account.status).map(({ status, count }) => (_jsxs("span", { style: { color: statusStyle(status).color }, children: [statusLabel(status), ": ", count] }, status)))] }))] }) }));
 }

@@ -8,6 +8,7 @@ import { AgencyLayout } from "../components/AgencyLayout";
 import { accountsApi } from "../api/accounts";
 import { agencyApi } from "../api/agency";
 import { api } from "../api/client";
+import { statusCounts, statusLabel, statusStyle } from "../utils/statusPresentation";
 // ─── Platform Config ──────────────────────────────────────────────────────────
 const PLATFORMS = [
     { value: "instagram", label: "Instagram", icon: "📸", color: "#E1306C" },
@@ -16,17 +17,9 @@ const PLATFORMS = [
     { value: "twitter", label: "Twitter", icon: "🐦", color: "#1DA1F2" },
     { value: "reddit", label: "Reddit", icon: "🔗", color: "#FF4500" },
 ];
-const STATUS_CONFIG = {
-    created: { color: "#9ca3af", bg: "#1f1f1f", label: "Created" },
-    active: { color: "#4ade80", bg: "#0d3320", label: "Active" },
-    paused: { color: "#fbbf24", bg: "#3d3d00", label: "Paused" },
-    blocked: { color: "#f87171", bg: "#3d1515", label: "Blocked" },
-    warming: { color: "#60a5fa", bg: "#1e3a5f", label: "Warming" },
-    cooldown: { color: "#c4b5fd", bg: "#2e1065", label: "Cooldown" },
-};
 // ─── Badges ───────────────────────────────────────────────────────────────────
 function StatusBadge({ status }) {
-    const config = STATUS_CONFIG[status] || STATUS_CONFIG.active;
+    const config = statusStyle(status);
     return (_jsx("span", { style: {
             padding: "3px 10px",
             borderRadius: "12px",
@@ -35,7 +28,7 @@ function StatusBadge({ status }) {
             background: config.bg,
             color: config.color,
             textTransform: "uppercase",
-        }, children: config.label }));
+        }, children: statusLabel(status) }));
 }
 function PlatformBadge({ platform }) {
     const p = PLATFORMS.find((x) => x.value === platform) || PLATFORMS[0];
@@ -115,7 +108,7 @@ function AddAccountModal({ clients, devices, onAdd, onClose }) {
                                         borderRadius: "6px",
                                         color: "#fff",
                                         fontSize: "13px",
-                                    }, children: [_jsx("option", { value: "", children: "Select device..." }), devices.map((d) => (_jsxs("option", { value: d.id, children: [d.friendlyName || d.model, " ", d.status === "online" ? "🟢" : "⚫"] }, d.id)))] })] }), _jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginBottom: "16px" }, children: [_jsxs("div", { children: [_jsx("label", { style: { display: "block", color: "#888", fontSize: "12px", marginBottom: "6px" }, children: "Platform" }), _jsx("select", { value: platform, onChange: (e) => setPlatform(e.target.value), style: {
+                                    }, children: [_jsx("option", { value: "", children: "Select device..." }), devices.map((d) => (_jsxs("option", { value: d.id, children: [d.friendlyName || d.model, " \u00B7 ", statusLabel(d.status)] }, d.id)))] })] }), _jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginBottom: "16px" }, children: [_jsxs("div", { children: [_jsx("label", { style: { display: "block", color: "#888", fontSize: "12px", marginBottom: "6px" }, children: "Platform" }), _jsx("select", { value: platform, onChange: (e) => setPlatform(e.target.value), style: {
                                                 width: "100%",
                                                 padding: "10px 12px",
                                                 background: "#1a1a1a",
@@ -211,13 +204,7 @@ export function AccountsPage() {
     const [platformFilter, setPlatformFilter] = useState("");
     const [statusFilter, setStatusFilter] = useState("");
     // Stats
-    const stats = {
-        total: accounts.length,
-        active: accounts.filter((a) => a.status === "active").length,
-        paused: accounts.filter((a) => a.status === "paused").length,
-        blocked: accounts.filter((a) => a.status === "blocked").length,
-        warming: accounts.filter((a) => a.status === "warming").length,
-    };
+    const stats = statusCounts(accounts, (account) => account.status);
     const fetchData = useCallback(async () => {
         try {
             const [accountsData, clientsData, farmingData, devicesData] = await Promise.all([
@@ -295,11 +282,13 @@ export function AccountsPage() {
                     marginBottom: "24px",
                     flexWrap: "wrap",
                 }, children: [
-                    { key: "", label: "All", count: stats.total, color: "#a78bfa" },
-                    { key: "active", label: "Active", count: stats.active, color: "#4ade80" },
-                    { key: "paused", label: "Paused", count: stats.paused, color: "#fbbf24" },
-                    { key: "blocked", label: "Blocked", count: stats.blocked, color: "#f87171" },
-                    { key: "warming", label: "Warming", count: stats.warming, color: "#60a5fa" },
+                    { key: "", label: "All", count: accounts.length, color: "#a78bfa" },
+                    ...stats.map(({ status, count }) => ({
+                        key: status,
+                        label: statusLabel(status),
+                        count,
+                        color: statusStyle(status).color,
+                    })),
                 ].map((stat) => (_jsxs("div", { onClick: () => setStatusFilter(stat.key), style: {
                         padding: "12px 24px",
                         background: statusFilter === stat.key ? "#1a1a2e" : "#111",

@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
+import { statusCounts, statusLabel, statusStyle } from "../utils/statusPresentation";
 import { agencyApi, WorkflowRun, WorkflowRunFeedbackRating, WorkflowRunStepCandidate } from "../api/agency";
 
 const statusColors: Record<string, { bg: string; color: string; label: string }> = {
@@ -217,12 +218,7 @@ export function RunHistoryPage() {
     }
   }, [updateSelectedCandidate]);
 
-  const counts = useMemo(() => ({
-    total: runs.length,
-    running: runs.filter((run) => run.status === "running").length,
-    succeeded: runs.filter((run) => run.status === "completed").length,
-    failed: runs.filter((run) => run.status === "failed").length,
-  }), [runs]);
+  const counts = useMemo(() => statusCounts(runs, (run) => run.status), [runs]);
 
   return (
     <AgencyLayout currentRoute="#/agency/runs">
@@ -232,10 +228,12 @@ export function RunHistoryPage() {
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(110px, 1fr))", gap: "12px", marginBottom: "18px" }}>
         {([
-          ["Total", counts.total, "#d4d4d8"],
-          ["Running", counts.running, "#60a5fa"],
-          ["Succeeded", counts.succeeded, "#4ade80"],
-          ["Failed", counts.failed, "#f87171"],
+          ["Total", runs.length, "#d4d4d8"],
+          ...counts.slice(0, 3).map(({ status, count }) => [
+            statusLabel(status),
+            count,
+            statusStyle(status).color,
+          ]),
         ] as Array<[string, number, string]>).map(([label, value, color]) => (
           <div key={label} style={{ background: "#111", border: "1px solid #222", borderRadius: "6px", padding: "14px" }}>
             <div style={{ color: "#777", fontSize: "11px", marginBottom: "6px" }}>{label}</div>
@@ -473,7 +471,7 @@ export function RunHistoryPage() {
                         </div>
                         <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "center" }}>
                           <Badge value={candidate.candidateState} palette={stepCandidateColors} />
-                          {candidate.candidateState === "step_candidate" && (
+                          {!candidate.validatedAt && (
                             <>
                               <button
                                 onClick={() => void validateCandidate(candidate)}

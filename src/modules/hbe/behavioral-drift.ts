@@ -16,7 +16,7 @@ import { clamp } from "./distributions";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface DriftProfile {
-  phase:                  "warmup" | "growth" | "mature";
+  phase:                  string;
   agedays:                number;
   timingMultiplier:       number;  // >1 = slower (warmup), ~1 = normal (mature)
   engagementMultiplier:   number;  // engagement probability scale

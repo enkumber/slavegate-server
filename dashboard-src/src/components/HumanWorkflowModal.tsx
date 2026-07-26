@@ -192,7 +192,7 @@ export function HumanWorkflowModal({ device, onClose }: Props) {
   const planStepCount = compileResult?.plan.steps?.length ?? compileResult?.plan.compiledPlan?.steps?.length ?? 0;
   const actionCount = compileResult?.plan.actions?.length ?? 0;
   const canRun = !!compileResult && compileResult.safetyClass !== "destructive" && !running;
-  const terminalStatus = runStatus?.status === "completed" || runStatus?.status === "failed" || runStatus?.status === "cancelled";
+  const terminalStatus = Boolean(runStatus?.completedAt ?? runStatus?.completed_at);
   const compilePending = compiling || !!compileJob;
 
   return (

@@ -152,7 +152,7 @@ export function FleetPage() {
   // ─── Stats ──────────────────────────────────────────────────────────────────
 
   const allDevices = Object.values(grouped).flat();
-  const online     = allDevices.filter(d => d.status === "online").length;
+  const online     = allDevices.filter(d => d.statusCapabilities.dispatchable).length;
   const total      = allDevices.length;
   const locations  = Object.keys(grouped).filter(k => k !== "unassigned");
 
@@ -471,7 +471,7 @@ function LocationGroup({
   onOtaPush: (id: string) => void;
   onAccountsClick: (d: Device) => void;
 }) {
-  const online = devices.filter(d => d.status === "online").length;
+  const online = devices.filter(d => d.statusCapabilities.dispatchable).length;
   const label  = locationId === "unassigned" ? "Unassigned" : locationId.toUpperCase();
 
   return (

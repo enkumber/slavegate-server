@@ -2,6 +2,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useCallback, useEffect, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
 import { agencyApi } from "../api/agency";
+import { statusTone } from "../utils/statusPresentation";
 function Badge({ label, tone }) {
     const palette = {
         green: { bg: "#0f3323", color: "#4ade80", border: "#166534" },
@@ -13,13 +14,8 @@ function Badge({ label, tone }) {
     return (_jsx("span", { style: { background: palette.bg, border: `1px solid ${palette.border}`, color: palette.color, borderRadius: "6px", padding: "3px 8px", fontSize: "11px", whiteSpace: "nowrap" }, children: label }));
 }
 function stateTone(state) {
-    if (state === "passed")
-        return "green";
-    if (state === "blocked")
-        return "red";
-    if (state === "review_ready")
-        return "yellow";
-    return "gray";
+    const tone = statusTone(state);
+    return tone === "blue" ? "gray" : tone;
 }
 function shortList(values, limit = 4) {
     if (!Array.isArray(values) || values.length === 0)

@@ -320,7 +320,7 @@ async function claimReceipt(
   bindingIdValue: string,
   checkpoint: number,
   candidateId: string,
-  outcome: "success" | "failure",
+  outcome: string,
   evidence: Record<string, unknown>,
 ): Promise<boolean> {
   const result = await getDb().query(

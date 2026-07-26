@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
 import { agencyApi, WorkflowValidationEvent, WorkflowValidationPipelineResponse } from "../api/agency";
+import { statusTone } from "../utils/statusPresentation";
 
 function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gray" | "red" | "blue" }) {
   const palette = {
@@ -18,10 +19,8 @@ function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gra
 }
 
 function stateTone(state: unknown): "green" | "yellow" | "gray" | "red" {
-  if (state === "passed") return "green";
-  if (state === "blocked") return "red";
-  if (state === "review_ready") return "yellow";
-  return "gray";
+  const tone = statusTone(state);
+  return tone === "blue" ? "gray" : tone;
 }
 
 function shortList(values: unknown, limit = 4) {
