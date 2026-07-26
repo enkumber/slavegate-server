@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { getDb } from "../../db/client";
+import { resourceLifecycleStateMatches } from "../lifecycle/lifecycle.service";
 import type { ActionStep, WorkflowStep, WorkflowTemplate } from "../workflows/types";
 import { uiGraphLearningLoop } from "./learning-loop";
 import { uiGraphRepository } from "./repository";
@@ -220,12 +221,20 @@ export function attachEdgeLearningBindings(template: WorkflowTemplate, bindings:
 export async function prepareEdgeLearningBindings(template: WorkflowTemplate): Promise<EdgeLearningBinding[]> {
   const [candidates, selectorContexts] = await Promise.all([
     getDb().query(
-      `SELECT id, app_id, source_state_id, target_state_id, payload, safety_class
-         FROM ui_graph_learning_candidates
-        WHERE app_id = $1
+      `SELECT candidate.id, candidate.app_id, candidate.source_state_id,
+              candidate.target_state_id, candidate.payload, candidate.safety_class
+         FROM ui_graph_learning_candidates candidate
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table=to_regclass('ui_graph_learning_candidates')
+          AND binding.state_column='status'
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key=binding.lifecycle_key
+          AND definition.status=candidate.status
+        WHERE candidate.app_id = $1
           AND candidate_type = 'selector'
-          AND status IN ('candidate', 'validating', 'promoted', 'degraded')
-        ORDER BY success_count DESC, last_observed_at DESC`,
+          AND NOT definition.terminal
+          AND NOT definition.administrative
+        ORDER BY candidate.success_count DESC, candidate.last_observed_at DESC`,
       [template.platform],
     ),
     getDb().query(
@@ -235,7 +244,15 @@ export async function prepareEdgeLearningBindings(template: WorkflowTemplate): P
                 ORDER BY t.confidence DESC LIMIT 1) AS target_state_id
          FROM ui_graph_selectors s
          JOIN ui_graph_states st ON st.id=s.state_id
-        WHERE st.app_id=$1 AND s.status IN ('promoted','validating','candidate','degraded')`,
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table=to_regclass('ui_graph_selectors')
+          AND binding.state_column='status'
+         JOIN lifecycle_state_definitions definition
+           ON definition.lifecycle_key=binding.lifecycle_key
+          AND definition.status=s.status
+        WHERE st.app_id=$1
+          AND NOT definition.terminal
+          AND NOT definition.administrative`,
       [template.platform],
     ).catch(() => ({ rows: [] })),
   ]);
@@ -568,9 +585,14 @@ export async function reconcileEdgeLearningStatus(input: {
     delta.snapshotsCaptured++;
   }
 
+  const workflowFailed = await resourceLifecycleStateMatches(
+    "workflows",
+    input.status,
+    { terminal: true, retryable: true },
+  );
   for (const binding of bindings) {
     if (!binding.candidateId || successfulBindings.has(binding.bindingId)) continue;
-    const failed = input.status === "failed"
+    const failed = workflowFailed
       && input.currentStep >= binding.actionStepIndex
       && input.currentStep <= binding.verifiedStepIndex;
     if (!failed) continue;

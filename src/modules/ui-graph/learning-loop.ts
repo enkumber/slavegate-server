@@ -1,5 +1,12 @@
 import crypto from "crypto";
 import { getDb } from "../../db/client";
+import {
+  getResourceLifecycleState,
+  getResourceLifecycleTransitionToState,
+  listResourceLifecycleStates,
+  selectResourceLifecycleTransition,
+  type LifecycleQueryable,
+} from "../lifecycle/lifecycle.service";
 import type { UiGraphContext, UiSafetyClass } from "./types";
 
 export type CandidateType = "state" | "selector" | "transition" | "recovery_rule";
@@ -24,6 +31,18 @@ export interface PromotionDecision {
   requiredSuccesses: number;
   validationStage: string;
   blockers: string[];
+}
+
+async function dispatchableResourceState(
+  resourceTable: string,
+  db: LifecycleQueryable,
+): Promise<string> {
+  const matches = (await listResourceLifecycleStates(resourceTable, "status", db))
+    .filter((state) => state.dispatchable && !state.terminal && !state.administrative);
+  if (matches.length !== 1) {
+    throw new Error("UI graph resource must have exactly one configured dispatchable state");
+  }
+  return matches[0].status;
 }
 
 function stable(value: unknown): string {
@@ -116,9 +135,9 @@ export class UiGraphLearningLoop {
     const contextKey = candidateEnvironmentKey(input.context);
     const result = await getDb().query(
       `INSERT INTO ui_graph_learning_candidates
-         (candidate_key, app_id, candidate_type, status, source_state_id, target_state_id,
+         (candidate_key, app_id, candidate_type, source_state_id, target_state_id,
           payload, evidence, contexts, discovery_method, confidence, safety_class, distinct_context_count)
-       VALUES ($1,$2,$3,'candidate',$4,$5,$6,$7,jsonb_build_array($8::text),$9,$10,$11,1)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,jsonb_build_array($8::text),$9,$10,$11,1)
        ON CONFLICT (candidate_key) DO UPDATE SET
          evidence = ui_graph_learning_candidates.evidence || EXCLUDED.evidence,
          contexts = CASE
@@ -193,6 +212,16 @@ export class UiGraphLearningLoop {
           input.success && input.stateVerified, JSON.stringify(input.evidence ?? {}),
         ],
       );
+      const lockedCandidate = await client.query(
+        `SELECT status, promoted_entity_id
+           FROM ui_graph_learning_candidates
+          WHERE id=$1
+          FOR UPDATE`,
+        [input.candidateId],
+      );
+      if (!lockedCandidate.rows[0]) {
+        throw new Error("UI_GRAPH_CANDIDATE_NOT_FOUND");
+      }
       const updated = await client.query(
         `UPDATE ui_graph_learning_candidates c SET
            success_count = stats.success_count,
@@ -206,12 +235,59 @@ export class UiGraphLearningLoop {
            confidence = LEAST(0.99, GREATEST(0.05,
              CASE WHEN stats.success_count + stats.failure_count = 0 THEN c.confidence
                   ELSE stats.success_count::double precision / (stats.success_count + stats.failure_count) END)),
-           status = CASE
-             WHEN stats.failure_count >= 3 AND stats.failure_count > stats.success_count THEN 'quarantined'
-             WHEN stats.failure_count > 0 AND c.status = 'promoted' THEN 'degraded'
-             WHEN c.status IN ('observed', 'candidate') THEN 'validating'
-             ELSE c.status END,
-           quarantined_at = CASE WHEN stats.failure_count >= 3 AND stats.failure_count > stats.success_count THEN NOW() ELSE c.quarantined_at END,
+           status = COALESCE(
+             (
+               SELECT transition.to_status
+                 FROM lifecycle_resource_bindings binding
+                 JOIN lifecycle_transitions transition
+                   ON transition.lifecycle_key=binding.lifecycle_key
+                  AND transition.from_status=c.status
+                 JOIN lifecycle_state_definitions target
+                   ON target.lifecycle_key=transition.lifecycle_key
+                  AND target.status=transition.to_status
+                WHERE binding.resource_table=to_regclass('ui_graph_learning_candidates')
+                  AND binding.state_column='status'
+                  AND transition.automatic
+                  AND target.administrative
+                  AND transition.metadata ? 'minimumFailureCount'
+                  AND stats.failure_count >= (transition.metadata->>'minimumFailureCount')::int
+                  AND stats.failure_count > stats.success_count
+                ORDER BY target.sort_order
+                LIMIT 1
+             ),
+             CASE WHEN stats.failure_count > 0 THEN lifecycle_transition_target(
+               'ui_graph_learning_candidates'::regclass,
+               c.status,
+               '{"targetRetryable":true,"automatic":true}'::jsonb
+             ) END,
+             CASE WHEN lifecycle_state_matches(
+               'ui_graph_learning_candidates'::regclass,
+               c.status,
+               '{"initial":true}'::jsonb
+             ) THEN lifecycle_transition_target(
+               'ui_graph_learning_candidates'::regclass,
+               c.status,
+               '{"targetInitial":false,"targetTerminal":false,"targetAdministrative":false,"automatic":true}'::jsonb
+             ) END,
+             c.status
+           ),
+           quarantined_at = CASE WHEN EXISTS (
+             SELECT 1
+               FROM lifecycle_resource_bindings binding
+               JOIN lifecycle_transitions transition
+                 ON transition.lifecycle_key=binding.lifecycle_key
+                AND transition.from_status=c.status
+               JOIN lifecycle_state_definitions target
+                 ON target.lifecycle_key=transition.lifecycle_key
+                AND target.status=transition.to_status
+              WHERE binding.resource_table=to_regclass('ui_graph_learning_candidates')
+                AND binding.state_column='status'
+                AND transition.automatic
+                AND target.administrative
+                AND transition.metadata ? 'minimumFailureCount'
+                AND stats.failure_count >= (transition.metadata->>'minimumFailureCount')::int
+                AND stats.failure_count > stats.success_count
+           ) THEN NOW() ELSE c.quarantined_at END,
            updated_at = NOW()
          FROM (
            SELECT candidate_id,
@@ -231,24 +307,60 @@ export class UiGraphLearningLoop {
         [input.candidateId],
       );
       const updatedCandidate = updated.rows[0];
-      if (updatedCandidate?.status === "degraded" && updatedCandidate.promoted_entity_id) {
-        const entityTable = updatedCandidate.candidate_type === "selector"
-          ? "ui_graph_selectors"
-          : updatedCandidate.candidate_type === "transition"
-            ? "ui_graph_transitions"
-            : null;
-        if (entityTable) {
-          await client.query(
-            `UPDATE ${entityTable} SET status='degraded', updated_at=NOW() WHERE id=$1 AND status='promoted'`,
+      const updatedState = updatedCandidate
+        ? await getResourceLifecycleState(
+          "ui_graph_learning_candidates",
+          updatedCandidate.status,
+          "status",
+          client,
+        )
+        : null;
+      if (updatedState?.retryable && updatedCandidate.promoted_entity_id) {
+        for (const entityTable of ["ui_graph_selectors", "ui_graph_transitions"]) {
+          const linked = await client.query(
+            `SELECT status FROM ${entityTable} WHERE id=$1 FOR UPDATE`,
             [updatedCandidate.promoted_entity_id],
           );
+          if (!linked.rows[0]) continue;
+          const linkedTransition = await selectResourceLifecycleTransition(
+            entityTable,
+            linked.rows[0].status,
+            { targetRetryable: true, transitionAutomatic: true },
+            "status",
+            client,
+          );
+          if (!linkedTransition) {
+            throw new Error("promoted UI graph entity has no configured retryable transition");
+          }
           await client.query(
-            `INSERT INTO ui_graph_promotion_events
-               (candidate_id, action, previous_status, next_status, actor, reason, evidence)
-             VALUES ($1,'degrade','promoted','degraded','edge_workflow_validation','First failed validation after promotion',$2)`,
-            [input.candidateId, JSON.stringify(input.evidence ?? {})],
+            `UPDATE ${entityTable} SET status=$2, updated_at=NOW() WHERE id=$1`,
+            [updatedCandidate.promoted_entity_id, linkedTransition.toStatus],
           );
         }
+        const candidateTransition = await getResourceLifecycleTransitionToState(
+          "ui_graph_learning_candidates",
+          lockedCandidate.rows[0].status,
+          updatedCandidate.status,
+          "status",
+          client,
+        );
+        if (!candidateTransition) {
+          throw new Error("candidate lifecycle transition was not configured");
+        }
+        await client.query(
+          `INSERT INTO ui_graph_promotion_events
+             (candidate_id, action, previous_status, next_status, actor, reason, evidence)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            input.candidateId,
+            candidateTransition.actionKey,
+            lockedCandidate.rows[0].status,
+            updatedCandidate.status,
+            "edge_workflow_validation",
+            "Validation policy selected a retryable lifecycle transition",
+            JSON.stringify(input.evidence ?? {}),
+          ],
+        );
       }
       await client.query("COMMIT");
       const row = updatedCandidate;
@@ -279,7 +391,13 @@ export class UiGraphLearningLoop {
       const locked = await client.query(`SELECT * FROM ui_graph_learning_candidates WHERE id = $1 FOR UPDATE`, [candidateId]);
       const candidate = locked.rows[0];
       if (!candidate) throw new Error("UI_GRAPH_CANDIDATE_NOT_FOUND");
-      if (candidate.status === "promoted" && candidate.promoted_entity_id) {
+      const candidateState = await getResourceLifecycleState(
+        "ui_graph_learning_candidates",
+        candidate.status,
+        "status",
+        client,
+      );
+      if (candidateState?.dispatchable && candidate.promoted_entity_id) {
         await client.query("COMMIT");
         return candidate.promoted_entity_id;
       }
@@ -307,40 +425,58 @@ export class UiGraphLearningLoop {
       });
       if (!decision.ready) throw new Error(`UI_GRAPH_CANDIDATE_NOT_READY:${decision.blockers.join(",")}`);
       if (allowAutomatic && !decision.autoPromotable) throw new Error(`UI_GRAPH_CANDIDATE_MANUAL_REVIEW_REQUIRED:${decision.blockers.join(",")}`);
+      const promotionTransition = await selectResourceLifecycleTransition(
+        "ui_graph_learning_candidates",
+        candidate.status,
+        {
+          targetDispatchable: true,
+          targetTerminal: false,
+          ...(allowAutomatic
+            ? { transitionAutomatic: true }
+            : { transitionManualAllowed: true }),
+        },
+        "status",
+        client,
+      );
+      if (!promotionTransition) {
+        throw new Error("candidate has no configured promotion transition");
+      }
 
       const payload = candidate.payload as Record<string, unknown>;
       let entityId: string;
       if (candidate.candidate_type === "selector") {
+        const entityStatus = await dispatchableResourceState("ui_graph_selectors", client);
         const inserted = await client.query(
           `INSERT INTO ui_graph_selectors
              (state_id, element_key, strategy, selector, priority, dynamic, confidence, status,
               app_version_pattern, device_class, success_count, failure_count, last_validated_at, metadata)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'promoted',$8,$9,$10,$11,NOW(),$12)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),$13)
            ON CONFLICT (state_id, element_key, strategy, selector) DO UPDATE SET
-             status='promoted', confidence=EXCLUDED.confidence, success_count=EXCLUDED.success_count,
+             status=EXCLUDED.status, confidence=EXCLUDED.confidence, success_count=EXCLUDED.success_count,
              failure_count=EXCLUDED.failure_count, last_validated_at=NOW(), updated_at=NOW()
            RETURNING id`,
           [candidate.source_state_id, payload.elementKey, payload.strategy, JSON.stringify(payload.selector ?? {}),
-            Number(payload.priority ?? 100), Boolean(payload.dynamic), candidate.confidence,
+            Number(payload.priority ?? 100), Boolean(payload.dynamic), candidate.confidence, entityStatus,
             payload.appVersionPattern ?? null, payload.deviceClass ?? null, candidate.success_count,
             candidate.failure_count, JSON.stringify({ candidateId })],
         );
         entityId = inserted.rows[0].id;
       } else if (candidate.candidate_type === "transition") {
+        const entityStatus = await dispatchableResourceState("ui_graph_transitions", client);
         const inserted = await client.query(
           `INSERT INTO ui_graph_transitions
              (app_id, transition_key, source_state_id, target_state_id, element_key, action,
               preconditions, postconditions, cost, safety_class, confidence, status, success_count, failure_count, metadata)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'promoted',$12,$13,$14)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
            ON CONFLICT (app_id, transition_key) DO UPDATE SET
-             status='promoted', confidence=EXCLUDED.confidence, action=EXCLUDED.action,
+             status=EXCLUDED.status, confidence=EXCLUDED.confidence, action=EXCLUDED.action,
              preconditions=EXCLUDED.preconditions, postconditions=EXCLUDED.postconditions,
              success_count=EXCLUDED.success_count, failure_count=EXCLUDED.failure_count, updated_at=NOW()
            RETURNING id`,
           [candidate.app_id, payload.transitionKey, candidate.source_state_id, candidate.target_state_id,
             payload.elementKey ?? null, JSON.stringify(payload.action ?? {}), JSON.stringify(payload.preconditions ?? {}),
             JSON.stringify(payload.postconditions ?? {}), Number(payload.cost ?? 1), candidate.safety_class,
-            candidate.confidence, candidate.success_count, candidate.failure_count, JSON.stringify({ candidateId })],
+            candidate.confidence, entityStatus, candidate.success_count, candidate.failure_count, JSON.stringify({ candidateId })],
         );
         entityId = inserted.rows[0].id;
       } else {
@@ -348,15 +484,23 @@ export class UiGraphLearningLoop {
       }
 
       await client.query(
-        `UPDATE ui_graph_learning_candidates SET status='promoted', validation_stage='global_promoted', promoted_entity_id=$2,
+        `UPDATE ui_graph_learning_candidates SET status=$3, promoted_entity_id=$2,
            promoted_at=NOW(), updated_at=NOW() WHERE id=$1`,
-        [candidateId, entityId],
+        [candidateId, entityId, promotionTransition.toStatus],
       );
       await client.query(
         `INSERT INTO ui_graph_promotion_events
            (candidate_id, action, previous_status, next_status, actor, reason, evidence)
-         VALUES ($1,'promote',$2,'promoted',$3,$4,$5)`,
-        [candidateId, candidate.status, actor, reason, JSON.stringify({ decision })],
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          candidateId,
+          promotionTransition.actionKey,
+          candidate.status,
+          promotionTransition.toStatus,
+          actor,
+          reason,
+          JSON.stringify({ decision }),
+        ],
       );
       await client.query("COMMIT");
       return entityId;

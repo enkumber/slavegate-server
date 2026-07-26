@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { requireAdminAuth } from "../../api/auth.middleware";
 import { getDb } from "../../db/client";
+import { selectResourceLifecycleTransition } from "../lifecycle/lifecycle.service";
 import { describeUiGraphRuntimeFlags } from "./config";
 import { uiGraphLearningLoop } from "./learning-loop";
 import { uiGraphRepository } from "./repository";
@@ -183,10 +184,23 @@ router.get("/canary-cohorts", requireAdminAuth, async (_req: Request, res: Respo
   const result = await getDb().query(
     `SELECT c.*,
             COUNT(r.id)::int AS run_count,
-            COUNT(r.id) FILTER (WHERE r.status='completed' AND r.postcondition_verified)::int AS verified_count,
-            COUNT(r.id) FILTER (WHERE r.status='failed')::int AS failed_count
+            COUNT(r.id) FILTER (
+              WHERE run_state.terminal
+                AND NOT run_state.retryable
+                AND NOT run_state.administrative
+                AND r.postcondition_verified
+            )::int AS verified_count,
+            COUNT(r.id) FILTER (
+              WHERE run_state.terminal AND run_state.retryable
+            )::int AS failed_count
        FROM workflow_canary_cohorts c
        LEFT JOIN workflow_canary_runs r ON r.cohort_id=c.id
+       LEFT JOIN lifecycle_resource_bindings run_binding
+         ON run_binding.resource_table=to_regclass('workflow_canary_runs')
+        AND run_binding.state_column='status'
+       LEFT JOIN lifecycle_state_definitions run_state
+         ON run_state.lifecycle_key=run_binding.lifecycle_key
+        AND run_state.status=r.status
       GROUP BY c.id ORDER BY c.updated_at DESC`,
   );
   res.json({ ok: true, data: result.rows });
@@ -252,7 +266,11 @@ router.post("/candidates/:id/promote", requireAdminAuth, async (req: Request, re
   if (!reason) return res.status(400).json({ ok: false, error: "reason is required" });
   try {
     const entityId = await uiGraphLearningLoop.promote(req.params.id, actor(req), reason, false);
-    res.json({ ok: true, data: { candidateId: req.params.id, entityId, status: "promoted" } });
+    const persisted = await getDb().query(
+      `SELECT status FROM ui_graph_learning_candidates WHERE id=$1`,
+      [req.params.id],
+    );
+    res.json({ ok: true, data: { candidateId: req.params.id, entityId, status: persisted.rows[0]?.status } });
   } catch (error) {
     res.status(409).json({ ok: false, error: (error as Error).message });
   }
@@ -269,18 +287,50 @@ router.post("/candidates/:id/quarantine", requireAdminAuth, async (req: Request,
       await client.query("ROLLBACK");
       return res.status(404).json({ ok: false, error: "candidate not found" });
     }
-    await client.query(`UPDATE ui_graph_learning_candidates SET status='quarantined', quarantined_at=NOW(), updated_at=NOW() WHERE id=$1`, [req.params.id]);
+    const transition = await selectResourceLifecycleTransition(
+      "ui_graph_learning_candidates",
+      locked.rows[0].status,
+      { targetAdministrative: true, transitionManualAllowed: true },
+      "status",
+      client,
+    );
+    if (!transition) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ ok: false, error: "candidate has no configured administrative transition" });
+    }
+    await client.query(
+      `UPDATE ui_graph_learning_candidates
+          SET status=$2, quarantined_at=NOW(), updated_at=NOW()
+        WHERE id=$1`,
+      [req.params.id, transition.toStatus],
+    );
     await client.query(
       `INSERT INTO ui_graph_promotion_events (candidate_id, action, previous_status, next_status, actor, reason)
-       VALUES ($1,'quarantine',$2,'quarantined',$3,$4)`,
-      [req.params.id, locked.rows[0].status, actor(req), reason],
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [req.params.id, transition.actionKey, locked.rows[0].status, transition.toStatus, actor(req), reason],
     );
     if (locked.rows[0].promoted_entity_id) {
-      if (locked.rows[0].candidate_type === "selector") await client.query(`UPDATE ui_graph_selectors SET status='quarantined', updated_at=NOW() WHERE id=$1`, [locked.rows[0].promoted_entity_id]);
-      if (locked.rows[0].candidate_type === "transition") await client.query(`UPDATE ui_graph_transitions SET status='quarantined', updated_at=NOW() WHERE id=$1`, [locked.rows[0].promoted_entity_id]);
+      for (const table of ["ui_graph_selectors", "ui_graph_transitions"]) {
+        const linked = await client.query(`SELECT status FROM ${table} WHERE id=$1 FOR UPDATE`, [locked.rows[0].promoted_entity_id]);
+        if (!linked.rows[0]) continue;
+        const linkedTransition = await selectResourceLifecycleTransition(
+          table,
+          linked.rows[0].status,
+          { targetAdministrative: true, transitionManualAllowed: true },
+          "status",
+          client,
+        );
+        if (!linkedTransition) {
+          throw new Error("linked UI graph entity has no configured administrative transition");
+        }
+        await client.query(
+          `UPDATE ${table} SET status=$2, updated_at=NOW() WHERE id=$1`,
+          [locked.rows[0].promoted_entity_id, linkedTransition.toStatus],
+        );
+      }
     }
     await client.query("COMMIT");
-    res.json({ ok: true, data: { candidateId: req.params.id, status: "quarantined" } });
+    res.json({ ok: true, data: { candidateId: req.params.id, status: transition.toStatus } });
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;

@@ -221,7 +221,7 @@ export class UiGraphRepository {
     targetStateId?: string | null;
     stateResolutionMethod: string;
     targetResolutionMethod: TargetResolutionMethod;
-    outcome: "shadow" | "completed" | "failed" | "recovered" | "aborted";
+    outcome: string;
     latencyMs: number;
     llmCalls?: number;
     vlmCalls?: number;
