@@ -48,6 +48,7 @@ import { isPnqV2ShadowRuntimeEnabled } from "../modules/device-execution/pnq-v2-
 import type { JobDispatchPayload, DeviceHealth } from "../../shared/protocol/messages";
 import { recordJobExecutionEventDetached } from "../modules/observability/job-execution-events";
 import { transitionJob } from "../modules/dispatcher/job-lifecycle.service";
+import { getConnectionRecoveryPolicy } from "./connection-recovery-config";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -1442,14 +1443,22 @@ export class DirectWsServer {
 
       if (!device) {
         console.warn(`[direct-ws] AUTH failed: no credentials from ${remoteIp}`);
-        this._send(ws, { type: "AUTH_FAIL", reason: "No valid credentials" });
+        this._send(ws, {
+          type: "AUTH_FAIL",
+          reason: "No valid credentials",
+          recovery: getConnectionRecoveryPolicy(false),
+        });
         ws.close(4003, "Auth failed");
         return;
       }
 
       if (device.lifecycleAdministrative || !device.lifecycleKnown) {
         console.warn(`[direct-ws] AUTH failed: device ${device.id.slice(0,8)} is blocked`);
-        this._send(ws, { type: "AUTH_FAIL", reason: "Device blocked" });
+        this._send(ws, {
+          type: "AUTH_FAIL",
+          reason: "Device blocked",
+          recovery: getConnectionRecoveryPolicy(false),
+        });
         ws.close(4003, "Blocked");
         return;
       }
@@ -1541,7 +1550,8 @@ export class DirectWsServer {
         type: "AUTH_OK", 
         deviceId: finalDeviceId,
         deviceKey: finalDeviceKey,
-        status: finalStatus
+        status: finalStatus,
+        recovery: getConnectionRecoveryPolicy(true),
       });
       console.log(`[direct-ws] Device ${finalDeviceId.slice(0,8)} authenticated (status=${finalStatus}) from ${remoteIp}`);
       onAuth(conn);
@@ -1561,7 +1571,11 @@ export class DirectWsServer {
 
     } catch (err) {
       console.error("[direct-ws] Auth DB error:", (err as Error).message);
-      this._send(ws, { type: "AUTH_FAIL", reason: "Server error" });
+      this._send(ws, {
+        type: "AUTH_FAIL",
+        reason: "Server error",
+        recovery: getConnectionRecoveryPolicy(true),
+      });
       ws.close(4003, "Server error");
     }
   }

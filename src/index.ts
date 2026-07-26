@@ -39,6 +39,10 @@ import {
   describeWorkflowQueueRuntimePolicy,
   initializeWorkflowQueueRuntimePolicy,
 } from "./modules/workflows/workflow-runtime-config";
+import {
+  describeConnectionRecoveryPolicies,
+  initializeConnectionRecoveryPolicies,
+} from "./ws/connection-recovery-config";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
@@ -74,6 +78,7 @@ async function bootstrap(): Promise<void> {
   await ensureSegmentBuilderAgentToken();
   await initializePnqV2RuntimeConfig();
   await initializeWorkflowQueueRuntimePolicy();
+  await initializeConnectionRecoveryPolicies();
   console.log("[server] Migrations applied.");
   const uiGraphFlags = describeUiGraphRuntimeFlags();
   console.log(`[server] UI graph runtime enabled=${uiGraphFlags.enabled} selectorFirst=${uiGraphFlags.selectorFirst} graphRuntime=${uiGraphFlags.graphRuntime} aiRecovery=${uiGraphFlags.aiRecovery} candidateLearning=${uiGraphFlags.candidateLearning} autoPromotion=${uiGraphFlags.autoPromotion}.`);
@@ -85,6 +90,11 @@ async function bootstrap(): Promise<void> {
   console.log("[server] Device execution arbiter schema verified.");
   const pnqV2RuntimeConfig = describePnqV2RuntimeConfig();
   console.log(`[server] Queue v2 runtime enabled=${pnqV2RuntimeConfig.enabled} (loaded from PostgreSQL at startup).`);
+  const connectionRecovery = describeConnectionRecoveryPolicies();
+  console.log(
+    `[server] Connection recovery policy ready=${connectionRecovery.ready} ` +
+    `candidates=${connectionRecovery.candidateCount} error=${connectionRecovery.error ?? "none"}.`,
+  );
   if (isPnqV2ShadowRuntimeEnabled()) {
     const summary = await pnqV2RuntimeService.reconcileStartup();
     console.log(`[server] Queue v2 shadow startup reconciliation: ok=${summary.ok} error=${summary.observed_error ?? "none"}.`);

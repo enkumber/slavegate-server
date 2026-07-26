@@ -120,6 +120,10 @@ import {
   describeWorkflowQueueRuntimePolicy,
   initializeWorkflowQueueRuntimePolicy,
 } from "../modules/workflows/workflow-runtime-config";
+import {
+  describeConnectionRecoveryPolicies,
+  initializeConnectionRecoveryPolicies,
+} from "../ws/connection-recovery-config";
 import { startWorkflowWorker } from "../modules/workflows/workflow.executor";
 import type {
   SegmentInputResolver,
@@ -851,6 +855,7 @@ router.get("/runtime-semantics", requireAdminAuth, async (req, res) => {
       ok: true,
       data: await listRuntimeSemanticEntries({ namespace, entryKey }),
       workflowQueue: describeWorkflowQueueRuntimePolicy(),
+      connectionRecovery: describeConnectionRecoveryPolicies(),
     });
   } catch (err) {
     res.status(400).json({ ok: false, error: (err as Error).message });
@@ -873,9 +878,15 @@ router.put("/runtime-semantics/:namespace/:entryKey", requireAdminAuth, async (r
       payload,
     });
     await initializeWorkflowQueueRuntimePolicy();
+    await initializeConnectionRecoveryPolicies();
     const workflowQueue = describeWorkflowQueueRuntimePolicy();
     if (workflowQueue.ready) startWorkflowWorker();
-    res.json({ ok: true, data: entry, workflowQueue });
+    res.json({
+      ok: true,
+      data: entry,
+      workflowQueue,
+      connectionRecovery: describeConnectionRecoveryPolicies(),
+    });
   } catch (err) {
     res.status(400).json({ ok: false, error: (err as Error).message });
   }
@@ -885,10 +896,12 @@ router.delete("/runtime-semantics/:namespace/:entryKey", requireAdminAuth, async
   try {
     const deleted = await deleteRuntimeSemanticEntry(req.params.namespace, req.params.entryKey);
     await initializeWorkflowQueueRuntimePolicy();
+    await initializeConnectionRecoveryPolicies();
     res.status(deleted ? 200 : 404).json({
       ok: deleted,
       deleted,
       workflowQueue: describeWorkflowQueueRuntimePolicy(),
+      connectionRecovery: describeConnectionRecoveryPolicies(),
     });
   } catch (err) {
     res.status(400).json({ ok: false, error: (err as Error).message });
@@ -2780,6 +2793,7 @@ router.get("/health", (_req, res) => {
       appVersion: process.env.PHONE_NETWORK_APP_VERSION ?? null,
       buildCommit: process.env.BUILD_COMMIT ?? process.env.GIT_SHA ?? null,
       workflowQueue: describeWorkflowQueueRuntimePolicy(),
+      connectionRecovery: describeConnectionRecoveryPolicies(),
     },
   });
 });
