@@ -2298,10 +2298,14 @@ export class DeviceExecutionArbiter {
       }
 
       const operationBoundary = typeof operation.metadata?.boundary === "string" ? operation.metadata.boundary : null;
-      const isServerWorkflowChild = root.root_kind === "server_workflow" &&
-        operation.operation_kind === "job" &&
-        operationBoundary !== null &&
-        (["generated_child", "self_healing_child", "prestep_child", "recovery_child"] as readonly string[]).includes(operationBoundary);
+      const operationPolicy = operationBoundary
+        ? await getDeviceExecutionBoundaryPolicy(operationBoundary, client)
+        : null;
+      const isServerWorkflowChild = operationPolicy !== null &&
+        operationPolicy.requiresExistingRootHandle &&
+        !operationPolicy.retainsRootUntilTerminal &&
+        root.root_kind === operationPolicy.rootKind &&
+        operation.operation_kind === operationPolicy.operationKind;
       const terminal = isServerWorkflowChild
         ? rootIsDispatching(root)
           ? await transitionRootState(client, {
@@ -2510,8 +2514,14 @@ export class DeviceExecutionArbiter {
 
       const operationHandle = operationRowToHandle(operation);
       const boundary = typeof operation.metadata?.boundary === "string" ? operation.metadata.boundary : null;
-      const isChildBoundary = boundary !== null &&
-        (["generated_child", "self_healing_child", "prestep_child", "recovery_child"] as readonly string[]).includes(boundary);
+      const boundaryPolicy = boundary
+        ? await getDeviceExecutionBoundaryPolicy(boundary, client)
+        : null;
+      const isChildBoundary = boundaryPolicy !== null &&
+        boundaryPolicy.requiresExistingRootHandle &&
+        !boundaryPolicy.retainsRootUntilTerminal &&
+        root.root_kind === boundaryPolicy.rootKind &&
+        operation.operation_kind === boundaryPolicy.operationKind;
       const validOwner = root.device_id === input.deviceId &&
         operation.root_id === root.id &&
         operation.device_id === input.deviceId &&
@@ -3050,7 +3060,12 @@ export class DeviceExecutionArbiter {
 	           AND workflow_failure_state.retryable
 	           AND NOT workflow_failure_state.administrative
           WHERE roots.root_kind = 'server_workflow'
-            AND roots.state NOT IN ('completed', 'failed', 'cancelled')
+            AND NOT lifecycle_state_matches(
+                  'device_execution_roots'::regclass,
+                  roots.state,
+                  '{"terminal":true}'::jsonb,
+                  'state'::name
+                )
             AND EXISTS (
               SELECT 1
               FROM command_log commands

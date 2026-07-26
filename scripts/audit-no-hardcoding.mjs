@@ -51,7 +51,17 @@ const rules = [
   {
     id: "runtime-status-name-sql",
     scope: (path) => !path.includes("/src/db/migrations/"),
-    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state)\s*(?:=|IN\s*\()\s*["'(][A-Za-z][A-Za-z0-9_-]*/gi,
+    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state)\s*(?:=|(?:NOT\s+)?IN\s*\()\s*["'(][A-Za-z][A-Za-z0-9_-]*/gi,
+  },
+  {
+    id: "runtime-semantic-includes-set",
+    scope: (path) => !path.includes("/src/db/migrations/") && /\.(?:ts|tsx|kt)$/.test(path),
+    pattern: /\(\s*\[\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'](?:\s*,\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'])+\s*\](?:\s+as\s+[^)]*)?\)\.includes\(\s*(?:status|state|decision|phase|outcome|action|actionKey|boundary|rootKind|operationKind|mode|scope)\b/g,
+  },
+  {
+    id: "runtime-semantic-named-set",
+    scope: (path) => !path.includes("/src/db/migrations/") && /\.(?:ts|tsx|kt)$/.test(path),
+    pattern: /\b(?:STATUS|STATES|DECISIONS|PHASES|OUTCOMES|ACTIONS|ACTION_KEYS|BOUNDARIES|MODES|SCOPES)\b[^=\n]*=\s*\[\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'](?:\s*,\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'])+/g,
   },
   {
     id: "runtime-status-literal-union",

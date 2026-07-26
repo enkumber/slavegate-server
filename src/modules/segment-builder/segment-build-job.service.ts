@@ -1366,20 +1366,27 @@ export class SegmentBuildJobService {
 
   async fail(id: string, agentId: string, error: string, blocked = false): Promise<SegmentBuildJob | null> {
     if (agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
-    const result = await getDb().query(
-      `UPDATE segment_build_jobs
-       SET status = $3,
-           error = $4,
-           completed_at = NOW(),
-           updated_at = NOW()
-       WHERE id = $1 AND assigned_agent = $2
-         AND status NOT IN ('completed','cancelled')
-       RETURNING *`,
-      [id, agentId, blocked ? "blocked" : "failed", error.slice(0, 2000)],
+    const failed = await transitionSegmentBuildJob(
+      id,
+      blocked
+        ? {
+            targetTerminal: false,
+            targetManual: true,
+            transitionAutomatic: true,
+          }
+        : {
+            targetTerminal: true,
+            targetRetryable: true,
+            targetAdministrative: false,
+            transitionAutomatic: true,
+          },
+      { error: error.slice(0, 2000) },
+      "assigned_agent = $2",
+      [agentId],
     );
-    if (!result.rows[0]) return null;
+    if (!failed) return null;
     await event(id, blocked ? "blocked" : "failed", agentId, { error: error.slice(0, 500) });
-    return rowToJob(result.rows[0]);
+    return failed;
   }
 }
 
