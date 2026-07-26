@@ -44,6 +44,11 @@ const rules = [
     pattern: /\b(?:status|state|lifecycleStatus|lifecycle_status|candidateState|candidate_state|promotionState|promotion_state|libraryState|library_state)\s*(?:===|!==|==|!=)\s*["'](?!(?:string|number|boolean|object|undefined|null)["'])[A-Za-z][A-Za-z0-9_-]*["']/g,
   },
   {
+    id: "runtime-decision-name-branch",
+    scope: (path) => !path.includes("/src/db/migrations/"),
+    pattern: /\b(?:decision|phase|outcome|artifactState|artifact_state|validationStage|validation_stage|actionKey|action_key)\s*(?:===|!==|==|!=)\s*["'](?!(?:string|number|boolean|object|undefined|null)["'])[A-Za-z][A-Za-z0-9_-]*["']/g,
+  },
+  {
     id: "runtime-status-name-sql",
     scope: (path) => !path.includes("/src/db/migrations/"),
     pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state)\s*(?:=|IN\s*\()\s*["'(][A-Za-z][A-Za-z0-9_-]*/gi,
