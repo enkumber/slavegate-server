@@ -98,9 +98,13 @@ function executionStats(checkpoint: WorkflowCheckpoint): WorkflowExecutionStats 
 
 export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED";
 
-export function shouldTerminallyFailWorkflowJob(attemptsMade: number, err: unknown): boolean {
+export function shouldTerminallyFailWorkflowJob(
+  attemptsMade: number,
+  err: unknown,
+  configuredAttempts = getWorkflowQueueRuntimePolicy().maxAttempts,
+): boolean {
   const typed = err as { code?: unknown; message?: unknown } | null;
-  return attemptsMade >= getWorkflowQueueRuntimePolicy().maxAttempts ||
+  return attemptsMade >= configuredAttempts ||
     typed?.code === RECOVERY_BUDGET_EXCEEDED ||
     typed?.message === RECOVERY_BUDGET_EXCEEDED;
 }
@@ -655,15 +659,9 @@ let workflowQueue: Queue | null = null;
 
 export function getWorkflowQueue(): Queue {
   if (!workflowQueue) {
-    const queuePolicy = getWorkflowQueueRuntimePolicy();
     workflowQueue = new Queue(WORKFLOW_QUEUE, {
       connection: getRedisConnectionOptions(),
       defaultJobOptions: {
-        attempts: queuePolicy.maxAttempts,
-        backoff: {
-          type: queuePolicy.backoffType,
-          delay: queuePolicy.backoffDelayMs,
-        },
         // timeout removed — BullMQ v5 removed this option; use worker-level timeout instead
         removeOnComplete: true,
         removeOnFail:     false,      // Keep for debugging
@@ -675,7 +673,10 @@ export function getWorkflowQueue(): Queue {
 
 // ─── Worker ───────────────────────────────────────────────────────────────────
 
+let workflowWorker: Worker | null = null;
+
 export function startWorkflowWorker(): Worker {
+  if (workflowWorker) return workflowWorker;
   const worker = new Worker(
     scalabilityConfig.workflowQueueName,
     async (job) => {
@@ -693,7 +694,10 @@ export function startWorkflowWorker(): Worker {
   worker.on("failed", async (job, err) => {
     if (!job) return;
     const { workflowId } = job.data as { workflowId: string };
-    if (shouldTerminallyFailWorkflowJob(job.attemptsMade, err)) {
+    const configuredAttempts = typeof job.opts.attempts === "number"
+      ? job.opts.attempts
+      : getWorkflowQueueRuntimePolicy().maxAttempts;
+    if (shouldTerminallyFailWorkflowJob(job.attemptsMade, err, configuredAttempts)) {
       console.error(`[workflow] terminal failure: ${workflowId} after ${job.attemptsMade} attempts: ${err.message}`);
       await workflowService.markFailed(workflowId, err.message);
       const workflow = await workflowService.get(workflowId);
@@ -712,7 +716,8 @@ export function startWorkflowWorker(): Worker {
   });
 
   console.log("[workflow] Worker started");
-  return worker;
+  workflowWorker = worker;
+  return workflowWorker;
 }
 
 // ─── Core execution loop ──────────────────────────────────────────────────────
@@ -1737,8 +1742,14 @@ function uuidv4Batch(): string {
  */
 export async function startWorkflow(workflowId: string): Promise<void> {
   const queue = getWorkflowQueue();
+  const queuePolicy = getWorkflowQueueRuntimePolicy();
   const addPromise = queue.add("execute-workflow", { workflowId }, {
     jobId: workflowId,  // Unic per workflow - previne duplicate jobs
+    attempts: queuePolicy.maxAttempts,
+    backoff: {
+      type: queuePolicy.backoffType,
+      delay: queuePolicy.backoffDelayMs,
+    },
     removeOnComplete: true,
     removeOnFail: false  // Keep for debugging
   });

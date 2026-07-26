@@ -111,6 +111,16 @@ import {
 } from "../modules/ota/apk-release";
 import { incidentService, type IncidentStatus } from "../modules/incidents/incident.service";
 import { workflowSegmentControlPlaneService } from "../modules/workflow-segments/control-plane.service";
+import {
+  deleteRuntimeSemanticEntry,
+  listRuntimeSemanticEntries,
+  upsertRuntimeSemanticEntry,
+} from "../modules/runtime-semantics/runtime-semantics.service";
+import {
+  describeWorkflowQueueRuntimePolicy,
+  initializeWorkflowQueueRuntimePolicy,
+} from "../modules/workflows/workflow-runtime-config";
+import { startWorkflowWorker } from "../modules/workflows/workflow.executor";
 import type {
   SegmentInputResolver,
   SegmentInputSchema,
@@ -831,6 +841,58 @@ router.get("/jobs", async (req, res) => {
 
 router.get("/jobs/status-definitions", async (_req, res) => {
   res.json({ ok: true, data: await listJobStatusDefinitions() });
+});
+
+router.get("/runtime-semantics", requireAdminAuth, async (req, res) => {
+  try {
+    const namespace = typeof req.query.namespace === "string" ? req.query.namespace : undefined;
+    const entryKey = typeof req.query.entryKey === "string" ? req.query.entryKey : undefined;
+    res.json({
+      ok: true,
+      data: await listRuntimeSemanticEntries({ namespace, entryKey }),
+      workflowQueue: describeWorkflowQueueRuntimePolicy(),
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.put("/runtime-semantics/:namespace/:entryKey", requireAdminAuth, async (req, res) => {
+  try {
+    const payload = req.body?.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return res.status(400).json({ ok: false, error: "payload must be an object" });
+    }
+    const entry = await upsertRuntimeSemanticEntry({
+      namespace: req.params.namespace,
+      entryKey: req.params.entryKey,
+      platform: typeof req.body?.platform === "string" ? req.body.platform : "*",
+      lifecycleKey: typeof req.body?.lifecycleKey === "string" ? req.body.lifecycleKey : "",
+      status: typeof req.body?.status === "string" ? req.body.status : "",
+      priority: Number.isSafeInteger(req.body?.priority) ? req.body.priority : 0,
+      payload,
+    });
+    await initializeWorkflowQueueRuntimePolicy();
+    const workflowQueue = describeWorkflowQueueRuntimePolicy();
+    if (workflowQueue.ready) startWorkflowWorker();
+    res.json({ ok: true, data: entry, workflowQueue });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.delete("/runtime-semantics/:namespace/:entryKey", requireAdminAuth, async (req, res) => {
+  try {
+    const deleted = await deleteRuntimeSemanticEntry(req.params.namespace, req.params.entryKey);
+    await initializeWorkflowQueueRuntimePolicy();
+    res.status(deleted ? 200 : 404).json({
+      ok: deleted,
+      deleted,
+      workflowQueue: describeWorkflowQueueRuntimePolicy(),
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
 });
 
 router.get("/lifecycle/:lifecycleKey", requireAdminAuth, async (req, res) => {
@@ -2717,6 +2779,7 @@ router.get("/health", (_req, res) => {
       ts: new Date().toISOString(),
       appVersion: process.env.PHONE_NETWORK_APP_VERSION ?? null,
       buildCommit: process.env.BUILD_COMMIT ?? process.env.GIT_SHA ?? null,
+      workflowQueue: describeWorkflowQueueRuntimePolicy(),
     },
   });
 });

@@ -35,7 +35,10 @@ import { isDeviceExecutionEnforced } from "./modules/device-execution/device-exe
 import { sweepQueuedJobsForOnlineDevices } from "./transport/transport";
 import { pnqV2RuntimeService } from "./modules/device-execution/pnq-v2-runtime.service";
 import { describePnqV2RuntimeConfig, initializePnqV2RuntimeConfig, isPnqV2ShadowRuntimeEnabled } from "./modules/device-execution/pnq-v2-runtime-config";
-import { initializeWorkflowQueueRuntimePolicy } from "./modules/workflows/workflow-runtime-config";
+import {
+  describeWorkflowQueueRuntimePolicy,
+  initializeWorkflowQueueRuntimePolicy,
+} from "./modules/workflows/workflow-runtime-config";
 // skill-updater now triggered via API endpoint (POST /api/skill-updater/run)
 import { isKillSwitchActive, setWsServerRef } from "./api/routes";
 import { startOpsMonitorScheduler } from "./modules/ops-monitor/ops-monitor.service";
@@ -147,8 +150,16 @@ async function bootstrap(): Promise<void> {
   await seedSystemPrompts();
 
   // ─── Start workflow execution worker ─────────────────────────────────────
-  startWorkflowWorker();
-  console.log("[server] Workflow worker started.");
+  const workflowQueuePolicy = describeWorkflowQueueRuntimePolicy();
+  if (workflowQueuePolicy.ready) {
+    startWorkflowWorker();
+    console.log("[server] Workflow worker started.");
+  } else {
+    console.warn(
+      `[server] Workflow worker disabled until PostgreSQL exposes exactly one active queue policy: ` +
+      `${workflowQueuePolicy.error ?? "configuration required"}.`,
+    );
+  }
   startEdgeWorkflowProgressWatchdog();
   console.log("[server] Edge workflow progress watchdog started.");
 

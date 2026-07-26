@@ -6,7 +6,16 @@ export interface WorkflowQueueRuntimePolicy {
   backoffDelayMs: number;
 }
 
+export interface WorkflowQueueRuntimePolicyStatus {
+  ready: boolean;
+  candidateCount: number;
+  policy: WorkflowQueueRuntimePolicy | null;
+  error: string | null;
+}
+
 let runtimePolicy: WorkflowQueueRuntimePolicy | null = null;
+let runtimePolicyCandidateCount = 0;
+let runtimePolicyError: string | null = null;
 let testOverride: WorkflowQueueRuntimePolicy | null = null;
 
 function parsePolicy(payload: Record<string, unknown>): WorkflowQueueRuntimePolicy {
@@ -29,7 +38,7 @@ function parsePolicy(payload: Record<string, unknown>): WorkflowQueueRuntimePoli
   };
 }
 
-export async function initializeWorkflowQueueRuntimePolicy(): Promise<WorkflowQueueRuntimePolicy> {
+export async function initializeWorkflowQueueRuntimePolicy(): Promise<WorkflowQueueRuntimePolicy | null> {
   const result = await getDb().query<{ payload: Record<string, unknown> }>(
     `SELECT entry.payload
        FROM runtime_semantic_entries entry
@@ -40,16 +49,40 @@ export async function initializeWorkflowQueueRuntimePolicy(): Promise<WorkflowQu
         AND entry.payload ?& ARRAY['maxAttempts','backoffType','backoffDelayMs']
       ORDER BY entry.priority DESC, entry.id`,
   );
+  runtimePolicyCandidateCount = result.rows.length;
   if (result.rows.length !== 1) {
-    throw new Error("PostgreSQL must expose exactly one active workflow queue runtime policy");
+    runtimePolicy = null;
+    runtimePolicyError = result.rows.length === 0
+      ? "PostgreSQL has no active workflow queue runtime policy"
+      : "PostgreSQL exposes multiple active workflow queue runtime policies";
+    return null;
   }
-  runtimePolicy = parsePolicy(result.rows[0].payload);
+  try {
+    runtimePolicy = parsePolicy(result.rows[0].payload);
+    runtimePolicyError = null;
+  } catch (err) {
+    runtimePolicy = null;
+    runtimePolicyError = (err as Error).message;
+    return null;
+  }
   return { ...runtimePolicy };
+}
+
+export function describeWorkflowQueueRuntimePolicy(): WorkflowQueueRuntimePolicyStatus {
+  const policy = testOverride ?? runtimePolicy;
+  return {
+    ready: policy !== null,
+    candidateCount: testOverride ? 1 : runtimePolicyCandidateCount,
+    policy: policy ? { ...policy } : null,
+    error: policy ? null : runtimePolicyError,
+  };
 }
 
 export function getWorkflowQueueRuntimePolicy(): WorkflowQueueRuntimePolicy {
   const policy = testOverride ?? runtimePolicy;
-  if (!policy) throw new Error("workflow queue runtime policy was not initialized");
+  if (!policy) {
+    throw new Error(runtimePolicyError ?? "workflow queue runtime policy was not initialized");
+  }
   return { ...policy };
 }
 
