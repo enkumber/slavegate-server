@@ -161,17 +161,35 @@ export class PnqV2RuntimeRepository {
         dispatch_deadline_at: Date;
         result_deadline_at: Date;
       }>(
-        `SELECT id, status, job_version, dispatch_generation, dispatch_deadline_at, result_deadline_at
-         FROM pnq_jobs
-         WHERE (status = 'DISPATCHING' AND dispatch_deadline_at <= $1)
-            OR (status = 'RUNNING' AND result_deadline_at <= $1)
-         ORDER BY node_id, node_seq
-         FOR UPDATE SKIP LOCKED`,
+        `SELECT job.id, job.status, job.job_version, job.dispatch_generation,
+                job.dispatch_deadline_at, job.result_deadline_at
+         FROM pnq_jobs job
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('pnq_jobs')
+          AND binding.state_column = 'status'::name
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = binding.lifecycle_key
+          AND state.status = job.status
+         WHERE NOT state.initial
+           AND NOT state.terminal
+           AND (
+             (
+               job.dispatch_started_at IS NOT NULL
+               AND job.execution_started_at IS NULL
+               AND job.dispatch_deadline_at <= $1
+             )
+             OR (
+               job.execution_started_at IS NOT NULL
+               AND job.result_deadline_at <= $1
+             )
+           )
+         ORDER BY job.node_id, job.node_seq
+         FOR UPDATE OF job SKIP LOCKED`,
         [now],
       );
       let marked = 0;
       for (const row of expired.rows) {
-        const result = await client.query("SELECT status FROM pnq_mark_stuck($1, $2, $3::jsonb, $4)", [
+        const result = await client.query("SELECT terminal_at IS NOT NULL AS terminal FROM pnq_mark_stuck($1, $2, $3::jsonb, $4)", [
           row.id,
           reason,
           JSON.stringify({
@@ -185,7 +203,7 @@ export class PnqV2RuntimeRepository {
           }),
           "pnq-v2-shadow-runtime",
         ]);
-        if (result.rows[0]?.status === "STUCK") marked += 1;
+        if (result.rows[0]?.terminal === true) marked += 1;
       }
       await client.query("COMMIT");
       return marked;
