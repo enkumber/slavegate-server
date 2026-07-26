@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS agency_workflow_run_admin_events (
   run_id          UUID NOT NULL,
   task_id         UUID,
   workflow_ids    UUID[] NOT NULL DEFAULT '{}',
-  action          TEXT NOT NULL CHECK (action IN ('admin_close')),
+  action          TEXT NOT NULL,
   actor_type      TEXT NOT NULL,
   actor_id        TEXT,
   reason          TEXT NOT NULL,

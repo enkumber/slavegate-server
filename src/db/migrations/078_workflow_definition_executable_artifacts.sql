@@ -5,19 +5,7 @@
 ALTER TABLE agency_workflow_definition_version_events
   DROP CONSTRAINT IF EXISTS agency_workflow_definition_version_events_action_check;
 
-ALTER TABLE agency_workflow_definition_version_events
-  ADD CONSTRAINT agency_workflow_definition_version_events_action_check
-  CHECK (action IN (
-    'create_version',
-    'archive',
-    'deprecate',
-    'activate',
-    'draft',
-    'hardening_preview',
-    'auto_use_enablement',
-    'auto_use_execution_queued',
-    'executable_artifact_promoted'
-  ));
+-- Version-event actions remain operator-defined data.
 
 CREATE INDEX IF NOT EXISTS idx_generated_workflow_plan_cache_definition_artifact
   ON generated_workflow_plan_cache (

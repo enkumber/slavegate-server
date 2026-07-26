@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS agency_workflow_definition_promotion_events (
   definition_id UUID NOT NULL REFERENCES agency_workflow_definitions(id) ON DELETE CASCADE,
   definition_key TEXT NOT NULL,
   definition_version INTEGER NOT NULL,
-  action TEXT NOT NULL CHECK (action IN ('promote_limited', 'revoke')),
+  action TEXT NOT NULL,
   previous_state TEXT NULL,
   next_state TEXT NOT NULL,
   promotion_scope TEXT NULL,

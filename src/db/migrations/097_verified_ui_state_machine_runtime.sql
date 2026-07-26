@@ -28,16 +28,12 @@ SET schema_version = GREATEST(schema_version, 3),
 WHERE contract_id = 'edge-workflow/v2';
 
 ALTER TABLE ui_graph_learning_candidates
-  ADD COLUMN IF NOT EXISTS validation_stage TEXT NOT NULL DEFAULT 'candidate';
+  ADD COLUMN IF NOT EXISTS validation_stage TEXT;
 
 ALTER TABLE ui_graph_learning_candidates
   DROP CONSTRAINT IF EXISTS chk_ui_graph_candidate_validation_stage;
 
-ALTER TABLE ui_graph_learning_candidates
-  ADD CONSTRAINT chk_ui_graph_candidate_validation_stage
-  CHECK (validation_stage IN (
-    'candidate', 'device_validated', 'cohort_validated', 'global_promoted'
-  ));
+-- Validation stages are supplied by the operator control plane.
 
 ALTER TABLE ui_graph_candidate_validations
   ADD COLUMN IF NOT EXISTS android_version TEXT NULL,

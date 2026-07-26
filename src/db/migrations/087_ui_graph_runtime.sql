@@ -9,8 +9,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_states (
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'screen'
     CHECK (kind IN ('screen', 'overlay', 'system', 'unknown')),
-  safety_class TEXT NOT NULL DEFAULT 'navigation'
-    CHECK (safety_class IN ('read_only', 'navigation', 'mutating', 'sensitive')),
+  safety_class TEXT NOT NULL,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -72,8 +71,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_transitions (
   preconditions JSONB NOT NULL DEFAULT '{}'::jsonb,
   postconditions JSONB NOT NULL DEFAULT '{}'::jsonb,
   cost DOUBLE PRECISION NOT NULL DEFAULT 1 CHECK (cost > 0),
-  safety_class TEXT NOT NULL DEFAULT 'navigation'
-    CHECK (safety_class IN ('read_only', 'navigation', 'mutating', 'sensitive')),
+  safety_class TEXT NOT NULL,
   confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5
     CHECK (confidence >= 0 AND confidence <= 1),
   status TEXT,
@@ -113,7 +111,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_action_events (
   target_state_id UUID NULL REFERENCES ui_graph_states(id) ON DELETE SET NULL,
   state_resolution_method TEXT NOT NULL DEFAULT 'unknown',
   target_resolution_method TEXT NOT NULL DEFAULT 'unknown',
-  outcome TEXT NOT NULL CHECK (outcome IN ('shadow', 'completed', 'failed', 'recovered', 'aborted')),
+  outcome TEXT NOT NULL,
   latency_ms INT NOT NULL DEFAULT 0,
   llm_calls INT NOT NULL DEFAULT 0,
   vlm_calls INT NOT NULL DEFAULT 0,
@@ -127,7 +125,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_learning_candidates (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   candidate_key TEXT NOT NULL UNIQUE,
   app_id TEXT NOT NULL,
-  candidate_type TEXT NOT NULL CHECK (candidate_type IN ('state', 'selector', 'transition', 'recovery_rule')),
+  candidate_type TEXT NOT NULL,
   status TEXT,
   source_state_id UUID NULL REFERENCES ui_graph_states(id) ON DELETE SET NULL,
   target_state_id UUID NULL REFERENCES ui_graph_states(id) ON DELETE SET NULL,
@@ -140,8 +138,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_learning_candidates (
   success_count INT NOT NULL DEFAULT 0,
   failure_count INT NOT NULL DEFAULT 0,
   distinct_context_count INT NOT NULL DEFAULT 0,
-  safety_class TEXT NOT NULL DEFAULT 'navigation'
-    CHECK (safety_class IN ('read_only', 'navigation', 'mutating', 'sensitive')),
+  safety_class TEXT NOT NULL,
   promoted_entity_id UUID NULL,
   first_observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -168,7 +165,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_candidate_validations (
 CREATE TABLE IF NOT EXISTS ui_graph_promotion_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   candidate_id UUID NOT NULL REFERENCES ui_graph_learning_candidates(id) ON DELETE CASCADE,
-  action TEXT NOT NULL CHECK (action IN ('promote', 'degrade', 'quarantine', 'retire', 'revalidate')),
+  action TEXT NOT NULL,
   previous_status TEXT NOT NULL,
   next_status TEXT NOT NULL,
   actor TEXT NOT NULL,
@@ -179,9 +176,9 @@ CREATE TABLE IF NOT EXISTS ui_graph_promotion_events (
 
 CREATE TABLE IF NOT EXISTS ui_graph_runtime_flags (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  scope_type TEXT NOT NULL CHECK (scope_type IN ('global', 'app', 'workflow', 'device')),
+  scope_type TEXT NOT NULL,
   scope_value TEXT NOT NULL DEFAULT '*',
-  mode TEXT NOT NULL DEFAULT 'disabled' CHECK (mode IN ('disabled', 'shadow', 'enforced')),
+  mode TEXT NOT NULL,
   selector_first BOOLEAN NOT NULL DEFAULT TRUE,
   graph_runtime BOOLEAN NOT NULL DEFAULT TRUE,
   ai_recovery BOOLEAN NOT NULL DEFAULT TRUE,

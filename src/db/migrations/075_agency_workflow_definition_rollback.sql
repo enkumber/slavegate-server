@@ -6,6 +6,4 @@
 ALTER TABLE agency_workflow_definition_promotion_events
   DROP CONSTRAINT IF EXISTS agency_workflow_definition_promotion_events_action_check;
 
-ALTER TABLE agency_workflow_definition_promotion_events
-  ADD CONSTRAINT agency_workflow_definition_promotion_events_action_check
-  CHECK (action IN ('promote_limited', 'revoke', 'rollback'));
+-- Action policy is configured operationally rather than constrained by release SQL.

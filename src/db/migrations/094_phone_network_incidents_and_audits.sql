@@ -29,10 +29,7 @@ CREATE TABLE IF NOT EXISTS phone_network_incidents (
 CREATE TABLE IF NOT EXISTS phone_network_incident_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   incident_id UUID NOT NULL REFERENCES phone_network_incidents(id) ON DELETE CASCADE,
-  event_type TEXT NOT NULL CHECK (event_type IN (
-    'created', 'reopened', 'acknowledged', 'investigating', 'shadow_check',
-    'quarantined', 'routed', 'resolved', 'closed', 'note'
-  )),
+  event_type TEXT NOT NULL,
   actor TEXT NOT NULL,
   details JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

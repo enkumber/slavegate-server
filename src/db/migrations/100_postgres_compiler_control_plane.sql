@@ -54,6 +54,9 @@ AS $$
   LIMIT 1
 $$;
 
+ALTER TABLE workflow_capabilities
+  ADD COLUMN IF NOT EXISTS compiler_retrievable BOOLEAN;
+
 CREATE OR REPLACE FUNCTION resolve_workflow_capabilities(
   p_intent TEXT,
   p_platform TEXT
@@ -91,7 +94,7 @@ AS $$
     CROSS JOIN LATERAL unnest(
       ARRAY[capability.capability_key, COALESCE(capability.description, '')] || capability.aliases
     ) descriptor(value)
-    WHERE capability.portability_scope = 'global'
+    WHERE capability.compiler_retrievable IS TRUE
       AND (lower(capability.platform) = lower(p_platform) OR lower(capability.platform) = 'android')
       AND NOT EXISTS (
         SELECT 1

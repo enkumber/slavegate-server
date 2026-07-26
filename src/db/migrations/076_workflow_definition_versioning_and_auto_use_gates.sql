@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS agency_workflow_definition_version_events (
   definition_id UUID REFERENCES agency_workflow_definitions(id) ON DELETE SET NULL,
   definition_key TEXT NOT NULL,
   definition_version INTEGER NOT NULL,
-  action TEXT NOT NULL CHECK (action IN ('create_version', 'archive', 'deprecate', 'activate', 'draft', 'hardening_preview')),
+  action TEXT NOT NULL,
   previous_status TEXT NULL,
   next_status TEXT NULL,
   target_definition_id UUID REFERENCES agency_workflow_definitions(id) ON DELETE SET NULL,

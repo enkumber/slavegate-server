@@ -24,6 +24,19 @@ export async function configurePnqV2LifecycleFixture(pool: Pool, repoRoot: strin
   }
 
   await pool.query(`
+    INSERT INTO pnq_resolution_policies (
+      epoch_mismatch, cas_miss, payload_mismatch, idempotent_replay,
+      stale_result, late_result, terminalized_for_recovery,
+      event_type, decision
+    ) VALUES
+      (TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 'epoch_rejected', 'rejected'),
+      (FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 'cas_lost', 'ignored'),
+      (FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 'payload_conflict', 'rejected'),
+      (FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, 'enqueue_idempotent_replay', 'ignored'),
+      (FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, FALSE, 'stale_result', 'rejected'),
+      (FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 'late_result', 'ignored'),
+      (FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 'marked_stuck', 'stuck');
+
     INSERT INTO lifecycle_state_definitions
       (lifecycle_key, status, initial, terminal, retryable, administrative,
        dispatchable, manual, sort_order)

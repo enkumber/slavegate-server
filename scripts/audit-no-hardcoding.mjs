@@ -19,7 +19,7 @@ const rules = [
   {
     id: "migration-semantic-status-constraint",
     scope: (path) => path.includes("/src/db/migrations/"),
-    pattern: /\bCHECK\s*\([^;]*(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state)\s+IN\s*\(/gi,
+    pattern: /\bCHECK\s*\([^;]*(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|event_type|decision|mode|phase|outcome|action|action_key|validation_stage|scope_type|candidate_type|safety_class|portability_scope)\s+IN\s*\(/gi,
   },
   {
     id: "migration-semantic-lifecycle-seed",
@@ -31,17 +31,22 @@ const rules = [
   {
     id: "migration-semantic-state-default",
     scope: (path) => path.includes("/src/db/migrations/"),
-    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state)\b[^,;\n]*\bDEFAULT\s+["'][A-Za-z][A-Za-z0-9_-]*["']/gi,
+    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|event_type|decision|mode|phase|outcome|action|action_key|validation_stage|scope_type|candidate_type|safety_class|portability_scope)\b[^,;\n]*\bDEFAULT\s+["'][A-Za-z][A-Za-z0-9_-]*["']/gi,
   },
   {
     id: "migration-semantic-state-sql",
     scope: (path) => path.includes("/src/db/migrations/"),
-    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state)\s*(?:=|(?:NOT\s+)?IN\s*\()\s*["'(][A-Za-z][A-Za-z0-9_-]*/gi,
+    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|event_type|decision|mode|phase|outcome|action|action_key|validation_stage|scope_type|candidate_type|safety_class|portability_scope)\s*(?:=|(?:NOT\s+)?IN\s*\()\s*["'(][A-Za-z][A-Za-z0-9_-]*/gi,
   },
   {
     id: "migration-product-policy-seed",
     scope: (path) => path.includes("/src/db/migrations/"),
     pattern: /\bINSERT\s+INTO\s+(?:runtime_semantic_entries|workflow_capabilities|workflow_capability_artifacts|job_status_definitions|task_status_definitions|workflow_status_definitions|agency_workflow_run_status_definitions|research_job_status_definitions)\b/gi,
+  },
+  {
+    id: "migration-semantic-row-seed",
+    scope: (path) => path.includes("/src/db/migrations/"),
+    pattern: /\bINSERT\s+INTO\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|artifact_state|event_type|decision|mode|phase|outcome|action|action_key|validation_stage|scope_type|candidate_type|safety_class|portability_scope)\b[^)]*\)\s*VALUES\s*\(?[\s\S]{0,500}?["'][A-Za-z][A-Za-z0-9_.:-]*["']/gi,
   },
   {
     id: "runtime-status-name-branch",

@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS ui_graph_edge_learning_receipts (
   workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
   candidate_id UUID NOT NULL REFERENCES ui_graph_learning_candidates(id) ON DELETE CASCADE,
-  outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure')),
+  outcome TEXT NOT NULL,
   evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (workflow_id, candidate_id)

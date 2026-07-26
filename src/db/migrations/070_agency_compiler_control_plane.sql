@@ -11,16 +11,6 @@ CREATE TABLE IF NOT EXISTS agency_compiler_policy_gate_config (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO agency_compiler_policy_gate_config (gate_id, state, version, owner, risk, config)
-VALUES
-  ('compiler_tool_visibility', 'blocked', 1, 'engineering', 'medium', '{}'::jsonb),
-  ('compiler_knowledge_application', 'blocked', 1, 'product', 'medium', '{}'::jsonb),
-  ('step_compiler_eligibility', 'blocked', 1, 'qa', 'high', '{}'::jsonb),
-  ('limited_reuse_scope_match', 'blocked', 1, 'qa', 'high', '{}'::jsonb),
-  ('compiler_auto_use', 'blocked', 1, 'product', 'high', '{}'::jsonb),
-  ('execution_path_change', 'blocked', 1, 'security', 'high', '{}'::jsonb)
-ON CONFLICT (gate_id) DO NOTHING;
-
 CREATE TABLE IF NOT EXISTS agency_compiler_control_plane_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   intent TEXT,

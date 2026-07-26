@@ -17,12 +17,7 @@ ALTER TABLE phone_network_incident_events
 ALTER TABLE phone_network_incident_events
   DROP CONSTRAINT IF EXISTS phone_network_incident_events_event_type_check;
 
-ALTER TABLE phone_network_incident_events
-  ADD CONSTRAINT phone_network_incident_events_event_type_check CHECK (event_type IN (
-    'created', 'reopened', 'acknowledged', 'investigating', 'shadow_check',
-    'quarantined', 'routed', 'ownership_changed', 'superseded',
-    'resolved', 'closed', 'note'
-  ));
+-- Event semantics are operator data, not a release-time constraint.
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_phone_network_incident_events_event_key
   ON phone_network_incident_events(incident_id, event_key)
@@ -99,4 +94,3 @@ SET artifact_state = 'quarantined',
 FROM classified
 WHERE cache.cache_key = classified.cache_key
   AND classified.inferred_safety_class IS NULL;
-

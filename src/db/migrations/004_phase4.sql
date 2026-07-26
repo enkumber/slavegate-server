@@ -29,8 +29,7 @@ CREATE TABLE IF NOT EXISTS detection_events (
   device_id    UUID        REFERENCES devices(id) ON DELETE SET NULL,
   account_id   UUID        REFERENCES accounts(id) ON DELETE SET NULL,
   platform     TEXT,
-  event_type   TEXT        NOT NULL   -- 'ban_detected' | 'challenge' | 'rate_limited' | 'fingerprint_leak' | 'parser_degraded'
-               CHECK (event_type IN ('ban_detected','challenge','rate_limited','fingerprint_leak','parser_degraded')),
+  event_type   TEXT        NOT NULL,
   confidence   REAL        NOT NULL DEFAULT 1.0,
   details      JSONB       NOT NULL DEFAULT '{}',
   ts           TIMESTAMPTZ NOT NULL DEFAULT NOW()

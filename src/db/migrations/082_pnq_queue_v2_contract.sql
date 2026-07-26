@@ -90,24 +90,7 @@ CREATE TABLE IF NOT EXISTS pnq_resolution_audit (
   execution_id          UUID,
   evidence              JSONB NOT NULL DEFAULT '{}'::jsonb,
   actor                 TEXT NOT NULL DEFAULT 'pnq-v2-contract',
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT pnq_resolution_audit_event_type_check CHECK (
-    event_type IN (
-      'enqueue_idempotent_replay',
-      'payload_conflict',
-      'epoch_rejected',
-      'cas_lost',
-      'stale_result',
-      'late_result',
-      'result_mismatch',
-      'recovery_required',
-      'marked_stuck',
-      'explicit_resolution'
-    )
-  ),
-  CONSTRAINT pnq_resolution_audit_decision_check CHECK (
-    decision IN ('ignored', 'rejected', 'stuck', 'resolved', 'requires_recovery')
-  )
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS pnq_resolution_audit_job_idx
@@ -115,6 +98,92 @@ CREATE INDEX IF NOT EXISTS pnq_resolution_audit_job_idx
 
 CREATE INDEX IF NOT EXISTS pnq_resolution_audit_node_idx
   ON pnq_resolution_audit(node_id, created_at);
+
+CREATE TABLE IF NOT EXISTS pnq_resolution_policies (
+  id                         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  epoch_mismatch             BOOLEAN NOT NULL DEFAULT FALSE,
+  cas_miss                   BOOLEAN NOT NULL DEFAULT FALSE,
+  payload_mismatch           BOOLEAN NOT NULL DEFAULT FALSE,
+  idempotent_replay          BOOLEAN NOT NULL DEFAULT FALSE,
+  stale_result               BOOLEAN NOT NULL DEFAULT FALSE,
+  late_result                BOOLEAN NOT NULL DEFAULT FALSE,
+  terminalized_for_recovery  BOOLEAN NOT NULL DEFAULT FALSE,
+  event_type                 TEXT NOT NULL,
+  decision                   TEXT NOT NULL,
+  enabled                    BOOLEAN NOT NULL DEFAULT TRUE,
+  metadata                   JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CHECK (
+    epoch_mismatch::integer
+    + cas_miss::integer
+    + payload_mismatch::integer
+    + idempotent_replay::integer
+    + stale_result::integer
+    + late_result::integer
+    + terminalized_for_recovery::integer = 1
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS pnq_resolution_policy_epoch_mismatch
+  ON pnq_resolution_policies(epoch_mismatch) WHERE epoch_mismatch AND enabled;
+CREATE UNIQUE INDEX IF NOT EXISTS pnq_resolution_policy_cas_miss
+  ON pnq_resolution_policies(cas_miss) WHERE cas_miss AND enabled;
+CREATE UNIQUE INDEX IF NOT EXISTS pnq_resolution_policy_payload_mismatch
+  ON pnq_resolution_policies(payload_mismatch) WHERE payload_mismatch AND enabled;
+CREATE UNIQUE INDEX IF NOT EXISTS pnq_resolution_policy_idempotent_replay
+  ON pnq_resolution_policies(idempotent_replay) WHERE idempotent_replay AND enabled;
+CREATE UNIQUE INDEX IF NOT EXISTS pnq_resolution_policy_stale_result
+  ON pnq_resolution_policies(stale_result) WHERE stale_result AND enabled;
+CREATE UNIQUE INDEX IF NOT EXISTS pnq_resolution_policy_late_result
+  ON pnq_resolution_policies(late_result) WHERE late_result AND enabled;
+CREATE UNIQUE INDEX IF NOT EXISTS pnq_resolution_policy_terminalized
+  ON pnq_resolution_policies(terminalized_for_recovery)
+  WHERE terminalized_for_recovery AND enabled;
+
+CREATE OR REPLACE FUNCTION pnq_resolution_labels(
+  p_epoch_mismatch BOOLEAN DEFAULT FALSE,
+  p_cas_miss BOOLEAN DEFAULT FALSE,
+  p_payload_mismatch BOOLEAN DEFAULT FALSE,
+  p_idempotent_replay BOOLEAN DEFAULT FALSE,
+  p_stale_result BOOLEAN DEFAULT FALSE,
+  p_late_result BOOLEAN DEFAULT FALSE,
+  p_terminalized_for_recovery BOOLEAN DEFAULT FALSE
+) RETURNS TABLE(event_type TEXT, decision TEXT) AS $$
+DECLARE
+  v_count BIGINT;
+BEGIN
+  IF (
+    p_epoch_mismatch::integer
+    + p_cas_miss::integer
+    + p_payload_mismatch::integer
+    + p_idempotent_replay::integer
+    + p_stale_result::integer
+    + p_late_result::integer
+    + p_terminalized_for_recovery::integer
+  ) <> 1 THEN
+    RAISE EXCEPTION 'exactly one resolution fact must be selected' USING ERRCODE = '23514';
+  END IF;
+
+  RETURN QUERY
+  SELECT policy.event_type, policy.decision
+    FROM pnq_resolution_policies policy
+   WHERE policy.enabled
+     AND policy.epoch_mismatch = p_epoch_mismatch
+     AND policy.cas_miss = p_cas_miss
+     AND policy.payload_mismatch = p_payload_mismatch
+     AND policy.idempotent_replay = p_idempotent_replay
+     AND policy.stale_result = p_stale_result
+     AND policy.late_result = p_late_result
+     AND policy.terminalized_for_recovery = p_terminalized_for_recovery;
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+
+  IF v_count <> 1 THEN
+    RAISE EXCEPTION 'resolution policy must resolve exactly one enabled label pair'
+      USING ERRCODE = '55000';
+  END IF;
+END;
+$$ LANGUAGE plpgsql STABLE;
 
 CREATE OR REPLACE FUNCTION pnq_resolution_audit_append_only()
 RETURNS TRIGGER AS $$
@@ -185,10 +254,10 @@ BEGIN
   IF NOT FOUND THEN
     INSERT INTO pnq_resolution_audit (
       node_id, event_type, decision, expected_epoch, evidence
-    ) VALUES (
-      p_node_id, 'epoch_rejected', 'rejected', p_expected_epoch,
-      jsonb_build_object('operation', 'bump_connection_epoch')
-    );
+    )
+    SELECT p_node_id, labels.event_type, labels.decision, p_expected_epoch,
+           jsonb_build_object('operation', 'bump_connection_epoch')
+      FROM pnq_resolution_labels(p_epoch_mismatch => TRUE) labels;
     SELECT * INTO v_node FROM pnq_nodes WHERE id = p_node_id;
     RETURN v_node;
   END IF;
@@ -236,19 +305,19 @@ BEGIN
     IF v_existing.request_payload <> p_request_payload THEN
       INSERT INTO pnq_resolution_audit (
         job_id, node_id, event_type, decision, evidence
-      ) VALUES (
-        v_existing.id, p_node_id, 'payload_conflict', 'rejected',
-        jsonb_build_object('request_key', p_request_key)
-      );
+      )
+      SELECT v_existing.id, p_node_id, labels.event_type, labels.decision,
+             jsonb_build_object('request_key', p_request_key)
+        FROM pnq_resolution_labels(p_payload_mismatch => TRUE) labels;
       RETURN v_existing;
     END IF;
 
     INSERT INTO pnq_resolution_audit (
       job_id, node_id, event_type, decision, evidence
-    ) VALUES (
-      v_existing.id, p_node_id, 'enqueue_idempotent_replay', 'ignored',
-      jsonb_build_object('request_key', p_request_key)
-    );
+    )
+    SELECT v_existing.id, p_node_id, labels.event_type, labels.decision,
+           jsonb_build_object('request_key', p_request_key)
+      FROM pnq_resolution_labels(p_idempotent_replay => TRUE) labels;
     RETURN v_existing;
   END IF;
 
@@ -303,9 +372,10 @@ BEGIN
   IF v_epoch <> p_connection_epoch THEN
     INSERT INTO pnq_resolution_audit (
       job_id, event_type, decision, observed_epoch, expected_epoch, execution_id, actor
-    ) VALUES (
-      p_job_id, 'epoch_rejected', 'rejected', p_connection_epoch, v_epoch, p_execution_id, p_actor
-    );
+    )
+    SELECT p_job_id, labels.event_type, labels.decision,
+           p_connection_epoch, v_epoch, p_execution_id, p_actor
+      FROM pnq_resolution_labels(p_epoch_mismatch => TRUE) labels;
     SELECT * INTO v_job FROM pnq_jobs WHERE id = p_job_id;
     RETURN v_job;
   END IF;
@@ -324,10 +394,10 @@ BEGIN
     IF v_job.execution_started_at IS NOT NULL THEN
       INSERT INTO pnq_resolution_audit (
         job_id, event_type, decision, expected_job_version, expected_generation, execution_id, actor
-      ) VALUES (
-        p_job_id, 'cas_lost', 'ignored', p_expected_job_version, p_expected_dispatch_generation,
-        p_execution_id, p_actor
-      );
+      )
+      SELECT p_job_id, labels.event_type, labels.decision,
+             p_expected_job_version, p_expected_dispatch_generation, p_execution_id, p_actor
+        FROM pnq_resolution_labels(p_cas_miss => TRUE) labels;
       RETURN v_job;
     END IF;
     RAISE EXCEPTION 'no configured execution-start transition for pnq job %', p_job_id
@@ -357,10 +427,10 @@ BEGIN
   IF NOT FOUND THEN
     INSERT INTO pnq_resolution_audit (
       job_id, event_type, decision, expected_job_version, expected_generation, execution_id, actor
-    ) VALUES (
-      p_job_id, 'cas_lost', 'ignored', p_expected_job_version, p_expected_dispatch_generation,
-      p_execution_id, p_actor
-    );
+    )
+    SELECT p_job_id, labels.event_type, labels.decision,
+           p_expected_job_version, p_expected_dispatch_generation, p_execution_id, p_actor
+      FROM pnq_resolution_labels(p_cas_miss => TRUE) labels;
     SELECT * INTO v_job FROM pnq_jobs WHERE id = p_job_id;
     RETURN v_job;
   END IF;
@@ -396,9 +466,10 @@ BEGIN
   IF v_epoch <> p_connection_epoch THEN
     INSERT INTO pnq_resolution_audit (
       node_id, event_type, decision, observed_epoch, expected_epoch, execution_id, actor
-    ) VALUES (
-      p_node_id, 'epoch_rejected', 'rejected', p_connection_epoch, v_epoch, p_execution_id, p_actor
-    );
+    )
+    SELECT p_node_id, labels.event_type, labels.decision,
+           p_connection_epoch, v_epoch, p_execution_id, p_actor
+      FROM pnq_resolution_labels(p_epoch_mismatch => TRUE) labels;
     RETURN NULL;
   END IF;
 
@@ -473,7 +544,6 @@ DECLARE
   v_current pnq_jobs;
   v_job pnq_jobs;
   v_epoch BIGINT;
-  v_event_type TEXT;
   v_target_status TEXT;
 BEGIN
   SELECT n.connection_epoch INTO v_epoch
@@ -502,18 +572,18 @@ BEGIN
       observed_epoch, expected_epoch,
       observed_generation, expected_generation,
       execution_id, evidence, actor
-    ) VALUES (
-      v_current.id, v_current.node_id, 'stale_result', 'rejected',
-      p_connection_epoch, v_epoch,
-      p_dispatch_generation, v_current.dispatch_generation,
-      p_execution_id,
-      jsonb_build_object(
-        'claimed_connection_epoch', v_current.claimed_connection_epoch,
-        'current_status', v_current.status,
-        'reason', 'connection_epoch_mismatch'
-      ),
-      p_actor
-    );
+    )
+    SELECT v_current.id, v_current.node_id, labels.event_type, labels.decision,
+           p_connection_epoch, v_epoch,
+           p_dispatch_generation, v_current.dispatch_generation,
+           p_execution_id,
+           jsonb_build_object(
+             'claimed_connection_epoch', v_current.claimed_connection_epoch,
+             'current_status', v_current.status,
+             'reason', 'connection_epoch_mismatch'
+           ),
+           p_actor
+      FROM pnq_resolution_labels(p_stale_result => TRUE) labels;
     RETURN v_current;
   END IF;
 
@@ -521,26 +591,24 @@ BEGIN
     OR v_current.execution_started_at IS NULL
     OR v_current.execution_id IS DISTINCT FROM p_execution_id
     OR v_current.dispatch_generation <> p_dispatch_generation THEN
-    v_event_type := CASE
-      WHEN v_current.terminal_at IS NOT NULL THEN 'late_result'
-      ELSE 'stale_result'
-    END;
-
     INSERT INTO pnq_resolution_audit (
       job_id, node_id, event_type, decision,
       observed_generation, expected_generation,
       execution_id, evidence, actor
-    ) VALUES (
-      v_current.id, v_current.node_id, v_event_type, 'ignored',
-      p_dispatch_generation, v_current.dispatch_generation,
-      p_execution_id,
-      jsonb_build_object(
-        'current_status', v_current.status,
-        'current_execution_id', v_current.execution_id,
-        'incoming_success', p_success
-      ),
-      p_actor
-    );
+    )
+    SELECT v_current.id, v_current.node_id, labels.event_type, labels.decision,
+           p_dispatch_generation, v_current.dispatch_generation,
+           p_execution_id,
+           jsonb_build_object(
+             'current_status', v_current.status,
+             'current_execution_id', v_current.execution_id,
+             'incoming_success', p_success
+           ),
+           p_actor
+      FROM pnq_resolution_labels(
+        p_stale_result => v_current.terminal_at IS NULL,
+        p_late_result => v_current.terminal_at IS NOT NULL
+      ) labels;
 
     RETURN v_current;
   END IF;
@@ -575,10 +643,10 @@ BEGIN
     INSERT INTO pnq_resolution_audit (
       job_id, node_id, event_type, decision,
       expected_job_version, expected_generation, execution_id, actor
-    ) VALUES (
-      v_current.id, v_current.node_id, 'cas_lost', 'ignored',
-      v_current.job_version, v_current.dispatch_generation, p_execution_id, p_actor
-    );
+    )
+    SELECT v_current.id, v_current.node_id, labels.event_type, labels.decision,
+           v_current.job_version, v_current.dispatch_generation, p_execution_id, p_actor
+      FROM pnq_resolution_labels(p_cas_miss => TRUE) labels;
     RAISE EXCEPTION 'CAS lost while recording result for pnq job %', p_job_id USING ERRCODE = '40001';
   END IF;
 
@@ -637,12 +705,12 @@ BEGIN
   INSERT INTO pnq_resolution_audit (
     job_id, node_id, event_type, decision,
     observed_job_version, observed_generation, execution_id, evidence, actor
-  ) VALUES (
-    v_job.id, v_job.node_id, 'marked_stuck', 'stuck',
-    v_current.job_version, v_current.dispatch_generation, v_job.execution_id,
-    COALESCE(p_evidence, '{}'::jsonb) || jsonb_build_object('reason', p_reason),
-    p_actor
-  );
+  )
+  SELECT v_job.id, v_job.node_id, labels.event_type, labels.decision,
+         v_current.job_version, v_current.dispatch_generation, v_job.execution_id,
+         COALESCE(p_evidence, '{}'::jsonb) || jsonb_build_object('reason', p_reason),
+         p_actor
+    FROM pnq_resolution_labels(p_terminalized_for_recovery => TRUE) labels;
 
   RETURN v_job;
 END;

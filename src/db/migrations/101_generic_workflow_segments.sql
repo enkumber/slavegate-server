@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS workflow_control_plane_events (
   entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'composition')),
   entity_key TEXT NOT NULL,
   entity_version TEXT NOT NULL,
-  action TEXT NOT NULL CHECK (action IN ('create', 'validate', 'canary', 'promote', 'degrade', 'quarantine', 'rollback', 'retire')),
+  action TEXT NOT NULL,
   from_status TEXT NULL,
   to_status TEXT NULL,
   actor TEXT NULL,

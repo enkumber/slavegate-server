@@ -81,13 +81,34 @@ describe("workflow capability catalog PostgreSQL migration", () => {
     await adminPool?.end();
   });
 
-  it("backfills capability identity and artifact bindings idempotently", async () => {
+  it("creates an idempotent operator-managed capability catalog", async () => {
     const migration = fs.readFileSync(
       path.join(repoRoot, "src/db/migrations/096_workflow_capability_catalog.sql"),
       "utf8",
     );
     await pool.query(migration);
     await pool.query(migration);
+    await pool.query(`
+      INSERT INTO workflow_capabilities (
+        capability_key, platform, description, aliases, required_terms,
+        forbidden_terms, safety_class, portability_scope, compiler_retrievable,
+        status, min_match_score, ambiguity_margin
+      ) VALUES (
+        'remote_support_enable_screen_share', 'android',
+        'Enable remote support screen sharing',
+        ARRAY['enable remote support screen share', 'Enable remote support screen sharing'],
+        ARRAY[]::TEXT[], ARRAY[]::TEXT[], 'standard', 'global', TRUE,
+        'active', 0.62, 0.12
+      );
+      INSERT INTO workflow_capability_artifacts (
+        capability_key, cache_key, role, status
+      ) VALUES (
+        'remote_support_enable_screen_share',
+        'aaaaaaaaaaaaaaaaaaaaaaaa',
+        'complete',
+        'active'
+      );
+    `);
 
     const capability = await pool.query(
       `SELECT capability_key, platform, safety_class, portability_scope, aliases

@@ -28,9 +28,8 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON execution_checkpoints(task_id
 CREATE INDEX IF NOT EXISTS idx_checkpoints_device ON execution_checkpoints(device_id);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON execution_checkpoints(session_id);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_expires ON execution_checkpoints(expires_at);
--- Partial index for blocked/error states (replaces full idx_checkpoints_phase)
-CREATE INDEX IF NOT EXISTS idx_checkpoints_blocked ON execution_checkpoints(device_id)
-WHERE phase IN ('blocked', 'error');
+CREATE INDEX IF NOT EXISTS idx_checkpoints_phase_device
+ON execution_checkpoints(phase, device_id);
 
 -- Auto-cleanup expired checkpoints (optional cron job sau pg_cron)
 COMMENT ON TABLE execution_checkpoints IS 'Session state recovery for interrupted workflows. Expires after 24h.';

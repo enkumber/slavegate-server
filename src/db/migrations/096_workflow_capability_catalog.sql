@@ -10,10 +10,9 @@ CREATE TABLE IF NOT EXISTS workflow_capabilities (
   aliases TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
   required_terms TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
   forbidden_terms TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
-  safety_class TEXT NOT NULL DEFAULT 'read_only'
-    CHECK (safety_class IN ('read_only', 'navigation', 'standard', 'mutating', 'sensitive', 'destructive')),
-  portability_scope TEXT NOT NULL DEFAULT 'global'
-    CHECK (portability_scope IN ('global', 'contextual', 'device', 'account')),
+  safety_class TEXT NOT NULL,
+  portability_scope TEXT NOT NULL,
+  compiler_retrievable BOOLEAN NOT NULL,
   status TEXT,
   min_match_score DOUBLE PRECISION NOT NULL DEFAULT 0.62
     CHECK (min_match_score >= 0 AND min_match_score <= 1),
