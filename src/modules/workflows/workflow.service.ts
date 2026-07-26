@@ -184,6 +184,42 @@ export class WorkflowService {
     };
   }
 
+  async listActive(page = 1, pageSize = 500): Promise<{ items: WorkflowRecord[]; total: number }> {
+    const db = getDb();
+    const values = [pageSize, (page - 1) * pageSize];
+    const activePredicate = "COALESCE((state.metadata->>'countsAsActive')::boolean, FALSE)";
+    const [rows, countRow] = await Promise.all([
+      db.query(
+        `SELECT workflow.*,
+                state.initial AS lifecycle_initial,
+                state.terminal AS lifecycle_terminal,
+                state.retryable AS lifecycle_retryable,
+                state.administrative AS lifecycle_administrative,
+                state.dispatchable AS lifecycle_dispatchable
+           FROM workflows workflow
+           JOIN lifecycle_state_definitions state
+             ON state.lifecycle_key = workflow.lifecycle_key
+            AND state.status = workflow.status
+          WHERE ${activePredicate}
+          ORDER BY workflow.created_at DESC
+          LIMIT $1 OFFSET $2`,
+        values,
+      ),
+      db.query(
+        `SELECT COUNT(*)
+           FROM workflows workflow
+           JOIN lifecycle_state_definitions state
+             ON state.lifecycle_key = workflow.lifecycle_key
+            AND state.status = workflow.status
+          WHERE ${activePredicate}`,
+      ),
+    ]);
+    return {
+      items: rows.rows.map(rowToWorkflow),
+      total: parseInt(countRow.rows[0]?.count as string ?? "0", 10),
+    };
+  }
+
   /**
    * Count workflows by status. Used for concurrency guard.
    */
@@ -211,6 +247,19 @@ export class WorkflowService {
         WHERE workflow.device_id = $1
           AND COALESCE((state.metadata->>'countsAsActive')::boolean, FALSE)`,
       [deviceId],
+    );
+    return parseInt(result.rows[0]?.count ?? "0", 10);
+  }
+
+  async countActiveGlobal(): Promise<number> {
+    const db = getDb();
+    const result = await db.query(
+      `SELECT COUNT(*)
+         FROM workflows workflow
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = workflow.lifecycle_key
+          AND state.status = workflow.status
+        WHERE COALESCE((state.metadata->>'countsAsActive')::boolean, FALSE)`,
     );
     return parseInt(result.rows[0]?.count ?? "0", 10);
   }

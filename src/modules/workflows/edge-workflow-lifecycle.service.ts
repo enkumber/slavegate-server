@@ -1,6 +1,7 @@
 import { workflowEvents } from "../workflow-events";
 import { workflowService } from "./workflow.service";
 import type { WorkflowStep, WorkflowTemplate } from "./types";
+import { getResourceLifecycleExecutionStatusContract } from "../lifecycle/lifecycle.service";
 
 const EDGE_WORKFLOW_ACK_TIMEOUT_MS = Number(process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS ?? 20_000);
 const EDGE_WORKFLOW_ACK_TIMEOUT_ERROR = "Edge workflow did not acknowledge WORKFLOW_START";
@@ -45,7 +46,8 @@ export function edgeProgressStaleAfterMs(template: WorkflowTemplate | null, curr
 }
 
 export async function sweepStaleEdgeWorkflows(nowMs = Date.now()): Promise<{ checked: number; failed: number }> {
-  const running = await workflowService.list(undefined, "running", 1, 500);
+  const running = await workflowService.listActive(1, 500);
+  const lifecycleStatusContract = await getResourceLifecycleExecutionStatusContract("workflows");
   let checked = 0;
   let failed = 0;
 
@@ -86,7 +88,7 @@ export async function sweepStaleEdgeWorkflows(nowMs = Date.now()): Promise<{ che
       workflowId: workflow.id,
       deviceId: workflow.deviceId,
       mode: "edge",
-      status: "failed",
+      status: lifecycleStatusContract.failed,
       currentStep: workflow.currentStep,
       error,
       details: { reason: "edge_progress_timeout", checkpointAt, ageMs, staleAfterMs, cancelSent },
@@ -119,7 +121,7 @@ export function scheduleEdgeWorkflowAckWatchdog(
   const timeout = setTimeout(async () => {
     try {
       const latest = await workflowService.get(workflowId);
-      if (!latest || (latest.status !== "running" && latest.status !== "queued") || latest.currentStep !== 0) return;
+      if (!latest || latest.lifecycleTerminal === true || latest.currentStep !== 0) return;
       if (edgeCheckpointAcknowledged(latest.checkpoint)) return;
 
       const failed = await workflowService.markFailedIfEdgeStartUnacknowledged(
@@ -133,7 +135,7 @@ export function scheduleEdgeWorkflowAckWatchdog(
         workflowId,
         deviceId,
         mode: "edge",
-        status: "failed",
+        status: (await getResourceLifecycleExecutionStatusContract("workflows")).failed,
         currentStep: 0,
         error: EDGE_WORKFLOW_ACK_TIMEOUT_ERROR,
         details: {
@@ -162,7 +164,7 @@ export async function promoteReplayedEdgeWorkflowToRunning(input: {
     started = await workflowService.markRunning(workflowId);
     if (!started) {
       const latest = await workflowService.get(workflowId);
-      if (!latest || ["completed", "failed", "cancelled"].includes(latest.status)) return;
+      if (!latest || latest.lifecycleTerminal === true) return;
       if (edgeCheckpointAcknowledged(latest.checkpoint)) return;
     }
 
@@ -183,7 +185,7 @@ export async function promoteReplayedEdgeWorkflowToRunning(input: {
       accountId: typeof controlPlaneContext.accountId === "string" ? controlPlaneContext.accountId : undefined,
       deviceId,
       mode: "edge",
-      status: "running",
+      status: (await getResourceLifecycleExecutionStatusContract("workflows")).active,
       details: {
         mode: "edge",
         templateId: templateId ?? null,

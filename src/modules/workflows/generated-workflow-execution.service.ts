@@ -92,7 +92,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
   variables?: Record<string, unknown>;
   controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
   logPrefix?: string;
-}): Promise<{ workflowId: string; status: "queued" | "running"; mode: "edge"; templateId: string; controlPlaneContext?: GeneratedWorkflowControlPlaneContext }> {
+}): Promise<{ workflowId: string; status: string; mode: "edge"; templateId: string; controlPlaneContext?: GeneratedWorkflowControlPlaneContext }> {
   const { templateId, template, deviceId, accountId, variables, controlPlaneContext, logPrefix = "workflow" } = input;
   const validation = validateGeneratedWorkflowTemplate(template);
   if (!validation.template) {
@@ -116,6 +116,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     throw err;
   }
 
+  const lifecycleStatusContract = await getResourceLifecycleExecutionStatusContract("workflows");
   const activeForDevice = await workflowService.countActiveByDevice(deviceId);
   if (activeForDevice >= scalabilityConfig.maxWorkflowsPerDevice) {
     const err = new Error(`Device already has ${activeForDevice} active workflow(s). Max: ${scalabilityConfig.maxWorkflowsPerDevice} per device.`);
@@ -124,7 +125,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     throw err;
   }
 
-  const globalRunning = await workflowService.countByStatus("running");
+  const globalRunning = await workflowService.countActiveGlobal();
   if (globalRunning >= scalabilityConfig.maxGlobalConcurrentWorkflows) {
     const err = new Error(`Server at capacity: ${globalRunning}/${scalabilityConfig.maxGlobalConcurrentWorkflows} concurrent workflows. Retry later.`);
     (err as Error & { status?: number; code?: string }).status = 429;
@@ -140,7 +141,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     clientId: controlPlaneContext?.clientId,
     accountId,
     deviceId,
-    status: "accepted",
+    status: lifecycleStatusContract.initial,
     totalSteps: template.steps.length,
     details: {
       templateId,
@@ -152,10 +153,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
   const accountAgeDays = (variables?.["accountAgeDays"] as number) ?? 30;
   const simulatedTimezone = (variables?.["timezone"] as string) ?? "Europe/Bucharest";
   const hbeSession = hbeService.initSession(accountAgeDays, simulatedTimezone) as unknown as Record<string, unknown>;
-  const [edgeLearningBindings, lifecycleStatusContract] = await Promise.all([
-    prepareEdgeLearningBindings(validation.template),
-    getResourceLifecycleExecutionStatusContract("workflows"),
-  ]);
+  const edgeLearningBindings = await prepareEdgeLearningBindings(validation.template);
   const edgeTemplate = {
     ...attachEdgeLearningBindings(validation.template, edgeLearningBindings),
     lifecycleStatusContract,
@@ -198,7 +196,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
         accountId,
         deviceId,
         mode: "edge",
-        status: "running",
+        status: lifecycleStatusContract.active,
         totalSteps: template.steps.length,
         details: {
           mode: "edge",
@@ -208,7 +206,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
         },
       });
       console.log(`[${logPrefix}] ${wf.id} dispatched to device (edge execution, agent=${directWsServer.getAgentVersion(deviceId)})`);
-      return { workflowId: wf.id, status: "running", mode: "edge", templateId, controlPlaneContext };
+      return { workflowId: wf.id, status: lifecycleStatusContract.active, mode: "edge", templateId, controlPlaneContext };
     }
 
     if (dispatch.queued) {
@@ -222,7 +220,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
         accountId,
         deviceId,
         mode: "edge",
-        status: "queued",
+        status: lifecycleStatusContract.initial,
         totalSteps: template.steps.length,
         details: {
           mode: "edge",
@@ -234,7 +232,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
         },
       });
       console.log(`[${logPrefix}] ${wf.id} queued behind active device root (edge execution)`);
-      return { workflowId: wf.id, status: "queued", mode: "edge", templateId, controlPlaneContext };
+      return { workflowId: wf.id, status: lifecycleStatusContract.initial, mode: "edge", templateId, controlPlaneContext };
     }
 
     await workflowService.markFailed(wf.id, "Edge dispatch failed");

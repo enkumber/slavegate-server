@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({
   markRunning: vi.fn(),
   markFailedIfEdgeStartUnacknowledged: vi.fn(),
   markFailedIfEdgeProgressStale: vi.fn(),
-  list: vi.fn(),
+  listActive: vi.fn(),
   getTemplate: vi.fn(),
   sendWorkflowCancellationControl: vi.fn(),
   get: vi.fn(),
@@ -16,10 +16,20 @@ vi.mock("./workflow.service", () => ({
     markRunning: mocks.markRunning,
     markFailedIfEdgeStartUnacknowledged: mocks.markFailedIfEdgeStartUnacknowledged,
     markFailedIfEdgeProgressStale: mocks.markFailedIfEdgeProgressStale,
-    list: mocks.list,
+    listActive: mocks.listActive,
     getTemplate: mocks.getTemplate,
     get: mocks.get,
   },
+}));
+
+vi.mock("../lifecycle/lifecycle.service", () => ({
+  getResourceLifecycleExecutionStatusContract: vi.fn().mockResolvedValue({
+    initial: "queued",
+    active: "running",
+    succeeded: "completed",
+    failed: "failed",
+    cancelled: "cancelled",
+  }),
 }));
 
 vi.mock("../workflow-events", () => ({
@@ -42,14 +52,14 @@ describe("replayed edge workflow lifecycle", () => {
     mocks.markRunning.mockResolvedValue(true);
     mocks.markFailedIfEdgeStartUnacknowledged.mockResolvedValue(true);
     mocks.markFailedIfEdgeProgressStale.mockResolvedValue(true);
-    mocks.list.mockResolvedValue({ items: [], total: 0 });
+    mocks.listActive.mockResolvedValue({ items: [], total: 0 });
     mocks.getTemplate.mockResolvedValue(null);
     mocks.sendWorkflowCancellationControl.mockResolvedValue(true);
   });
 
   it("fails and cancels an acknowledged workflow whose current step stopped making progress", async () => {
     const checkpointAt = "2026-07-22T12:00:00.000Z";
-    mocks.list.mockResolvedValue({
+    mocks.listActive.mockResolvedValue({
       items: [{
         id: WORKFLOW_ID,
         deviceId: DEVICE_ID,
@@ -82,7 +92,7 @@ describe("replayed edge workflow lifecycle", () => {
 
   it("does not cancel a workflow that progressed before the checkpoint CAS", async () => {
     const checkpointAt = "2026-07-22T12:00:00.000Z";
-    mocks.list.mockResolvedValue({
+    mocks.listActive.mockResolvedValue({
       items: [{
         id: WORKFLOW_ID,
         deviceId: DEVICE_ID,
