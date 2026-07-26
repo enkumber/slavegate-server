@@ -570,16 +570,14 @@ function parseWorkflowRunFeedback(input: unknown): {
   };
 }
 
-type StepCandidateReviewAction = "keep_review" | "reject";
-
 function parseStepCandidateReview(input: unknown): {
-  action: StepCandidateReviewAction;
+  action: string;
   note: string | null;
 } | { error: string; code: string } {
   const body = normalizeJsonObject(input);
   const action = typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
-  if (!["keep_review", "reject"].includes(action)) {
-    return { error: "action must be one of keep_review, reject", code: "INVALID_STEP_CANDIDATE_REVIEW_ACTION" };
+  if (!action) {
+    return { error: "action is required", code: "INVALID_STEP_CANDIDATE_REVIEW_ACTION" };
   }
 
   const note = typeof body.note === "string" ? body.note.trim() : "";
@@ -588,7 +586,7 @@ function parseStepCandidateReview(input: unknown): {
   }
 
   return {
-    action: action as StepCandidateReviewAction,
+    action,
     note: note.length > 0 ? note : null,
   };
 }
@@ -1082,28 +1080,6 @@ function stepLabel(step: Record<string, unknown>, fallbackIndex: number): string
   return action ?? type ?? id ?? `Step ${fallbackIndex + 1}`;
 }
 
-function stepStatus(input: {
-  runStatus: string | null;
-  workflowStatus: string | null;
-  currentStep: number | null;
-  stepIndex: number;
-}): string {
-  const terminalStatus = input.workflowStatus ?? input.runStatus;
-  const completedCount = input.currentStep ?? 0;
-  if (terminalStatus === "completed") return "succeeded";
-  if (terminalStatus === "failed") {
-    if (input.stepIndex < Math.max(0, completedCount - 1)) return "succeeded";
-    if (input.stepIndex === Math.max(0, completedCount - 1)) return "failed";
-    return "pending";
-  }
-  if (terminalStatus === "running") {
-    if (input.stepIndex < Math.max(0, completedCount - 1)) return "succeeded";
-    if (input.stepIndex === Math.max(0, completedCount - 1)) return "running";
-    return "pending";
-  }
-  return input.stepIndex < completedCount ? "succeeded" : "pending";
-}
-
 function buildAgencyWorkflowTimeline(row: Record<string, unknown>): Record<string, unknown>[] {
   const workflow = normalizeJsonObject(row.cached_workflow);
   const compiledPlan = normalizeJsonObject(row.cached_compiled_plan);
@@ -1130,7 +1106,13 @@ function buildAgencyWorkflowTimeline(row: Record<string, unknown>): Record<strin
   const workflowError = typeof row.workflow_error === "string" ? row.workflow_error : typeof row.error === "string" ? row.error : null;
 
   return fallbackSteps.map((step, index) => {
-    const status = stepStatus({ runStatus, workflowStatus, currentStep, stepIndex: index });
+    const isCurrentStep = currentStep !== null && index === Math.max(0, currentStep - 1);
+    const status = typeof step.status === "string"
+      ? step.status
+      : isCurrentStep
+        ? workflowStatus ?? runStatus
+        : null;
+    const hasFailureEvidence = isCurrentStep && workflowError !== null;
     return {
       index,
       id: typeof step.id === "string" ? step.id : `step_${index + 1}`,
@@ -1139,8 +1121,8 @@ function buildAgencyWorkflowTimeline(row: Record<string, unknown>): Record<strin
       type: typeof step.type === "string" ? step.type : null,
       status,
       durationMs: null,
-      error: status === "failed" ? workflowError : null,
-      state: status === "failed" ? checkpointVariables.screenState ?? checkpointVariables.currentScreen ?? null : null,
+      error: hasFailureEvidence ? workflowError : null,
+      state: hasFailureEvidence ? checkpointVariables.screenState ?? checkpointVariables.currentScreen ?? null : null,
     };
   });
 }
@@ -3637,6 +3619,29 @@ router.post("/workflow-definitions/:id/rollback", requireAdminAuth, async (req: 
       code: "WORKFLOW_DEFINITION_ROLLBACK_TARGET_NOT_OLDER",
     });
   }
+  const [sourceTransition, targetTransition] = await Promise.all([
+    selectResourceLifecycleTransition(
+      "agency_workflow_definitions",
+      definition.promotion.state,
+      { targetTerminal: true, transitionManualAllowed: true },
+      "promotion_state",
+      db,
+    ),
+    selectResourceLifecycleTransition(
+      "agency_workflow_definitions",
+      targetDefinition.promotion.state,
+      { targetDispatchable: true, transitionManualAllowed: true },
+      "promotion_state",
+      db,
+    ),
+  ]);
+  if (!sourceTransition || !targetTransition) {
+    return res.status(409).json({
+      ok: false,
+      error: "Rollback lifecycle transitions are not configured",
+      code: "WORKFLOW_DEFINITION_ROLLBACK_TRANSITIONS_MISSING",
+    });
+  }
 
   const rollbackScope = definition.promotion.scope ?? `definition:${definition.key}:v${targetDefinition.version}`;
   const rollbackScopeDetails = workflowDefinitionScopeDetails(rollbackScope);
@@ -3704,14 +3709,14 @@ router.post("/workflow-definitions/:id/rollback", requireAdminAuth, async (req: 
     await client.query("BEGIN");
     const sourceUpdate = await client.query(
       `UPDATE agency_workflow_definitions
-       SET promotion_state = 'revoked',
+       SET promotion_state = $2,
            promotion_scope = NULL,
-           promotion_note = $2,
+           promotion_note = $3,
            promotion_confidence = 0,
-           promotion_readiness = $3,
-           promotion_scope_details = $4,
-           rollback_definition_id = $5,
-           rollback_preview = $6,
+           promotion_readiness = $4,
+           promotion_scope_details = $5,
+           rollback_definition_id = $6,
+           rollback_preview = $7,
            revoked_by = 'dashboard',
            revoked_at = NOW(),
            updated_at = NOW()
@@ -3719,6 +3724,7 @@ router.post("/workflow-definitions/:id/rollback", requireAdminAuth, async (req: 
        RETURNING *`,
       [
         definition.id,
+        sourceTransition.toStatus,
         parsed.note,
         JSON.stringify({
           ...rollbackReadiness,
@@ -3733,14 +3739,14 @@ router.post("/workflow-definitions/:id/rollback", requireAdminAuth, async (req: 
     );
     const targetUpdate = await client.query(
       `UPDATE agency_workflow_definitions
-       SET promotion_state = 'limited_reuse',
-           promotion_scope = $2,
-           promotion_note = $3,
-           promotion_confidence = $4,
-           promotion_readiness = $5,
-           promotion_scope_details = $6,
+       SET promotion_state = $2,
+           promotion_scope = $3,
+           promotion_note = $4,
+           promotion_confidence = $5,
+           promotion_readiness = $6,
+           promotion_scope_details = $7,
            rollback_definition_id = NULL,
-           rollback_preview = $7,
+           rollback_preview = $8,
            promoted_by = 'dashboard',
            promoted_at = NOW(),
            revoked_by = NULL,
@@ -3750,6 +3756,7 @@ router.post("/workflow-definitions/:id/rollback", requireAdminAuth, async (req: 
        RETURNING *`,
       [
         targetDefinition.id,
+        targetTransition.toStatus,
         rollbackScope,
         parsed.note,
         Math.max(0, Math.min(0.99, targetDefinition.promotion.confidence || definition.promotion.confidence || 0)),
@@ -3779,12 +3786,14 @@ router.post("/workflow-definitions/:id/rollback", requireAdminAuth, async (req: 
          promotion_scope_details,
          rollback_preview
        )
-       VALUES ($1, $2, $3, 'rollback', $4, 'limited_reuse', $5, $6, 'dashboard', $7, $8, $9, $10, $11, $12)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'dashboard', $9, $10, $11, $12, $13, $14)`,
       [
         definition.id,
         definition.key,
         definition.version,
+        targetTransition.actionKey,
         definition.promotion.state,
+        targetTransition.toStatus,
         rollbackScope,
         parsed.note,
         JSON.stringify(rollbackPolicy),
@@ -3899,7 +3908,7 @@ router.get("/workflow-validation-pipeline", requireAdminAuth, async (req: Reques
     ? req.query.key.trim()
     : undefined;
 
-  const conditions = ["status IN ('active', 'draft')"];
+  const conditions = ["NOT status_terminal"];
   const values: unknown[] = [];
   let idx = 1;
 
@@ -4068,7 +4077,7 @@ router.get("/compiler-control-plane", requireAdminAuth, async (req: Request, res
     : undefined;
 
   const values: unknown[] = [];
-  const conditions = ["c.candidate_state = 'validated_step'"];
+  const conditions = ["c.candidate_reusable"];
   let idx = 1;
   if (action) {
     conditions.push(`c.action = $${idx++}`);
@@ -4387,15 +4396,44 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
   if (existing.rows.length === 0) {
     return res.status(404).json({ ok: false, error: "Step Library entry not found", code: "STEP_LIBRARY_ENTRY_NOT_FOUND" });
   }
-  if (existing.rows[0].candidate_state !== "validated_step") {
+  if (existing.rows[0].candidate_reusable !== true) {
     return res.status(409).json({
       ok: false,
-      error: "Only validated_step entries can be promoted in Step Library",
+      error: "Only reusable candidate states can be promoted in Step Library",
       code: "STEP_LIBRARY_ENTRY_NOT_VALIDATED",
     });
   }
 
-  if (parsed.action === "promote_limited") {
+  const transition = await getResourceLifecycleTransition(
+    "agency_workflow_step_candidates",
+    String(existing.rows[0].library_state),
+    parsed.action,
+    "library_state",
+    db,
+  );
+  if (!transition?.manualAllowed) {
+    return res.status(409).json({
+      ok: false,
+      error: "Step Library transition is not manually allowed by PostgreSQL policy",
+      code: "STEP_LIBRARY_TRANSITION_NOT_ALLOWED",
+    });
+  }
+  const target = await getResourceLifecycleState(
+    "agency_workflow_step_candidates",
+    transition.toStatus,
+    "library_state",
+    db,
+  );
+  if (!target) {
+    return res.status(500).json({
+      ok: false,
+      error: "Step Library transition target is not configured",
+      code: "STEP_LIBRARY_TRANSITION_TARGET_MISSING",
+    });
+  }
+  const enablesReuse = target.dispatchable && !target.terminal;
+  const targetPolicy = normalizeJsonObject(target.metadata);
+  if (enablesReuse) {
     const entry = rowToStepLibraryEntry(existing.rows[0]) as Record<string, any>;
     const readiness = normalizeJsonObject(entry.readiness);
     const readinessScore = typeof readiness.score === "number" ? readiness.score : 0;
@@ -4411,51 +4449,45 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
         data: { readiness },
       });
     }
+    if (!parsed.scope || (parsed.scope === "global" && targetPolicy.allowGlobalScope !== true)) {
+      return res.status(400).json({
+        ok: false,
+        error: "The configured Step Library state requires a non-global promotion scope",
+        code: "STEP_LIBRARY_GLOBAL_SCOPE_DISABLED",
+      });
+    }
   }
 
-  const updateSql = parsed.action === "promote_limited"
-    ? `WITH updated AS (
-         UPDATE agency_workflow_step_candidates
-         SET library_state = 'limited_reuse',
-             promotion_scope = $2,
-             promotion_note = $3,
-             promoted_by = 'dashboard',
-             promoted_at = NOW(),
-             revoked_by = NULL,
-             revoked_at = NULL,
-             updated_at = NOW()
-         WHERE id = $1
-         RETURNING *
-       )
-       SELECT updated.*,
-              r.status AS run_status,
-              r.intent AS run_intent,
-              d.friendly_name AS device_name
-       FROM updated
-       LEFT JOIN agency_workflow_runs r ON r.id = updated.run_id
-       LEFT JOIN devices d ON d.id = r.device_id`
-    : `WITH updated AS (
-         UPDATE agency_workflow_step_candidates
-         SET library_state = 'revoked',
-             promotion_note = $2,
-             revoked_by = 'dashboard',
-             revoked_at = NOW(),
-             updated_at = NOW()
-         WHERE id = $1
-         RETURNING *
-       )
-       SELECT updated.*,
-              r.status AS run_status,
-              r.intent AS run_intent,
-              d.friendly_name AS device_name
-       FROM updated
-       LEFT JOIN agency_workflow_runs r ON r.id = updated.run_id
-       LEFT JOIN devices d ON d.id = r.device_id`;
-
-  const updateValues = parsed.action === "promote_limited"
-    ? [req.params.id, parsed.scope, parsed.note]
-    : [req.params.id, parsed.note];
-  const updated = await db.query(updateSql, updateValues);
+  const updated = await db.query(
+    `WITH updated AS (
+       UPDATE agency_workflow_step_candidates
+       SET library_state = $2,
+           promotion_scope = $3,
+           promotion_note = $4,
+           promoted_by = CASE WHEN $5 THEN 'dashboard' ELSE NULL END,
+           promoted_at = CASE WHEN $5 THEN NOW() ELSE NULL END,
+           revoked_by = CASE WHEN $6 THEN 'dashboard' ELSE NULL END,
+           revoked_at = CASE WHEN $6 THEN NOW() ELSE NULL END,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING *
+     )
+     SELECT updated.*,
+            r.status AS run_status,
+            r.intent AS run_intent,
+            d.friendly_name AS device_name
+     FROM updated
+     LEFT JOIN agency_workflow_runs r ON r.id = updated.run_id
+     LEFT JOIN devices d ON d.id = r.device_id`,
+    [
+      req.params.id,
+      transition.toStatus,
+      enablesReuse ? parsed.scope : null,
+      parsed.note,
+      enablesReuse,
+      target.terminal,
+    ],
+  );
   const updatedRow = updated.rows[0];
   await db.query(
     `INSERT INTO agency_workflow_step_library_promotion_events (
@@ -4471,7 +4503,7 @@ router.patch("/step-library/:id/promotion", requireAdminAuth, async (req: Reques
     [
       req.params.id,
       parsed.action,
-      parsed.action === "promote_limited" ? "limited_reuse" : "revoked",
+      transition.toStatus,
       updatedRow.promotion_scope ?? null,
       parsed.note,
       JSON.stringify({
@@ -4498,15 +4530,21 @@ router.patch("/workflow-step-candidates/:id/review", requireAdminAuth, async (re
   if (existing.rows.length === 0) {
     return res.status(404).json({ ok: false, error: "Step candidate not found", code: "STEP_CANDIDATE_NOT_FOUND" });
   }
-  if (existing.rows[0].candidate_state === "validated_step") {
+  const transition = await getResourceLifecycleTransition(
+    "agency_workflow_step_candidates",
+    String(existing.rows[0].candidate_state),
+    parsed.action,
+    "candidate_state",
+    db,
+  );
+  if (!transition?.manualAllowed) {
     return res.status(409).json({
       ok: false,
-      error: "validated_step candidates require the validation workflow",
-      code: "VALIDATED_STEP_REVIEW_LOCKED",
+      error: "Step candidate review transition is not manually allowed by PostgreSQL policy",
+      code: "STEP_CANDIDATE_REVIEW_TRANSITION_NOT_ALLOWED",
     });
   }
 
-  const nextState = parsed.action === "reject" ? "rejected" : "step_candidate";
   const updated = await db.query(
     `UPDATE agency_workflow_step_candidates
      SET candidate_state = $2,
@@ -4516,7 +4554,7 @@ router.patch("/workflow-step-candidates/:id/review", requireAdminAuth, async (re
          updated_at = NOW()
      WHERE id = $1
      RETURNING *`,
-    [req.params.id, nextState, parsed.note]
+    [req.params.id, transition.toStatus, parsed.note]
   );
 
   return res.json({ ok: true, data: rowToStepCandidate(updated.rows[0]) });
@@ -4536,20 +4574,27 @@ router.patch("/workflow-step-candidates/:id/validate", requireAdminAuth, async (
   if (existing.rows.length === 0) {
     return res.status(404).json({ ok: false, error: "Step candidate not found", code: "STEP_CANDIDATE_NOT_FOUND" });
   }
-  if (existing.rows[0].candidate_state !== "step_candidate") {
+  const transition = await selectResourceLifecycleTransition(
+    "agency_workflow_step_candidates",
+    String(existing.rows[0].candidate_state),
+    { targetDispatchable: true, transitionManualAllowed: true },
+    "candidate_state",
+    db,
+  );
+  if (!transition) {
     return res.status(409).json({
       ok: false,
-      error: "Only step_candidate entries can be validated",
+      error: "No manually allowed validation transition is configured",
       code: "STEP_CANDIDATE_NOT_IN_REVIEW",
     });
   }
 
   const updated = await db.query(
     `UPDATE agency_workflow_step_candidates
-     SET candidate_state = 'validated_step',
-         validation_contract = $2,
-         validation_evidence = $3,
-         review_note = $4,
+     SET candidate_state = $2,
+         validation_contract = $3,
+         validation_evidence = $4,
+         review_note = $5,
          reviewed_by = 'dashboard',
          reviewed_at = NOW(),
          validated_by = 'dashboard',
@@ -4557,7 +4602,7 @@ router.patch("/workflow-step-candidates/:id/validate", requireAdminAuth, async (
          updated_at = NOW()
      WHERE id = $1
      RETURNING *`,
-    [req.params.id, parsed.contract, parsed.evidence, parsed.note]
+    [req.params.id, transition.toStatus, parsed.contract, parsed.evidence, parsed.note]
   );
 
   return res.json({ ok: true, data: rowToStepCandidate(updated.rows[0]) });
@@ -4793,14 +4838,26 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
       ),
       db.query(
         `SELECT COUNT(*)::int AS count
-         FROM human_workflow_compile_jobs
-         WHERE status IN ('failed', 'cancelled')`
+         FROM human_workflow_compile_jobs job
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('human_workflow_compile_jobs')
+          AND binding.state_column = 'status'::name
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = binding.lifecycle_key
+          AND state.status = job.status
+         WHERE state.retryable OR state.administrative`
       ),
       db.query(
         `WITH failed_handles AS (
-           SELECT request_key, cache_key
-           FROM human_workflow_compile_jobs
-           WHERE status IN ('failed', 'cancelled')
+           SELECT job.request_key, job.cache_key
+           FROM human_workflow_compile_jobs job
+           JOIN lifecycle_resource_bindings binding
+             ON binding.resource_table = to_regclass('human_workflow_compile_jobs')
+            AND binding.state_column = 'status'::name
+           JOIN lifecycle_state_definitions state
+             ON state.lifecycle_key = binding.lifecycle_key
+            AND state.status = job.status
+           WHERE state.retryable OR state.administrative
 
            UNION
 
@@ -4818,10 +4875,16 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
          )
          SELECT COUNT(DISTINCT c.cache_key)::int AS count
          FROM generated_workflow_plan_cache c
+         JOIN lifecycle_resource_bindings cache_binding
+           ON cache_binding.resource_table = to_regclass('generated_workflow_plan_cache')
+          AND cache_binding.state_column = 'artifact_state'::name
+         JOIN lifecycle_state_definitions cache_state
+           ON cache_state.lifecycle_key = cache_binding.lifecycle_key
+          AND cache_state.status = c.artifact_state
          LEFT JOIN failed_handles h
            ON (h.request_key IS NOT NULL AND c.request_key = h.request_key)
            OR (h.cache_key IS NOT NULL AND c.cache_key = h.cache_key)
-         WHERE c.artifact_state IN ('failed', 'quarantined')
+         WHERE (cache_state.retryable OR cache_state.administrative)
             OR h.request_key IS NOT NULL
             OR h.cache_key IS NOT NULL`
       ),
@@ -4844,9 +4907,15 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
 
     const cacheArtifacts = await client.query(
       `WITH failed_handles AS (
-         SELECT request_key, cache_key
-         FROM human_workflow_compile_jobs
-         WHERE status IN ('failed', 'cancelled')
+         SELECT job.request_key, job.cache_key
+         FROM human_workflow_compile_jobs job
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('human_workflow_compile_jobs')
+          AND binding.state_column = 'status'::name
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = binding.lifecycle_key
+          AND state.status = job.status
+         WHERE state.retryable OR state.administrative
 
          UNION
 
@@ -4871,7 +4940,13 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
        ),
        state_deleted AS (
          DELETE FROM generated_workflow_plan_cache c
-         WHERE c.artifact_state IN ('failed', 'quarantined')
+         USING lifecycle_resource_bindings binding,
+               lifecycle_state_definitions state
+         WHERE binding.resource_table = to_regclass('generated_workflow_plan_cache')
+           AND binding.state_column = 'artifact_state'::name
+           AND state.lifecycle_key = binding.lifecycle_key
+           AND state.status = c.artifact_state
+           AND (state.retryable OR state.administrative)
            AND NOT EXISTS (SELECT 1 FROM deleted d WHERE d.cache_key = c.cache_key)
          RETURNING c.cache_key
        )
@@ -4881,9 +4956,15 @@ router.post("/workflow-runs/purge-failed", requireAdminAuth, async (req: Request
     );
 
     const compileJobs = await client.query(
-      `DELETE FROM human_workflow_compile_jobs
-       WHERE status IN ('failed', 'cancelled')
-       RETURNING id`
+      `DELETE FROM human_workflow_compile_jobs job
+       USING lifecycle_resource_bindings binding,
+             lifecycle_state_definitions state
+       WHERE binding.resource_table = to_regclass('human_workflow_compile_jobs')
+         AND binding.state_column = 'status'::name
+         AND state.lifecycle_key = binding.lifecycle_key
+         AND state.status = job.status
+         AND (state.retryable OR state.administrative)
+       RETURNING job.id`
     );
 
     const workflowRuns = await client.query(
@@ -4951,6 +5032,20 @@ router.post("/workflow-runs/:id/feedback", requireAdminAuth, async (req: Request
       });
     }
   }
+  const candidateInitialState = parsed.rating === "partial"
+    ? (await listResourceLifecycleStates(
+        "agency_workflow_step_candidates",
+        "candidate_state",
+        db,
+      )).find((state) => state.initial)
+    : null;
+  if (parsed.rating === "partial" && !candidateInitialState) {
+    return res.status(500).json({
+      ok: false,
+      error: "Step candidate initial state is not configured",
+      code: "STEP_CANDIDATE_INITIAL_STATE_MISSING",
+    });
+  }
 
   const client = await db.connect();
   try {
@@ -4981,20 +5076,20 @@ router.post("/workflow-runs/:id/feedback", requireAdminAuth, async (req: Request
               canonical_workflow_version, last_good_step_index, step_snapshot, evidence, note)
            VALUES
              ($1, $2, $3, $4, $5, $6, $7,
-              'step_candidate', $8, $9, $10,
-              $11, $12, $13, $14, $15)
+              $8, $9, $10, $11,
+              $12, $13, $14, $15, $16)
            ON CONFLICT (run_id, step_index) DO UPDATE
              SET label = EXCLUDED.label,
                  action = EXCLUDED.action,
                  type = EXCLUDED.type,
                  step_status = EXCLUDED.step_status,
-                 candidate_state = 'step_candidate',
+                 candidate_state = $8,
                  last_good_step_index = EXCLUDED.last_good_step_index,
                  step_snapshot = EXCLUDED.step_snapshot,
                  evidence = EXCLUDED.evidence,
                  note = EXCLUDED.note,
                  updated_at = NOW()
-           WHERE agency_workflow_step_candidates.candidate_state = 'step_candidate'`,
+           WHERE agency_workflow_step_candidates.candidate_state = $8`,
           [
             req.params.id,
             step.index,
@@ -5003,6 +5098,7 @@ router.post("/workflow-runs/:id/feedback", requireAdminAuth, async (req: Request
             step.action ?? null,
             step.type ?? null,
             step.status ?? null,
+            candidateInitialState!.status,
             existing.rows[0].request_key ?? null,
             existing.rows[0].cache_key ?? null,
             existing.rows[0].canonical_workflow_id ?? null,
@@ -5207,13 +5303,23 @@ router.get("/reports/stats", async (_req: Request, res: Response) => {
   const [clients, posts, tasks, materials] = await Promise.all([
     db.query("SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE active) as active FROM clients"),
     db.query(`
-      SELECT 
-        COUNT(*) as total,
-        COUNT(*) FILTER (WHERE status = 'pending_approval') as pending,
-        COUNT(*) FILTER (WHERE status = 'approved') as approved,
-        COUNT(*) FILTER (WHERE status = 'published') as published,
-        COUNT(*) FILTER (WHERE status = 'rejected') as rejected
-      FROM posts
+      SELECT COALESCE(SUM(state_count.count), 0)::int AS total,
+             COALESCE(
+               jsonb_object_agg(state.status, state_count.count ORDER BY state.sort_order)
+                 FILTER (WHERE state.status IS NOT NULL),
+               '{}'::jsonb
+             ) AS statuses
+      FROM lifecycle_resource_bindings binding
+      JOIN lifecycle_state_definitions state
+        ON state.lifecycle_key = binding.lifecycle_key
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS count
+        FROM posts post
+        WHERE post.status = state.status
+      ) state_count ON TRUE
+      WHERE binding.resource_table = to_regclass('posts')
+        AND binding.state_column = 'status'::name
+      GROUP BY binding.lifecycle_key
     `),
     db.query(`
       SELECT COALESCE(SUM(state_count.count), 0)::int AS total,
@@ -5248,7 +5354,10 @@ router.get("/reports/stats", async (_req: Request, res: Response) => {
     ok: true,
     data: {
       clients: clients.rows[0],
-      posts: posts.rows[0],
+      posts: {
+        total: Number(posts.rows[0]?.total ?? 0),
+        ...((posts.rows[0]?.statuses as Record<string, number> | undefined) ?? {}),
+      },
       tasks: {
         total: Number(tasks.rows[0]?.total ?? 0),
         ...((tasks.rows[0]?.statuses as Record<string, number> | undefined) ?? {}),
