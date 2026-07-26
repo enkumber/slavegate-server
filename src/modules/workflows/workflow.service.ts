@@ -67,7 +67,7 @@ export interface GeneratedWorkflowPlanCacheRecord {
   canonicalWorkflowId: string;
   canonicalWorkflowVersion: string;
   compiledPlanHash: string;
-  artifactState: "candidate" | "promoted" | "failed" | "quarantined";
+  artifactState: string;
   sourceMetadata: Record<string, unknown>;
   templateId: string;
   platform: string;
@@ -679,10 +679,18 @@ export class WorkflowService {
       `INSERT INTO workflow_capability_artifacts (
          capability_key, cache_key, role, status, evidence
        )
-       VALUES ($1, $2, $3, 'active', $4::jsonb)
+       SELECT $1, $2, $3, state.status, $4::jsonb
+         FROM lifecycle_resource_bindings binding
+         JOIN lifecycle_state_definitions state
+           ON state.lifecycle_key = binding.lifecycle_key
+        WHERE binding.resource_table = to_regclass('workflow_capability_artifacts')
+          AND binding.state_column = 'status'::name
+          AND state.initial
+        ORDER BY state.sort_order, state.status
+        LIMIT 1
        ON CONFLICT (capability_key, cache_key) DO UPDATE SET
          role = EXCLUDED.role,
-         status = 'active',
+         status = EXCLUDED.status,
          evidence = workflow_capability_artifacts.evidence || EXCLUDED.evidence,
          updated_at = NOW()`,
       [

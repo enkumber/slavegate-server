@@ -132,11 +132,19 @@ function aggregatePolicyGateSummary(...values: unknown[]): Record<string, unknow
     risk: gate.risk ?? null,
     owner: gate.owner ?? null,
     safeToAutoApply: gate.safeToAutoApply === true,
+    stateCapabilities: gate.stateCapabilities ?? null,
   }));
   return {
     gates,
     total: gates.length,
-    blocked: gates.filter((gate) => gate.state === "blocked").length,
+    blocked: gates.filter((gate) => {
+      const capabilities = gate.stateCapabilities
+        && typeof gate.stateCapabilities === "object"
+        && !Array.isArray(gate.stateCapabilities)
+        ? gate.stateCapabilities as Record<string, unknown>
+        : {};
+      return capabilities.dispatchable !== true && capabilities.manual !== true;
+    }).length,
     highRisk: gates.filter((gate) => gate.risk === "high").length,
     safeToAutoApply: gates.filter((gate) => gate.safeToAutoApply === true).length,
   };

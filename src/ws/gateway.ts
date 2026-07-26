@@ -300,8 +300,22 @@ export class WebSocketGateway {
     try {
       const db = getDb();
       // Validate: device exists, key matches, not blocked
-      const result = await db.query<{ id: string; status: string; device_key: string | null }>(
-        `SELECT id, status, device_key FROM devices WHERE id = $1`,
+      const result = await db.query<{
+        id: string;
+        status: string;
+        device_key: string | null;
+        connection_allowed: boolean;
+      }>(
+        `SELECT device.id, device.status, device.device_key,
+                COALESCE(
+                  (state.metadata->>'connectionAllowed')::boolean,
+                  NOT state.administrative
+                ) AS connection_allowed
+           FROM devices device
+           JOIN lifecycle_state_definitions state
+             ON state.lifecycle_key = device.lifecycle_key
+            AND state.status = device.status
+          WHERE device.id = $1`,
         [deviceId]
       );
 
@@ -314,10 +328,10 @@ export class WebSocketGateway {
 
       const device = result.rows[0];
 
-      if (device.status === "blocked") {
-        console.warn(`[ws-gateway] AUTH failed: device ${deviceId.slice(0,8)} is blocked`);
-        this._send(ws, { type: "AUTH_FAIL", reason: "Device blocked" });
-        ws.close(4003, "Blocked");
+      if (!device.connection_allowed) {
+        console.warn(`[ws-gateway] AUTH failed: device ${deviceId.slice(0,8)} lifecycle policy denies connection`);
+        this._send(ws, { type: "AUTH_FAIL", reason: "Device lifecycle policy denies connection" });
+        ws.close(4003, "Connection denied");
         return;
       }
 

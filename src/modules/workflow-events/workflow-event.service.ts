@@ -255,7 +255,7 @@ export class DashboardWorkflowWsServer {
 
     ws.send(JSON.stringify({
       type: "workflow_event_connection",
-      status: "connected",
+      ready: true,
       timestamp: new Date().toISOString(),
       occurredAt: new Date().toISOString(),
     }));

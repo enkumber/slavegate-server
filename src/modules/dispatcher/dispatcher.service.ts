@@ -457,7 +457,7 @@ export class DispatcherService {
       deviceId: row.device_id,
       rootKind: "job",
       externalId: row.id,
-      status: "cancelled",
+      status: row.status,
       actor: "dispatcher_cancel",
       reason: "queued_job_cancelled",
     });
