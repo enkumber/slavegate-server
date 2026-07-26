@@ -22,6 +22,8 @@ vi.mock("../dispatcher/dispatcher.service", () => ({
 }));
 
 vi.mock("../device-execution", () => ({
+  isDeviceExecutionResultTerminal: (result: { transitionApplied?: boolean }) =>
+    result.transitionApplied === true,
   deviceExecutionArbiter: {
     observeAdmission: mocks.observeAdmission,
     finishServerWorkflowRoot: mocks.finishServerWorkflowRoot,
@@ -39,6 +41,7 @@ describe("workflow dispatch PNQ lifecycle", () => {
     mocks.observeAdmission.mockResolvedValue({ decision: "admitted" });
     mocks.finishServerWorkflowRoot.mockResolvedValue({
       decision: "terminal",
+      transitionApplied: true,
       root: { state: "completed" },
     });
     mocks.recordRejectedEgress.mockResolvedValue(undefined);
@@ -76,6 +79,7 @@ describe("workflow dispatch PNQ lifecycle", () => {
     });
     mocks.cancelQueuedServerWorkflowRoot.mockResolvedValueOnce({
       decision: "terminal",
+      transitionApplied: true,
       root: { state: "cancelled" },
     });
 

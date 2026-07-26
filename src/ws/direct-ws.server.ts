@@ -30,6 +30,8 @@ import {
   decodeDeviceExecutionHandle,
   encodeDeviceExecutionHandle,
   deviceExecutionArbiter,
+  isDeviceExecutionResultQuiescent,
+  isDeviceExecutionResultTerminal,
   type DeviceExecutionJobDispatchPermit,
   type DeviceExecutionHandle,
   type DeviceExecutionRootKind,
@@ -426,8 +428,7 @@ export class DirectWsServer {
     }
     try {
       const transition = await deviceExecutionArbiter.markAmbiguous(input);
-      const confirmed = transition.decision === "ambiguous" ||
-        (transition.decision === "ignored" && transition.reason === "root_already_terminal");
+      const confirmed = await isDeviceExecutionResultQuiescent(transition);
       if (!confirmed) {
         throw new Error(`ambiguity transition not confirmed (${transition.reason ?? transition.decision})`);
       }
@@ -466,7 +467,7 @@ export class DirectWsServer {
     }
     try {
       const transition = await deviceExecutionArbiter.expireServerWorkflowChild(input);
-      if (transition.decision !== "terminal") {
+      if (!(await isDeviceExecutionResultTerminal(transition))) {
         throw new Error(`child timeout transition not confirmed (${transition.reason ?? transition.decision})`);
       }
       cleanup();
@@ -1825,7 +1826,7 @@ export class DirectWsServer {
       reason: msg.error as string | undefined,
       metadata: { totalDurationMs, resultCount: results.length, handleCompatibility: handleResolution.compatibility },
     });
-    if (terminal.decision !== "terminal") return;
+    if (!(await isDeviceExecutionResultTerminal(terminal))) return;
 
     clearTimeout(pending.timer);
     this.pendingBatches.delete(batchId);
@@ -1992,7 +1993,7 @@ export class DirectWsServer {
                 total: typeof total === "number" ? total : null,
               },
             });
-        if (terminal.decision !== "terminal") return;
+        if (!(await isDeviceExecutionResultTerminal(terminal))) return;
         if (pendingWorkflow) clearTimeout(pendingWorkflow.timer);
         this.pendingWorkflows.delete(workflowId);
       }

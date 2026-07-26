@@ -215,6 +215,7 @@ describe("PNQ unreplayable observed-root disposition", () => {
   function mockWouldWait(waitingHandle: DeviceExecutionHandle) {
     vi.spyOn(deviceExecutionArbiter, "runObservedEgress").mockResolvedValue({
       decision: "would_wait",
+      deferred: true,
       root: null,
       handle: waitingHandle,
       sent: false,
@@ -222,6 +223,7 @@ describe("PNQ unreplayable observed-root disposition", () => {
     });
     return vi.spyOn(deviceExecutionArbiter, "observeTerminal").mockResolvedValue({
       decision: "terminal",
+      transitionApplied: true,
       root: null,
       handle: waitingHandle,
     });

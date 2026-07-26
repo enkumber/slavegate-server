@@ -23,6 +23,8 @@ vi.mock("../lifecycle/lifecycle.service", () => ({
 }));
 
 vi.mock("../device-execution", () => ({
+  isDeviceExecutionResultTerminal: (result: { transitionApplied?: boolean }) =>
+    result.transitionApplied === true,
   deviceExecutionArbiter: {
     cancelQueuedPersistedWorkflow: mocks.cancelQueuedPersistedWorkflow,
     recordRejectedEgress: mocks.recordRejectedEgress,
@@ -42,7 +44,11 @@ describe("persisted workflow cancellation safety", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.get.mockResolvedValue(workflow);
-    mocks.cancelQueuedPersistedWorkflow.mockResolvedValue({ decision: "terminal", root: null });
+    mocks.cancelQueuedPersistedWorkflow.mockResolvedValue({
+      decision: "terminal",
+      transitionApplied: true,
+      root: null,
+    });
     mocks.recordRejectedEgress.mockResolvedValue(undefined);
   });
 
@@ -76,7 +82,11 @@ describe("persisted workflow cancellation safety", () => {
   });
 
   it("accepts cancellation before a PNQ root has been admitted", async () => {
-    mocks.cancelQueuedPersistedWorkflow.mockResolvedValue({ decision: "terminal", root: null });
+    mocks.cancelQueuedPersistedWorkflow.mockResolvedValue({
+      decision: "terminal",
+      transitionApplied: true,
+      root: null,
+    });
 
     await expect(cancelPersistedWorkflowSafely(workflow.id)).resolves.toMatchObject({ status: "cancelled" });
   });

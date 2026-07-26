@@ -255,6 +255,7 @@ describe("PNQ v2 shadow DirectWS side effects", () => {
     const recordShadowResult = vi.spyOn(pnqV2RuntimeService, "recordShadowResult");
     const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal").mockResolvedValue({
       decision: "terminal",
+      transitionApplied: true,
       root: null,
     } as never);
     vi.spyOn(dispatcherService, "handleJobResult").mockResolvedValue(undefined as never);
@@ -344,6 +345,7 @@ describe("PNQ-003 observe-only DirectWS ingress compatibility", () => {
     };
     const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal").mockResolvedValue({
       decision: "terminal",
+      transitionApplied: true,
       root: null,
     });
     const pending = internals.waitForBatchResult("observe-batch", 60_000, expectedHandle.deviceId);
@@ -450,6 +452,7 @@ describe("PNQ-003 observe-only DirectWS ingress compatibility", () => {
     };
     const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal").mockResolvedValue({
       decision: "terminal",
+      transitionApplied: true,
       root: null,
     });
     const rejected = vi.spyOn(deviceExecutionArbiter, "recordRejectedEgress");
@@ -588,7 +591,7 @@ describe("DirectWS typed pending lifecycle", () => {
     const writesReleased = new Promise<void>((resolve) => { releaseWrites = resolve; });
     const markAmbiguous = vi.spyOn(deviceExecutionArbiter, "markAmbiguous").mockImplementation(async () => {
       await writesReleased;
-      return { decision: "ambiguous", root: null };
+      return { decision: "ambiguous", transitionApplied: true, root: null };
     });
     let batchARejected = false;
     void pendingA.catch(() => { batchARejected = true; });
@@ -626,7 +629,11 @@ describe("DirectWS typed pending lifecycle", () => {
       expirePendingWorkflow: (handle: DeviceExecutionHandle) => Promise<void>;
     };
     internals.pendingWorkflows.set(workflow.operationId, { handle: workflow, timer: workflowTimer });
-    const markAmbiguous = vi.spyOn(deviceExecutionArbiter, "markAmbiguous").mockResolvedValue({ decision: "ambiguous", root: null });
+    const markAmbiguous = vi.spyOn(deviceExecutionArbiter, "markAmbiguous").mockResolvedValue({
+      decision: "ambiguous",
+      transitionApplied: true,
+      root: null,
+    });
 
     await internals.expirePendingBatch(batch, 1234);
     await internals.expirePendingWorkflow(workflow);
@@ -647,7 +654,7 @@ describe("DirectWS typed pending lifecycle", () => {
       expirePendingJob: (jobId: string, timeoutMs: number, jobDispatchPermit: ReturnType<typeof jobPermit>) => Promise<void>;
     };
     const expireChild = vi.spyOn(deviceExecutionArbiter, "expireServerWorkflowChild")
-      .mockResolvedValue({ decision: "terminal", root: null });
+      .mockResolvedValue({ decision: "terminal", transitionApplied: true, root: null });
     const markAmbiguous = vi.spyOn(deviceExecutionArbiter, "markAmbiguous");
 
     await internals.expirePendingJob(permit.handle.operationId, 1234, permit);
@@ -688,14 +695,14 @@ describe("DirectWS typed pending lifecycle", () => {
         const count = (attempts.get(operationId) ?? 0) + 1;
         attempts.set(operationId, count);
         if (count === 1) throw new Error("db unavailable");
-        return { decision: "terminal", root: null };
+        return { decision: "terminal", transitionApplied: true, root: null };
       });
       vi.spyOn(deviceExecutionArbiter, "markAmbiguous").mockImplementation(async (input) => {
         const operationId = input.handle!.operationId;
         const count = (attempts.get(operationId) ?? 0) + 1;
         attempts.set(operationId, count);
         if (count === 1) throw new Error("db unavailable");
-        return { decision: "ambiguous", root: null };
+        return { decision: "ambiguous", transitionApplied: true, root: null };
       });
 
       await Promise.all([
@@ -741,7 +748,7 @@ describe("DirectWS typed pending lifecycle", () => {
         const count = (attempts.get(operationId) ?? 0) + 1;
         attempts.set(operationId, count);
         if (count === 1) throw new Error("db unavailable");
-        return { decision: "ambiguous", root: null };
+        return { decision: "ambiguous", transitionApplied: true, root: null };
       });
 
       await internals.blockPendingForDisconnectedDevice(expectedHandle.deviceId, 1006, "lost");

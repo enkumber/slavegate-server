@@ -1,4 +1,7 @@
-import { deviceExecutionArbiter } from "../device-execution";
+import {
+  deviceExecutionArbiter,
+  isDeviceExecutionResultTerminal,
+} from "../device-execution";
 import { isDeviceExecutionEnforced } from "../device-execution/device-execution-authority";
 import { workflowService } from "./workflow.service";
 import { getResourceLifecycleExecutionStatusContract } from "../lifecycle/lifecycle.service";
@@ -71,7 +74,7 @@ export async function cancelPersistedWorkflowSafely(workflowId: string): Promise
     reason: "api_cancelled_before_dispatch",
     metadata: { workflowStatus: workflow.status },
   });
-  if (pnq.decision !== "terminal") {
+  if (!(await isDeviceExecutionResultTerminal(pnq))) {
     await auditUnsupportedInFlight(workflowId, workflow.deviceId, pnq.root?.state ?? workflow.status);
     throw cancellationError(
       "CANCELLATION_UNSUPPORTED_IN_FLIGHT",

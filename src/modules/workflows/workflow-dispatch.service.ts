@@ -5,7 +5,10 @@
 
 import { sendDeviceExecutionJobToDevice, isDeviceOnline, waitForResult } from "../../transport/transport";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { deviceExecutionArbiter } from "../device-execution";
+import {
+  deviceExecutionArbiter,
+  isDeviceExecutionResultTerminal,
+} from "../device-execution";
 
 // ── Pre-workflow steps (sent as individual jobs before workflow) ────────────
 // Device-side workflow executor may not handle these correctly,
@@ -154,7 +157,7 @@ export async function dispatchWorkflow(params: DispatchParams) {
       reason: "all_preworkflow_steps_finished",
       metadata: { workflowName: workflow.name, preStepCount: workflow.steps.length },
     });
-    if (finished.decision !== "terminal") {
+    if (!(await isDeviceExecutionResultTerminal(finished))) {
       throw new Error(`Failed to finish all-presteps workflow root: ${finished.reason ?? finished.decision}`);
     }
     const jobId = `pre-${Date.now()}`;
@@ -193,7 +196,7 @@ export async function dispatchWorkflow(params: DispatchParams) {
     },
   });
 
-  const accepted = dispatch.sent || dispatch.decision === "would_wait";
+  const accepted = dispatch.sent || dispatch.queued;
   if (!accepted) {
     throw Object.assign(
       new Error(`Workflow dispatch failed (${dispatch.decision}${dispatch.reason ? `: ${dispatch.reason}` : ""})`),
@@ -238,13 +241,13 @@ export async function cancelWorkflow(jobId: string) {
     metadata: { jobId, workflowName: entry.workflowName },
   });
 
-  if (cancelled.decision === "terminal") {
+  if (await isDeviceExecutionResultTerminal(cancelled)) {
     activeWorkflows.delete(jobId);
     console.log(`[workflow-dispatch] Cancelled queued job ${jobId} (${entry.workflowName})`);
     return { jobId, status: cancelled.root?.state ?? cancelled.decision };
   }
 
-  if (cancelled.reason === "root_not_queued") {
+  if (cancelled.root) {
     // The queue pump may have dispatched after the original API response. Do
     // not send WORKFLOW_CANCEL: workflow_execute is a JOB wire operation and
     // that signal would falsely claim cancellation while releasing ownership.
@@ -264,7 +267,7 @@ export async function cancelWorkflow(jobId: string) {
 
   throw Object.assign(
     new Error(`Workflow cancellation failed (${cancelled.reason ?? cancelled.decision})`),
-    { code: cancelled.decision === "missing" ? "NOT_FOUND" : "CANCELLATION_REJECTED" },
+    { code: "NOT_FOUND" },
   );
 }
 

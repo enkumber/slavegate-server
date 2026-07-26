@@ -1019,7 +1019,7 @@ router.post("/jobs", async (req, res) => {
       timeoutMs,
       requiresRoot: body.confirmRoot,
     });
-    if (!sendResult.sent && sendResult.decision !== "would_wait") {
+    if (!sendResult.sent && !sendResult.queued) {
       console.warn(
         `[jobs] standalone job accepted but not sent: jobId=${jobId.slice(0, 8)} decision=${sendResult.decision} reason=${sendResult.reason ?? "none"}`
       );

@@ -15,7 +15,12 @@ import type {
   DeviceExecutionRootKind,
   DeviceExecutionStandaloneJobEgressResult,
 } from "../modules/device-execution";
-import { encodeDeviceExecutionHandle, getDeviceExecutionBoundaryPolicy } from "../modules/device-execution";
+import {
+  encodeDeviceExecutionHandle,
+  getDeviceExecutionBoundaryPolicy,
+  isDeviceExecutionResultQueued,
+  isDeviceExecutionResultTerminal,
+} from "../modules/device-execution";
 import { isDeviceExecutionEnforced } from "../modules/device-execution/device-execution-authority";
 import type { JobDispatchPayload } from "../../shared/protocol/messages";
 import { promoteReplayedEdgeWorkflowToRunning } from "../modules/workflows/edge-workflow-lifecycle.service";
@@ -236,7 +241,7 @@ export async function sendDeviceExecutionJobToDevice(
     handle: result.handle,
     reason: result.reason,
     sent: result.sent,
-    queued: !result.sent && result.decision === "would_wait",
+    queued: !result.sent && await isDeviceExecutionResultQueued(result),
   };
 }
 
@@ -365,7 +370,11 @@ async function sendBatchThroughBoundary(
   });
   if (!dispatch.sent || !dispatch.handle || !resultPromise) {
     if (dispatch.handle) directWsServer.rejectBatchWaiterWithHandle(dispatch.handle, dispatch.reason ?? "batch_not_sent");
-    if (options.boundary === "edge_batch" && dispatch.decision === "would_wait" && dispatch.handle) {
+    if (
+      options.boundary === "edge_batch" &&
+      await isDeviceExecutionResultQueued(dispatch) &&
+      dispatch.handle
+    ) {
       await cancelUnreplayableObservedAttempt(dispatch.handle, "queued_edge_batch_not_replayable");
     }
     throw new Error(`Batch ${batchId} was not sent: ${dispatch.reason ?? dispatch.decision}`);
@@ -421,7 +430,7 @@ export async function sendEdgeWorkflowToDeviceEnforced(
     handle: dispatch.handle,
     reason: dispatch.reason,
     sent: dispatch.sent,
-    queued: !dispatch.sent && dispatch.decision === "would_wait",
+    queued: !dispatch.sent && await isDeviceExecutionResultQueued(dispatch),
   };
 }
 
@@ -470,7 +479,7 @@ async function cancelUnreplayableObservedAttempt(
     reason,
     metadata: { queueDisposition: "cancelled_before_fallback", handle: encodeDeviceExecutionHandle(handle) },
   });
-  if (cancelled.decision !== "terminal") {
+  if (!(await isDeviceExecutionResultTerminal(cancelled))) {
     throw new Error(`Failed to cancel unreplayable PNQ attempt ${handle.operationId}: ${cancelled.reason ?? cancelled.decision}`);
   }
 }

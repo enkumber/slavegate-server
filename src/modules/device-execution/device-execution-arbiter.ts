@@ -106,10 +106,31 @@ export type DeviceExecutionDecision =
 export interface DeviceExecutionTransitionResult {
   decision: DeviceExecutionDecision;
   root: DeviceExecutionRoot | null;
+  transitionApplied?: boolean;
+  deferred?: boolean;
+  sendReady?: boolean;
   handle?: DeviceExecutionHandle;
   operation?: DeviceExecutionOperation;
   activeRootId?: string;
   reason?: string;
+}
+
+export function isDeviceExecutionResultTerminal(
+  result: Pick<DeviceExecutionTransitionResult, "transitionApplied">,
+): boolean {
+  return result.transitionApplied === true;
+}
+
+export function isDeviceExecutionResultQueued(
+  result: Pick<DeviceExecutionTransitionResult, "deferred">,
+): boolean {
+  return result.deferred === true;
+}
+
+export function isDeviceExecutionResultQuiescent(
+  result: Pick<DeviceExecutionTransitionResult, "transitionApplied">,
+): boolean {
+  return result.transitionApplied === true;
 }
 
 export interface DeviceExecutionObservedEgressInput {
@@ -725,6 +746,7 @@ export class DeviceExecutionArbiter {
         });
         return {
           decision: "would_wait" as const,
+          deferred: true,
           root: rowToRoot(root),
           operation: rowToOperation(operation),
           handle,
@@ -821,6 +843,7 @@ export class DeviceExecutionArbiter {
           });
           return {
             decision: "would_wait" as const,
+            deferred: true,
             root: rowToRoot(root),
             operation: rowToOperation(operation),
             handle,
@@ -926,6 +949,7 @@ export class DeviceExecutionArbiter {
 
       return {
         decision: "claimed" as const,
+        sendReady: true,
         root: rowToRoot(current),
         operation: rowToOperation(dispatchingOperation),
         handle,
@@ -1280,6 +1304,7 @@ export class DeviceExecutionArbiter {
         });
         return {
           decision: "would_wait" as const,
+          deferred: true,
           root: rowToRoot(root),
           operation: rowToOperation(operation),
           handle,
@@ -1303,6 +1328,7 @@ export class DeviceExecutionArbiter {
           });
           return {
             decision: "would_wait" as const,
+            deferred: true,
             root: rowToRoot(root),
             operation: rowToOperation(operation),
             handle,
@@ -1345,6 +1371,7 @@ export class DeviceExecutionArbiter {
 
       return {
         decision: "claimed" as const,
+        sendReady: true,
         root: rowToRoot(current),
         operation: rowToOperation(operationDispatching),
         handle: operationRowToHandle(operationDispatching),
@@ -1352,7 +1379,7 @@ export class DeviceExecutionArbiter {
       };
     });
 
-    if (!prepared.handle || prepared.decision !== "claimed") return prepared;
+    if (!prepared.handle || prepared.sendReady !== true) return prepared;
 
     let sent = false;
     let wireError: string | undefined;
@@ -2074,6 +2101,7 @@ export class DeviceExecutionArbiter {
       });
       return {
         decision: "terminal",
+        transitionApplied: true,
         root: rowToRoot(terminal),
         operation: terminalOperation ? rowToOperation(terminalOperation) : undefined,
         handle: terminalOperation ? operationRowToHandle(terminalOperation) : handle,
@@ -2420,6 +2448,7 @@ export class DeviceExecutionArbiter {
       });
       return {
         decision: "terminal",
+        transitionApplied: true,
         root: rowToRoot(terminal),
         operation: terminalOperation ? rowToOperation(terminalOperation) : undefined,
       };
@@ -2526,6 +2555,7 @@ export class DeviceExecutionArbiter {
       });
       return {
         decision: "terminal",
+        transitionApplied: true,
         root: rowToRoot(root),
         operation: rowToOperation(terminalOperation),
         handle: operationRowToHandle(terminalOperation),
@@ -2628,6 +2658,7 @@ export class DeviceExecutionArbiter {
       });
       return {
         decision: "terminal",
+        transitionApplied: true,
         root: rowToRoot(terminal),
         operation: terminalOperation ? rowToOperation(terminalOperation) : undefined,
       };
@@ -2787,6 +2818,7 @@ export class DeviceExecutionArbiter {
       });
       return {
         decision: "terminal",
+        transitionApplied: true,
         root: terminalRoot ? rowToRoot(terminalRoot) : null,
         operation: terminalOperation ? rowToOperation(terminalOperation) : undefined,
       };
@@ -2855,7 +2887,12 @@ export class DeviceExecutionArbiter {
           reason: input.reason,
           metadata: input.metadata ?? {},
         });
-        return { decision: "ignored", root: rowToRoot(root), reason: "root_already_terminal" };
+        return {
+          decision: "ignored",
+          transitionApplied: true,
+          root: rowToRoot(root),
+          reason: "root_already_terminal",
+        };
       }
 
       const expectedGeneration = input.handle?.ownerGeneration
@@ -2926,6 +2963,7 @@ export class DeviceExecutionArbiter {
       });
       return {
         decision: "ambiguous",
+        transitionApplied: true,
         root: rowToRoot(ambiguous),
         operation: ambiguousOperation ? rowToOperation(ambiguousOperation) : undefined,
         handle: ambiguousOperation ? operationRowToHandle(ambiguousOperation) : handle,
