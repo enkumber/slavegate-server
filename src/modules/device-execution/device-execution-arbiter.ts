@@ -2005,10 +2005,12 @@ export class DeviceExecutionArbiter {
         operationPolicy.retainsRootUntilTerminal === false;
       const terminal = isServerWorkflowChild
         ? rootIsDispatching(root)
-          ? await updateRootState(client, {
+          ? await transitionRootState(client, {
               rootId: root.id,
-              fromStates: ["dispatching"],
-              toState: "dispatched",
+              selector: {
+                targetTerminal: false,
+                transitionAutomatic: true,
+              },
               ownerGenerationIncrement: false,
               metadata: input.metadata,
             })
@@ -2044,7 +2046,7 @@ export class DeviceExecutionArbiter {
         ? await updateOperationState(client, {
             operationKind: operation.operation_kind,
             operationId: operation.operation_id,
-            fromStates: ["registered", "dispatching", "dispatched", "reconciling", "blocked", "rejected"],
+            fromStates: [operation.state],
             toState: terminalState,
             ownerGeneration: expectedGeneration,
             metadata: input.metadata,
@@ -2244,10 +2246,12 @@ export class DeviceExecutionArbiter {
         (["generated_child", "self_healing_child", "prestep_child", "recovery_child"] as readonly string[]).includes(operationBoundary);
       const terminal = isServerWorkflowChild
         ? rootIsDispatching(root)
-          ? await updateRootState(client, {
+          ? await transitionRootState(client, {
               rootId: root.id,
-              fromStates: ["dispatching"],
-              toState: "dispatched",
+              selector: {
+                targetTerminal: false,
+                transitionAutomatic: true,
+              },
               ownerGenerationIncrement: false,
               metadata: input.metadata,
             })
@@ -2284,7 +2288,7 @@ export class DeviceExecutionArbiter {
       const terminalOperation = await updateOperationState(client, {
         operationKind: operation.operation_kind,
         operationId: operation.operation_id,
-        fromStates: ["dispatching", "dispatched"],
+        fromStates: [operation.state],
         toState: terminalState,
         ownerGeneration: expectedGeneration,
         metadata: input.metadata,
@@ -2464,7 +2468,7 @@ export class DeviceExecutionArbiter {
           reason: !isChildBoundary ? "operation_is_not_server_workflow_child" : "child_timeout_owner_mismatch",
         };
       }
-      if (["completed", "failed", "cancelled"].includes(operation.state)) {
+      if (operationIsTerminal(operation)) {
         return {
           decision: "terminal",
           root: rowToRoot(root),
@@ -2483,11 +2487,15 @@ export class DeviceExecutionArbiter {
         };
       }
 
-      const terminalOperation = await updateOperationState(client, {
+      const terminalOperation = await transitionOperationState(client, {
         operationKind: "job",
         operationId: input.jobId,
-        fromStates: ["dispatching", "dispatched"],
-        toState: "failed",
+        selector: {
+          targetTerminal: true,
+          targetRetryable: true,
+          targetAdministrative: false,
+          transitionAutomatic: true,
+        },
         ownerGeneration: toNumber(root.owner_generation),
         metadata: input.metadata,
       });

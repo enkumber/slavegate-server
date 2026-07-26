@@ -24,7 +24,9 @@ const rules = [
   {
     id: "migration-semantic-lifecycle-seed",
     scope: (path) => path.includes("/src/db/migrations/"),
-    pattern: /\bINSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions|resource_bindings|resource_policies)\b/gi,
+    // Generic functions may insert caller-supplied/discovered bindings. Only
+    // packaged literal rows are product semantics and therefore forbidden.
+    pattern: /\bINSERT\s+INTO\s+lifecycle_(?:state_definitions|transitions|resource_bindings|resource_policies)\b[\s\S]{0,500}?\bVALUES\s*\(\s*["'][A-Za-z][A-Za-z0-9_.:-]*["']/gi,
   },
   {
     id: "migration-semantic-state-default",
