@@ -18,7 +18,37 @@ DECLARE
   current_state TEXT;
   initial_state TEXT;
   binding_count INTEGER := 0;
+  shared_lifecycle_key TEXT;
+  lifecycle_key_count INTEGER;
+  current_lifecycle_key TEXT;
+  has_lifecycle_key_column BOOLEAN;
 BEGIN
+  SELECT MIN(binding.lifecycle_key), COUNT(DISTINCT binding.lifecycle_key)
+    INTO shared_lifecycle_key, lifecycle_key_count
+    FROM lifecycle_resource_bindings binding
+   WHERE binding.resource_table = TG_RELID;
+
+  SELECT EXISTS (
+    SELECT 1
+      FROM pg_attribute
+     WHERE attrelid = TG_RELID
+       AND attname = 'lifecycle_key'
+       AND attnum > 0
+       AND NOT attisdropped
+  ) INTO has_lifecycle_key_column;
+
+  IF has_lifecycle_key_column AND lifecycle_key_count = 1 THEN
+    current_lifecycle_key := to_jsonb(NEW)->>'lifecycle_key';
+    IF current_lifecycle_key IS NULL OR BTRIM(current_lifecycle_key) = '' THEN
+      NEW := jsonb_populate_record(
+        NEW,
+        jsonb_build_object('lifecycle_key', shared_lifecycle_key)
+      );
+    ELSIF current_lifecycle_key <> shared_lifecycle_key THEN
+      RAISE EXCEPTION 'resource lifecycle key disagrees with configured binding';
+    END IF;
+  END IF;
+
   FOR configured IN
     SELECT binding.lifecycle_key, binding.state_column
       FROM lifecycle_resource_bindings binding

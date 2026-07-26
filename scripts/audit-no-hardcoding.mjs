@@ -34,6 +34,11 @@ const rules = [
     pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state)\b[^,;\n]*\bDEFAULT\s+["'][A-Za-z][A-Za-z0-9_-]*["']/gi,
   },
   {
+    id: "migration-semantic-state-sql",
+    scope: (path) => path.includes("/src/db/migrations/"),
+    pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state)\s*(?:=|(?:NOT\s+)?IN\s*\()\s*["'(][A-Za-z][A-Za-z0-9_-]*/gi,
+  },
+  {
     id: "migration-product-policy-seed",
     scope: (path) => path.includes("/src/db/migrations/"),
     pattern: /\bINSERT\s+INTO\s+(?:runtime_semantic_entries|workflow_capabilities|workflow_capability_artifacts|job_status_definitions|task_status_definitions|workflow_status_definitions|agency_workflow_run_status_definitions|research_job_status_definitions)\b/gi,

@@ -4,7 +4,7 @@
 BEGIN;
 
 -- ═══════════════════════════════════════════════════════════════════════════════
--- CLIENTS — Adaugă status column (Marketer folosește WHERE status = 'active')
+-- CLIENTS — add generic lifecycle status storage
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 ALTER TABLE clients

@@ -7,6 +7,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE IF NOT EXISTS pnq_nodes (
   id                 UUID PRIMARY KEY,
   node_key           TEXT NOT NULL,
+  lifecycle_key      TEXT,
   status             TEXT NOT NULL,
   next_node_seq      BIGINT NOT NULL DEFAULT 1,
   connection_epoch   BIGINT NOT NULL DEFAULT 0,
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS pnq_jobs (
   node_seq                   BIGINT NOT NULL,
   request_key                TEXT NOT NULL,
   request_payload            JSONB NOT NULL,
+  lifecycle_key              TEXT,
   status                     TEXT NOT NULL,
   job_version                BIGINT NOT NULL DEFAULT 1,
   dispatch_generation        BIGINT NOT NULL DEFAULT 0,
@@ -51,6 +53,9 @@ CREATE TABLE IF NOT EXISTS pnq_jobs (
   CONSTRAINT pnq_jobs_claimed_connection_epoch_check CHECK (
     claimed_connection_epoch IS NULL OR claimed_connection_epoch >= 0
   ),
+  CONSTRAINT pnq_jobs_execution_id_required_check CHECK (
+    execution_started_at IS NULL OR execution_id IS NOT NULL
+  ),
   CONSTRAINT pnq_jobs_deadline_order_check CHECK (
     queue_deadline_at < dispatch_deadline_at
     AND dispatch_deadline_at < execution_deadline_at
@@ -64,8 +69,7 @@ CREATE INDEX IF NOT EXISTS pnq_jobs_fifo_idx
 DROP INDEX IF EXISTS pnq_jobs_one_active_per_node_idx;
 
 CREATE INDEX IF NOT EXISTS pnq_jobs_recovery_idx
-  ON pnq_jobs(status, updated_at, result_deadline_at)
-  WHERE status IN ('DISPATCHING', 'RUNNING');
+  ON pnq_jobs(status, updated_at, result_deadline_at);
 
 CREATE INDEX IF NOT EXISTS pnq_jobs_terminal_idx
   ON pnq_jobs(node_id, terminal_at DESC)
@@ -280,6 +284,7 @@ CREATE OR REPLACE FUNCTION pnq_start_execution(
 DECLARE
   v_job pnq_jobs;
   v_epoch BIGINT;
+  v_target_status TEXT;
 BEGIN
   IF p_execution_id IS NULL THEN
     RAISE EXCEPTION 'execution_id is required when entering execution' USING ERRCODE = '23514';
@@ -305,12 +310,38 @@ BEGIN
     RETURN v_job;
   END IF;
 
+  SELECT lifecycle_transition_target(
+    'pnq_jobs'::regclass,
+    current_job.status,
+    jsonb_build_object('targetTerminal', FALSE, 'markStarted', TRUE)
+  )
+  INTO v_target_status
+  FROM pnq_jobs current_job
+  WHERE current_job.id = p_job_id;
+
+  IF v_target_status IS NULL THEN
+    SELECT * INTO v_job FROM pnq_jobs WHERE id = p_job_id;
+    IF v_job.execution_started_at IS NOT NULL THEN
+      INSERT INTO pnq_resolution_audit (
+        job_id, event_type, decision, expected_job_version, expected_generation, execution_id, actor
+      ) VALUES (
+        p_job_id, 'cas_lost', 'ignored', p_expected_job_version, p_expected_dispatch_generation,
+        p_execution_id, p_actor
+      );
+      RETURN v_job;
+    END IF;
+    RAISE EXCEPTION 'no configured execution-start transition for pnq job %', p_job_id
+      USING ERRCODE = '55000';
+  END IF;
+
   UPDATE pnq_jobs AS j
-  SET status = 'RUNNING',
+  SET status = v_target_status,
       execution_started_at = NOW(),
       job_version = j.job_version + 1
   WHERE j.id = p_job_id
-    AND j.status = 'DISPATCHING'
+    AND j.terminal_at IS NULL
+    AND j.dispatch_started_at IS NOT NULL
+    AND j.execution_started_at IS NULL
     AND j.execution_id = p_execution_id
     AND j.claimed_connection_epoch = p_connection_epoch
     AND j.job_version = p_expected_job_version
@@ -347,6 +378,7 @@ CREATE OR REPLACE FUNCTION pnq_claim_next_job(
 DECLARE
   v_job pnq_jobs;
   v_epoch BIGINT;
+  v_target_status TEXT;
 BEGIN
   IF p_execution_id IS NULL THEN
     RAISE EXCEPTION 'execution_id is required when claiming execution' USING ERRCODE = '23514';
@@ -374,7 +406,8 @@ BEGIN
     SELECT 1
     FROM pnq_jobs
     WHERE node_id = p_node_id
-      AND status IN ('DISPATCHING', 'RUNNING')
+      AND execution_id IS NOT NULL
+      AND terminal_at IS NULL
   ) THEN
     RETURN NULL;
   END IF;
@@ -382,7 +415,13 @@ BEGIN
   SELECT * INTO v_job
   FROM pnq_jobs
   WHERE node_id = p_node_id
-    AND status = 'PENDING'
+    AND execution_id IS NULL
+    AND terminal_at IS NULL
+    AND lifecycle_state_matches(
+      'pnq_jobs'::regclass,
+      status,
+      jsonb_build_object('initial', TRUE)
+    )
   ORDER BY node_seq ASC
   FOR UPDATE
   LIMIT 1;
@@ -391,8 +430,18 @@ BEGIN
     RETURN NULL;
   END IF;
 
+  v_target_status := lifecycle_transition_target(
+    'pnq_jobs'::regclass,
+    v_job.status,
+    jsonb_build_object('targetTerminal', FALSE, 'automatic', TRUE)
+  );
+  IF v_target_status IS NULL THEN
+    RAISE EXCEPTION 'no configured automatic claim transition for pnq job %', v_job.id
+      USING ERRCODE = '55000';
+  END IF;
+
   UPDATE pnq_jobs job
-  SET status = 'DISPATCHING',
+  SET status = v_target_status,
       execution_id = p_execution_id,
       claimed_connection_epoch = p_connection_epoch,
       dispatch_started_at = COALESCE(dispatch_started_at, NOW()),
@@ -425,6 +474,7 @@ DECLARE
   v_job pnq_jobs;
   v_epoch BIGINT;
   v_event_type TEXT;
+  v_target_status TEXT;
 BEGIN
   SELECT n.connection_epoch INTO v_epoch
   FROM pnq_jobs j
@@ -467,7 +517,8 @@ BEGIN
     RETURN v_current;
   END IF;
 
-  IF v_current.status <> 'RUNNING'
+  IF v_current.terminal_at IS NOT NULL
+    OR v_current.execution_started_at IS NULL
     OR v_current.execution_id IS DISTINCT FROM p_execution_id
     OR v_current.dispatch_generation <> p_dispatch_generation THEN
     v_event_type := CASE
@@ -494,8 +545,23 @@ BEGIN
     RETURN v_current;
   END IF;
 
+  v_target_status := lifecycle_transition_target(
+    'pnq_jobs'::regclass,
+    v_current.status,
+    jsonb_build_object(
+      'targetTerminal', TRUE,
+      'targetRetryable', NOT p_success,
+      'targetAdministrative', FALSE,
+      'markCompleted', TRUE
+    )
+  );
+  IF v_target_status IS NULL THEN
+    RAISE EXCEPTION 'no configured result transition for pnq job %', p_job_id
+      USING ERRCODE = '55000';
+  END IF;
+
   UPDATE pnq_jobs AS j
-  SET status = 'DONE',
+  SET status = v_target_status,
       result_payload = COALESCE(p_result_payload, '{}'::jsonb),
       terminal_at = NOW(),
       terminal_reason = CASE WHEN p_success THEN 'result_succeeded' ELSE 'result_failed' END,
@@ -529,6 +595,7 @@ CREATE OR REPLACE FUNCTION pnq_mark_stuck(
 DECLARE
   v_current pnq_jobs;
   v_job pnq_jobs;
+  v_target_status TEXT;
 BEGIN
   SELECT * INTO v_current
   FROM pnq_jobs
@@ -539,14 +606,28 @@ BEGIN
     RAISE EXCEPTION 'pnq job % does not exist', p_job_id USING ERRCODE = '23503';
   END IF;
 
+  IF v_current.terminal_at IS NOT NULL THEN
+    RETURN v_current;
+  END IF;
+
+  v_target_status := lifecycle_transition_target(
+    'pnq_jobs'::regclass,
+    v_current.status,
+    jsonb_build_object('targetTerminal', TRUE, 'targetAdministrative', TRUE)
+  );
+  IF v_target_status IS NULL THEN
+    RAISE EXCEPTION 'no configured administrative terminal transition for pnq job %', p_job_id
+      USING ERRCODE = '55000';
+  END IF;
+
   UPDATE pnq_jobs
-  SET status = 'STUCK',
+  SET status = v_target_status,
       terminal_at = NOW(),
       terminal_reason = p_reason,
       last_error = p_reason,
       job_version = job_version + 1
   WHERE id = p_job_id
-    AND status NOT IN ('DONE', 'STUCK')
+    AND terminal_at IS NULL
   RETURNING * INTO v_job;
 
   IF NOT FOUND THEN

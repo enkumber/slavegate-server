@@ -3,6 +3,7 @@ import path from "node:path";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PnqV2RuntimeRepository } from "../../src/modules/device-execution/pnq-v2-runtime.repository";
+import { configurePnqV2LifecycleFixture } from "../fixtures/pnq-v2-lifecycle";
 
 const repoRoot = path.resolve(__dirname, "../..");
 const migration082Path = path.join(repoRoot, "src/db/migrations/082_pnq_queue_v2_contract.sql");
@@ -32,6 +33,7 @@ describe("PNQ-003 Queue v2 shadow runtime PostgreSQL integration", () => {
       options: `-c search_path=${schema}`,
     });
     await pool.query(fs.readFileSync(migration082Path, "utf8"));
+    await configurePnqV2LifecycleFixture(pool, repoRoot);
     await pool.query(fs.readFileSync(migration083Path, "utf8"));
     repo = new PnqV2RuntimeRepository(pool);
   });

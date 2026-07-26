@@ -8,6 +8,8 @@ import { setDeviceExecutionAuthorityForTest } from "../../src/modules/device-exe
 import { setPnqV2RuntimeConfigForTest } from "../../src/modules/device-execution/pnq-v2-runtime-config";
 import { pnqV2RuntimeService } from "../../src/modules/device-execution/pnq-v2-runtime.service";
 import { setWorkflowJobResultResolverForTest } from "../../src/ws/direct-ws.server";
+import { configurePnqV2LifecycleFixture } from "../fixtures/pnq-v2-lifecycle";
+import { TEST_DEVICE_EXECUTION_RESOURCE_POLICY } from "../fixtures/device-execution-policy";
 
 const repoRoot = path.resolve(__dirname, "../..");
 const postgresUrl = process.env.PNQ003_PG_URL
@@ -53,6 +55,77 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
     ]) {
       await applySql(file);
     }
+    await configurePnqV2LifecycleFixture(pool, repoRoot);
+    await applySql("src/db/migrations/114_lifecycle_resource_policies.sql");
+    await pool.query(`
+      INSERT INTO lifecycle_state_definitions
+        (lifecycle_key, status, initial, terminal, retryable, administrative,
+         dispatchable, manual, sort_order)
+      VALUES
+        ('phase4_root_fixture', 'queued', TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 10),
+        ('phase4_root_fixture', 'claimed', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
+        ('phase4_root_fixture', 'dispatching', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 30),
+        ('phase4_root_fixture', 'dispatched', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 40),
+        ('phase4_root_fixture', 'blocked', FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 50),
+        ('phase4_root_fixture', 'reconciling', FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 60),
+        ('phase4_root_fixture', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 70),
+        ('phase4_root_fixture', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 80),
+        ('phase4_root_fixture', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 90),
+        ('phase4_operation_fixture', 'registered', TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 10),
+        ('phase4_operation_fixture', 'dispatching', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
+        ('phase4_operation_fixture', 'dispatched', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 30),
+        ('phase4_operation_fixture', 'rejected', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, 40),
+        ('phase4_operation_fixture', 'blocked', FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 50),
+        ('phase4_operation_fixture', 'reconciling', FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 60),
+        ('phase4_operation_fixture', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 70),
+        ('phase4_operation_fixture', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 80),
+        ('phase4_operation_fixture', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 90);
+
+      INSERT INTO lifecycle_transitions
+        (lifecycle_key, action_key, from_status, to_status, manual_allowed,
+         external_allowed, automatic, mark_started, mark_completed, clear_failure)
+      VALUES
+        ('phase4_root_fixture', 'claim', 'queued', 'claimed', FALSE, FALSE, TRUE, TRUE, FALSE, FALSE),
+        ('phase4_root_fixture', 'begin_dispatch', 'queued', 'dispatching', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_root_fixture', 'observe_dispatch', 'queued', 'dispatched', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_root_fixture', 'dispatch_claimed', 'claimed', 'dispatching', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_root_fixture', 'observe_claimed_dispatch', 'claimed', 'dispatched', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_root_fixture', 'finish_dispatch', 'dispatching', 'dispatched', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_root_fixture', 'reconcile_claimed', 'claimed', 'reconciling', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_root_fixture', 'block_dispatching', 'dispatching', 'blocked', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_root_fixture', 'reconcile_dispatched', 'dispatched', 'reconciling', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_root_fixture', 'complete_claimed', 'claimed', 'completed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+        ('phase4_root_fixture', 'fail_claimed', 'claimed', 'failed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+        ('phase4_root_fixture', 'complete_dispatching', 'dispatching', 'completed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+        ('phase4_root_fixture', 'fail_dispatching', 'dispatching', 'failed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+        ('phase4_root_fixture', 'complete_dispatched', 'dispatched', 'completed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+        ('phase4_root_fixture', 'fail_dispatched', 'dispatched', 'failed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+        ('phase4_root_fixture', 'cancel_queued', 'queued', 'cancelled', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE),
+        ('phase4_operation_fixture', 'begin_dispatch', 'registered', 'dispatching', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_operation_fixture', 'observe_dispatch', 'registered', 'dispatched', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_operation_fixture', 'reject_send', 'registered', 'rejected', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_operation_fixture', 'finish_dispatch', 'dispatching', 'dispatched', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_operation_fixture', 'block_dispatching', 'dispatching', 'blocked', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_operation_fixture', 'reconcile_dispatched', 'dispatched', 'reconciling', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+        ('phase4_operation_fixture', 'complete_dispatching', 'dispatching', 'completed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+        ('phase4_operation_fixture', 'fail_dispatching', 'dispatching', 'failed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+        ('phase4_operation_fixture', 'complete_dispatched', 'dispatched', 'completed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+        ('phase4_operation_fixture', 'fail_dispatched', 'dispatched', 'failed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+        ('phase4_operation_fixture', 'cancel_registered', 'registered', 'cancelled', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE);
+
+      SELECT configure_lifecycle_resource_binding(
+        'device_execution_roots'::regclass, 'phase4_root_fixture', 'state'
+      );
+      SELECT configure_lifecycle_resource_binding(
+        'device_execution_operations'::regclass, 'phase4_operation_fixture', 'state'
+      );
+    `);
+    await pool.query(
+      `INSERT INTO lifecycle_resource_policies
+         (resource_table, state_column, policy, updated_by)
+       VALUES ('device_execution_roots'::regclass, 'state', $1::jsonb, 'phase4-test')`,
+      [JSON.stringify(TEST_DEVICE_EXECUTION_RESOURCE_POLICY)],
+    );
     await pool.query(`
       INSERT INTO lifecycle_state_definitions
         (lifecycle_key, status, initial, terminal, retryable, administrative,

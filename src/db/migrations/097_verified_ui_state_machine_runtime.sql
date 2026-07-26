@@ -39,14 +39,6 @@ ALTER TABLE ui_graph_learning_candidates
     'candidate', 'device_validated', 'cohort_validated', 'global_promoted'
   ));
 
-UPDATE ui_graph_learning_candidates
-SET validation_stage = CASE
-  WHEN status = 'promoted' THEN 'global_promoted'
-  WHEN status IN ('validating', 'degraded') THEN 'device_validated'
-  ELSE 'candidate'
-END
-WHERE validation_stage = 'candidate';
-
 ALTER TABLE ui_graph_candidate_validations
   ADD COLUMN IF NOT EXISTS android_version TEXT NULL,
   ADD COLUMN IF NOT EXISTS app_build TEXT NULL,

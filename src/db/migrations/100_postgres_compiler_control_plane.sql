@@ -91,8 +91,7 @@ AS $$
     CROSS JOIN LATERAL unnest(
       ARRAY[capability.capability_key, COALESCE(capability.description, '')] || capability.aliases
     ) descriptor(value)
-    WHERE capability.status = 'active'
-      AND capability.portability_scope = 'global'
+    WHERE capability.portability_scope = 'global'
       AND (lower(capability.platform) = lower(p_platform) OR lower(capability.platform) = 'android')
       AND NOT EXISTS (
         SELECT 1

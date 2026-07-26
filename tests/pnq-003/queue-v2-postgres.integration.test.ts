@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { configurePnqV2LifecycleFixture } from "../fixtures/pnq-v2-lifecycle";
 
 const repoRoot = path.resolve(__dirname, "../..");
 const migrationPath = path.join(repoRoot, "src/db/migrations/082_pnq_queue_v2_contract.sql");
@@ -30,6 +31,7 @@ describe("PNQ-003 Queue v2 PostgreSQL contract", () => {
       options: `-c search_path=${schema}`,
     });
     await pool.query(fs.readFileSync(migrationPath, "utf8"));
+    await configurePnqV2LifecycleFixture(pool, repoRoot);
   });
 
   beforeEach(async () => {
@@ -171,7 +173,7 @@ describe("PNQ-003 Queue v2 PostgreSQL contract", () => {
     await expect(
       pool.query(
         `UPDATE pnq_jobs
-         SET status = 'RUNNING'
+         SET execution_started_at = NOW()
          WHERE id = $1`,
         [second.id],
       ),
