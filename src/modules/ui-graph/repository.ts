@@ -92,9 +92,15 @@ export class UiGraphRepository {
     const result = await db.query(
       `SELECT id, state_id, element_key, strategy, selector, priority, dynamic,
               confidence, status, app_version_pattern, device_class, metadata
-       FROM ui_graph_selectors
-       WHERE state_id = $1 AND element_key = $2
-         AND status = 'promoted'
+       FROM ui_graph_selectors selector
+       JOIN lifecycle_resource_bindings binding
+         ON binding.resource_table=to_regclass('ui_graph_selectors')
+        AND binding.state_column='status'
+       JOIN lifecycle_state_definitions state
+         ON state.lifecycle_key=binding.lifecycle_key
+        AND state.status=selector.status
+       WHERE selector.state_id = $1 AND selector.element_key = $2
+         AND state.dispatchable
        ORDER BY priority, confidence DESC`,
       [stateId, elementKey],
     );
@@ -111,7 +117,6 @@ export class UiGraphRepository {
         priority: Number(row.priority),
         dynamic: Boolean(row.dynamic),
         confidence: Number(row.confidence),
-        status: row.status,
         appVersionPattern: row.app_version_pattern,
         deviceClass: row.device_class,
         variantId: typeof jsonObject(row.metadata).variantId === "string" ? String(jsonObject(row.metadata).variantId) : null,
@@ -124,8 +129,14 @@ export class UiGraphRepository {
     const result = await db.query(
       `SELECT id, transition_key, app_id, source_state_id, target_state_id, element_key,
               action, preconditions, postconditions, cost, safety_class, confidence, status
-       FROM ui_graph_transitions
-       WHERE app_id = $1 AND status IN ('promoted', 'validating', 'candidate', 'degraded')`,
+       FROM ui_graph_transitions transition
+       JOIN lifecycle_resource_bindings binding
+         ON binding.resource_table=to_regclass('ui_graph_transitions')
+        AND binding.state_column='status'
+       JOIN lifecycle_state_definitions state
+         ON state.lifecycle_key=binding.lifecycle_key
+        AND state.status=transition.status
+       WHERE transition.app_id = $1 AND NOT state.administrative`,
       [appId],
     );
     if (result.rows.length === 0) {
@@ -145,7 +156,6 @@ export class UiGraphRepository {
       cost: Number(row.cost),
       safetyClass: row.safety_class,
       confidence: Number(row.confidence),
-      status: row.status,
     }));
   }
 
@@ -238,7 +248,7 @@ export class UiGraphRepository {
   async saveRuntimeCheckpoint(input: {
     context: UiGraphContext;
     checkpoint: GraphRuntimeCheckpoint;
-    status: "running" | "completed" | "failed" | "aborted";
+    status: string;
   }): Promise<void> {
     const safeUuid = (value: string | null | undefined) => value?.startsWith("legacy:") ? null : value ?? null;
     await getDb().query(
@@ -265,8 +275,35 @@ export class UiGraphRepository {
            (success_count + CASE WHEN $2 THEN 1 ELSE 0 END)::double precision /
            GREATEST(1, success_count + failure_count + 1))),
          status = CASE
-           WHEN NOT $2 AND failure_count + 1 >= 3 AND failure_count + 1 > success_count THEN 'quarantined'
-           WHEN NOT $2 AND status = 'promoted' THEN 'degraded'
+           WHEN NOT $2 AND failure_count + 1 > success_count THEN COALESCE(
+             (
+               SELECT transition.to_status
+                 FROM lifecycle_resource_bindings binding
+                 JOIN lifecycle_transitions transition
+                   ON transition.lifecycle_key=binding.lifecycle_key
+                  AND transition.from_status=ui_graph_selectors.status
+                 JOIN lifecycle_state_definitions target
+                   ON target.lifecycle_key=transition.lifecycle_key
+                  AND target.status=transition.to_status
+                WHERE binding.resource_table=to_regclass('ui_graph_selectors')
+                  AND binding.state_column='status'
+                  AND transition.automatic
+                  AND target.administrative
+                  AND transition.metadata ? 'minimumFailureCount'
+                  AND failure_count + 1 >= (transition.metadata->>'minimumFailureCount')::int
+                ORDER BY target.sort_order
+                LIMIT 1
+             ),
+             status
+           )
+           WHEN NOT $2 THEN COALESCE(
+             lifecycle_transition_target(
+               'ui_graph_selectors'::regclass,
+               status,
+               '{"targetRetryable":true,"transitionAutomatic":true}'::jsonb
+             ),
+             status
+           )
            ELSE status END,
          last_validated_at = CASE WHEN $2 THEN NOW() ELSE last_validated_at END,
          updated_at = NOW()
@@ -282,8 +319,35 @@ export class UiGraphRepository {
            success_count = success_count + CASE WHEN $2 THEN 1 ELSE 0 END,
            failure_count = failure_count + CASE WHEN $2 THEN 0 ELSE 1 END,
            status = CASE
-             WHEN NOT $2 AND failure_count + 1 >= 3 AND failure_count + 1 > success_count THEN 'quarantined'
-             WHEN NOT $2 AND status = 'promoted' THEN 'degraded'
+             WHEN NOT $2 AND failure_count + 1 > success_count THEN COALESCE(
+               (
+                 SELECT transition.to_status
+                   FROM lifecycle_resource_bindings binding
+                   JOIN lifecycle_transitions transition
+                     ON transition.lifecycle_key=binding.lifecycle_key
+                    AND transition.from_status=ui_graph_learning_candidates.status
+                   JOIN lifecycle_state_definitions target
+                     ON target.lifecycle_key=transition.lifecycle_key
+                    AND target.status=transition.to_status
+                  WHERE binding.resource_table=to_regclass('ui_graph_learning_candidates')
+                    AND binding.state_column='status'
+                    AND transition.automatic
+                    AND target.administrative
+                    AND transition.metadata ? 'minimumFailureCount'
+                    AND failure_count + 1 >= (transition.metadata->>'minimumFailureCount')::int
+                  ORDER BY target.sort_order
+                  LIMIT 1
+               ),
+               status
+             )
+             WHEN NOT $2 THEN COALESCE(
+               lifecycle_transition_target(
+                 'ui_graph_learning_candidates'::regclass,
+                 status,
+                 '{"targetRetryable":true,"transitionAutomatic":true}'::jsonb
+               ),
+               status
+             )
              ELSE status END,
            updated_at=NOW()
          WHERE id=$1`,

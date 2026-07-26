@@ -3,7 +3,6 @@ import type { UiTreeNode } from "../app-mapping/schema";
 export type UiSafetyClass = "read_only" | "navigation" | "mutating" | "sensitive";
 export type UiGraphRuntimeMode = "disabled" | "shadow" | "enforced";
 export type UiStateKind = "screen" | "overlay" | "system" | "unknown";
-export type KnowledgeStatus = "candidate" | "validating" | "promoted" | "degraded" | "quarantined" | "retired";
 export type ResolutionMethod = "exact_hash" | "anchors" | "fuzzy" | "unknown";
 export type TargetResolutionMethod = "direct" | "resource_id" | "content_description" | "semantic_id" | "text" | "structural" | "coord_cache" | "ocr" | "vlm" | "unknown";
 
@@ -77,7 +76,6 @@ export interface UiSelectorDefinition {
   priority: number;
   dynamic: boolean;
   confidence: number;
-  status: KnowledgeStatus;
   appVersionPattern?: string | null;
   deviceClass?: string | null;
   variantId?: string | null;
@@ -105,7 +103,6 @@ export interface UiTransitionDefinition {
   cost: number;
   safetyClass: UiSafetyClass;
   confidence: number;
-  status: KnowledgeStatus;
   preconditions?: Record<string, unknown>;
   postconditions?: Record<string, unknown>;
 }

@@ -27,17 +27,11 @@ export interface GraphRuntimeCheckpoint {
 
 export interface GraphRuntimeResult {
   ok: boolean;
-  status: "completed" | "failed" | "aborted";
+  aborted: boolean;
   checkpoint: GraphRuntimeCheckpoint;
   lastResolution: StateResolution;
   error?: string;
 }
-
-const DEFAULT_BUDGET: GraphRuntimeBudget = {
-  maxTransitions: 30,
-  maxReplans: 8,
-  maxDurationMs: 180_000,
-};
 
 export class GraphRuntimeEngine {
   constructor(
@@ -46,7 +40,7 @@ export class GraphRuntimeEngine {
     private readonly context: UiGraphContext,
     private readonly policy: GraphPlanningPolicy,
     private readonly dependencies: GraphRuntimeDependencies,
-    private readonly budget: GraphRuntimeBudget = DEFAULT_BUDGET,
+    private readonly budget: GraphRuntimeBudget,
   ) {}
 
   async planCurrentRoute(targetStateId: string): Promise<{ resolution: StateResolution; route: GraphRoute }> {
@@ -59,7 +53,7 @@ export class GraphRuntimeEngine {
       resolution,
       route: planGraphRoute(resolution.stateId, targetStateId, this.transitions, {
         ...this.policy,
-        maxTransitions: Math.min(this.policy.maxTransitions ?? this.budget.maxTransitions, this.budget.maxTransitions),
+        maxTransitions: Math.min(this.policy.maxTransitions, this.budget.maxTransitions),
       }),
     };
   }
@@ -80,9 +74,9 @@ export class GraphRuntimeEngine {
     };
 
     while (true) {
-      if (Date.now() - startedAt > this.budget.maxDurationMs) return this.failure("Graph runtime duration budget exceeded", checkpoint, lastResolution, "aborted");
-      if (checkpoint.transitionsExecuted >= this.budget.maxTransitions) return this.failure("Graph runtime transition budget exceeded", checkpoint, lastResolution, "aborted");
-      if (checkpoint.replans > this.budget.maxReplans) return this.failure("Graph runtime replan budget exceeded", checkpoint, lastResolution, "aborted");
+      if (Date.now() - startedAt > this.budget.maxDurationMs) return this.failure("Graph runtime duration budget exceeded", checkpoint, lastResolution, true);
+      if (checkpoint.transitionsExecuted >= this.budget.maxTransitions) return this.failure("Graph runtime transition budget exceeded", checkpoint, lastResolution, true);
+      if (checkpoint.replans > this.budget.maxReplans) return this.failure("Graph runtime replan budget exceeded", checkpoint, lastResolution, true);
 
       const tree = await this.dependencies.captureUiTree();
       lastResolution = resolveUiState(tree, this.states, this.context);
@@ -97,7 +91,7 @@ export class GraphRuntimeEngine {
         continue;
       }
       if (lastResolution.stateId === targetStateId) {
-        return { ok: true, status: "completed", checkpoint, lastResolution };
+        return { ok: true, aborted: false, checkpoint, lastResolution };
       }
 
       const route = planGraphRoute(lastResolution.stateId, targetStateId, this.transitions, this.policy);
@@ -115,7 +109,7 @@ export class GraphRuntimeEngine {
     }
   }
 
-  private failure(error: string, checkpoint: GraphRuntimeCheckpoint, lastResolution: StateResolution, status: "failed" | "aborted" = "failed"): GraphRuntimeResult {
-    return { ok: false, status, checkpoint, lastResolution, error };
+  private failure(error: string, checkpoint: GraphRuntimeCheckpoint, lastResolution: StateResolution, aborted = false): GraphRuntimeResult {
+    return { ok: false, aborted, checkpoint, lastResolution, error };
   }
 }

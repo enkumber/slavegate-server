@@ -13,7 +13,6 @@ function transition(id: string, source: string, target: string, overrides: Parti
     cost: 1,
     safetyClass: "navigation",
     confidence: 0.9,
-    status: "promoted",
     ...overrides,
   };
 }
@@ -24,7 +23,7 @@ describe("planGraphRoute", () => {
       transition("direct", "home", "comments", { cost: 4 }),
       transition("open-post", "home", "post"),
       transition("open-comments", "post", "comments"),
-    ], { maxSafetyClass: "navigation" });
+    ], { maxSafetyClass: "navigation", minimumConfidence: 0.7, maxTransitions: 20 });
     expect(route.found).toBe(true);
     expect(route.transitions.map((item) => item.id)).toEqual(["open-post", "open-comments"]);
   });
@@ -32,15 +31,8 @@ describe("planGraphRoute", () => {
   it("rejects transitions above the workflow safety class", () => {
     const route = planGraphRoute("home", "posted", [
       transition("submit", "home", "posted", { safetyClass: "mutating" }),
-    ], { maxSafetyClass: "navigation" });
+    ], { maxSafetyClass: "navigation", minimumConfidence: 0.7, maxTransitions: 20 });
     expect(route.found).toBe(false);
   });
 
-  it("does not route through candidate or degraded knowledge", () => {
-    const route = planGraphRoute("a", "c", [
-      transition("candidate", "a", "c", { status: "candidate", confidence: 1 }),
-      transition("degraded", "a", "c", { status: "degraded", confidence: 1 }),
-    ], { maxSafetyClass: "sensitive" });
-    expect(route.found).toBe(false);
-  });
 });

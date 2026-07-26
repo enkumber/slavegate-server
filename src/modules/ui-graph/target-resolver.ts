@@ -103,7 +103,6 @@ export function resolveUiTarget(
   const attempted: TargetResolutionMethod[] = [];
   const candidates = flatten(uiTree);
   const eligible = selectors
-    .filter((selector) => !["quarantined", "retired"].includes(selector.status))
     .filter((selector) => contextMatches(selector, context))
     .sort((a, b) => STRATEGY_ORDER[a.strategy] - STRATEGY_ORDER[b.strategy] || a.priority - b.priority || b.confidence - a.confidence);
 

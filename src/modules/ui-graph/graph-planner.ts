@@ -9,8 +9,8 @@ const SAFETY_RANK: Record<UiSafetyClass, number> = {
 
 export interface GraphPlanningPolicy {
   maxSafetyClass: UiSafetyClass;
-  minimumConfidence?: number;
-  maxTransitions?: number;
+  minimumConfidence: number;
+  maxTransitions: number;
 }
 
 export function planGraphRoute(
@@ -20,11 +20,10 @@ export function planGraphRoute(
   policy: GraphPlanningPolicy,
 ): GraphRoute {
   if (sourceStateId === targetStateId) return { found: true, transitions: [], totalCost: 0 };
-  const minimumConfidence = policy.minimumConfidence ?? 0.7;
-  const maxTransitions = policy.maxTransitions ?? 20;
+  const minimumConfidence = policy.minimumConfidence;
+  const maxTransitions = policy.maxTransitions;
   const eligible = transitions.filter((transition) =>
-    transition.status === "promoted"
-    && transition.confidence >= minimumConfidence
+    transition.confidence >= minimumConfidence
     && SAFETY_RANK[transition.safetyClass] <= SAFETY_RANK[policy.maxSafetyClass]
   );
 

@@ -21,7 +21,6 @@ const base: Omit<UiSelectorDefinition, "id" | "strategy"> = {
   priority: 100,
   dynamic: false,
   confidence: 0.9,
-  status: "promoted",
   variantId: "home-default",
 };
 

@@ -17,7 +17,7 @@ function state(id: string): UiStateDefinition {
 }
 
 function transition(id: string, source: string, target: string): UiTransitionDefinition {
-  return { id, key: id, appId: "app", sourceStateId: source, targetStateId: target, action: { type: "tap" }, cost: 1, safetyClass: "navigation", confidence: 0.95, status: "promoted" };
+  return { id, key: id, appId: "app", sourceStateId: source, targetStateId: target, action: { type: "tap" }, cost: 1, safetyClass: "navigation", confidence: 0.95 };
 }
 
 describe("GraphRuntimeEngine", () => {
@@ -29,12 +29,13 @@ describe("GraphRuntimeEngine", () => {
       [state("home"), state("popup"), state("target")],
       [transition("home-target", "home", "target"), transition("dismiss", "popup", "home"), transition("popup-target", "popup", "target")],
       { appId: "app" },
-      { maxSafetyClass: "navigation" },
+      { maxSafetyClass: "navigation", minimumConfidence: 0.7, maxTransitions: 20 },
       {
         captureUiTree: async () => observations.shift() ?? tree("target"),
         executeTransition: execute,
         saveCheckpoint: save,
       },
+      { maxTransitions: 30, maxReplans: 8, maxDurationMs: 180_000 },
     );
     const result = await engine.run("target");
     expect(result.ok).toBe(true);
@@ -44,8 +45,9 @@ describe("GraphRuntimeEngine", () => {
 
   it("fails closed on an unknown state", async () => {
     const engine = new GraphRuntimeEngine(
-      [state("home")], [], { appId: "app" }, { maxSafetyClass: "navigation" },
+      [state("home")], [], { appId: "app" }, { maxSafetyClass: "navigation", minimumConfidence: 0.7, maxTransitions: 20 },
       { captureUiTree: async () => tree("unknown"), executeTransition: async () => ({ ok: true }), saveCheckpoint: async () => undefined },
+      { maxTransitions: 30, maxReplans: 8, maxDurationMs: 180_000 },
     );
     const result = await engine.run("home");
     expect(result.ok).toBe(false);

@@ -44,7 +44,6 @@ export function projectLegacyAppMap(map: AppMap): LegacyGraphProjection {
         priority: 100,
         dynamic: false,
         confidence: 0.9,
-        status: "promoted" as const,
         variantId: `${projectedStateId}:default`,
       };
       if (element.resourceId) selectors.push({ ...base, id: `${projectedStateId}:${elementId}:rid`, strategy: "resource_id", value: element.resourceId, priority: 10 });
@@ -74,7 +73,6 @@ export function projectLegacyAppMap(map: AppMap): LegacyGraphProjection {
           cost: 1,
           safetyClass: "navigation",
           confidence: 0.85,
-          status: "promoted",
         });
       }
     }

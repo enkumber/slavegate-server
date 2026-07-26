@@ -15,14 +15,26 @@ export interface CanaryGate {
 export async function evaluateCanaryGate(cacheKey: string, cohortId: string): Promise<CanaryGate> {
   const result = await getDb().query(
     `SELECT c.required_distinct_devices, c.required_distinct_branches,
-            COUNT(*) FILTER (WHERE r.status='completed' AND r.postcondition_verified)::int AS completed,
-            COUNT(*) FILTER (WHERE r.status='failed' OR NOT r.postcondition_verified)::int AS failed,
-            COUNT(DISTINCT r.device_id) FILTER (WHERE r.status='completed' AND r.postcondition_verified)::int AS distinct_devices,
-            COUNT(DISTINCT r.branch_key) FILTER (WHERE r.status='completed' AND r.postcondition_verified)::int AS distinct_branches,
-            COALESCE(SUM(r.recovery_count) FILTER (WHERE r.status='completed'),0)::int AS recovered
+            COUNT(*) FILTER (WHERE run_state.terminal AND NOT run_state.retryable AND r.postcondition_verified)::int AS completed,
+            COUNT(*) FILTER (WHERE run_state.terminal AND run_state.retryable OR NOT r.postcondition_verified)::int AS failed,
+            COUNT(DISTINCT r.device_id) FILTER (WHERE run_state.terminal AND NOT run_state.retryable AND r.postcondition_verified)::int AS distinct_devices,
+            COUNT(DISTINCT r.branch_key) FILTER (WHERE run_state.terminal AND NOT run_state.retryable AND r.postcondition_verified)::int AS distinct_branches,
+            COALESCE(SUM(r.recovery_count) FILTER (WHERE run_state.terminal AND NOT run_state.retryable),0)::int AS recovered
        FROM workflow_canary_cohorts c
+       JOIN lifecycle_resource_bindings cohort_binding
+         ON cohort_binding.resource_table=to_regclass('workflow_canary_cohorts')
+        AND cohort_binding.state_column='status'
+       JOIN lifecycle_state_definitions cohort_state
+         ON cohort_state.lifecycle_key=cohort_binding.lifecycle_key
+        AND cohort_state.status=c.status
        LEFT JOIN workflow_canary_runs r ON r.cohort_id=c.id AND r.cache_key=$1
-      WHERE c.id=$2 AND c.status='active'
+       LEFT JOIN lifecycle_resource_bindings run_binding
+         ON run_binding.resource_table=to_regclass('workflow_canary_runs')
+        AND run_binding.state_column='status'
+       LEFT JOIN lifecycle_state_definitions run_state
+         ON run_state.lifecycle_key=run_binding.lifecycle_key
+        AND run_state.status=r.status
+      WHERE c.id=$2 AND cohort_state.dispatchable
       GROUP BY c.id`,
     [cacheKey, cohortId],
   );
@@ -52,7 +64,7 @@ export async function recordCanaryResult(input: {
   deviceId: string;
   workflowId?: string | null;
   branchKey?: string;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  status: string;
   postconditionVerified?: boolean;
   recoveryCount?: number;
   evidence?: Record<string, unknown>;
@@ -62,14 +74,18 @@ export async function recordCanaryResult(input: {
        (cohort_id, cache_key, device_id, workflow_id, branch_key, status,
         postcondition_verified, recovery_count, evidence, completed_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
-       CASE WHEN $6 IN ('completed','failed','cancelled') THEN NOW() ELSE NULL END)
+       CASE WHEN lifecycle_state_matches(
+         'workflow_canary_runs'::regclass, $6, '{"terminal":true}'::jsonb
+       ) THEN NOW() ELSE NULL END)
      ON CONFLICT (cohort_id, cache_key, device_id, branch_key) DO UPDATE SET
        workflow_id=COALESCE(EXCLUDED.workflow_id,workflow_canary_runs.workflow_id),
        status=EXCLUDED.status,
        postcondition_verified=EXCLUDED.postcondition_verified,
        recovery_count=EXCLUDED.recovery_count,
        evidence=EXCLUDED.evidence,
-       completed_at=CASE WHEN EXCLUDED.status IN ('completed','failed','cancelled') THEN NOW() ELSE NULL END,
+       completed_at=CASE WHEN lifecycle_state_matches(
+         'workflow_canary_runs'::regclass, EXCLUDED.status, '{"terminal":true}'::jsonb
+       ) THEN NOW() ELSE NULL END,
        updated_at=NOW()
      RETURNING *`,
     [

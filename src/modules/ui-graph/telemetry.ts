@@ -19,17 +19,17 @@ export function observeTargetResolution(appId: string, resolution: TargetResolut
 export function observeUiGraphAction(input: {
   appId: string;
   path: TargetResolutionMethod | "graph" | "legacy" | "recovery";
-  outcome: "shadow" | "completed" | "failed" | "recovered" | "aborted";
+  outcome: string;
   latencyMs: number;
 }): void {
   uiGraphActions?.labels(input.appId, input.path, input.outcome).inc();
   uiGraphActionLatency?.labels(input.appId, input.path).observe(Math.max(0, input.latencyMs) / 1000);
 }
 
-export function observeRecovery(appId: string, level: "deterministic" | "ui_tree_llm" | "vlm", outcome: "completed" | "failed" | "aborted"): void {
+export function observeRecovery(appId: string, level: "deterministic" | "ui_tree_llm" | "vlm", outcome: string): void {
   uiGraphRecovery?.labels(appId, level, outcome).inc();
 }
 
-export function observeLearningCandidate(appId: string, type: string, event: "observed" | "validated" | "promoted" | "degraded" | "quarantined"): void {
+export function observeLearningCandidate(appId: string, type: string, event: string): void {
   uiGraphLearningCandidates?.labels(appId, type, event).inc();
 }
