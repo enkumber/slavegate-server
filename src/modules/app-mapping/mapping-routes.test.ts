@@ -76,9 +76,9 @@ describe("reddit app-map refresh helpers", () => {
   });
 
   it("accepts a selector transition only when the agent actually found the element", () => {
-    expect(a11yTapSucceeded({ status: "completed", output: { found: true } })).toBe(true);
-    expect(a11yTapSucceeded({ status: "completed", output: { found: false, error: "Element not found" } })).toBe(false);
-    expect(a11yTapSucceeded({ status: "failed", output: { found: true } })).toBe(false);
+    expect(a11yTapSucceeded({ success: true, output: { found: true } })).toBe(true);
+    expect(a11yTapSucceeded({ success: true, output: { found: false, error: "Element not found" } })).toBe(false);
+    expect(a11yTapSucceeded({ success: false, output: { found: true } })).toBe(false);
   });
 
   it("normalizes x/y/width/height UI-tree bounds into usable app-map bounds", () => {

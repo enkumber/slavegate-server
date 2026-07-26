@@ -73,11 +73,9 @@ describe("DirectWS legacy generated workflow lane", () => {
     await expect(resultPromise).resolves.toMatchObject({
       jobId,
       success: true,
-      status: "completed",
       output: { tree: [] },
     });
     expect(resolveWorkflowResult).toHaveBeenCalledWith(jobId, expect.objectContaining({
-      status: "completed",
       output: { tree: [] },
     }));
     expect(recordShadowResult).not.toHaveBeenCalled();
@@ -151,11 +149,9 @@ describe("DirectWS legacy generated workflow lane", () => {
     await expect(resultPromise).resolves.toMatchObject({
       jobId,
       success: true,
-      status: "completed",
       output: { tree: ["late-but-within-grace"] },
     });
     expect(resolveWorkflowResult).toHaveBeenCalledWith(jobId, expect.objectContaining({
-      status: "completed",
       output: { tree: ["late-but-within-grace"] },
     }));
     expect(recordShadowResult).not.toHaveBeenCalled();

@@ -57,7 +57,7 @@ describe("generic DB-authoritative lifecycle", () => {
     expect(bindingMigration).toContain("CREATE TABLE IF NOT EXISTS lifecycle_resource_bindings");
     expect(bindingMigration).toContain("TG_RELID");
     expect(bindingMigration).toContain("configure_lifecycle_resource_binding");
-    expect(bindingMigration).toContain("FOREIGN KEY (lifecycle_key, status)");
+    expect(bindingMigration).toContain("FOREIGN KEY (lifecycle_key, %I)");
     expect(adoptionMigration).toContain("metadata->>'resourceTable'");
     expect(adoptionMigration).toContain("to_regclass");
     expect(adoptionMigration).toContain("configure_lifecycle_resource_binding");

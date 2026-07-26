@@ -74,7 +74,8 @@ async function dispatchAndAwaitRefresh(
 }
 
 export function a11yTapSucceeded(result: any): boolean {
-  return result?.output?.found === true
+  return result?.success === true
+    && result?.output?.found === true
     && result?.output?.error == null;
 }
 

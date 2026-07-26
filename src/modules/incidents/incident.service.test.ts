@@ -109,6 +109,24 @@ describe("incident service", () => {
 
   it("records status transitions with an audit event", async () => {
     mocks.db.query
+      .mockResolvedValueOnce({ rows: [{ status: "open" }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          lifecycle_key: "incident_test",
+          action_key: "investigate",
+          from_status: "open",
+          to_status: "investigating",
+          manual_allowed: true,
+          external_allowed: false,
+          automatic: false,
+          mark_started: true,
+          mark_completed: false,
+          clear_completed: false,
+          clear_failure: false,
+          reset_retry: false,
+          metadata: {},
+        }],
+      })
       .mockResolvedValueOnce({ rows: [{ id: "incident-1", status: "investigating" }] })
       .mockResolvedValueOnce({ rows: [] });
 
@@ -120,7 +138,7 @@ describe("incident service", () => {
     });
 
     expect(result).toMatchObject({ status: "investigating" });
-    expect(mocks.db.query.mock.calls[1][1].slice(0, 3)).toEqual(["incident-1", "investigating", "kraken"]);
+    expect(mocks.db.query.mock.calls[3][1].slice(0, 3)).toEqual(["incident-1", "investigate", "kraken"]);
   });
 
   it("writes ownership changes once for the same canonical owner pair", async () => {

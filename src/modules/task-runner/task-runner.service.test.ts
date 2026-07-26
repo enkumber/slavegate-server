@@ -928,7 +928,7 @@ describe("task-runner generated_workflow routine", () => {
       success: true,
       generatedWorkflow: expect.objectContaining({
         selfHealing: expect.objectContaining({
-          status: "recovered",
+          outcome: "recovered",
           attempts: 1,
           sourceCacheKeys: [CACHE_KEY],
           repairedCacheKeys: [expect.any(String)],
@@ -969,7 +969,6 @@ describe("task-runner generated_workflow routine", () => {
           source: "llm_repair",
           repairOfCacheKey: CACHE_KEY,
           workflowRepair: expect.objectContaining({
-            status: "candidate_generated",
             nextAction: "retry_task_with_repaired_candidate",
             reason: "RECOVERY_BUDGET_EXCEEDED",
           }),
