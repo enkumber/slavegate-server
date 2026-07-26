@@ -5,16 +5,23 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   decodeDeviceExecutionHandle,
   DeviceExecutionArbiter,
-  DEVICE_EXECUTION_BOUNDARY_MATRIX,
   DeviceExecutionSchemaError,
   type DeviceExecutionJobDispatchPermit,
   type DeviceExecutionState,
 } from "../../src/modules/device-execution/device-execution-arbiter";
+import {
+  TEST_DEVICE_EXECUTION_BOUNDARIES,
+  TEST_DEVICE_EXECUTION_RESOURCE_POLICY,
+} from "../fixtures/device-execution-policy";
 
 const repoRoot = path.resolve(__dirname, "../..");
 const migrationPath = path.join(repoRoot, "src/db/migrations/081_device_execution_queue.sql");
 const genericLifecycleMigrationPath = path.join(repoRoot, "src/db/migrations/105_generic_resource_lifecycle.sql");
 const resourceBindingsMigrationPath = path.join(repoRoot, "src/db/migrations/107_lifecycle_resource_bindings.sql");
+const genericLifecycleQueriesMigrationPath = path.join(repoRoot, "src/db/migrations/110_generic_lifecycle_queries.sql");
+const multiColumnBindingsMigrationPath = path.join(repoRoot, "src/db/migrations/111_multi_column_lifecycle_bindings.sql");
+const resourcePoliciesMigrationPath = path.join(repoRoot, "src/db/migrations/114_lifecycle_resource_policies.sql");
+const deviceExecutionIndexesMigrationPath = path.join(repoRoot, "src/db/migrations/115_device_execution_structural_indexes.sql");
 const postgresUrl = process.env.PNQ001_PG_URL ?? "postgresql://pnqtest@127.0.0.1:55432/pnq001_test";
 const describePostgres = postgresUrl ? describe : describe.skip;
 
@@ -195,7 +202,7 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     const observed: Array<{ kind: "waiter" | "wire"; operationId: string; handle: unknown }> = [];
 
     for (const boundary of ["edge_batch", "server_workflow_root"] as const) {
-      const policy = DEVICE_EXECUTION_BOUNDARY_MATRIX[boundary];
+      const policy = TEST_DEVICE_EXECUTION_BOUNDARIES[boundary];
       const operationId = `${boundary}-operation`;
       if (boundary === "server_workflow_root") {
         await arbiter.observeAdmission({
@@ -427,7 +434,8 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     const staleTerminalPermit = await arbiter.claimNextRoot({ deviceId: DEVICE_D, actor: "workflow-worker" });
     expect(staleTerminalPermit).not.toBeNull();
     await pool.query(
-      `INSERT INTO jobs (id, device_id, status, started_at, completed_at) VALUES ($1, $2, 'timeout', NULL, NOW())`,
+      `INSERT INTO jobs (id, device_id, lifecycle_key, status, started_at, completed_at)
+       VALUES ($1, $2, 'job_execution', 'timeout', NULL, NOW())`,
       [jobId, DEVICE_A],
     );
     await pool.query(
@@ -435,7 +443,8 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       [jobId, `workflow:${workflowId} step:0 screen_wake`],
     );
     await pool.query(
-      `INSERT INTO jobs (id, device_id, status, started_at, completed_at) VALUES ($1, $2, 'timeout', NOW(), NOW())`,
+      `INSERT INTO jobs (id, device_id, lifecycle_key, status, started_at, completed_at)
+       VALUES ($1, $2, 'job_execution', 'timeout', NOW(), NOW())`,
       [startedJobId, DEVICE_B],
     );
     await pool.query(
@@ -443,7 +452,8 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       [startedJobId, `workflow:${startedWorkflowId} step:0 screen_wake`],
     );
     await pool.query(
-      `INSERT INTO jobs (id, device_id, status, started_at, completed_at) VALUES ($1, $2, 'timeout', NULL, NOW())`,
+      `INSERT INTO jobs (id, device_id, lifecycle_key, status, started_at, completed_at)
+       VALUES ($1, $2, 'job_execution', 'timeout', NULL, NOW())`,
       [failedJobId, DEVICE_C],
     );
     await pool.query(
@@ -451,8 +461,8 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       [failedJobId, `workflow:${failedWorkflowId} step:0 screen_wake`],
     );
     await pool.query(
-      `INSERT INTO jobs (id, device_id, status, started_at, completed_at)
-       VALUES ($1, $2, 'timeout', NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '9 minutes')`,
+      `INSERT INTO jobs (id, device_id, lifecycle_key, status, started_at, completed_at)
+       VALUES ($1, $2, 'job_execution', 'timeout', NOW() - INTERVAL '10 minutes', NOW() - INTERVAL '9 minutes')`,
       [staleTerminalJobId, DEVICE_D],
     );
     await pool.query(
@@ -501,8 +511,8 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     );
     const blockedRoot = await rootForExternalId(pool, workflowId);
     await pool.query(
-      `INSERT INTO jobs (id, device_id, status, completed_at)
-       VALUES ($1, $2, 'timeout', NOW() - INTERVAL '6 minutes')`,
+      `INSERT INTO jobs (id, device_id, lifecycle_key, status, completed_at)
+       VALUES ($1, $2, 'job_execution', 'timeout', NOW() - INTERVAL '6 minutes')`,
       [childJobId, DEVICE_A],
     );
     await pool.query(
@@ -562,7 +572,8 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     );
     const blockedRoot = await rootForExternalId(pool, workflowId);
     await pool.query(
-      `INSERT INTO jobs (id, device_id, status, completed_at) VALUES ($1, $2, 'timeout', NOW())`,
+      `INSERT INTO jobs (id, device_id, lifecycle_key, status, completed_at)
+       VALUES ($1, $2, 'job_execution', 'timeout', NOW())`,
       [childJobId, DEVICE_A],
     );
     await pool.query(
@@ -684,7 +695,10 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
         );
       } else if (testCase.mutate === "queued-job") {
         const jobId = "00000000-0000-4000-8000-00000000d099";
-        await pool.query("INSERT INTO jobs (id, device_id, status) VALUES ($1, $2, 'pending')", [jobId, deviceId]);
+        await pool.query(
+          "INSERT INTO jobs (id, device_id, lifecycle_key, status) VALUES ($1, $2, 'job_execution', 'pending')",
+          [jobId, deviceId],
+        );
         await pool.query("INSERT INTO command_log (job_id, command_raw) VALUES ($1, $2)", [jobId, `workflow:${workflowId} step:0`]);
       }
     }
@@ -694,8 +708,8 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
   });
 
   it.each([
-    ["timeout", "job_timeout", "blocked"] as const,
-    ["disconnect", "device_disconnect", "blocked"] as const,
+    ["timeout", "job_timeout", "reconciling"] as const,
+    ["disconnect", "device_disconnect", "reconciling"] as const,
     ["restart", "server_startup_reconciliation", "reconciling"] as const,
   ])("keeps a successor queued when %s ambiguity is active", async (_label, reason, expectedState) => {
     await insertDevice(pool, DEVICE_A, `pnq-${reason}-a`);
@@ -727,7 +741,6 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
           operationId: `${reason}-root`,
         },
         reason,
-        state: expectedState,
         actor: `${reason}-test`,
       });
       expect(ambiguous.decision).toBe("ambiguous");
@@ -990,9 +1003,16 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     const rootConstraints = await constraintsFor(pool, "device_execution_roots");
     expect(rootConstraints.some((constraint) => constraint.contype === "p")).toBe(true);
     expect(rootConstraints.some((constraint) => constraint.contype === "f" && constraint.definition.includes("REFERENCES devices(id)"))).toBe(true);
-    expect(rootConstraints.find((constraint) => constraint.conname === "device_execution_roots_root_kind_check")?.definition).toContain("server_workflow");
-    expect(rootConstraints.find((constraint) => constraint.conname === "device_execution_roots_state_check")?.definition).toContain("reconciling");
     expect(rootConstraints.find((constraint) => constraint.conname === "device_execution_roots_owner_generation_check")?.definition).toContain("owner_generation >= 0");
+    const rootBinding = await pool.query<{ lifecycle_key: string; state_column: string }>(
+      `SELECT lifecycle_key, state_column::text
+         FROM lifecycle_resource_bindings
+        WHERE resource_table = 'device_execution_roots'::regclass
+          AND state_column = 'state'::name`,
+    );
+    expect(rootBinding.rows).toEqual([
+      { lifecycle_key: "pnq_test_root", state_column: "state" },
+    ]);
 
     const eventConstraints = await constraintsFor(pool, "device_execution_events");
     expect(eventConstraints.filter((constraint) => constraint.contype === "f")).toHaveLength(2);
@@ -1000,24 +1020,18 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     expect(eventConstraints.some((constraint) => constraint.definition.includes("REFERENCES devices(id)"))).toBe(true);
 
     const indexes = await indexesFor(pool);
-    const activeSlot = indexes.get("idx_device_execution_active_slot");
-    expect(activeSlot).toMatchObject({ indisunique: true });
-    expect(activeSlot?.predicate).toContain("claimed");
-    expect(activeSlot?.predicate).toContain("dispatched");
-    expect(activeSlot?.predicate).toContain("reconciling");
-    expect(activeSlot?.predicate).toContain("blocked");
-    expect(activeSlot?.predicate).not.toContain("queued");
-
-    const fifoIndex = indexes.get("idx_device_execution_roots_fifo");
-    expect(fifoIndex?.predicate).toContain("queued");
+    expect(indexes.has("idx_device_execution_roots_state_fifo")).toBe(true);
+    expect(indexes.has("idx_device_execution_roots_device_created")).toBe(true);
     expect(indexes.get("idx_device_execution_roots_external")).toMatchObject({ indisunique: true });
     expect(indexes.has("idx_device_execution_events_root")).toBe(true);
     expect(indexes.has("idx_device_execution_events_device")).toBe(true);
     expect(indexes.has("idx_device_execution_events_type")).toBe(true);
+    expect(indexes.has("idx_device_execution_operations_state")).toBe(true);
+    expect(indexes.has("idx_device_execution_events_type_created")).toBe(true);
   });
 
   it("fails closed when a required schema index is missing", async () => {
-    await pool.query("DROP INDEX idx_device_execution_roots_fifo");
+    await pool.query("DROP INDEX idx_device_execution_roots_state_fifo");
 
     await expect(arbiter.validateSchema()).rejects.toBeInstanceOf(DeviceExecutionSchemaError);
   });
@@ -1042,6 +1056,7 @@ async function assertRealPostgres(db: Pool): Promise<void> {
 
 async function resetPnqSchema(db: Pool): Promise<void> {
   await db.query(`
+    DROP TABLE IF EXISTS lifecycle_resource_policies CASCADE;
     DROP TABLE IF EXISTS command_log CASCADE;
     DROP TABLE IF EXISTS jobs CASCADE;
     DROP TABLE IF EXISTS tasks CASCADE;
@@ -1092,6 +1107,8 @@ async function resetPnqSchema(db: Pool): Promise<void> {
   `);
   await db.query(fs.readFileSync(genericLifecycleMigrationPath, "utf8"));
   await db.query(fs.readFileSync(resourceBindingsMigrationPath, "utf8"));
+  await db.query(fs.readFileSync(genericLifecycleQueriesMigrationPath, "utf8"));
+  await db.query(fs.readFileSync(multiColumnBindingsMigrationPath, "utf8"));
   await db.query(`
     INSERT INTO lifecycle_state_definitions
       (lifecycle_key, status, initial, terminal, retryable, administrative,
@@ -1103,20 +1120,89 @@ async function resetPnqSchema(db: Pool): Promise<void> {
       ('workflow_execution', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40),
       ('workflow_execution', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50),
       ('job_execution', 'pending', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 10),
-      ('job_execution', 'timeout', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 20)
+      ('job_execution', 'timeout', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 20),
+      ('pnq_test_root', 'queued', TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 10),
+      ('pnq_test_root', 'claimed', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
+      ('pnq_test_root', 'dispatching', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 30),
+      ('pnq_test_root', 'dispatched', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 40),
+      ('pnq_test_root', 'blocked', FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 50),
+      ('pnq_test_root', 'reconciling', FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 60),
+      ('pnq_test_root', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 70),
+      ('pnq_test_root', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 80),
+      ('pnq_test_root', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 90),
+      ('pnq_test_operation', 'registered', TRUE, FALSE, FALSE, FALSE, FALSE, FALSE, 10),
+      ('pnq_test_operation', 'dispatching', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
+      ('pnq_test_operation', 'dispatched', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 30),
+      ('pnq_test_operation', 'rejected', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE, 40),
+      ('pnq_test_operation', 'blocked', FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 50),
+      ('pnq_test_operation', 'reconciling', FALSE, FALSE, FALSE, FALSE, FALSE, TRUE, 60),
+      ('pnq_test_operation', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 70),
+      ('pnq_test_operation', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 80),
+      ('pnq_test_operation', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 90)
     ON CONFLICT (lifecycle_key, status) DO NOTHING;
     INSERT INTO lifecycle_transitions
       (lifecycle_key, action_key, from_status, to_status, manual_allowed,
-       mark_completed, clear_failure)
+       external_allowed, automatic, mark_started, mark_completed, clear_failure)
     VALUES
-      ('workflow_execution', 'cancel', 'queued', 'cancelled', TRUE, TRUE, FALSE),
-      ('workflow_execution', 'fail', 'queued', 'failed', FALSE, TRUE, FALSE),
-      ('workflow_execution', 'fail', 'running', 'failed', FALSE, TRUE, FALSE)
+      ('workflow_execution', 'cancel', 'queued', 'cancelled', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE),
+      ('workflow_execution', 'fail', 'queued', 'failed', FALSE, FALSE, TRUE, FALSE, TRUE, FALSE),
+      ('workflow_execution', 'fail', 'running', 'failed', FALSE, FALSE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_root', 'claim', 'queued', 'claimed', FALSE, FALSE, TRUE, TRUE, FALSE, FALSE),
+      ('pnq_test_root', 'begin_dispatch', 'queued', 'dispatching', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_root', 'observe_dispatch', 'queued', 'dispatched', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_root', 'dispatch_claimed', 'claimed', 'dispatching', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_root', 'observe_claimed_dispatch', 'claimed', 'dispatched', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_root', 'finish_dispatch', 'dispatching', 'dispatched', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_root', 'reconcile_claimed', 'claimed', 'reconciling', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_root', 'block_dispatching', 'dispatching', 'blocked', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_root', 'reconcile_dispatched', 'dispatched', 'reconciling', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_root', 'complete_claimed', 'claimed', 'completed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_root', 'fail_claimed', 'claimed', 'failed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_root', 'complete_dispatching', 'dispatching', 'completed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_root', 'fail_dispatching', 'dispatching', 'failed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_root', 'complete_dispatched', 'dispatched', 'completed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_root', 'fail_dispatched', 'dispatched', 'failed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_root', 'cancel_queued', 'queued', 'cancelled', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE),
+      ('pnq_test_operation', 'begin_dispatch', 'registered', 'dispatching', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_operation', 'observe_dispatch', 'registered', 'dispatched', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_operation', 'reject_send', 'registered', 'rejected', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_operation', 'finish_dispatch', 'dispatching', 'dispatched', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_operation', 'block_dispatching', 'dispatching', 'blocked', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_operation', 'reconcile_dispatched', 'dispatched', 'reconciling', FALSE, FALSE, TRUE, FALSE, FALSE, FALSE),
+      ('pnq_test_operation', 'complete_dispatching', 'dispatching', 'completed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_operation', 'fail_dispatching', 'dispatching', 'failed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_operation', 'complete_dispatched', 'dispatched', 'completed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_operation', 'fail_dispatched', 'dispatched', 'failed', FALSE, TRUE, TRUE, FALSE, TRUE, FALSE),
+      ('pnq_test_operation', 'cancel_registered', 'registered', 'cancelled', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE)
     ON CONFLICT (lifecycle_key, action_key, from_status) DO NOTHING;
     SELECT configure_lifecycle_resource_binding('workflows', 'workflow_execution');
     SELECT configure_lifecycle_resource_binding('jobs', 'job_execution');
   `);
   await db.query(fs.readFileSync(migrationPath, "utf8"));
+  await db.query(fs.readFileSync(deviceExecutionIndexesMigrationPath, "utf8"));
+  await db.query(`
+    SELECT configure_lifecycle_resource_binding(
+      'device_execution_roots'::regclass,
+      'pnq_test_root',
+      'state'
+    );
+    SELECT configure_lifecycle_resource_binding(
+      'device_execution_operations'::regclass,
+      'pnq_test_operation',
+      'state'
+    );
+  `);
+  await db.query(fs.readFileSync(resourcePoliciesMigrationPath, "utf8"));
+  await db.query(
+    `INSERT INTO lifecycle_resource_policies
+       (resource_table, state_column, policy, updated_by)
+     VALUES ('device_execution_roots'::regclass, 'state', $1::jsonb, 'pnq-test')
+     ON CONFLICT (resource_table, state_column) DO UPDATE
+       SET policy = EXCLUDED.policy,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = NOW()`,
+    [JSON.stringify(TEST_DEVICE_EXECUTION_RESOURCE_POLICY)],
+  );
 }
 
 async function insertDevice(db: Pool, deviceId: string, friendlyName: string): Promise<void> {
@@ -1297,7 +1383,11 @@ async function indexesFor(db: Pool): Promise<Map<string, IndexRow>> {
      FROM pg_index
      JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
      JOIN pg_class table_class ON table_class.oid = pg_index.indrelid
-     WHERE table_class.relname IN ('device_execution_roots', 'device_execution_events')
+     WHERE table_class.relname IN (
+       'device_execution_roots',
+       'device_execution_operations',
+       'device_execution_events'
+     )
      ORDER BY index_class.relname`,
   );
   return new Map(result.rows.map((row) => [row.index_name, row]));

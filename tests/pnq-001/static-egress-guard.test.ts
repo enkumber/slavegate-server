@@ -3,9 +3,9 @@ import path from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import {
-  DEVICE_EXECUTION_BOUNDARY_MATRIX,
-  DEVICE_EXECUTION_MULTI_WORKER_POLICY,
-} from "../../src/modules/device-execution/device-execution-arbiter";
+  TEST_DEVICE_EXECUTION_BOUNDARIES,
+  TEST_DEVICE_EXECUTION_MULTI_WORKER_POLICY,
+} from "../fixtures/device-execution-policy";
 
 type BaselineEntry = {
   file: string;
@@ -390,8 +390,8 @@ function requiresExistingRootIdentityViolations(): string[] {
           const boundary = boundaryNode && ts.isStringLiteral(boundaryNode) ? boundaryNode.text : null;
           if (
             boundary &&
-            boundary in DEVICE_EXECUTION_BOUNDARY_MATRIX &&
-            DEVICE_EXECUTION_BOUNDARY_MATRIX[boundary as keyof typeof DEVICE_EXECUTION_BOUNDARY_MATRIX].requiresExistingRootHandle &&
+            boundary in TEST_DEVICE_EXECUTION_BOUNDARIES &&
+            TEST_DEVICE_EXECUTION_BOUNDARIES[boundary as keyof typeof TEST_DEVICE_EXECUTION_BOUNDARIES].requiresExistingRootHandle &&
             !properties.has("rootId") &&
             !properties.has("rootExternalId")
           ) {
@@ -585,11 +585,11 @@ describe("PNQ-001 production egress inventory guard", () => {
 
     expect(handler).not.toBeNull();
     expect(handler).toContain("res.status(202).json");
-    expect(handler).toContain('status: "queued"');
+    expect(handler).toContain("status: job?.status");
   });
 
   it("pins semantic queue boundaries for batch, workflow, and recovery children", () => {
-    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.edge_batch).toMatchObject({
+    expect(TEST_DEVICE_EXECUTION_BOUNDARIES.edge_batch).toMatchObject({
       rootKind: "batch",
       operationKind: "batch",
       retainsRootUntilTerminal: true,
@@ -597,7 +597,7 @@ describe("PNQ-001 production egress inventory guard", () => {
       egressLane: "device_execution",
       mayBypassDeviceQueue: false,
     });
-    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.edge_workflow).toMatchObject({
+    expect(TEST_DEVICE_EXECUTION_BOUNDARIES.edge_workflow).toMatchObject({
       rootKind: "edge_workflow",
       operationKind: "workflow",
       retainsRootUntilTerminal: true,
@@ -605,7 +605,7 @@ describe("PNQ-001 production egress inventory guard", () => {
       egressLane: "device_execution",
       mayBypassDeviceQueue: false,
     });
-    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.server_workflow_root).toMatchObject({
+    expect(TEST_DEVICE_EXECUTION_BOUNDARIES.server_workflow_root).toMatchObject({
       rootKind: "server_workflow",
       operationKind: "workflow",
       retainsRootUntilTerminal: true,
@@ -613,7 +613,7 @@ describe("PNQ-001 production egress inventory guard", () => {
       egressLane: "device_execution",
       mayBypassDeviceQueue: false,
     });
-    expect(DEVICE_EXECUTION_BOUNDARY_MATRIX.server_workflow_batch_child).toMatchObject({
+    expect(TEST_DEVICE_EXECUTION_BOUNDARIES.server_workflow_batch_child).toMatchObject({
       rootKind: "server_workflow",
       operationKind: "batch",
       retainsRootUntilTerminal: false,
@@ -623,7 +623,7 @@ describe("PNQ-001 production egress inventory guard", () => {
     });
 
     for (const childBoundary of ["generated_child", "self_healing_child", "prestep_child", "recovery_child"] as const) {
-      expect(DEVICE_EXECUTION_BOUNDARY_MATRIX[childBoundary]).toMatchObject({
+      expect(TEST_DEVICE_EXECUTION_BOUNDARIES[childBoundary]).toMatchObject({
         rootKind: "server_workflow",
         operationKind: "job",
         retainsRootUntilTerminal: false,
@@ -633,7 +633,7 @@ describe("PNQ-001 production egress inventory guard", () => {
       });
     }
 
-    expect(DEVICE_EXECUTION_MULTI_WORKER_POLICY).toEqual({
+    expect(TEST_DEVICE_EXECUTION_MULTI_WORKER_POLICY).toEqual({
       authority: "postgres",
       ownershipToken: "root_id_device_id_owner_generation",
       terminalCas: "device_root_generation",

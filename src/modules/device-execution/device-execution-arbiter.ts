@@ -354,14 +354,8 @@ export class DeviceExecutionArbiter {
       required_constraints(table_name, constraint_name, constraint_type) AS (
         VALUES
           ('device_execution_roots', 'device_execution_roots_pkey', 'PRIMARY KEY'),
-          ('device_execution_roots', 'device_execution_roots_root_kind_check', 'CHECK'),
-          ('device_execution_roots', 'device_execution_roots_state_check', 'CHECK'),
           ('device_execution_roots', 'device_execution_roots_owner_generation_check', 'CHECK'),
           ('device_execution_operations', 'device_execution_operations_pkey', 'PRIMARY KEY'),
-          ('device_execution_operations', 'device_execution_operations_root_kind_check', 'CHECK'),
-          ('device_execution_operations', 'device_execution_operations_operation_kind_check', 'CHECK'),
-          ('device_execution_operations', 'device_execution_operations_state_check', 'CHECK'),
-          ('device_execution_operations', 'device_execution_operations_egress_lane_check', 'CHECK'),
           ('device_execution_operations', 'device_execution_operations_owner_generation_check', 'CHECK'),
           ('device_execution_events', 'device_execution_events_pkey', 'PRIMARY KEY')
       ),
@@ -376,22 +370,15 @@ export class DeviceExecutionArbiter {
       required_indexes(index_name) AS (
         VALUES
           ('idx_device_execution_roots_external'),
-          ('idx_device_execution_active_slot'),
-          ('idx_device_execution_roots_fifo'),
+          ('idx_device_execution_roots_state_fifo'),
+          ('idx_device_execution_roots_device_created'),
           ('idx_device_execution_operations_identity'),
           ('idx_device_execution_operations_root'),
           ('idx_device_execution_operations_device'),
+          ('idx_device_execution_operations_state'),
           ('idx_device_execution_events_root'),
-          ('idx_device_execution_events_device')
-      ),
-      required_predicate_states(index_name, state_value) AS (
-        VALUES
-          ('idx_device_execution_active_slot', 'claimed'),
-          ('idx_device_execution_active_slot', 'dispatching'),
-          ('idx_device_execution_active_slot', 'dispatched'),
-          ('idx_device_execution_active_slot', 'reconciling'),
-          ('idx_device_execution_active_slot', 'blocked'),
-          ('idx_device_execution_roots_fifo', 'queued')
+          ('idx_device_execution_events_device'),
+          ('idx_device_execution_events_type')
       )
       SELECT
         to_regclass('public.device_execution_roots') IS NOT NULL AS roots_table,
@@ -460,17 +447,7 @@ export class DeviceExecutionArbiter {
           ),
           '[]'::jsonb
         ) AS missing_indexes,
-        COALESCE(
-          (
-            SELECT jsonb_agg(DISTINCT required_predicate_states.index_name)
-            FROM required_predicate_states
-            JOIN pg_class index_class ON index_class.relname = required_predicate_states.index_name
-            JOIN pg_index index_rows ON index_rows.indexrelid = index_class.oid
-            WHERE pg_get_expr(index_rows.indpred, index_rows.indrelid) IS NULL
-               OR pg_get_expr(index_rows.indpred, index_rows.indrelid) NOT LIKE '%' || required_predicate_states.state_value || '%'
-          ),
-          '[]'::jsonb
-        ) AS invalid_index_predicates
+        '[]'::jsonb AS invalid_index_predicates
       FROM required_columns
       LEFT JOIN information_schema.columns columns
         ON columns.table_schema = 'public'
@@ -855,7 +832,14 @@ export class DeviceExecutionArbiter {
 
         const dispatching = await transitionRootState(client, {
           rootId: root.id,
-          selector: { targetTerminal: false, transitionAutomatic: true },
+          selector: {
+            targetTerminal: false,
+            targetRetryable: false,
+            targetDispatchable: false,
+            targetManual: false,
+            transitionAutomatic: true,
+            transitionMarkStarted: false,
+          },
           ownerGenerationIncrement: true,
           metadata,
         });
@@ -883,7 +867,14 @@ export class DeviceExecutionArbiter {
       } else if (rootIsClaimed(root)) {
         const dispatching = await transitionRootState(client, {
           rootId: root.id,
-          selector: { targetTerminal: false, transitionAutomatic: true },
+          selector: {
+            targetTerminal: false,
+            targetRetryable: false,
+            targetDispatchable: false,
+            targetManual: false,
+            transitionAutomatic: true,
+            transitionMarkStarted: false,
+          },
           ownerGenerationIncrement: false,
           metadata,
         });
@@ -902,7 +893,13 @@ export class DeviceExecutionArbiter {
       const dispatchingOperation = await transitionOperationState(client, {
         operationKind,
         operationId: input.jobId,
-        selector: { targetTerminal: false, transitionAutomatic: true },
+        selector: {
+          targetTerminal: false,
+          targetRetryable: false,
+          targetDispatchable: false,
+          targetManual: false,
+          transitionAutomatic: true,
+        },
         ownerGeneration: toNumber(current.owner_generation),
         wireHandle: encodeDeviceExecutionHandle(rootToHandle(current, operationKind, input.jobId)),
         metadata: {
@@ -1116,7 +1113,12 @@ export class DeviceExecutionArbiter {
         ? root
         : await transitionRootState(client, {
             rootId: root.id,
-            selector: { targetTerminal: false, transitionAutomatic: true },
+            selector: {
+              targetTerminal: false,
+              targetDispatchable: true,
+              targetManual: false,
+              transitionAutomatic: true,
+            },
             ownerGenerationIncrement: false,
             metadata: {
               ...metadata,
@@ -1148,7 +1150,12 @@ export class DeviceExecutionArbiter {
       const dispatchedOperation = await transitionOperationState(client, {
         operationKind,
         operationId: input.jobId,
-        selector: { targetTerminal: false, transitionAutomatic: true },
+        selector: {
+          targetTerminal: false,
+          targetDispatchable: true,
+          targetManual: false,
+          transitionAutomatic: true,
+        },
         ownerGeneration: expectedGeneration,
         wireHandle: prepared.permit.wireHandle,
         metadata: {
@@ -1343,7 +1350,14 @@ export class DeviceExecutionArbiter {
       if (rootIsInitialPhase(root) || rootIsClaimed(root)) {
         const dispatching = await transitionRootState(client, {
           rootId: root.id,
-          selector: { targetTerminal: false, transitionAutomatic: true },
+          selector: {
+            targetTerminal: false,
+            targetRetryable: false,
+            targetDispatchable: false,
+            targetManual: false,
+            transitionAutomatic: true,
+            transitionMarkStarted: false,
+          },
           ownerGenerationIncrement: rootIsInitialPhase(root),
           metadata,
         });
@@ -1353,7 +1367,13 @@ export class DeviceExecutionArbiter {
       const operationDispatching = await transitionOperationState(client, {
         operationKind,
         operationId: input.operationId,
-        selector: { targetTerminal: false, transitionAutomatic: true },
+        selector: {
+          targetTerminal: false,
+          targetRetryable: false,
+          targetDispatchable: false,
+          targetManual: false,
+          transitionAutomatic: true,
+        },
         ownerGeneration: toNumber(current.owner_generation),
         wireHandle: encodeDeviceExecutionHandle(operationRowToHandle({ ...operation, owner_generation: current.owner_generation })),
         metadata: { ...metadata, handle: encodeDeviceExecutionHandle(operationRowToHandle({ ...operation, owner_generation: current.owner_generation })) },
@@ -1488,7 +1508,12 @@ export class DeviceExecutionArbiter {
       const dispatched = rootWasDispatching
         ? await transitionRootState(client, {
             rootId: root.id,
-            selector: { targetTerminal: false, transitionAutomatic: true },
+            selector: {
+              targetTerminal: false,
+              targetDispatchable: true,
+              targetManual: false,
+              transitionAutomatic: true,
+            },
             ownerGenerationIncrement: false,
             metadata,
           })
@@ -1496,7 +1521,12 @@ export class DeviceExecutionArbiter {
       const dispatchedOperation = await transitionOperationState(client, {
         operationKind,
         operationId: input.operationId,
-        selector: { targetTerminal: false, transitionAutomatic: true },
+        selector: {
+          targetTerminal: false,
+          targetDispatchable: true,
+          targetManual: false,
+          transitionAutomatic: true,
+        },
         ownerGeneration: toNumber((dispatched ?? root).owner_generation),
         wireHandle: encodeDeviceExecutionHandle(operationRowToHandle({ ...operation, owner_generation: (dispatched ?? root).owner_generation })),
         metadata: {
@@ -3717,6 +3747,8 @@ async function updateRootState(
     fromStates: DeviceExecutionState[];
     toState: DeviceExecutionState;
     ownerGenerationIncrement: boolean;
+    transitionMarksStarted: boolean;
+    targetDispatchable: boolean;
     metadata?: Record<string, unknown>;
   },
 ): Promise<DeviceExecutionRootRow | null> {
@@ -3726,11 +3758,13 @@ async function updateRootState(
          owner_generation = owner_generation + $2::bigint,
          claimed_at = COALESCE(claimed_at, NOW()),
          dispatching_at = CASE
-           WHEN claimed_at IS NOT NULL THEN COALESCE(dispatching_at, NOW())
+           WHEN claimed_at IS NOT NULL OR NOT $6::boolean
+             THEN COALESCE(dispatching_at, NOW())
            ELSE dispatching_at
          END,
          dispatched_at = CASE
-           WHEN dispatching_at IS NOT NULL THEN COALESCE(dispatched_at, NOW())
+           WHEN dispatching_at IS NOT NULL OR $7::boolean
+             THEN COALESCE(dispatched_at, NOW())
            ELSE dispatched_at
          END,
          updated_at = NOW(),
@@ -3744,6 +3778,8 @@ async function updateRootState(
       JSON.stringify(input.metadata ?? {}),
       input.rootId,
       input.fromStates,
+      input.transitionMarksStarted,
+      input.targetDispatchable,
     ]
   );
   return result.rows[0] ?? null;
@@ -3768,11 +3804,20 @@ async function transitionRootState(
     client,
   );
   if (!transition) return null;
+  const target = await getResourceLifecycleState(
+    "device_execution_roots",
+    transition.toStatus,
+    "state",
+    client,
+  );
+  if (!target) throw new Error("Device execution root target state is not configured");
   return updateRootState(client, {
     rootId: input.rootId,
     fromStates: [current.state],
     toState: transition.toStatus,
     ownerGenerationIncrement: input.ownerGenerationIncrement,
+    transitionMarksStarted: transition.markStarted,
+    targetDispatchable: target.dispatchable,
     metadata: input.metadata,
   });
 }
@@ -3808,7 +3853,8 @@ async function updateOperationState(
            ELSE dispatching_at
          END,
          dispatched_at = CASE
-           WHEN NOT $8::boolean AND dispatching_at IS NOT NULL THEN COALESCE(dispatched_at, NOW())
+           WHEN NOT $8::boolean AND (dispatching_at IS NOT NULL OR $9::boolean)
+             THEN COALESCE(dispatched_at, NOW())
            ELSE dispatched_at
          END,
          terminal_at = CASE WHEN $8::boolean THEN NOW() ELSE terminal_at END
@@ -3825,6 +3871,7 @@ async function updateOperationState(
       input.operationId,
       input.fromStates,
       target.terminal,
+      target.dispatchable,
     ]
   );
   return result.rows[0] ?? null;
