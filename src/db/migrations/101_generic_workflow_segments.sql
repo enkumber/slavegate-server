@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS workflow_segment_versions (
   version TEXT NOT NULL,
   platform TEXT NOT NULL,
   lifecycle_status TEXT NOT NULL,
+  active_for_resolution BOOLEAN NOT NULL DEFAULT FALSE,
   template JSONB NOT NULL,
   input_schema JSONB NOT NULL,
   output_schema JSONB NULL,
@@ -27,6 +28,10 @@ CREATE TABLE IF NOT EXISTS workflow_segment_versions (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (segment_key, version)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_segment_active_resolution
+  ON workflow_segment_versions(segment_key)
+  WHERE active_for_resolution;
 
 CREATE TABLE IF NOT EXISTS workflow_compositions (
   composition_name TEXT NOT NULL

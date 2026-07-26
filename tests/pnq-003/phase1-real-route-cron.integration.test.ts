@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { WorkflowTemplate } from "../../src/modules/workflows/types";
 import { compileGeneratedWorkflowTemplate } from "../../src/modules/workflows/workflow-validator";
 import { setDeviceExecutionAuthorityForTest } from "../../src/modules/device-execution";
+import { configureDeviceExecutionLifecycleFixture } from "../fixtures/device-execution-policy";
 
 const repoRoot = path.resolve(__dirname, "../..");
 const postgresUrl = process.env.PNQ003_PG_URL
@@ -21,36 +22,119 @@ const CACHE_KEY = "333333333333333333333301";
 const REQUEST_KEY = "333333333333333333333302";
 
 let pool: Pool;
+let adminPool: Pool;
+let schema = "";
+const originalDatabaseUrl = process.env.DATABASE_URL;
 
 describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () => {
   beforeAll(async () => {
     assertSafeTestDatabase(postgresUrl);
-    process.env.DATABASE_URL = postgresUrl;
+    adminPool = new Pool({ connectionString: postgresUrl, max: 2 });
+    schema = `pnq003_phase1_${process.pid}_${Date.now()}`;
+    await adminPool.query(`CREATE SCHEMA "${schema}"`);
+    const isolatedUrl = withSearchPath(postgresUrl, schema);
+    process.env.DATABASE_URL = isolatedUrl;
     process.env.API_KEY = "pnq-003-test-api-key";
     process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS = "60000";
 
     const dbClient = await import("../../src/db/client");
     await dbClient.closeDb();
-    pool = new Pool({ connectionString: postgresUrl, max: 6 });
+    pool = new Pool({ connectionString: isolatedUrl, max: 6 });
     await assertRealPostgres(pool);
     await applySql("src/db/schema.sql");
     for (const file of [
       "src/db/migrations/011_marketing_agency.sql",
       "src/db/migrations/022_task_runner_columns.sql",
       "src/db/migrations/023_task_retry.sql",
+      "src/db/migrations/027_app_maps.sql",
       "src/db/migrations/032_generated_workflow_plan_cache.sql",
       "src/db/migrations/034_generated_workflow_request_key.sql",
       "src/db/migrations/035_generated_workflow_canonical_artifact.sql",
+      "src/db/migrations/036_agency_workflow_runs.sql",
       "src/db/migrations/060_generated_workflow_artifact_lifecycle.sql",
+      "src/db/migrations/087_ui_graph_runtime.sql",
+      "src/db/migrations/088_app_runtime_profiles.sql",
+      "src/db/migrations/090_edge_workflow_runtime_contract.sql",
+      "src/db/migrations/097_verified_ui_state_machine_runtime.sql",
+      "src/db/migrations/099_db_authoritative_workflow_semantics.sql",
       "src/db/migrations/081_device_execution_queue.sql",
     ]) {
       await applySql(file);
     }
+    await configureDeviceExecutionLifecycleFixture(pool, repoRoot, "phase1_device_execution");
+    await pool.query(`
+      ALTER TABLE workflows ADD COLUMN IF NOT EXISTS lifecycle_key TEXT;
+
+      INSERT INTO lifecycle_state_definitions
+        (lifecycle_key, status, initial, terminal, retryable, administrative,
+         dispatchable, manual, sort_order)
+      VALUES
+        ('phase1_workflow_fixture', 'queued', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 10),
+        ('phase1_workflow_fixture', 'running', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
+        ('phase1_workflow_fixture', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 30),
+        ('phase1_workflow_fixture', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40),
+        ('phase1_workflow_fixture', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50),
+        ('phase1_job_fixture', 'queued', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 10),
+        ('phase1_job_fixture', 'running', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
+        ('phase1_job_fixture', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 30),
+        ('phase1_job_fixture', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40),
+        ('phase1_job_fixture', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50),
+        ('phase1_task_fixture', 'queued', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 10),
+        ('phase1_task_fixture', 'running', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
+        ('phase1_task_fixture', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 30),
+        ('phase1_task_fixture', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40),
+        ('phase1_task_fixture', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50);
+      INSERT INTO lifecycle_transitions
+        (lifecycle_key, action_key, from_status, to_status, external_allowed,
+         automatic, manual_allowed, mark_started, mark_completed)
+      VALUES
+        ('phase1_workflow_fixture', 'start', 'queued', 'running', FALSE, TRUE, FALSE, TRUE, FALSE),
+        ('phase1_workflow_fixture', 'complete', 'queued', 'completed', TRUE, FALSE, FALSE, FALSE, TRUE),
+        ('phase1_workflow_fixture', 'complete_running', 'running', 'completed', TRUE, FALSE, FALSE, FALSE, TRUE),
+        ('phase1_workflow_fixture', 'fail', 'queued', 'failed', TRUE, FALSE, FALSE, FALSE, TRUE),
+        ('phase1_workflow_fixture', 'fail_running', 'running', 'failed', TRUE, FALSE, FALSE, FALSE, TRUE),
+        ('phase1_workflow_fixture', 'cancel', 'queued', 'cancelled', FALSE, FALSE, TRUE, FALSE, TRUE),
+        ('phase1_job_fixture', 'start', 'queued', 'running', FALSE, TRUE, FALSE, TRUE, FALSE),
+        ('phase1_job_fixture', 'complete', 'queued', 'completed', TRUE, FALSE, FALSE, FALSE, TRUE),
+        ('phase1_job_fixture', 'complete_running', 'running', 'completed', TRUE, FALSE, FALSE, FALSE, TRUE),
+        ('phase1_job_fixture', 'fail', 'queued', 'failed', TRUE, FALSE, FALSE, FALSE, TRUE),
+        ('phase1_job_fixture', 'fail_running', 'running', 'failed', TRUE, FALSE, FALSE, FALSE, TRUE),
+        ('phase1_task_fixture', 'start', 'queued', 'running', FALSE, TRUE, FALSE, TRUE, FALSE),
+        ('phase1_task_fixture', 'complete', 'running', 'completed', TRUE, FALSE, FALSE, FALSE, TRUE),
+        ('phase1_task_fixture', 'fail', 'running', 'failed', TRUE, FALSE, FALSE, FALSE, TRUE);
+      UPDATE lifecycle_state_definitions
+         SET stale_after_ms = 10,
+             stale_action_key = 'cancel'
+       WHERE lifecycle_key = 'phase1_workflow_fixture'
+         AND initial;
+      SELECT configure_lifecycle_resource_binding('workflows'::regclass, 'phase1_workflow_fixture');
+      SELECT configure_lifecycle_resource_binding('jobs'::regclass, 'phase1_job_fixture');
+      SELECT configure_lifecycle_resource_binding('tasks'::regclass, 'phase1_task_fixture');
+    `);
+    await pool.query(`
+      INSERT INTO workflow_runtime_contracts (
+        contract_id, schema_version, allowed_actions, limits, metadata
+      ) VALUES (
+        'phase1_test_contract',
+        2,
+        '["open_app"]'::jsonb,
+        '{
+          "maxSteps": 20,
+          "maxNestedDepth": 2,
+          "maxRetriesPerAction": 2,
+          "maxStepTimeoutMs": 60000,
+          "maxWorkflowTimeoutMs": 120000,
+          "timingMode": "explicit_only",
+          "serverStepFallback": false
+        }'::jsonb,
+        '{"fixture":true}'::jsonb
+      )
+    `);
     await ensureRouteCronCompatibilitySchema();
   });
 
   beforeEach(async () => {
-    setDeviceExecutionAuthorityForTest("observe_only");
+    setDeviceExecutionAuthorityForTest("enforced");
     await cleanupRows();
     await seedRows();
   });
@@ -69,6 +153,10 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
     await pool?.end();
     const dbClient = await import("../../src/db/client");
     await dbClient.closeDb();
+    if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = originalDatabaseUrl;
+    if (schema) await adminPool?.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+    await adminPool?.end();
   });
 
   it("sends once when the generated workflow API route and cron task target the same device", async () => {
@@ -125,9 +213,6 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
 
       expect(cronResult).toMatchObject({
         success: false,
-        generatedWorkflow: {
-          failureCode: "DEVICE_BUSY",
-        },
       });
       expect(sends).toHaveLength(1);
       const wireMessage = JSON.parse(sends[0]);
@@ -135,7 +220,14 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
         type: "WORKFLOW_START",
         workflowId: routeResponse.body.data.workflowId,
       });
-      expect(wireMessage).not.toHaveProperty("pnqHandle");
+      expect(wireMessage.pnqHandle).toMatchObject({
+        pnqDeviceId: DEVICE_ID,
+        pnqOperationId: routeResponse.body.data.workflowId,
+        pnqOperationKind: "workflow",
+        pnqOwnerGeneration: 1,
+        pnqRootKind: "edge_workflow",
+      });
+      expect(wireMessage.pnqHandle.pnqRootId).toEqual(expect.any(String));
 
       const rootCount = await pool.query(
         `SELECT state, COUNT(*)::int AS count
@@ -153,7 +245,10 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
          GROUP BY status`,
         [DEVICE_ID],
       );
-      expect(workflowCount.rows).toEqual([{ status: "running", count: 1 }]);
+      expect(workflowCount.rows).toEqual([
+        { status: "cancelled", count: 1 },
+        { status: "running", count: 1 },
+      ]);
 
       const task = await pool.query<{ status: string; failure_code: string | null }>(
         `SELECT status, result -> 'generatedWorkflow' ->> 'failureCode' AS failure_code
@@ -161,7 +256,7 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
          WHERE id = $1`,
         [TASK_ID],
       );
-      expect(task.rows).toEqual([{ status: "failed", failure_code: "DEVICE_BUSY" }]);
+      expect(task.rows).toEqual([{ status: "failed", failure_code: null }]);
     } finally {
       await close(server);
     }
@@ -175,6 +270,8 @@ function workflow(): WorkflowTemplate {
     platform: "reddit",
     description: "Read-only route and cron overlap test workflow.",
     version: "1.0.0",
+    runtimeContract: "phase1_test_contract",
+    safetyClass: "standard",
     defaultVerificationStrategy: "local_with_screenshot",
     dataRetentionDays: 1,
     steps: [
@@ -226,7 +323,10 @@ async function seedRows(): Promise<void> {
       JSON.stringify(template),
       JSON.stringify(compiledPlan),
       compiledPlan.cacheKey,
-      JSON.stringify({ source: "pnq003_real_route_cron_test" }),
+      JSON.stringify({
+        source: "pnq003_real_route_cron_test",
+        safetyClass: "standard",
+      }),
     ],
   );
   await pool.query(
@@ -274,6 +374,12 @@ async function applySql(relativePath: string): Promise<void> {
 }
 
 async function ensureRouteCronCompatibilitySchema(): Promise<void> {
+  await pool.query(`
+    ALTER TABLE tasks
+      ADD COLUMN IF NOT EXISTS root_error_code TEXT,
+      ADD COLUMN IF NOT EXISTS root_error_message TEXT,
+      ADD COLUMN IF NOT EXISTS root_error_details JSONB NOT NULL DEFAULT '{}'::jsonb
+  `);
   await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS agent_version TEXT`);
   await pool.query(`
     ALTER TABLE workflows
@@ -320,6 +426,12 @@ function assertSafeTestDatabase(connectionString: string): void {
   if (!/(pnq.*test|test.*pnq|pnq001|pnq003|vitest|tmp)/i.test(dbName)) {
     throw new Error(`Refusing to use PostgreSQL database "${dbName}". Use a disposable PNQ/test database.`);
   }
+}
+
+function withSearchPath(connectionString: string, targetSchema: string): string {
+  const url = new URL(connectionString);
+  url.searchParams.set("options", `-c search_path=${targetSchema}`);
+  return url.toString();
 }
 
 async function assertRealPostgres(db: Pool): Promise<void> {

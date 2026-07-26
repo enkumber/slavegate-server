@@ -63,6 +63,17 @@ describe("generated workflow cache PostgreSQL contract", () => {
          VALUES ($1, $2, $3, 'PG cache device', 'test', 'approved')`,
         [DEVICE_ID, "pg-cache-device", "pg-cache-imei"],
       );
+      await pool.query(`
+        INSERT INTO workflow_runtime_contracts
+          (contract_id, schema_version, allowed_actions, limits, metadata)
+        VALUES (
+          'edge-workflow/v2',
+          2,
+          '["open_app","screenshot"]'::jsonb,
+          '{"maxSteps":20}'::jsonb,
+          '{"fixture":true}'::jsonb
+        )
+      `);
     } finally {
       await pool.end();
     }

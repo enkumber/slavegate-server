@@ -11,6 +11,13 @@ const mocks = vi.hoisted(() => ({
     query: vi.fn(),
     release: vi.fn(),
   },
+  lifecycle: {
+    getState: vi.fn(),
+    getTransition: vi.fn(),
+    getTransitionToState: vi.fn(),
+    listStates: vi.fn(),
+    selectTransition: vi.fn(),
+  },
 }));
 
 vi.mock("../db/client", () => ({
@@ -19,6 +26,15 @@ vi.mock("../db/client", () => ({
 
 vi.mock("../modules/task-runner", () => ({
   taskRunnerService: { pollNow: vi.fn(() => Promise.resolve()) },
+}));
+
+vi.mock("../modules/lifecycle/lifecycle.service", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../modules/lifecycle/lifecycle.service")>(),
+  getResourceLifecycleState: mocks.lifecycle.getState,
+  getResourceLifecycleTransition: mocks.lifecycle.getTransition,
+  getResourceLifecycleTransitionToState: mocks.lifecycle.getTransitionToState,
+  listResourceLifecycleStates: mocks.lifecycle.listStates,
+  selectResourceLifecycleTransition: mocks.lifecycle.selectTransition,
 }));
 
 function app() {
@@ -94,6 +110,10 @@ function hydratedRun(overrides: Record<string, unknown> = {}) {
 }
 
 function workflowDefinitionRow(overrides: Record<string, unknown> = {}) {
+  const status = typeof overrides.status === "string" ? overrides.status : "active";
+  const promotionState = typeof overrides.promotion_state === "string"
+    ? overrides.promotion_state
+    : "not_promoted";
   const dataDrivenPolicy = {
     reusable: false,
     compilerVisible: false,
@@ -120,7 +140,13 @@ function workflowDefinitionRow(overrides: Record<string, unknown> = {}) {
     id: "99999999-9999-4999-8999-999999999999",
     definition_key: "reddit_account_health_scan",
     version: 1,
-    status: "active",
+    status,
+    status_initial: status === "draft",
+    status_terminal: status === "revoked",
+    status_retryable: false,
+    status_administrative: status === "revoked",
+    status_dispatchable: status === "active",
+    status_manual: true,
     title: "Reddit account health scan",
     description: "Read-only workflow definition",
     platform: "reddit",
@@ -140,7 +166,13 @@ function workflowDefinitionRow(overrides: Record<string, unknown> = {}) {
     constraints: ["read_only_only"],
     fallback_rules: ["if login wall detected classify expected_failure"],
     rollback: { required: false },
-    promotion_state: "not_promoted",
+    promotion_state: promotionState,
+    promotion_initial: ["not_promoted", "review_only"].includes(promotionState),
+    promotion_terminal: promotionState === "revoked",
+    promotion_retryable: false,
+    promotion_administrative: promotionState === "revoked",
+    promotion_dispatchable: promotionState === "limited_reuse",
+    promotion_manual: true,
     promotion_scope: null,
     promotion_confidence: null,
     promotion_readiness: {},
@@ -167,6 +199,25 @@ function workflowDefinitionRow(overrides: Record<string, unknown> = {}) {
 
 function tokenHash(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
+}
+
+function enabledCompilerGate(overrides: Record<string, unknown>) {
+  return {
+    state: "enabled",
+    version: 2,
+    owner: "product",
+    risk: "medium",
+    config: { explicitApproval: true },
+    state_initial: false,
+    state_terminal: false,
+    state_retryable: false,
+    state_administrative: false,
+    state_dispatchable: true,
+    state_manual: true,
+    state_metadata: {},
+    allowed_states: [],
+    ...overrides,
+  };
 }
 
 async function postWorkflowRun(body: Record<string, unknown>) {
@@ -256,6 +307,111 @@ describe("agency workflow runs API", () => {
     process.env.API_KEY = "test-api-key";
     process.env.JWT_SECRET = "test-jwt-secret";
     mocks.db.connect.mockResolvedValue(mocks.client);
+    mocks.lifecycle.getState.mockImplementation(async (
+      _resourceTable: string,
+      status: string,
+    ) => ({
+      lifecycleKey: "test_fixture",
+      status,
+      initial: ["step_candidate", "not_promoted", "review_only", "draft"].includes(status),
+      terminal: ["rejected", "revoked"].includes(status),
+      retryable: false,
+      administrative: ["rejected", "revoked"].includes(status),
+      dispatchable: ["enabled", "validated_step", "limited_reuse", "active"].includes(status),
+      manual: true,
+      staleAfterMs: null,
+      staleActionKey: null,
+      description: null,
+      metadata: status === "limited_reuse"
+        ? {
+            requiresScope: true,
+            disallowedScopes: ["global"],
+            minimumValidationScore: 60,
+            minimumBranchCoverage: 50,
+          }
+        : {},
+    }));
+    mocks.lifecycle.getTransitionToState.mockImplementation(async (
+      _resourceTable: string,
+      fromStatus: string,
+      toStatus: string,
+    ) => ({
+      lifecycleKey: "test_fixture",
+      actionKey: `set_${toStatus}`,
+      fromStatus,
+      toStatus,
+      manualAllowed: true,
+      externalAllowed: false,
+      automatic: false,
+      markStarted: false,
+      markCompleted: false,
+      metadata: {},
+    }));
+    mocks.lifecycle.getTransition.mockImplementation(async (
+      _resourceTable: string,
+      fromStatus: string,
+      actionKey: string,
+    ) => {
+      if (
+        (fromStatus === "validated_step" && actionKey === "reject")
+        || fromStatus === "rejected"
+      ) return null;
+      return ({
+      lifecycleKey: "test_fixture",
+      actionKey,
+      fromStatus,
+      toStatus: actionKey === "promote_limited"
+        ? "limited_reuse"
+        : actionKey === "revoke"
+          ? "revoked"
+          : actionKey === "reject"
+            ? "rejected"
+            : actionKey,
+      manualAllowed: true,
+      externalAllowed: false,
+      automatic: false,
+      markStarted: false,
+      markCompleted: false,
+      metadata: {},
+      });
+    });
+    mocks.lifecycle.listStates.mockImplementation(async (
+      resourceTable: string,
+      stateColumn = "status",
+    ) => {
+      if (resourceTable === "agency_workflow_step_candidates" && stateColumn === "candidate_state") {
+        return Promise.all(["step_candidate", "validated_step", "rejected"].map((status) =>
+          mocks.lifecycle.getState(resourceTable, status)
+        ));
+      }
+      return Promise.all(["draft", "active", "revoked"].map((status) =>
+        mocks.lifecycle.getState(resourceTable, status)
+      ));
+    });
+    mocks.lifecycle.selectTransition.mockImplementation(async (
+      _resourceTable: string,
+      fromStatus: string,
+      selector: Record<string, boolean>,
+      stateColumn = "status",
+    ) => {
+      if (fromStatus === "rejected") return null;
+      return ({
+      lifecycleKey: "test_fixture",
+      actionKey: selector.targetTerminal ? "revoke" : "validate",
+      fromStatus,
+      toStatus: selector.targetTerminal
+        ? "revoked"
+        : stateColumn === "candidate_state"
+          ? "validated_step"
+          : "limited_reuse",
+      manualAllowed: true,
+      externalAllowed: false,
+      automatic: false,
+      markStarted: false,
+      markCompleted: false,
+      metadata: {},
+      });
+    });
   });
 
   it("creates a queued generated_workflow task from an existing read-only canonical artifact", async () => {
@@ -768,7 +924,7 @@ describe("agency workflow runs API", () => {
         label: "open_app",
         action: "open_app",
         type: null,
-        status: "succeeded",
+        status: null,
         durationMs: null,
         error: null,
         state: null,
@@ -790,7 +946,7 @@ describe("agency workflow runs API", () => {
         label: "type_text",
         action: "type_text",
         type: null,
-        status: "pending",
+        status: null,
         durationMs: null,
         error: null,
         state: null,
@@ -852,7 +1008,7 @@ describe("agency workflow runs API", () => {
       runIntent: "reddit_account_health_scan",
       deviceName: "Pixel",
     });
-    expect(mocks.db.query.mock.calls[0][0]).toContain("FROM agency_workflow_step_candidates c");
+    expect(mocks.db.query.mock.calls[0][0]).toContain("FROM agency_workflow_step_candidates_lifecycle c");
     expect(mocks.db.query.mock.calls[0][0]).toContain("c.candidate_state = $1");
     expect(mocks.db.query.mock.calls[0][1]).toEqual(["step_candidate", 10, 0]);
   });
@@ -868,6 +1024,11 @@ describe("agency workflow runs API", () => {
       type: null,
       step_status: "succeeded",
       candidate_state: "validated_step",
+      candidate_reusable: true,
+      candidate_terminal: false,
+      library_state: "review_only",
+      library_reusable: false,
+      library_terminal: false,
       request_key: "c02c59dfbe512562f8c65c97",
       cache_key: null,
       canonical_workflow_id: "agent_generated_reddit_account_health_scan_v1",
@@ -940,8 +1101,10 @@ describe("agency workflow runs API", () => {
         candidateState: "validated_step",
       },
     });
-    expect(mocks.db.query.mock.calls[0][0]).toContain("c.candidate_state = 'validated_step'");
-    expect(mocks.db.query.mock.calls[0][0]).not.toContain("step_candidate'");
+    expect(mocks.db.query.mock.calls[0][0]).toContain(
+      "lifecycle_state_matches('agency_workflow_step_candidates', c.candidate_state",
+    );
+    expect(mocks.db.query.mock.calls[0][0]).toContain('{"dispatchable":true}');
   });
 
   it("lists the read-only Tool Catalog without enabling compiler auto-use", async () => {
@@ -1281,7 +1444,7 @@ describe("agency workflow runs API", () => {
       policy: expect.objectContaining({
         manualOnly: true,
         editableGates: true,
-        autoUseEnabled: true,
+        autoUseEnabled: false,
         executionChanging: false,
         workflowCacheChanging: false,
         wouldExecuteWorkflow: false,
@@ -1291,7 +1454,7 @@ describe("agency workflow runs API", () => {
         id: "compiler_auto_use",
         state: "enabled",
         version: 3,
-        remediation: expect.objectContaining({ safeToAutoApply: true }),
+        remediation: expect.objectContaining({ safeToAutoApply: false }),
       }),
     });
     expect(String(mocks.client.query.mock.calls[1][0])).toContain("agency_compiler_policy_gate_config");
@@ -1430,6 +1593,8 @@ describe("agency workflow runs API", () => {
       type: null,
       step_status: "succeeded",
       candidate_state: "validated_step",
+      candidate_reusable: true,
+      candidate_terminal: false,
       request_key: "c02c59dfbe512562f8c65c97",
       cache_key: null,
       canonical_workflow_id: "agent_generated_reddit_account_health_scan_v1",
@@ -1469,6 +1634,8 @@ describe("agency workflow runs API", () => {
         rows: [{
           ...validated,
           library_state: "limited_reuse",
+          library_reusable: true,
+          library_terminal: false,
           promotion_scope: "device:11111111-1111-4111-8111-111111111111",
           promotion_note: "safe for this device only",
           promoted_by: "dashboard",
@@ -1502,7 +1669,8 @@ describe("agency workflow runs API", () => {
         },
       },
     });
-    expect(mocks.db.query.mock.calls[1][0]).toContain("library_state = 'limited_reuse'");
+    expect(mocks.db.query.mock.calls[1][0]).toContain("library_state = $2");
+    expect(mocks.db.query.mock.calls[1][1][1]).toBe("limited_reuse");
     expect(mocks.db.query.mock.calls[1][0]).not.toContain("compiler");
     expect(mocks.db.query.mock.calls[2][0]).toContain("agency_workflow_step_library_promotion_events");
     expect(mocks.db.query.mock.calls[2][1]).toEqual([
@@ -1520,6 +1688,26 @@ describe("agency workflow runs API", () => {
   });
 
   it("does not allow global Step Library promotion scope", async () => {
+    mocks.db.query.mockResolvedValueOnce({
+      rows: [{
+        id: "55555555-5555-4555-8555-555555555555",
+        candidate_state: "validated_step",
+        candidate_reusable: true,
+        candidate_terminal: false,
+        library_state: "review_only",
+        library_reusable: false,
+        library_terminal: false,
+        validation_contract: {
+          scope: "device:test-device",
+          preconditions: ["ready"],
+          postconditions: ["done"],
+          compatibility: { test: true },
+        },
+        validation_evidence: { test: true },
+        step_status: "succeeded",
+        run_status: "completed",
+      }],
+    });
     const response = await patchAgency(
       "/api/agency/step-library/55555555-5555-4555-8555-555555555555/promotion",
       { action: "promote_limited", scope: "global" }
@@ -1527,7 +1715,7 @@ describe("agency workflow runs API", () => {
 
     expect(response.status).toBe(400);
     expect(response.body.code).toBe("STEP_LIBRARY_GLOBAL_SCOPE_DISABLED");
-    expect(mocks.db.query).not.toHaveBeenCalled();
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 
   it("revokes limited Step Library reuse without demoting validation", async () => {
@@ -1541,6 +1729,8 @@ describe("agency workflow runs API", () => {
       type: null,
       step_status: "succeeded",
       candidate_state: "validated_step",
+      candidate_reusable: true,
+      candidate_terminal: false,
       request_key: "c02c59dfbe512562f8c65c97",
       cache_key: null,
       canonical_workflow_id: "agent_generated_reddit_account_health_scan_v1",
@@ -1580,6 +1770,8 @@ describe("agency workflow runs API", () => {
         rows: [{
           ...validated,
           library_state: "revoked",
+          library_reusable: false,
+          library_terminal: true,
           promotion_note: "scope no longer trusted",
           revoked_by: "dashboard",
           revoked_at: new Date("2026-05-22T10:12:00.000Z"),
@@ -1600,12 +1792,15 @@ describe("agency workflow runs API", () => {
       compilerEligible: false,
       revokedBy: "dashboard",
     });
-    expect(mocks.db.query.mock.calls[1][0]).toContain("library_state = 'revoked'");
-    expect(mocks.db.query.mock.calls[1][0]).toContain("promotion_note = $2");
-    expect(mocks.db.query.mock.calls[1][0]).not.toContain("$3");
+    expect(mocks.db.query.mock.calls[1][0]).toContain("library_state = $2");
+    expect(mocks.db.query.mock.calls[1][0]).toContain("promotion_note = $4");
     expect(mocks.db.query.mock.calls[1][1]).toEqual([
       validated.id,
+      "revoked",
+      null,
       "scope no longer trusted",
+      false,
+      true,
     ]);
     expect(mocks.db.query.mock.calls[1][0]).not.toContain("candidate_state =");
     expect(mocks.db.query.mock.calls[2][0]).toContain("agency_workflow_step_library_promotion_events");
@@ -1685,6 +1880,8 @@ describe("agency workflow runs API", () => {
     const candidate = {
       id: "44444444-4444-4444-8444-444444444444",
       candidate_state: "validated_step",
+      candidate_reusable: true,
+      candidate_terminal: false,
     };
     mocks.db.query.mockResolvedValueOnce({ rows: [candidate] });
 
@@ -1694,7 +1891,7 @@ describe("agency workflow runs API", () => {
     );
 
     expect(response.status).toBe(409);
-    expect(response.body.code).toBe("VALIDATED_STEP_REVIEW_LOCKED");
+    expect(response.body.code).toBe("STEP_CANDIDATE_REVIEW_TRANSITION_NOT_ALLOWED");
     expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 
@@ -1743,6 +1940,8 @@ describe("agency workflow runs API", () => {
         rows: [{
           ...candidate,
           candidate_state: "validated_step",
+          candidate_reusable: true,
+          candidate_terminal: false,
           validation_contract: contract,
           validation_evidence: evidence,
           review_note: "contract ok",
@@ -1766,8 +1965,14 @@ describe("agency workflow runs API", () => {
       validationEvidence: evidence,
       validatedBy: "dashboard",
     });
-    expect(mocks.db.query.mock.calls[1][0]).toContain("candidate_state = 'validated_step'");
-    expect(mocks.db.query.mock.calls[1][1]).toEqual([candidate.id, contract, evidence, "contract ok"]);
+    expect(mocks.db.query.mock.calls[1][0]).toContain("candidate_state = $2");
+    expect(mocks.db.query.mock.calls[1][1]).toEqual([
+      candidate.id,
+      "validated_step",
+      contract,
+      evidence,
+      "contract ok",
+    ]);
   });
 
   it("requires validation preconditions postconditions and evidence", async () => {
@@ -1809,7 +2014,11 @@ describe("agency workflow runs API", () => {
         action: "unlock",
         type: null,
         candidate_state: "validated_step",
+        candidate_reusable: true,
+        candidate_terminal: false,
         library_state: "limited_reuse",
+        library_reusable: true,
+        library_terminal: false,
         promotion_scope: "device:test-device",
         validation_contract: {
           preconditions: ["device screen is awake"],
@@ -1886,7 +2095,7 @@ describe("agency workflow runs API", () => {
     });
     expect(response.body.data.candidates.tools).toEqual([]);
     expect(response.body.data.candidates.knowledge).toEqual([]);
-    expect(String(mocks.db.query.mock.calls[0][0])).toContain("c.candidate_state = 'validated_step'");
+    expect(String(mocks.db.query.mock.calls[0][0])).toContain("candidate_reusable");
     expect(String(mocks.db.query.mock.calls[3][0])).toContain("agency_compiler_awareness_events");
     expect(mocks.db.query.mock.calls[3][1][0]).toBe("unlock device");
     expect(mocks.db.query.mock.calls[3][1][4]).toContain("\"autoUseEnabled\":false");
@@ -1909,7 +2118,11 @@ describe("agency workflow runs API", () => {
           action: "unlock",
           type: null,
           candidate_state: "validated_step",
+          candidate_reusable: true,
+          candidate_terminal: false,
           library_state: "limited_reuse",
+          library_reusable: true,
+          library_terminal: false,
           promotion_scope: "device:test-device",
           validation_contract: {
             preconditions: ["device screen is awake"],
@@ -2012,7 +2225,7 @@ describe("agency workflow runs API", () => {
       publishedByDevice: false,
       deviceSelected: true,
       deviceName: "Pixel",
-      compatibility: expect.objectContaining({ state: "known_device" }),
+      compatibility: expect.objectContaining({ available: false }),
     });
     expect(response.body.data.limitedReusePlan).toMatchObject({
       mode: "limited_reuse_planning_read_only",
@@ -2026,16 +2239,19 @@ describe("agency workflow runs API", () => {
     expect(response.body.data.limitedReusePlan.items[0]).toMatchObject({
       action: "unlock",
       scopeMatch: true,
-      capabilityMatch: true,
+      capabilityMatch: false,
       wouldUse: false,
       safeToAutoApply: false,
       blockers: expect.arrayContaining(["compiler_auto_use_disabled", "step_not_compiler_eligible"]),
     });
     expect(String(mocks.db.query.mock.calls[1][0])).toContain("agency_compiler_policy_gate_config");
-    expect(String(mocks.db.query.mock.calls[6][0])).toContain("agency_compiler_control_plane_events");
-    expect(mocks.db.query.mock.calls[6][1][5]).toContain("\"autoUseEnabled\":false");
-    expect(mocks.db.query.mock.calls[6][1][6]).toContain("\"wouldExecuteStepLibrary\":false");
-    expect(mocks.db.query.mock.calls[6][1][8]).toContain("\"wouldUse\":0");
+    const controlPlaneEventCall = mocks.db.query.mock.calls.find(([sql]) =>
+      String(sql).includes("agency_compiler_control_plane_events")
+    );
+    expect(controlPlaneEventCall).toBeDefined();
+    expect(controlPlaneEventCall![1][5]).toContain("\"autoUseEnabled\":false");
+    expect(controlPlaneEventCall![1][6]).toContain("\"wouldExecuteStepLibrary\":false");
+    expect(controlPlaneEventCall![1][8]).toContain("\"wouldUse\":0");
   });
 
   it("lists Workflow Definition Registry entries without enabling compiler use", async () => {
@@ -2082,7 +2298,7 @@ describe("agency workflow runs API", () => {
       workflowCacheChanging: false,
       mode: "workflow_definition_registry_read_only",
     });
-    expect(response.body.data.summary).toMatchObject({ active: 1, draft: 0 });
+    expect(response.body.data.summary).toMatchObject({ active: 1 });
     expect(response.body.data.items[0]).toMatchObject({
       key: "reddit_account_health_scan",
       version: 1,
@@ -2216,46 +2432,34 @@ describe("agency workflow runs API", () => {
       .mockResolvedValueOnce({ rows: [definition] })
       .mockResolvedValueOnce({
         rows: [
-          {
+          enabledCompilerGate({
             gate_id: "compiler_knowledge_application",
-            state: "enabled",
-            version: 2,
             owner: "product",
             risk: "medium",
-            config: { explicitApproval: true },
             updated_by: "dashboard",
             updated_at: new Date("2026-05-22T11:35:00.000Z"),
-          },
-          {
+          }),
+          enabledCompilerGate({
             gate_id: "limited_reuse_scope_match",
-            state: "enabled",
-            version: 2,
             owner: "product",
             risk: "medium",
-            config: { explicitApproval: true },
             updated_by: "dashboard",
             updated_at: new Date("2026-05-22T11:35:00.000Z"),
-          },
-          {
+          }),
+          enabledCompilerGate({
             gate_id: "compiler_auto_use",
-            state: "enabled",
-            version: 2,
             owner: "product",
             risk: "high",
-            config: { explicitApproval: true },
             updated_by: "dashboard",
             updated_at: new Date("2026-05-22T11:35:00.000Z"),
-          },
-          {
+          }),
+          enabledCompilerGate({
             gate_id: "execution_path_change",
-            state: "enabled",
-            version: 2,
             owner: "security",
             risk: "high",
-            config: { explicitApproval: true },
             updated_by: "dashboard",
             updated_at: new Date("2026-05-22T11:35:00.000Z"),
-          },
+          }),
         ],
       });
 
@@ -2315,10 +2519,10 @@ describe("agency workflow runs API", () => {
       .mockResolvedValueOnce({ rows: [definition] })
       .mockResolvedValueOnce({
         rows: [
-          { gate_id: "compiler_knowledge_application", state: "enabled", version: 2, owner: "product", risk: "medium", config: { explicitApproval: true } },
-          { gate_id: "limited_reuse_scope_match", state: "enabled", version: 2, owner: "qa", risk: "high", config: { explicitApproval: true } },
-          { gate_id: "compiler_auto_use", state: "enabled", version: 2, owner: "product", risk: "high", config: { explicitApproval: true } },
-          { gate_id: "execution_path_change", state: "enabled", version: 2, owner: "security", risk: "high", config: { explicitApproval: true } },
+          enabledCompilerGate({ gate_id: "compiler_knowledge_application" }),
+          enabledCompilerGate({ gate_id: "limited_reuse_scope_match", owner: "qa", risk: "high" }),
+          enabledCompilerGate({ gate_id: "compiler_auto_use", risk: "high" }),
+          enabledCompilerGate({ gate_id: "execution_path_change", owner: "security", risk: "high" }),
         ],
       })
       .mockResolvedValueOnce({ rows: [] })
@@ -2520,7 +2724,7 @@ describe("agency workflow runs API", () => {
         platform: "reddit",
       }),
       staticValidation: expect.objectContaining({
-        state: "passed",
+        valid: true,
         errors: 0,
         warnings: 0,
         contract: expect.objectContaining({
@@ -2750,16 +2954,17 @@ describe("agency workflow runs API", () => {
       }),
     });
     expect(mocks.client.query.mock.calls[0][0]).toBe("BEGIN");
-    expect(String(mocks.client.query.mock.calls[1][0])).toContain("SET promotion_state = 'limited_reuse'");
+    expect(String(mocks.client.query.mock.calls[1][0])).toContain("SET promotion_state = $2");
+    expect(mocks.client.query.mock.calls[1][1][1]).toBe("limited_reuse");
     expect(mocks.client.query.mock.calls[1][1].slice(0, 4)).toEqual([
       "99999999-9999-4999-8999-999999999999",
+      "limited_reuse",
+      true,
       "device:test-device",
-      "Manual approval for one device",
-      0.83,
     ]);
-    expect(mocks.client.query.mock.calls[1][1][4]).toContain("\"state\":\"manual_limited_promotion_ready\"");
-    expect(mocks.client.query.mock.calls[1][1][5]).toContain("\"scopeType\":\"device\"");
-    expect(mocks.client.query.mock.calls[1][1][6]).toContain("\"wouldRollbackNow\":false");
+    expect(mocks.client.query.mock.calls[1][1][6]).toContain("\"state\":\"manual_limited_promotion_ready\"");
+    expect(mocks.client.query.mock.calls[1][1][7]).toContain("\"scopeType\":\"device\"");
+    expect(mocks.client.query.mock.calls[1][1][8]).toContain("\"wouldRollbackNow\":false");
     expect(String(mocks.client.query.mock.calls[2][0])).toContain("agency_workflow_definition_promotion_events");
     expect(mocks.client.query.mock.calls[2][1][3]).toBe("promote_limited");
     expect(mocks.client.query.mock.calls[2][1][4]).toBe("review_only");
@@ -2774,6 +2979,22 @@ describe("agency workflow runs API", () => {
   });
 
   it("rejects global workflow definition promotion scope", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({
+        rows: [workflowDefinitionRow({
+          definition_key: "device_unlock",
+          platform: "android",
+          intent: "device_unlock",
+          promotion_state: "review_only",
+          definition: {
+            steps: ["wake_device", "swipe_unlock", "verify_home"],
+            terminalStates: ["success", "expected_failure", "needs_review", "quarantined"],
+            sideEffects: [],
+          },
+          allowed_tools: ["wake_device", "gesture_swipe", "ui_tree_dump"],
+        })],
+      })
+      .mockResolvedValueOnce({ rows: [] });
     const response = await patchAgency(
       "/api/agency/workflow-definitions/99999999-9999-4999-8999-999999999999/promotion",
       { action: "promote_limited", scope: "global" }
@@ -2782,9 +3003,9 @@ describe("agency workflow runs API", () => {
     expect(response.status).toBe(400);
     expect(response.body).toMatchObject({
       ok: false,
-      code: "WORKFLOW_DEFINITION_GLOBAL_SCOPE_DISABLED",
+      code: "WORKFLOW_DEFINITION_PROMOTION_SCOPE_NOT_ALLOWED",
     });
-    expect(mocks.db.query).not.toHaveBeenCalled();
+    expect(mocks.db.query).toHaveBeenCalledTimes(2);
   });
 
   it("revokes workflow definition promotion and records an audit event", async () => {
@@ -2877,7 +3098,8 @@ describe("agency workflow runs API", () => {
       }),
     });
     expect(mocks.client.query.mock.calls[0][0]).toBe("BEGIN");
-    expect(String(mocks.client.query.mock.calls[1][0])).toContain("SET promotion_state = 'revoked'");
+    expect(String(mocks.client.query.mock.calls[1][0])).toContain("SET promotion_state = $2");
+    expect(mocks.client.query.mock.calls[1][1][1]).toBe("revoked");
     expect(String(mocks.client.query.mock.calls[2][0])).toContain("agency_workflow_definition_promotion_events");
     expect(mocks.client.query.mock.calls[2][1][3]).toBe("revoke");
     expect(mocks.client.query.mock.calls[2][1][4]).toBe("limited_reuse");
@@ -3090,12 +3312,13 @@ describe("agency workflow runs API", () => {
       }),
     });
     expect(mocks.client.query.mock.calls[0][0]).toBe("BEGIN");
-    expect(String(mocks.client.query.mock.calls[1][0])).toContain("rollback_definition_id = $5");
-    expect(String(mocks.client.query.mock.calls[2][0])).toContain("promotion_state = 'limited_reuse'");
+    expect(String(mocks.client.query.mock.calls[1][0])).toContain("rollback_definition_id = $6");
+    expect(String(mocks.client.query.mock.calls[2][0])).toContain("promotion_state = $2");
+    expect(mocks.client.query.mock.calls[2][1][1]).toBe("limited_reuse");
     expect(String(mocks.client.query.mock.calls[3][0])).toContain("agency_workflow_definition_promotion_events");
-    expect(mocks.client.query.mock.calls[3][1][3]).toBe("limited_reuse");
-    expect(mocks.client.query.mock.calls[3][1][6]).toContain("\"rollbackAction\":true");
-    expect(mocks.client.query.mock.calls[3][1][7]).toContain("\"wouldExecuteWorkflow\":false");
+    expect(mocks.client.query.mock.calls[3][1][3]).toBe("validate");
+    expect(mocks.client.query.mock.calls[3][1][8]).toContain("\"rollbackAction\":true");
+    expect(mocks.client.query.mock.calls[3][1][9]).toContain("\"wouldExecuteWorkflow\":false");
     expect(mocks.client.query.mock.calls[4][0]).toBe("COMMIT");
   });
 

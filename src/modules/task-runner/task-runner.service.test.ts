@@ -25,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   compiledWorkflowToEdgeTemplate: vi.fn(),
   recordExhaustedTaskIncident: vi.fn(),
   reconcileSupersededTaskIncidents: vi.fn(),
+  getResourceLifecycleState: vi.fn(),
+  selectResourceLifecycleTransition: vi.fn(),
 }));
 
 vi.mock("../../db/client", () => ({
@@ -78,6 +80,12 @@ vi.mock("../workflow-events", () => ({
 vi.mock("../incidents/incident.service", () => ({
   recordExhaustedTaskIncident: mocks.recordExhaustedTaskIncident,
   reconcileSupersededTaskIncidents: mocks.reconcileSupersededTaskIncidents,
+}));
+
+vi.mock("../lifecycle/lifecycle.service", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lifecycle/lifecycle.service")>(),
+  getResourceLifecycleState: mocks.getResourceLifecycleState,
+  selectResourceLifecycleTransition: mocks.selectResourceLifecycleTransition,
 }));
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
@@ -300,6 +308,12 @@ describe("task-runner generated_workflow routine", () => {
     mocks.cancelPersistedWorkflowSafely.mockResolvedValue({
       workflowId: WORKFLOW_ID,
       status: "cancelled",
+    });
+    mocks.getResourceLifecycleState.mockResolvedValue({
+      staleAfterMs: 180_000,
+    });
+    mocks.selectResourceLifecycleTransition.mockResolvedValue({
+      toStatus: "runtime-selected",
     });
     mocks.recordGeneratedPlanCacheOutcome.mockResolvedValue(null);
     mocks.getGeneratedPlanCacheForRepair.mockResolvedValue(null);

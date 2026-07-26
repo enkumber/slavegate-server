@@ -92,9 +92,10 @@ describe("DB-authoritative AI workflow semantics migration", () => {
     await pool.query(
       `INSERT INTO workflow_capabilities (
          capability_key, platform, description, aliases, required_terms,
-         safety_class, portability_scope, min_match_score, ambiguity_margin, metadata
+         safety_class, portability_scope, compiler_retrievable,
+         min_match_score, ambiguity_margin, metadata
        )
-       VALUES ($1, $2, $3, $4::text[], $5::text[], 'read_only', 'global', 0.2, 0.05, $6::jsonb)`,
+       VALUES ($1, $2, $3, $4::text[], $5::text[], 'read_only', 'global', TRUE, 0.2, 0.05, $6::jsonb)`,
       [
         "inspect_sample_surface",
         "sample_app",

@@ -455,13 +455,10 @@ function validateGeneratedWorkflowStepInput(
 
   switch (step.type) {
     case "action": {
-      const allowedActions = runtimeContract === "edge-workflow/v2"
-        ? EDGE_WORKFLOW_V2_ACTIONS
-        : GENERATED_WORKFLOW_ALLOWED_ACTIONS;
       if (typeof step.action !== "string" || step.action.length === 0) {
         errors.push(`${path}.action must be a non-empty string for action steps`);
-      } else if (!(allowedActions as readonly string[]).includes(step.action)) {
-        errors.push(`${path}.action "${step.action}" is not allowed; must be one of: ${allowedActions.join(", ")}`);
+      } else if (!runtimeContract && !(GENERATED_WORKFLOW_ALLOWED_ACTIONS as readonly string[]).includes(step.action)) {
+        errors.push(`${path}.action "${step.action}" is not allowed by the legacy validator`);
       }
       if (step.params !== undefined && !isRecord(step.params)) {
         errors.push(`${path}.params must be an object when provided`);
@@ -907,8 +904,14 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
   }
 
   const candidate = template as Partial<WorkflowTemplate>;
-  if (candidate.runtimeContract !== undefined && candidate.runtimeContract !== "edge-workflow/v2") {
-    errors.push("workflow.runtimeContract must be edge-workflow/v2 when provided");
+  if (
+    candidate.runtimeContract !== undefined
+    && (
+      typeof candidate.runtimeContract !== "string"
+      || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(candidate.runtimeContract)
+    )
+  ) {
+    errors.push("workflow.runtimeContract must be a safe non-empty contract identifier when provided");
   }
   if (!candidate.id || typeof candidate.id !== "string") errors.push("workflow.id must be a non-empty string");
   if (!candidate.name || typeof candidate.name !== "string") errors.push("workflow.name must be a non-empty string");

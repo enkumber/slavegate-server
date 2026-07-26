@@ -3361,6 +3361,34 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
     });
   }
   const enablesReuse = promotionTarget.dispatchable && !promotionTarget.terminal;
+  const promotionTargetPolicy = normalizeJsonObject(promotionTarget.metadata);
+  const disallowedScopes = nonEmptyStringArray(promotionTargetPolicy.disallowedScopes);
+  const minimumValidationScore = typeof promotionTargetPolicy.minimumValidationScore === "number"
+    ? promotionTargetPolicy.minimumValidationScore
+    : null;
+  const minimumBranchCoverage = typeof promotionTargetPolicy.minimumBranchCoverage === "number"
+    ? promotionTargetPolicy.minimumBranchCoverage
+    : null;
+  if (
+    enablesReuse
+    && (
+      (promotionTargetPolicy.requiresScope === true && !parsed.scope)
+      || (parsed.scope !== null && disallowedScopes.includes(parsed.scope))
+    )
+  ) {
+    return res.status(400).json({
+      ok: false,
+      error: "The configured promotion state does not allow the requested scope",
+      code: "WORKFLOW_DEFINITION_PROMOTION_SCOPE_NOT_ALLOWED",
+    });
+  }
+  if (enablesReuse && (minimumValidationScore === null || minimumBranchCoverage === null)) {
+    return res.status(500).json({
+      ok: false,
+      error: "Promotion readiness thresholds are not configured in PostgreSQL",
+      code: "WORKFLOW_DEFINITION_PROMOTION_POLICY_INCOMPLETE",
+    });
+  }
   const pipeline = buildWorkflowValidationPipeline({
     definitions: [definition],
     policyGates: gates,
@@ -3398,12 +3426,19 @@ router.patch("/workflow-definitions/:id/promotion", requireAdminAuth, async (req
         code: "WORKFLOW_DEFINITION_STATIC_ERRORS_BLOCK_PROMOTION",
       });
     }
-    if (validationScore < 60 || branchCoverage < 50) {
+    if (validationScore < minimumValidationScore! || branchCoverage < minimumBranchCoverage!) {
       return res.status(400).json({
         ok: false,
         error: "Workflow definition validation score or branch coverage is below the limited-promotion threshold",
         code: "WORKFLOW_DEFINITION_READINESS_BLOCKS_PROMOTION",
-        data: { validationScore, branchCoverage, threshold: { validationScore: 60, branchCoverage: 50 } },
+        data: {
+          validationScore,
+          branchCoverage,
+          threshold: {
+            validationScore: minimumValidationScore,
+            branchCoverage: minimumBranchCoverage,
+          },
+        },
       });
     }
   }

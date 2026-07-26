@@ -49,7 +49,10 @@ import {
   transitionTask,
 } from "../task-lifecycle/task-lifecycle.service";
 import { transitionAgencyWorkflowRun } from "../workflows/agency-workflow-run-lifecycle.service";
-import { selectResourceLifecycleTransition } from "../lifecycle/lifecycle.service";
+import {
+  getResourceLifecycleState,
+  selectResourceLifecycleTransition,
+} from "../lifecycle/lifecycle.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -172,9 +175,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const GENERATED_WORKFLOW_ROUTINE = "generated_workflow";
 const GENERATED_WORKFLOW_FINAL_POLL_INTERVAL_MS = 2_000;
 const GENERATED_WORKFLOW_ACTIVE_WARN_MS = 180_000;
-const GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS = Number(
-  process.env.GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS ?? GENERATED_WORKFLOW_ACTIVE_WARN_MS,
-);
 const GENERATED_WORKFLOW_LATE_TERMINAL_GRACE_MS = Number(
   process.env.GENERATED_WORKFLOW_LATE_TERMINAL_GRACE_MS ?? 30_000,
 );
@@ -472,6 +472,7 @@ async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<Workfl
   let lateTerminalGraceStartedAt: number | null = null;
   let queueCancellationLostRace = false;
   let latest: WorkflowRecord | null = null;
+  let queueTimeoutMs: number | null | undefined;
 
   while (true) {
     latest = await workflowService.get(workflowId);
@@ -500,7 +501,14 @@ async function waitForGeneratedWorkflowFinal(workflowId: string): Promise<Workfl
     }
 
     if (latest.lifecycleDispatchable === true && !queueCancellationLostRace) {
-      if (Date.now() - queuedAt >= GENERATED_WORKFLOW_QUEUE_TIMEOUT_MS) {
+      if (queueTimeoutMs === undefined) {
+        const lifecycleState = await getResourceLifecycleState("workflows", latest.status);
+        queueTimeoutMs = lifecycleState?.staleAfterMs ?? null;
+        if (queueTimeoutMs === null) {
+          throw new Error("queued workflow lifecycle has no stale timeout configured");
+        }
+      }
+      if (queueTimeoutMs !== null && Date.now() - queuedAt >= queueTimeoutMs) {
         try {
           await cancelPersistedWorkflowSafely(workflowId);
           const cancelled = await workflowService.get(workflowId);

@@ -432,7 +432,7 @@ describe("generated workflow cache-only execution route", () => {
         variables: { generatedWorkflow: true },
         logPrefix: "test",
       }))
-      .rejects.toMatchObject({ code: "GENERATED_WORKFLOW_VALIDATION_FAILED", status: 400 });
+      .rejects.toMatchObject({ code: "RUNTIME_CONTRACT_ACTION_DISABLED", status: 409 });
 
     expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
   });

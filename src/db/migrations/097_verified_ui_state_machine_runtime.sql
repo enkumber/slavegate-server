@@ -3,30 +3,6 @@
 -- The interpreter remains generic. Application states, selectors, transitions,
 -- compatibility and promotion evidence are operational data.
 
-UPDATE workflow_runtime_contracts
-SET schema_version = GREATEST(schema_version, 3),
-    allowed_actions = (
-      SELECT jsonb_agg(value ORDER BY value)
-      FROM (
-        SELECT DISTINCT value
-        FROM jsonb_array_elements_text(
-          allowed_actions || '["observe_and_transition","run_state_machine"]'::jsonb
-        ) AS actions(value)
-      ) deduplicated
-    ),
-    limits = limits || '{
-      "maxStateMachineIterations":100,
-      "maxTransitionSelectors":20,
-      "postconditionRequiredForTransitions":true,
-      "oneTransitionPerObservation":true
-    }'::jsonb,
-    metadata = metadata || '{
-      "verifiedTransitions":true,
-      "stateMachineContract":"data_driven_fail_closed"
-    }'::jsonb,
-    updated_at = NOW()
-WHERE contract_id = 'edge-workflow/v2';
-
 ALTER TABLE ui_graph_learning_candidates
   ADD COLUMN IF NOT EXISTS validation_stage TEXT;
 

@@ -53,12 +53,11 @@ describe("edge-workflow/v2 validation", () => {
     expect(validateGeneratedWorkflowTemplate(workflow())).toEqual(expect.objectContaining({ ok: true }));
   });
 
-  it("rejects application-specific runtime actions", () => {
+  it("defers contract action authorization to PostgreSQL", () => {
     const candidate = workflow();
     candidate.steps[0].action = "classify_reddit_health_scan";
     const result = validateGeneratedWorkflowTemplate(candidate);
-    expect(result.ok).toBe(false);
-    expect(result.errors.join(" ")).toContain("classify_reddit_health_scan");
+    expect(result.ok).toBe(true);
   });
 
   it("accepts an explicit LLM request and accounts for it in the plan", () => {

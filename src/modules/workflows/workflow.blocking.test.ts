@@ -298,10 +298,10 @@ describe("Generated workflow contract validation", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors).toEqual(expect.arrayContaining([
-      expect.stringContaining('workflow.steps[0].action "pm_uninstall" is not allowed; must be one of:'),
-      expect.stringContaining('workflow.steps[1].action "cascade_tap" is not allowed; must be one of:'),
-      expect.stringContaining('workflow.steps[2].action "file_delete" is not allowed; must be one of:'),
-      expect.stringContaining('workflow.steps[3].action "reboot" is not allowed; must be one of:'),
+      expect.stringContaining('workflow.steps[0].action "pm_uninstall" is not allowed by the legacy validator'),
+      expect.stringContaining('workflow.steps[1].action "cascade_tap" is not allowed by the legacy validator'),
+      expect.stringContaining('workflow.steps[2].action "file_delete" is not allowed by the legacy validator'),
+      expect.stringContaining('workflow.steps[3].action "reboot" is not allowed by the legacy validator'),
     ]));
   });
 

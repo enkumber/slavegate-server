@@ -104,11 +104,14 @@ describe("generic workflow segment PostgreSQL migration", () => {
 
   it("enforces one promoted version per segment and capability composition", async () => {
     await pool.query(
-      `INSERT INTO workflow_capabilities(capability_key, platform, safety_class)
-       VALUES ('fixture_capability', 'android', 'navigation')`,
+      `INSERT INTO workflow_capabilities(
+         capability_key, platform, safety_class, portability_scope, compiler_retrievable
+       )
+       VALUES ('fixture_capability', 'android', 'navigation', 'global', TRUE)`,
     );
     await pool.query(
-      `INSERT INTO workflow_segments(segment_key) VALUES ('fixture_segment')`,
+      `INSERT INTO workflow_segments(segment_key, status)
+       VALUES ('fixture_segment', 'fixture_available')`,
     );
     const template = {
       id: "fixture",
@@ -124,13 +127,21 @@ describe("generic workflow segment PostgreSQL migration", () => {
     for (const version of ["1", "2"]) {
       await pool.query(
         `INSERT INTO workflow_segment_versions
-           (segment_key, version, platform, lifecycle_status, template, input_schema, fingerprint)
-         VALUES ('fixture_segment',$1,'android',$2,$3::jsonb,$4::jsonb,$5)`,
-        [version, version === "1" ? "promoted" : "candidate", JSON.stringify(template), JSON.stringify(schema), version.repeat(64)],
+           (segment_key, version, platform, lifecycle_status, active_for_resolution,
+            template, input_schema, fingerprint)
+         VALUES ('fixture_segment',$1,'android',$2,$3,$4::jsonb,$5::jsonb,$6)`,
+        [
+          version,
+          version === "1" ? "fixture_selected" : "fixture_candidate",
+          version === "1",
+          JSON.stringify(template),
+          JSON.stringify(schema),
+          version.repeat(64),
+        ],
       );
     }
     await expect(pool.query(
-      `UPDATE workflow_segment_versions SET lifecycle_status='promoted'
+      `UPDATE workflow_segment_versions SET active_for_resolution=TRUE
        WHERE segment_key='fixture_segment' AND version='2'`,
     )).rejects.toThrow();
   });

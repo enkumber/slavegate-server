@@ -63,8 +63,8 @@ function countSteps(steps: WorkflowStep[]): number {
 }
 
 export async function assertOperationalRuntimeContract(template: WorkflowTemplate): Promise<void> {
-  if (template.runtimeContract !== "edge-workflow/v2") {
-    const error = new Error("Workflow must be recompiled for edge-workflow/v2; legacy runtime contracts are not executable");
+  if (!template.runtimeContract) {
+    const error = new Error("Workflow has no configured runtime contract");
     (error as Error & { code?: string; status?: number }).code = "WORKFLOW_RECOMPILE_REQUIRED";
     (error as Error & { code?: string; status?: number }).status = 409;
     throw error;
@@ -92,7 +92,8 @@ export async function assertOperationalRuntimeContract(template: WorkflowTemplat
   const unknownActions = [...new Set(collectActions(template.steps).filter((action) => !allowed.has(action)))];
   if (unknownActions.length > 0) {
     const error = new Error(`Workflow uses actions disabled by ${template.runtimeContract}: ${unknownActions.join(", ")}`);
-    (error as Error & { code?: string }).code = "RUNTIME_CONTRACT_ACTION_DISABLED";
+    (error as Error & { code?: string; status?: number }).code = "RUNTIME_CONTRACT_ACTION_DISABLED";
+    (error as Error & { code?: string; status?: number }).status = 409;
     throw error;
   }
 

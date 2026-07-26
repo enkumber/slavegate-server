@@ -214,7 +214,7 @@ export interface WorkflowTemplate {
   /** Compatible app version patterns (e.g. "300+", "301") */
   compatibleAppVersions?: string[];
   /** Contract marker: all timing/branching/retry behavior is explicit in the payload. */
-  runtimeContract?: "edge-workflow/v2";
+  runtimeContract?: string;
 }
 
 export interface WorkflowRecoveryPolicy {

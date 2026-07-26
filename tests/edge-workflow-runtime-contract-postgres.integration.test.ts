@@ -62,7 +62,7 @@ describe("edge workflow runtime contract PostgreSQL migration", () => {
     await adminPool?.end();
   });
 
-  it("installs the generic contract idempotently without rewriting application workflows", async () => {
+  it("creates operator-managed contract schema idempotently without packaging product semantics", async () => {
     const migration = fs.readFileSync(migrationPath, "utf8");
     await pool.query(migration);
     await pool.query(migration);
@@ -74,19 +74,34 @@ describe("edge workflow runtime contract PostgreSQL migration", () => {
     }>(
       "SELECT allowed_actions, limits, metadata FROM workflow_runtime_contracts WHERE contract_id = 'edge-workflow/v2'",
     );
-    expect(contract.rows[0]).toMatchObject({
-      limits: { timingMode: "explicit_only", serverStepFallback: false },
-      metadata: { operationalSource: "postgresql", applicationKnowledgeAllowed: false },
-    });
-    expect(contract.rows[0]?.allowed_actions).toContain("classify_ui_tree");
+    expect(contract.rows).toEqual([]);
 
     const profile = await pool.query<{ workflow_policy: Record<string, unknown> }>(
       "SELECT workflow_policy FROM app_runtime_profiles WHERE app_id = 'test.app'",
     );
-    expect(profile.rows[0]?.workflow_policy).toMatchObject({
-      runtimeContract: "edge-workflow/v2",
-      timingMode: "explicit_only",
-      serverStepFallback: false,
+    expect(profile.rows[0]?.workflow_policy).toEqual({});
+
+    await pool.query(`
+      INSERT INTO workflow_runtime_contracts
+        (contract_id, schema_version, allowed_actions, limits, metadata)
+      VALUES (
+        'fixture-contract',
+        1,
+        '["fixture_action"]'::jsonb,
+        '{"maxSteps":3}'::jsonb,
+        '{"operatorManaged":true}'::jsonb
+      )
+    `);
+    await pool.query(migration);
+    const operatorContract = await pool.query(
+      `SELECT allowed_actions, limits, metadata
+         FROM workflow_runtime_contracts
+        WHERE contract_id = 'fixture-contract'`,
+    );
+    expect(operatorContract.rows[0]).toMatchObject({
+      allowed_actions: ["fixture_action"],
+      limits: { maxSteps: 3 },
+      metadata: { operatorManaged: true },
     });
 
     const legacy = await pool.query<{ workflow: Record<string, unknown> }>(

@@ -41,7 +41,7 @@ const rules = [
   {
     id: "migration-product-policy-seed",
     scope: (path) => path.includes("/src/db/migrations/"),
-    pattern: /\bINSERT\s+INTO\s+(?:runtime_semantic_entries|workflow_capabilities|workflow_capability_artifacts|job_status_definitions|task_status_definitions|workflow_status_definitions|agency_workflow_run_status_definitions|research_job_status_definitions)\b/gi,
+    pattern: /\bINSERT\s+INTO\s+(?:runtime_semantic_entries|workflow_runtime_contracts|workflow_capabilities|workflow_capability_artifacts|job_status_definitions|task_status_definitions|workflow_status_definitions|agency_workflow_run_status_definitions|research_job_status_definitions)\b/gi,
   },
   {
     id: "migration-semantic-row-seed",
