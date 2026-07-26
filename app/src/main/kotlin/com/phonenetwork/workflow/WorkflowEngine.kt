@@ -86,6 +86,26 @@ class WorkflowEngine(
     private var currentStepIndex = 0
     private var totalSteps = 0
     @Volatile private var workflowId = ""
+    private var lifecycleInitialStatus = ""
+    private var lifecycleActiveStatus = ""
+    private var lifecycleSucceededStatus = ""
+    private var lifecycleFailedStatus = ""
+    private var lifecycleCancelledStatus = ""
+
+    private fun loadLifecycleStatusContract(templateJson: JSONObject) {
+        val contract = templateJson.optJSONObject("lifecycleStatusContract")
+            ?: throw IllegalArgumentException("Workflow lifecycle status contract is missing")
+        lifecycleInitialStatus = contract.optString("initial").requireConfiguredLifecycleRole("initial")
+        lifecycleActiveStatus = contract.optString("active").requireConfiguredLifecycleRole("active")
+        lifecycleSucceededStatus = contract.optString("succeeded").requireConfiguredLifecycleRole("succeeded")
+        lifecycleFailedStatus = contract.optString("failed").requireConfiguredLifecycleRole("failed")
+        lifecycleCancelledStatus = contract.optString("cancelled").requireConfiguredLifecycleRole("cancelled")
+    }
+
+    private fun String.requireConfiguredLifecycleRole(role: String): String {
+        require(isNotBlank()) { "Workflow lifecycle role $role is not configured" }
+        return this
+    }
 
     // ─── Public API ───────────────────────────────────────────────────────────
 
@@ -99,6 +119,7 @@ class WorkflowEngine(
         templateJson: JSONObject,
         resumeCheckpoint: WorkflowCheckpoint? = null,
     ) {
+        loadLifecycleStatusContract(templateJson)
         if (!running.tryAcquire()) {
             val rejectedWorkflowId = templateJson.optString(
                 "workflowId",
@@ -108,7 +129,7 @@ class WorkflowEngine(
             sendStatus(JSONObject().apply {
                 put("type", "WORKFLOW_STATUS")
                 put("workflowId", rejectedWorkflowId)
-                put("status", "failed")
+                put("status", lifecycleFailedStatus)
                 put("currentStep", 0)
                 put("totalSteps", templateJson.optJSONArray("steps")?.length() ?: 0)
                 put("error", "Workflow already running on device")
@@ -125,10 +146,10 @@ class WorkflowEngine(
             executeWorkflowInternal(templateJson, resumeCheckpoint)
         } catch (e: CancellationException) {
             Log.w(TAG, "Workflow cancelled: ${e.message}")
-            sendStatusUpdate("cancelled", terminal = true, error = e.message)
+            sendStatusUpdate(lifecycleCancelledStatus, terminal = true, error = e.message)
         } catch (e: Exception) {
             Log.e(TAG, "Workflow failed: ${e.message}", e)
-            sendStatusUpdate("failed", terminal = true, error = e.message)
+            sendStatusUpdate(lifecycleFailedStatus, terminal = true, error = e.message)
         } finally {
             running.release()
             currentJob = null
@@ -216,7 +237,7 @@ class WorkflowEngine(
         sendStatus(JSONObject().apply {
             put("type", "WORKFLOW_STATUS")
             put("workflowId", workflowId)
-            put("status", "running")
+            put("status", lifecycleActiveStatus)
             put("currentStep", 0)
             put("totalSteps", templateJson.optJSONArray("steps")?.length() ?: 0)
             put("variables", JSONObject())
@@ -247,7 +268,7 @@ class WorkflowEngine(
             Log.i(TAG, "Starting workflow $workflowId: $totalSteps steps")
         }
 
-        sendStatusUpdate("running")
+        sendStatusUpdate(lifecycleActiveStatus)
 
         // Initialize HBE engine from template variables
         val accountAgeDays = (variables["accountAgeDays"] as? Number)?.toInt() ?: 30
@@ -270,7 +291,7 @@ class WorkflowEngine(
             } catch (e: Exception) {
                 Log.e(TAG, "Step $i failed: ${e.message}")
                 saveCheckpoint(workflowId, i, "step_failed")
-                sendStatusUpdate("failed", terminal = true, error = "Step $i (${step.id}) failed: ${e.message}")
+                sendStatusUpdate(lifecycleFailedStatus, terminal = true, error = "Step $i (${step.id}) failed: ${e.message}")
                 return
             }
 
@@ -278,12 +299,12 @@ class WorkflowEngine(
             saveCheckpoint(workflowId, i + 1, null)
 
             // Send progress update
-            sendStatusUpdate("running", stepIndex = i + 1)
+            sendStatusUpdate(lifecycleActiveStatus, stepIndex = i + 1)
         }
 
         // Workflow completed successfully
         clearCheckpoint(workflowId)
-        sendStatusUpdate("completed", terminal = true, stepIndex = totalSteps)
+        sendStatusUpdate(lifecycleSucceededStatus, terminal = true, stepIndex = totalSteps)
         Log.i(TAG, "Workflow $workflowId completed successfully")
     }
 
@@ -538,13 +559,13 @@ class WorkflowEngine(
             val durationMs = hbe.resolveDuration(duration)
             Log.d(TAG, "Wait: ${durationMs}ms (${duration.distribution})")
             val deadline = android.os.SystemClock.elapsedRealtime() + durationMs
-            sendStatusUpdate("running", stepIndex = currentStepIndex)
+            sendStatusUpdate(lifecycleActiveStatus, stepIndex = currentStepIndex)
             while (true) {
                 ensureActive()
                 val remaining = deadline - android.os.SystemClock.elapsedRealtime()
                 if (remaining <= 0L) break
                 delay(min(remaining, 1_000L))
-                sendStatusUpdate("running", stepIndex = currentStepIndex)
+                sendStatusUpdate(lifecycleActiveStatus, stepIndex = currentStepIndex)
             }
             return
         }
@@ -849,7 +870,7 @@ class WorkflowEngine(
             // Execute body
             for (subStep in bodySteps) {
                 ensureActive()
-                sendStatusUpdate("running", stepIndex = currentStepIndex)
+                sendStatusUpdate(lifecycleActiveStatus, stepIndex = currentStepIndex)
                 withTimeout(subStepTimeoutMs(subStep)) {
                     executeStep(subStep, emptyList(), -1, hbe, 1)
                 }

@@ -667,7 +667,13 @@ class DirectWsClient(
             sendRaw(ws ?: return, JSONObject().apply {
                 put("type", "WORKFLOW_STATUS")
                 put("workflowId", msg.optString("workflowId", msg.optString("id")))
-                put("status", "failed")
+                put(
+                    "status",
+                    msg.optJSONObject("lifecycleStatusContract")
+                        ?.optString("failed")
+                        ?.takeIf { it.isNotBlank() }
+                        ?: throw IllegalStateException("Missing workflow lifecycle failure state")
+                )
                 put("error", "WorkflowEngine not initialized on device")
             })
             return

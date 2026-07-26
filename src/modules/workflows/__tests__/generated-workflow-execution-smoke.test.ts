@@ -305,15 +305,23 @@ describe("generated workflow cache-only execution route", () => {
     mocks.directWsServer.getAgentVersion.mockReturnValue("4.0.0");
     mocks.hbeService.initSession.mockReturnValue({});
     mocks.appMapping.loadMap.mockResolvedValue(null);
-    mocks.db.query.mockResolvedValue({
-      rows: [{
-        contract_id: "edge-workflow/v2",
-        schema_version: 2,
-        allowed_actions: ["open_app", "get_screen_state"],
-        limits: { maxSteps: 500 },
-        active: true,
-      }],
-    });
+    mocks.db.query.mockImplementation((sql: string) => Promise.resolve({
+      rows: sql.includes("transition.mark_started")
+        ? [
+            { role: "active", status: "running" },
+            { role: "cancelled", status: "cancelled" },
+            { role: "failed", status: "failed" },
+            { role: "initial", status: "queued" },
+            { role: "succeeded", status: "completed" },
+          ]
+        : [{
+            contract_id: "edge-workflow/v2",
+            schema_version: 2,
+            allowed_actions: ["open_app", "get_screen_state"],
+            limits: { maxSteps: 500 },
+            active: true,
+          }],
+    }));
   });
 
   afterEach(() => {
@@ -502,7 +510,16 @@ describe("generated workflow cache-only execution route", () => {
     expect(mocks.workflowService.getGeneratedPlanCache).toHaveBeenCalledWith(cached.cacheKey);
     expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
-      cached.workflow,
+      expect.objectContaining({
+        ...cached.workflow,
+        lifecycleStatusContract: expect.objectContaining({
+          initial: expect.any(String),
+          active: expect.any(String),
+          succeeded: expect.any(String),
+          failed: expect.any(String),
+          cancelled: expect.any(String),
+        }),
+      }),
       expect.objectContaining({
         generatedWorkflow: true,
         generatedWorkflowId: cached.templateId,
@@ -564,7 +581,16 @@ describe("generated workflow cache-only execution route", () => {
     expect(mocks.workflowService.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(cached.requestKey);
     expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
-      cached.workflow,
+      expect.objectContaining({
+        ...cached.workflow,
+        lifecycleStatusContract: expect.objectContaining({
+          initial: expect.any(String),
+          active: expect.any(String),
+          succeeded: expect.any(String),
+          failed: expect.any(String),
+          cancelled: expect.any(String),
+        }),
+      }),
       expect.any(Object),
       "wf-cache-smoke",
     );

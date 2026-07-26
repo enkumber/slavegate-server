@@ -9,6 +9,7 @@ import { workflowEvents } from "../workflow-events";
 import { assertOperationalRuntimeContract } from "./runtime-contract.service";
 import { scheduleEdgeWorkflowAckWatchdog } from "./edge-workflow-lifecycle.service";
 import { attachEdgeLearningBindings, prepareEdgeLearningBindings } from "../ui-graph/edge-learning.service";
+import { getResourceLifecycleExecutionStatusContract } from "../lifecycle/lifecycle.service";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
 
@@ -151,8 +152,14 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
   const accountAgeDays = (variables?.["accountAgeDays"] as number) ?? 30;
   const simulatedTimezone = (variables?.["timezone"] as string) ?? "Europe/Bucharest";
   const hbeSession = hbeService.initSession(accountAgeDays, simulatedTimezone) as unknown as Record<string, unknown>;
-  const edgeLearningBindings = await prepareEdgeLearningBindings(validation.template);
-  const edgeTemplate = attachEdgeLearningBindings(validation.template, edgeLearningBindings);
+  const [edgeLearningBindings, lifecycleStatusContract] = await Promise.all([
+    prepareEdgeLearningBindings(validation.template),
+    getResourceLifecycleExecutionStatusContract("workflows"),
+  ]);
+  const edgeTemplate = {
+    ...attachEdgeLearningBindings(validation.template, edgeLearningBindings),
+    lifecycleStatusContract,
+  };
   const dispatchVariables = controlPlaneContext
     ? { ...(variables ?? {}), controlPlaneContext }
     : variables;

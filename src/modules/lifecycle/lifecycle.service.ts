@@ -84,6 +84,14 @@ export interface LifecycleTransitionSelector {
   transitionResetRetry?: boolean;
 }
 
+export interface LifecycleExecutionStatusContract {
+  initial: string;
+  active: string;
+  succeeded: string;
+  failed: string;
+  cancelled: string;
+}
+
 export type LifecycleStateSelector = Partial<
   Pick<
     LifecycleStateDefinition,
@@ -265,6 +273,63 @@ export async function selectResourceLifecycleTransition(
     throw new Error("lifecycle transition selector is ambiguous for configured resource");
   }
   return result.rows[0] ? rowToTransition(result.rows[0]) : null;
+}
+
+export async function getResourceLifecycleExecutionStatusContract(
+  resourceTable: string,
+  stateColumn = "status",
+  db: LifecycleQueryable = getDb(),
+): Promise<LifecycleExecutionStatusContract> {
+  const result = await db.query(
+    `WITH binding AS (
+       SELECT lifecycle_key
+         FROM lifecycle_resource_bindings
+        WHERE resource_table = to_regclass($1)
+          AND state_column = $2::name
+     ),
+     ranked AS (
+       SELECT state.status,
+              CASE
+                WHEN state.initial THEN 'initial'
+                WHEN state.terminal AND state.administrative THEN 'cancelled'
+                WHEN state.terminal AND state.retryable THEN 'failed'
+                WHEN state.terminal AND NOT state.retryable AND NOT state.administrative THEN 'succeeded'
+                WHEN EXISTS (
+                  SELECT 1
+                    FROM lifecycle_transitions transition
+                   WHERE transition.lifecycle_key = state.lifecycle_key
+                     AND transition.to_status = state.status
+                     AND transition.mark_started
+                ) THEN 'active'
+                ELSE NULL
+              END AS role,
+              state.sort_order
+         FROM lifecycle_state_definitions state
+         JOIN binding ON binding.lifecycle_key = state.lifecycle_key
+     )
+     SELECT role, status
+       FROM ranked
+      WHERE role IS NOT NULL
+      ORDER BY role, sort_order, status`,
+    [resourceTable, stateColumn],
+  );
+  const grouped = new Map<string, string[]>();
+  for (const row of result.rows) {
+    const role = String(row.role);
+    grouped.set(role, [...(grouped.get(role) ?? []), String(row.status)]);
+  }
+  const required = ["initial", "active", "succeeded", "failed", "cancelled"] as const;
+  const contract = {} as LifecycleExecutionStatusContract;
+  for (const role of required) {
+    const matches = grouped.get(role) ?? [];
+    if (matches.length !== 1) {
+      throw new Error(
+        `resource lifecycle execution role ${role} must resolve to exactly one configured state`,
+      );
+    }
+    contract[role] = matches[0];
+  }
+  return contract;
 }
 
 export async function getResourceLifecycleTransitionToState(
