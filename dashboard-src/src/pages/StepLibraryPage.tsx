@@ -114,10 +114,10 @@ export function StepLibraryPage() {
     void loadPromotionEvents(updated.id);
   };
 
-  const promoteLimited = async () => {
+  const applyPromotionTransition = async (actionKey: string, requiresScope: boolean) => {
     if (!selected || promotionBusy) return;
     const scope = promotionScope.trim();
-    if (!scope) {
+    if (requiresScope && !scope) {
       setError("Promotion scope is required.");
       return;
     }
@@ -125,30 +125,14 @@ export function StepLibraryPage() {
     setError(null);
     try {
       const updated = await agencyApi.stepLibrary.updatePromotion(selected.id, {
-        action: "promote_limited",
-        scope,
+        action: actionKey,
+        scope: scope || null,
         note: promotionNote.trim() || null,
       });
       updateSelectedEntry(updated);
+      await loadEntries();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to promote Step Library entry");
-    } finally {
-      setPromotionBusy(false);
-    }
-  };
-
-  const revokeLimited = async () => {
-    if (!selected || promotionBusy) return;
-    setPromotionBusy(true);
-    setError(null);
-    try {
-      const updated = await agencyApi.stepLibrary.updatePromotion(selected.id, {
-        action: "revoke",
-        note: promotionNote.trim() || null,
-      });
-      updateSelectedEntry(updated);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to revoke Step Library entry");
+      setError(err instanceof Error ? err.message : "Failed to apply Step Library transition");
     } finally {
       setPromotionBusy(false);
     }
@@ -329,20 +313,19 @@ export function StepLibraryPage() {
                   style={{ width: "100%", boxSizing: "border-box", background: "#111", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", marginBottom: "10px", resize: "vertical" }}
                 />
                 <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                  <button
-                    onClick={() => void promoteLimited()}
-                    disabled={promotionBusy || selected.reusable}
-                    style={{ background: selected.reusable ? "#1f1f1f" : "#166534", border: "1px solid #15803d", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.reusable ? "not-allowed" : "pointer" }}
-                  >
-                    Promote limited
-                  </button>
-                  <button
-                    onClick={() => void revokeLimited()}
-                    disabled={promotionBusy || !selected.reusable}
-                    style={{ background: !selected.reusable ? "#1f1f1f" : "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || !selected.reusable ? "not-allowed" : "pointer" }}
-                  >
-                    Revoke
-                  </button>
+                  {selected.promotionTransitions.map((transition) => (
+                    <button
+                      key={transition.actionKey}
+                      onClick={() => void applyPromotionTransition(
+                        transition.actionKey,
+                        transition.target.dispatchable && !transition.target.terminal,
+                      )}
+                      disabled={promotionBusy}
+                      style={{ background: transition.target.terminal ? "#3a1618" : "#166534", border: `1px solid ${transition.target.terminal ? "#7f1d1d" : "#15803d"}`, color: transition.target.terminal ? "#fecaca" : "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}
+                    >
+                      {transition.description || transition.toStatus}
+                    </button>
+                  ))}
                 </div>
               </div>
 

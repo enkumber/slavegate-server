@@ -3313,7 +3313,7 @@ describe("agency workflow runs API", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.data).toMatchObject({
-      action: "rollback",
+      action: "validate",
       previousState: "limited_reuse",
       nextState: "limited_reuse",
       sourceDefinition: expect.objectContaining({

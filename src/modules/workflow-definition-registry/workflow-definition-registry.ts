@@ -18,6 +18,7 @@ export interface WorkflowDefinition {
     dispatchable: boolean;
     manual: boolean;
   };
+  statusTransitions: JsonObject[];
   title: string;
   description: string | null;
   platform: string;
@@ -59,6 +60,7 @@ export interface WorkflowDefinition {
     compilerEligible: boolean;
     wouldUseDefinition: boolean;
     autoUseEnabled: boolean;
+    transitions: JsonObject[];
   };
   telemetrySummary: JsonObject;
   confidenceDecay: JsonObject;
@@ -143,6 +145,9 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
       dispatchable: row.status_dispatchable === true,
       manual: row.status_manual === true,
     },
+    statusTransitions: arrayValue(row.status_transition_options).filter(
+      (value): value is JsonObject => !!value && typeof value === "object" && !Array.isArray(value),
+    ),
     title: String(row.title),
     description: typeof row.description === "string" ? row.description : null,
     platform: String(row.platform),
@@ -184,6 +189,9 @@ export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowD
       compilerEligible: rowPolicy.compilerVisible === true || rowPolicy.autoUseEnabled === true,
       wouldUseDefinition: rowPolicy.autoUseEnabled === true,
       autoUseEnabled: rowPolicy.autoUseEnabled === true,
+      transitions: arrayValue(row.promotion_transition_options).filter(
+        (value): value is JsonObject => !!value && typeof value === "object" && !Array.isArray(value),
+      ),
     },
     telemetrySummary: objectValue(row.telemetry_summary),
     confidenceDecay: objectValue(row.confidence_decay),

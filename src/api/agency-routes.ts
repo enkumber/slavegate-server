@@ -341,6 +341,7 @@ function rowToStepLibraryEntry(row: Record<string, unknown>): Record<string, unk
     revokedAt: row.revoked_at instanceof Date ? row.revoked_at.toISOString() : row.revoked_at ?? null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at ?? null,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at ?? null,
+    promotionTransitions: normalizeJsonArray(row.library_transition_options),
   };
 }
 
@@ -2057,10 +2058,34 @@ router.get("/step-library", requireAdminAuth, async (req: Request, res: Response
       `SELECT c.*,
               r.status AS run_status,
               r.intent AS run_intent,
-              d.friendly_name AS device_name
+              d.friendly_name AS device_name,
+              COALESCE(library_options.items, '[]'::jsonb) AS library_transition_options
        FROM agency_workflow_step_candidates_lifecycle c
        LEFT JOIN agency_workflow_runs r ON r.id = c.run_id
        LEFT JOIN devices d ON d.id = r.device_id
+       LEFT JOIN LATERAL (
+         SELECT jsonb_agg(jsonb_build_object(
+           'actionKey', transition.action_key,
+           'toStatus', transition.to_status,
+           'description', target.description,
+           'target', jsonb_build_object(
+             'terminal', target.terminal,
+             'dispatchable', target.dispatchable,
+             'manual', target.manual,
+             'metadata', target.metadata
+           )
+         ) ORDER BY target.sort_order, transition.action_key) AS items
+         FROM lifecycle_resource_bindings binding
+         JOIN lifecycle_transitions transition
+           ON transition.lifecycle_key = binding.lifecycle_key
+          AND transition.from_status = c.library_state
+          AND transition.manual_allowed
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = transition.lifecycle_key
+          AND target.status = transition.to_status
+         WHERE binding.resource_table = to_regclass('agency_workflow_step_candidates')
+           AND binding.state_column = 'library_state'
+       ) library_options ON TRUE
        ${where}
        ORDER BY c.validated_at DESC NULLS LAST, c.updated_at DESC, c.created_at DESC
        LIMIT $${idx++} OFFSET $${idx}`,
@@ -2575,11 +2600,59 @@ router.get("/workflow-definitions", requireAdminAuth, async (req: Request, res: 
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = await db.query(
-    `SELECT definition.*
+    `SELECT definition.*,
+            COALESCE(status_options.items, '[]'::jsonb) AS status_transition_options,
+            COALESCE(promotion_options.items, '[]'::jsonb) AS promotion_transition_options
      FROM agency_workflow_definitions_lifecycle definition
      JOIN lifecycle_state_definitions state
-       ON state.lifecycle_key = definition.lifecycle_key
+      ON state.lifecycle_key = definition.lifecycle_key
       AND state.status = definition.status
+     LEFT JOIN LATERAL (
+       SELECT jsonb_agg(jsonb_build_object(
+         'actionKey', transition.action_key,
+         'toStatus', transition.to_status,
+         'description', target.description,
+         'target', jsonb_build_object(
+           'terminal', target.terminal,
+           'dispatchable', target.dispatchable,
+           'manual', target.manual,
+           'metadata', target.metadata
+         )
+       ) ORDER BY target.sort_order, transition.action_key) AS items
+       FROM lifecycle_resource_bindings binding
+       JOIN lifecycle_transitions transition
+         ON transition.lifecycle_key = binding.lifecycle_key
+        AND transition.from_status = definition.status
+        AND transition.manual_allowed
+       JOIN lifecycle_state_definitions target
+         ON target.lifecycle_key = transition.lifecycle_key
+        AND target.status = transition.to_status
+       WHERE binding.resource_table = to_regclass('agency_workflow_definitions')
+         AND binding.state_column = 'status'
+     ) status_options ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT jsonb_agg(jsonb_build_object(
+         'actionKey', transition.action_key,
+         'toStatus', transition.to_status,
+         'description', target.description,
+         'target', jsonb_build_object(
+           'terminal', target.terminal,
+           'dispatchable', target.dispatchable,
+           'manual', target.manual,
+           'metadata', target.metadata
+         )
+       ) ORDER BY target.sort_order, transition.action_key) AS items
+       FROM lifecycle_resource_bindings binding
+       JOIN lifecycle_transitions transition
+         ON transition.lifecycle_key = binding.lifecycle_key
+        AND transition.from_status = definition.promotion_state
+        AND transition.manual_allowed
+       JOIN lifecycle_state_definitions target
+         ON target.lifecycle_key = transition.lifecycle_key
+        AND target.status = transition.to_status
+       WHERE binding.resource_table = to_regclass('agency_workflow_definitions')
+         AND binding.state_column = 'promotion_state'
+     ) promotion_options ON TRUE
      ${where}
      ORDER BY state.sort_order,
        definition.definition_key ASC,
@@ -3920,9 +3993,9 @@ router.post("/workflow-definitions/:id/rollback", requireAdminAuth, async (req: 
   res.json({
     ok: true,
     data: {
-      action: "rollback",
+      action: targetTransition.actionKey,
       previousState: definition.promotion.state,
-      nextState: "limited_reuse",
+      nextState: targetTransition.toStatus,
       sourceDefinition: updatedSource,
       targetDefinition: updatedTarget,
       rollbackTarget: {

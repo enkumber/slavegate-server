@@ -322,12 +322,25 @@ export interface StepLibraryEntry {
   revokedAt: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  promotionTransitions: LifecycleTransitionOption[];
+}
+
+export interface LifecycleTransitionOption {
+  actionKey: string;
+  toStatus: string;
+  description: string | null;
+  target: {
+    terminal: boolean;
+    dispatchable: boolean;
+    manual: boolean;
+    metadata: Record<string, unknown>;
+  };
 }
 
 export interface StepLibraryPromotionEvent {
   id: string;
   stepCandidateId: string;
-  action: "promote_limited" | "revoke" | string;
+  action: string;
   libraryState: string;
   promotionScope: string | null;
   note: string | null;
@@ -733,6 +746,7 @@ export interface WorkflowDefinition {
     dispatchable: boolean;
     manual: boolean;
   };
+  statusTransitions: LifecycleTransitionOption[];
   title: string;
   description: string | null;
   platform: string;
@@ -777,6 +791,7 @@ export interface WorkflowDefinition {
     compilerEligible: false;
     wouldUseDefinition: false;
     autoUseEnabled: false;
+    transitions: LifecycleTransitionOption[];
   };
   summary: {
     successCriteria: number;
@@ -815,7 +830,7 @@ export interface WorkflowDefinitionPromotionEvent {
   definitionId: string | null;
   definitionKey: string | null;
   definitionVersion: number | null;
-  action: "promote_limited" | "revoke" | "rollback" | string;
+  action: string;
   previousState: string | null;
   nextState: string | null;
   promotionScope: string | null;
@@ -832,7 +847,7 @@ export interface WorkflowDefinitionPromotionEvent {
 
 export interface WorkflowDefinitionPromotionResponse {
   definition: WorkflowDefinition;
-  action: "promote_limited" | "revoke" | string;
+  action: string;
   previousState: string | null;
   nextState: string;
   validationSnapshot: Record<string, unknown>;
@@ -844,7 +859,7 @@ export interface WorkflowDefinitionPromotionResponse {
 }
 
 export interface WorkflowDefinitionRollbackResponse {
-  action: "rollback";
+  action: string;
   previousState: string | null;
   nextState: string;
   sourceDefinition: WorkflowDefinition;
@@ -906,7 +921,7 @@ export interface WorkflowDefinitionVersionEvent {
   definitionId: string | null;
   definitionKey: string | null;
   definitionVersion: number | null;
-  action: "create_version" | "archive" | "deprecate" | "activate" | "draft" | "hardening_preview" | string;
+  action: string;
   previousStatus: string | null;
   nextStatus: string | null;
   targetDefinitionId: string | null;
@@ -1118,7 +1133,7 @@ export const agencyApi = {
     },
     reviewStepCandidate: (
       id: string,
-      data: { action: "keep_review" | "reject"; note?: string | null }
+      data: { action: string; note?: string | null }
     ) => api.patch<WorkflowRunStepCandidate>(`/agency/workflow-step-candidates/${id}/review`, data),
     validateStepCandidate: (
       id: string,
@@ -1148,7 +1163,7 @@ export const agencyApi = {
     },
     updatePromotion: (
       id: string,
-      data: { action: "promote_limited" | "revoke"; scope?: string | null; note?: string | null }
+      data: { action: string; scope?: string | null; note?: string | null }
     ) => api.patch<StepLibraryEntry>(`/agency/step-library/${id}/promotion`, data),
     listPromotionEvents: (params?: { page?: number; pageSize?: number; entryId?: string; action?: string; actor?: string; scope?: string }) => {
       const query = new URLSearchParams();
@@ -1286,9 +1301,9 @@ export const agencyApi = {
       if (scope) query.set("scope", scope);
       return api.get<Record<string, unknown>>(`/agency/workflow-definitions/${id}/promotion-hardening?${query}`);
     },
-    lifecycle: (id: string, data: { action: "archive" | "deprecate" | "activate" | "draft"; note?: string | null }) =>
+    lifecycle: (id: string, data: { action: string; note?: string | null }) =>
       api.patch<{ definition: WorkflowDefinition; action: string; previousStatus: string; nextStatus: string; impactPreview: Record<string, unknown>; policy: Record<string, unknown> }>(`/agency/workflow-definitions/${id}/lifecycle`, data),
-    promote: (id: string, data: { action: "promote_limited" | "revoke"; scope?: string | null; note?: string | null }) =>
+    promote: (id: string, data: { action: string; scope?: string | null; note?: string | null }) =>
       api.patch<WorkflowDefinitionPromotionResponse>(`/agency/workflow-definitions/${id}/promotion`, data),
     rollback: (id: string, data: { targetDefinitionId?: string | null; note?: string | null }) =>
       api.post<WorkflowDefinitionRollbackResponse>(`/agency/workflow-definitions/${id}/rollback`, data),

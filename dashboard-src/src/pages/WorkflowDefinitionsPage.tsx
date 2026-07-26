@@ -192,14 +192,14 @@ export function WorkflowDefinitionsPage() {
     setHardeningPreview(hardening);
   }, [promotionScope]);
 
-  const promoteSelected = useCallback(async () => {
+  const applyPromotionTransition = useCallback(async (actionKey: string, requiresScope: boolean) => {
     if (!selected) return;
     setPromotionBusy(true);
     setError(null);
     try {
       const response = await agencyApi.workflowDefinitions.promote(selected.id, {
-        action: "promote_limited",
-        scope: promotionScope,
+        action: actionKey,
+        scope: requiresScope ? promotionScope : null,
         note: promotionNote || null,
       });
       setSelected(response.definition);
@@ -207,31 +207,11 @@ export function WorkflowDefinitionsPage() {
       await loadPromotionEvents(selected.id);
       await loadRollbackPreview(selected.id);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to promote workflow definition");
+      setError(err instanceof Error ? err.message : "Failed to apply workflow definition promotion transition");
     } finally {
       setPromotionBusy(false);
     }
   }, [load, loadPromotionEvents, loadRollbackPreview, promotionNote, promotionScope, selected]);
-
-  const revokeSelected = useCallback(async () => {
-    if (!selected) return;
-    setPromotionBusy(true);
-    setError(null);
-    try {
-      const response = await agencyApi.workflowDefinitions.promote(selected.id, {
-        action: "revoke",
-        note: promotionNote || null,
-      });
-      setSelected(response.definition);
-      await load();
-      await loadPromotionEvents(selected.id);
-      await loadRollbackPreview(selected.id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to revoke workflow definition promotion");
-    } finally {
-      setPromotionBusy(false);
-    }
-  }, [load, loadPromotionEvents, loadRollbackPreview, promotionNote, selected]);
 
   const rollbackSelected = useCallback(async () => {
     if (!selected) return;
@@ -272,7 +252,7 @@ export function WorkflowDefinitionsPage() {
     }
   }, [load, loadVersioning, promotionNote, selected]);
 
-  const lifecycleSelected = useCallback(async (action: "archive" | "deprecate" | "activate" | "draft") => {
+  const lifecycleSelected = useCallback(async (action: string) => {
     if (!selected) return;
     setPromotionBusy(true);
     setError(null);
@@ -410,8 +390,19 @@ export function WorkflowDefinitionsPage() {
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginBottom: "12px" }}>
               <input value={promotionScope} onChange={(event) => setPromotionScope(event.target.value)} placeholder="scope, e.g. definition:..." style={{ background: "#0a0a0a", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", minWidth: "260px" }} />
               <input value={promotionNote} onChange={(event) => setPromotionNote(event.target.value)} placeholder="review note" style={{ background: "#0a0a0a", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "8px 10px", minWidth: "260px" }} />
-              <button onClick={() => void promoteSelected()} disabled={promotionBusy || selected.promotion.reusable} style={{ background: selected.promotion.reusable ? "#1f1f1f" : "#166534", border: "1px solid #15803d", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.promotion.reusable ? "not-allowed" : "pointer" }}>Promote limited</button>
-              <button onClick={() => void revokeSelected()} disabled={promotionBusy || selected.promotion.stateCapabilities.terminal} style={{ background: selected.promotion.stateCapabilities.terminal ? "#1f1f1f" : "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy || selected.promotion.stateCapabilities.terminal ? "not-allowed" : "pointer" }}>Revoke</button>
+              {selected.promotion.transitions.map((transition) => (
+                <button
+                  key={transition.actionKey}
+                  onClick={() => void applyPromotionTransition(
+                    transition.actionKey,
+                    transition.target.dispatchable && !transition.target.terminal,
+                  )}
+                  disabled={promotionBusy}
+                  style={{ background: transition.target.terminal ? "#3a1618" : "#166534", border: `1px solid ${transition.target.terminal ? "#7f1d1d" : "#15803d"}`, color: transition.target.terminal ? "#fecaca" : "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}
+                >
+                  {transition.description || transition.toStatus}
+                </button>
+              ))}
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(180px, 1fr))", gap: "8px", marginBottom: "12px" }}>
               <div style={{ background: "#0a0a0a", border: "1px solid #222", borderRadius: "6px", padding: "10px" }}>
@@ -473,9 +464,16 @@ export function WorkflowDefinitionsPage() {
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginBottom: "10px" }}>
                 <button onClick={() => void createVersionSelected()} disabled={promotionBusy} style={{ background: "#1f2937", border: "1px solid #374151", color: "#e5e7eb", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}>Create draft version</button>
-                <button onClick={() => void lifecycleSelected("activate")} disabled={promotionBusy} style={{ background: "#0f3323", border: "1px solid #166534", color: "#dcfce7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}>Activate</button>
-                <button onClick={() => void lifecycleSelected("deprecate")} disabled={promotionBusy} style={{ background: "#332b12", border: "1px solid #854d0e", color: "#fef3c7", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}>Deprecate</button>
-                <button onClick={() => void lifecycleSelected("archive")} disabled={promotionBusy} style={{ background: "#3a1618", border: "1px solid #7f1d1d", color: "#fecaca", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}>Archive</button>
+                {selected.statusTransitions.map((transition) => (
+                  <button
+                    key={transition.actionKey}
+                    onClick={() => void lifecycleSelected(transition.actionKey)}
+                    disabled={promotionBusy}
+                    style={{ background: transition.target.terminal ? "#3a1618" : "#1f2937", border: `1px solid ${transition.target.terminal ? "#7f1d1d" : "#374151"}`, color: transition.target.terminal ? "#fecaca" : "#e5e7eb", borderRadius: "6px", padding: "8px 12px", cursor: promotionBusy ? "not-allowed" : "pointer" }}
+                  >
+                    {transition.description || transition.toStatus}
+                  </button>
+                ))}
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(160px, 1fr))", gap: "8px", marginBottom: "10px" }}>
                 <div style={{ background: "#050505", border: "1px solid #1f1f1f", borderRadius: "6px", padding: "10px" }}>

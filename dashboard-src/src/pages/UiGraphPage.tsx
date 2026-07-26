@@ -26,6 +26,18 @@ interface Candidate {
   distinct_context_count: number;
   safety_class: string;
   payload: Record<string, unknown>;
+  transition_options: Array<{
+    actionKey: string;
+    toStatus: string;
+    description: string | null;
+    target: {
+      terminal: boolean;
+      dispatchable: boolean;
+      administrative: boolean;
+      manual: boolean;
+      metadata: Record<string, unknown>;
+    };
+  }>;
 }
 
 interface StatusResponse {
@@ -100,11 +112,11 @@ export function UiGraphPage() {
     finally { setBusy(false); }
   };
 
-  const candidateAction = async (id: string, action: "promote" | "quarantine") => {
+  const candidateAction = async (id: string, action: string) => {
     if (!reason.trim()) { setError("Audit reason is required"); return; }
     setBusy(true);
     try {
-      await api.post(`/ui-graph/candidates/${id}/${action}`, { reason });
+      await api.post(`/ui-graph/candidates/${id}/transition`, { action, reason });
       await load();
     } catch (err) { setError(err instanceof Error ? err.message : `${action} failed`); }
     finally { setBusy(false); }
@@ -170,8 +182,16 @@ export function UiGraphPage() {
               <div style={{ fontSize: 12 }}>{candidate.status} · {(Number(candidate.confidence) * 100).toFixed(0)}%</div>
               <div style={{ fontSize: 12, color: "#9ca3af" }}>{candidate.success_count} ok / {candidate.failure_count} fail / {candidate.distinct_context_count} portable envs</div>
               <div style={{ display: "flex", gap: 6 }}>
-                <button style={button} disabled={busy} onClick={() => void candidateAction(candidate.id, "promote")}>Promote</button>
-                <button style={{ ...button, borderColor: "#7f1d1d", color: "#fca5a5" }} disabled={busy} onClick={() => void candidateAction(candidate.id, "quarantine")}>Quarantine</button>
+                {candidate.transition_options.map((transition) => (
+                  <button
+                    key={transition.actionKey}
+                    style={{ ...button, borderColor: transition.target.administrative ? "#7f1d1d" : "#374151", color: transition.target.administrative ? "#fca5a5" : "#e5e7eb" }}
+                    disabled={busy}
+                    onClick={() => void candidateAction(candidate.id, transition.actionKey)}
+                  >
+                    {transition.description || transition.toStatus}
+                  </button>
+                ))}
               </div>
             </div>
           ))}

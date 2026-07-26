@@ -65,6 +65,18 @@ const rules = [
     pattern: /\baction\s*(?:===|!==|==|!=)\s*["'](?!(?:string|number|boolean|object|undefined|null)["'])[A-Za-z][A-Za-z0-9_.:-]*["']/g,
   },
   {
+    id: "runtime-product-action-packaged-value",
+    scope: (path) => path.endsWith("/src/api/agency-routes.ts")
+      || path.includes("/dashboard-src/src/"),
+    pattern: /\baction\s*:\s*["'][A-Za-z][A-Za-z0-9_.:-]*["']/g,
+  },
+  {
+    id: "runtime-product-action-literal-union",
+    scope: (path) => path.endsWith("/src/api/agency-routes.ts")
+      || path.includes("/dashboard-src/src/"),
+    pattern: /\b(?:[A-Za-z][A-Za-z0-9_]*Action|action)\??\s*:\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'](?:\s*\|\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'])+/g,
+  },
+  {
     id: "runtime-status-name-sql",
     scope: (path) => !path.includes("/src/db/migrations/"),
     pattern: /\b(?:status|state|lifecycle_status|candidate_state|promotion_state|library_state|artifact_state|decision|mode|phase|outcome|action_key|safety_class|portability_scope)\s*(?:=|<>|!=|(?:NOT\s+)?IN\s*\()\s*(?:["'][A-Za-z][A-Za-z0-9_.:-]*|\(\s*["'][A-Za-z][A-Za-z0-9_.:-]*)/gi,
