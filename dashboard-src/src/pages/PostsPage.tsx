@@ -5,19 +5,14 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, Post } from "../api/agency";
+import { agencyApi, LifecycleStateDefinition, Post } from "../api/agency";
 
 // ─── Status Badge ─────────────────────────────────────────────────────────────
 
-const statusColors: Record<Post["status"], { bg: string; color: string; label: string }> = {
-  pending_approval: { bg: "#3d3d00", color: "#fbbf24", label: "Pending" },
-  approved: { bg: "#0d3320", color: "#4ade80", label: "Approved" },
-  rejected: { bg: "#3d1515", color: "#f87171", label: "Rejected" },
-  published: { bg: "#1e3a5f", color: "#60a5fa", label: "Published" },
-};
-
-function StatusBadge({ status }: { status: Post["status"] }) {
-  const { bg, color, label } = statusColors[status];
+function StatusBadge({ status, definition }: { status: string; definition?: LifecycleStateDefinition }) {
+  const color = definition?.terminal
+    ? definition.retryable ? "#f87171" : "#4ade80"
+    : definition?.dispatchable ? "#60a5fa" : "#d4d4d8";
   return (
     <span
       style={{
@@ -25,11 +20,11 @@ function StatusBadge({ status }: { status: Post["status"] }) {
         borderRadius: "12px",
         fontSize: "11px",
         fontWeight: 500,
-        background: bg,
+        background: "#1f1f1f",
         color,
       }}
     >
-      {label}
+      {definition?.description ?? status}
     </span>
   );
 }
@@ -38,17 +33,19 @@ function StatusBadge({ status }: { status: Post["status"] }) {
 
 interface PostModalProps {
   post: Post;
+  definition?: LifecycleStateDefinition;
+  transitions: LifecycleStateDefinition[];
   onClose: () => void;
-  onAction: (action: "approve" | "reject") => Promise<void>;
+  onAction: (targetStatus: string) => Promise<void>;
 }
 
-function PostModal({ post, onClose, onAction }: PostModalProps) {
+function PostModal({ post, definition, transitions, onClose, onAction }: PostModalProps) {
   const [acting, setActing] = useState(false);
 
-  const handleAction = async (action: "approve" | "reject") => {
+  const handleAction = async (targetStatus: string) => {
     setActing(true);
     try {
-      await onAction(action);
+      await onAction(targetStatus);
       onClose();
     } finally {
       setActing(false);
@@ -56,8 +53,6 @@ function PostModal({ post, onClose, onAction }: PostModalProps) {
   };
 
   const content = post.content || {};
-  const canApprove = post.status === "pending_approval";
-
   return (
     <div
       style={{
@@ -99,7 +94,7 @@ function PostModal({ post, onClose, onAction }: PostModalProps) {
               <span style={{ color: "#fff", fontSize: "15px", fontWeight: 500 }}>
                 Post Preview
               </span>
-              <StatusBadge status={post.status} />
+              <StatusBadge status={post.status} definition={definition} />
             </div>
             <div style={{ color: "#666", fontSize: "12px", marginTop: "4px" }}>
               @{post.account_username} · {post.account_platform}
@@ -240,7 +235,7 @@ function PostModal({ post, onClose, onAction }: PostModalProps) {
         </div>
 
         {/* Footer with actions */}
-        {canApprove && (
+        {transitions.length > 0 && (
           <div
             style={{
               padding: "16px 20px",
@@ -250,38 +245,25 @@ function PostModal({ post, onClose, onAction }: PostModalProps) {
               gap: "12px",
             }}
           >
-            <button
-              onClick={() => handleAction("reject")}
-              disabled={acting}
-              style={{
-                padding: "10px 20px",
-                background: acting ? "#333" : "#7f1d1d",
-                border: "none",
-                borderRadius: "6px",
-                color: "#fff",
-                cursor: acting ? "not-allowed" : "pointer",
-                fontSize: "13px",
-                fontWeight: 500,
-              }}
-            >
-              ❌ Reject
-            </button>
-            <button
-              onClick={() => handleAction("approve")}
-              disabled={acting}
-              style={{
-                padding: "10px 20px",
-                background: acting ? "#333" : "#166534",
-                border: "none",
-                borderRadius: "6px",
-                color: "#fff",
-                cursor: acting ? "not-allowed" : "pointer",
-                fontSize: "13px",
-                fontWeight: 500,
-              }}
-            >
-              ✅ Approve
-            </button>
+            {transitions.map((target) => (
+              <button
+                key={target.status}
+                onClick={() => handleAction(target.status)}
+                disabled={acting}
+                style={{
+                  padding: "10px 20px",
+                  background: acting ? "#333" : "#1f2937",
+                  border: "none",
+                  borderRadius: "6px",
+                  color: "#fff",
+                  cursor: acting ? "not-allowed" : "pointer",
+                  fontSize: "13px",
+                  fontWeight: 500,
+                }}
+              >
+                {target.description ?? target.status}
+              </button>
+            ))}
           </div>
         )}
       </div>
@@ -293,10 +275,11 @@ function PostModal({ post, onClose, onAction }: PostModalProps) {
 
 interface PostCardProps {
   post: Post;
+  definition?: LifecycleStateDefinition;
   onClick: () => void;
 }
 
-function PostCard({ post, onClick }: PostCardProps) {
+function PostCard({ post, definition, onClick }: PostCardProps) {
   const content = post.content || {};
   const caption = content.caption || "";
   const previewText = caption.slice(0, 100) + (caption.length > 100 ? "..." : "");
@@ -331,7 +314,7 @@ function PostCard({ post, onClick }: PostCardProps) {
             {post.account_platform || post.platform}
           </div>
         </div>
-        <StatusBadge status={post.status} />
+        <StatusBadge status={post.status} definition={definition} />
       </div>
 
       {/* Thumbnail */}
@@ -377,37 +360,27 @@ function PostCard({ post, onClick }: PostCardProps) {
 
 export function PostsPage() {
   const [posts, setPosts] = useState<Post[]>([]);
+  const [definitions, setDefinitions] = useState<LifecycleStateDefinition[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedPost, setSelectedPost] = useState<Post | null>(null);
+  const [selectedTransitions, setSelectedTransitions] = useState<LifecycleStateDefinition[]>([]);
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [platformFilter, setPlatformFilter] = useState<string>("");
 
-  // Stats
-  const [stats, setStats] = useState<{ pending: number; approved: number; rejected: number; published: number }>({
-    pending: 0,
-    approved: 0,
-    rejected: 0,
-    published: 0,
-  });
-
   const fetchPosts = useCallback(async () => {
     try {
-      const data = await agencyApi.posts.list({
-        status: statusFilter || undefined,
-        pageSize: 100,
-      });
+      const [data, lifecycleDefinitions] = await Promise.all([
+        agencyApi.posts.list({
+          status: statusFilter || undefined,
+          pageSize: 100,
+        }),
+        agencyApi.posts.definitions(),
+      ]);
       setPosts(data.items);
-
-      // Calculate stats from data
-      const pending = data.items.filter((p) => p.status === "pending_approval").length;
-      const approved = data.items.filter((p) => p.status === "approved").length;
-      const rejected = data.items.filter((p) => p.status === "rejected").length;
-      const published = data.items.filter((p) => p.status === "published").length;
-      setStats({ pending, approved, rejected, published });
-
+      setDefinitions(lifecycleDefinitions);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -447,16 +420,28 @@ export function PostsPage() {
   // Get unique platforms for filter
   const platforms = [...new Set(posts.map((p) => p.account_platform || p.platform))];
 
-  const handleAction = async (postId: string, action: "approve" | "reject") => {
+  const definitionByStatus = new Map(definitions.map((definition) => [definition.status, definition]));
+  const statusStats = definitions.map((definition) => ({
+    definition,
+    count: posts.filter((post) => post.status === definition.status).length,
+  }));
+
+  const selectPost = async (post: Post) => {
+    setSelectedPost(post);
     try {
-      if (action === "approve") {
-        await agencyApi.posts.approve(postId);
-      } else {
-        await agencyApi.posts.reject(postId);
-      }
+      setSelectedTransitions(await agencyApi.posts.transitions(post.id));
+    } catch (e) {
+      setSelectedTransitions([]);
+      setError((e as Error).message);
+    }
+  };
+
+  const handleAction = async (postId: string, targetStatus: string) => {
+    try {
+      await agencyApi.posts.transition(postId, targetStatus);
       await fetchPosts();
     } catch (e) {
-      alert(`Failed to ${action}: ${(e as Error).message}`);
+      alert(`Transition failed: ${(e as Error).message}`);
     }
   };
 
@@ -482,62 +467,25 @@ export function PostsPage() {
           border: "1px solid #222",
         }}
       >
-        <div
-          onClick={() => setStatusFilter("pending_approval")}
-          style={{
-            flex: 1,
-            padding: "12px",
-            background: statusFilter === "pending_approval" ? "#3d3d00" : "#0a0a0a",
-            borderRadius: "6px",
-            cursor: "pointer",
-            textAlign: "center",
-          }}
-        >
-          <div style={{ color: "#fbbf24", fontSize: "24px", fontWeight: 600 }}>{stats.pending}</div>
-          <div style={{ color: "#888", fontSize: "11px" }}>Pending</div>
-        </div>
-        <div
-          onClick={() => setStatusFilter("approved")}
-          style={{
-            flex: 1,
-            padding: "12px",
-            background: statusFilter === "approved" ? "#0d3320" : "#0a0a0a",
-            borderRadius: "6px",
-            cursor: "pointer",
-            textAlign: "center",
-          }}
-        >
-          <div style={{ color: "#4ade80", fontSize: "24px", fontWeight: 600 }}>{stats.approved}</div>
-          <div style={{ color: "#888", fontSize: "11px" }}>Approved</div>
-        </div>
-        <div
-          onClick={() => setStatusFilter("rejected")}
-          style={{
-            flex: 1,
-            padding: "12px",
-            background: statusFilter === "rejected" ? "#3d1515" : "#0a0a0a",
-            borderRadius: "6px",
-            cursor: "pointer",
-            textAlign: "center",
-          }}
-        >
-          <div style={{ color: "#f87171", fontSize: "24px", fontWeight: 600 }}>{stats.rejected}</div>
-          <div style={{ color: "#888", fontSize: "11px" }}>Rejected</div>
-        </div>
-        <div
-          onClick={() => setStatusFilter("published")}
-          style={{
-            flex: 1,
-            padding: "12px",
-            background: statusFilter === "published" ? "#1e3a5f" : "#0a0a0a",
-            borderRadius: "6px",
-            cursor: "pointer",
-            textAlign: "center",
-          }}
-        >
-          <div style={{ color: "#60a5fa", fontSize: "24px", fontWeight: 600 }}>{stats.published}</div>
-          <div style={{ color: "#888", fontSize: "11px" }}>Published</div>
-        </div>
+        {statusStats.map(({ definition, count }) => (
+          <div
+            key={definition.status}
+            onClick={() => setStatusFilter(definition.status)}
+            style={{
+              flex: 1,
+              padding: "12px",
+              background: statusFilter === definition.status ? "#1f2937" : "#0a0a0a",
+              borderRadius: "6px",
+              cursor: "pointer",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ color: "#d4d4d8", fontSize: "24px", fontWeight: 600 }}>{count}</div>
+            <div style={{ color: "#888", fontSize: "11px" }}>
+              {definition.description ?? definition.status}
+            </div>
+          </div>
+        ))}
         <div
           onClick={() => setStatusFilter("")}
           style={{
@@ -639,7 +587,12 @@ export function PostsPage() {
                 }}
               >
                 {groupedByDate[date].map((post) => (
-                  <PostCard key={post.id} post={post} onClick={() => setSelectedPost(post)} />
+                  <PostCard
+                    key={post.id}
+                    post={post}
+                    definition={definitionByStatus.get(post.status)}
+                    onClick={() => void selectPost(post)}
+                  />
                 ))}
               </div>
             </div>
@@ -651,8 +604,10 @@ export function PostsPage() {
       {selectedPost && (
         <PostModal
           post={selectedPost}
+          definition={definitionByStatus.get(selectedPost.status)}
+          transitions={selectedTransitions}
           onClose={() => setSelectedPost(null)}
-          onAction={(action) => handleAction(selectedPost.id, action)}
+          onAction={(targetStatus) => handleAction(selectedPost.id, targetStatus)}
         />
       )}
     </AgencyLayout>

@@ -17,10 +17,10 @@ function Badge({ label, tone }: { label: string; tone: "green" | "yellow" | "gra
   );
 }
 
-function toneForState(state?: string): "green" | "yellow" | "gray" | "red" {
-  if (state === "enabled") return "green";
-  if (state === "review_ready") return "yellow";
-  if (state === "blocked") return "red";
+function toneForCapabilities(capabilities?: { terminal?: boolean; retryable?: boolean; dispatchable?: boolean }): "green" | "yellow" | "gray" | "red" {
+  if (capabilities?.dispatchable) return "green";
+  if (capabilities?.terminal && capabilities?.retryable) return "red";
+  if (capabilities?.retryable) return "yellow";
   return "gray";
 }
 
@@ -69,14 +69,14 @@ export function CompilerControlPlanePage() {
   const reuseSummary = data?.limitedReusePlan.summary;
   const visibleTools = useMemo(() => (manifest?.tools ?? []).slice(0, 10), [manifest?.tools]);
 
-  const updateGate = useCallback(async (gateId: string, state: "blocked" | "review_ready" | "enabled", risk?: string) => {
+  const updateGate = useCallback(async (gateId: string, state: string, metadata?: Record<string, unknown>, risk?: string) => {
     setLoading(true);
     setError(null);
     try {
       await agencyApi.compilerPolicyGates.update(gateId, {
         state,
         note: gateNote || null,
-        config: state === "enabled" && risk === "high" ? { explicitApproval: true } : {},
+        config: metadata?.requiresExplicitApproval === true && risk === "high" ? { explicitApproval: true } : {},
       });
       await load();
     } catch (err) {
@@ -157,7 +157,7 @@ export function CompilerControlPlanePage() {
         <section style={{ border: "1px solid #222", borderRadius: "6px", background: "#101010", padding: "14px" }}>
           <div style={{ color: "#fff", fontSize: "15px", fontWeight: 600, marginBottom: "10px" }}>Capability Manifest</div>
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }}>
-            <Badge label={manifest?.compatibility.state ?? "unknown_device"} tone={manifest?.compatibility.state === "known_device" ? "green" : "yellow"} />
+            <Badge label={manifest?.compatibility.state ?? "unknown_device"} tone="gray" />
             <Badge label={`device: ${manifest?.deviceName ?? "-"}`} tone="gray" />
             <Badge label={`agent: ${manifest?.agentVersion ?? "-"}`} tone="gray" />
           </div>
@@ -217,14 +217,21 @@ export function CompilerControlPlanePage() {
               <div style={{ color: "#e5e7eb", fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{gate.title}</div>
               <div style={{ color: "#666", fontSize: "11px", marginTop: "4px" }}>{gate.id}</div>
               <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "8px" }}>
-                <Badge label={gate.state} tone={toneForState(gate.state)} />
+                <Badge label={gate.state} tone={toneForCapabilities(gate.stateCapabilities)} />
                 <Badge label={`v${gate.version ?? 1}`} tone="blue" />
                 <Badge label={gate.risk} tone={gate.risk === "high" ? "red" : gate.risk === "medium" ? "yellow" : "green"} />
               </div>
               <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "10px" }}>
-                <button onClick={() => void updateGate(gate.id, "blocked", gate.risk)} disabled={loading || gate.state === "blocked"} style={{ background: "#1f1f1f", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "6px 8px", cursor: loading || gate.state === "blocked" ? "not-allowed" : "pointer", fontSize: "11px" }}>Block</button>
-                <button onClick={() => void updateGate(gate.id, "review_ready", gate.risk)} disabled={loading || gate.state === "review_ready"} style={{ background: "#332b12", border: "1px solid #854d0e", color: "#fef3c7", borderRadius: "6px", padding: "6px 8px", cursor: loading || gate.state === "review_ready" ? "not-allowed" : "pointer", fontSize: "11px" }}>Review</button>
-                <button onClick={() => void updateGate(gate.id, "enabled", gate.risk)} disabled={loading || gate.state === "enabled"} style={{ background: "#0f3323", border: "1px solid #166534", color: "#dcfce7", borderRadius: "6px", padding: "6px 8px", cursor: loading || gate.state === "enabled" ? "not-allowed" : "pointer", fontSize: "11px" }}>Enable</button>
+                {(gate.allowedStates ?? []).map((target) => (
+                  <button
+                    key={target.status}
+                    onClick={() => void updateGate(gate.id, target.status, target.metadata, gate.risk)}
+                    disabled={loading}
+                    style={{ background: "#1f1f1f", border: "1px solid #333", color: "#ddd", borderRadius: "6px", padding: "6px 8px", cursor: loading ? "not-allowed" : "pointer", fontSize: "11px" }}
+                  >
+                    {target.description ?? target.status}
+                  </button>
+                ))}
               </div>
             </div>
           ))}
@@ -237,8 +244,8 @@ export function CompilerControlPlanePage() {
           {gateEvents.map((event) => (
             <div key={event.id} style={{ display: "grid", gridTemplateColumns: "1fr 110px 110px 140px", gap: "10px", alignItems: "center", borderBottom: "1px solid #1f1f1f", paddingBottom: "8px" }}>
               <div style={{ color: "#e5e7eb", fontSize: "12px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{event.gateId}</div>
-              <Badge label={event.previousState ?? "-"} tone={toneForState(event.previousState ?? undefined)} />
-              <Badge label={event.nextState} tone={toneForState(event.nextState)} />
+              <Badge label={event.previousState ?? "-"} tone="gray" />
+              <Badge label={event.nextState} tone="gray" />
               <div style={{ color: "#666", fontSize: "11px" }}>{event.createdAt ? new Date(event.createdAt).toLocaleString() : "-"}</div>
             </div>
           ))}

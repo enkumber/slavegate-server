@@ -7,29 +7,25 @@ import { useState, useEffect, useCallback } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
 import { agencyApi } from "../api/agency";
 // ─── Status Badge ─────────────────────────────────────────────────────────────
-const statusColors = {
-    pending_approval: { bg: "#3d3d00", color: "#fbbf24", label: "Pending" },
-    approved: { bg: "#0d3320", color: "#4ade80", label: "Approved" },
-    rejected: { bg: "#3d1515", color: "#f87171", label: "Rejected" },
-    published: { bg: "#1e3a5f", color: "#60a5fa", label: "Published" },
-};
-function StatusBadge({ status }) {
-    const { bg, color, label } = statusColors[status];
+function StatusBadge({ status, definition }) {
+    const color = definition?.terminal
+        ? definition.retryable ? "#f87171" : "#4ade80"
+        : definition?.dispatchable ? "#60a5fa" : "#d4d4d8";
     return (_jsx("span", { style: {
             padding: "3px 10px",
             borderRadius: "12px",
             fontSize: "11px",
             fontWeight: 500,
-            background: bg,
+            background: "#1f1f1f",
             color,
-        }, children: label }));
+        }, children: definition?.description ?? status }));
 }
-function PostModal({ post, onClose, onAction }) {
+function PostModal({ post, definition, transitions, onClose, onAction }) {
     const [acting, setActing] = useState(false);
-    const handleAction = async (action) => {
+    const handleAction = async (targetStatus) => {
         setActing(true);
         try {
-            await onAction(action);
+            await onAction(targetStatus);
             onClose();
         }
         finally {
@@ -37,7 +33,6 @@ function PostModal({ post, onClose, onAction }) {
         }
     };
     const content = post.content || {};
-    const canApprove = post.status === "pending_approval";
     return (_jsx("div", { style: {
             position: "fixed",
             inset: 0,
@@ -61,7 +56,7 @@ function PostModal({ post, onClose, onAction }) {
                         display: "flex",
                         justifyContent: "space-between",
                         alignItems: "center",
-                    }, children: [_jsxs("div", { children: [_jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [_jsx("span", { style: { color: "#fff", fontSize: "15px", fontWeight: 500 }, children: "Post Preview" }), _jsx(StatusBadge, { status: post.status })] }), _jsxs("div", { style: { color: "#666", fontSize: "12px", marginTop: "4px" }, children: ["@", post.account_username, " \u00B7 ", post.account_platform] })] }), _jsx("button", { onClick: onClose, style: {
+                    }, children: [_jsxs("div", { children: [_jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [_jsx("span", { style: { color: "#fff", fontSize: "15px", fontWeight: 500 }, children: "Post Preview" }), _jsx(StatusBadge, { status: post.status, definition: definition })] }), _jsxs("div", { style: { color: "#666", fontSize: "12px", marginTop: "4px" }, children: ["@", post.account_username, " \u00B7 ", post.account_platform] })] }), _jsx("button", { onClick: onClose, style: {
                                 background: "none",
                                 border: "none",
                                 color: "#666",
@@ -100,33 +95,24 @@ function PostModal({ post, onClose, onAction }) {
                                 padding: "12px",
                                 background: "#0a0a0a",
                                 borderRadius: "6px",
-                            }, children: [_jsxs("div", { children: [_jsx("div", { style: { color: "#666", fontSize: "11px" }, children: "Created by" }), _jsx("div", { style: { color: "#ccc", fontSize: "13px" }, children: post.created_by })] }), _jsxs("div", { children: [_jsx("div", { style: { color: "#666", fontSize: "11px" }, children: "Created at" }), _jsx("div", { style: { color: "#ccc", fontSize: "13px" }, children: new Date(post.created_at).toLocaleString() })] }), post.approved_at && (_jsxs("div", { children: [_jsx("div", { style: { color: "#666", fontSize: "11px" }, children: "Approved at" }), _jsx("div", { style: { color: "#ccc", fontSize: "13px" }, children: new Date(post.approved_at).toLocaleString() })] })), post.published_at && (_jsxs("div", { children: [_jsx("div", { style: { color: "#666", fontSize: "11px" }, children: "Published at" }), _jsx("div", { style: { color: "#ccc", fontSize: "13px" }, children: new Date(post.published_at).toLocaleString() })] }))] })] }), canApprove && (_jsxs("div", { style: {
+                            }, children: [_jsxs("div", { children: [_jsx("div", { style: { color: "#666", fontSize: "11px" }, children: "Created by" }), _jsx("div", { style: { color: "#ccc", fontSize: "13px" }, children: post.created_by })] }), _jsxs("div", { children: [_jsx("div", { style: { color: "#666", fontSize: "11px" }, children: "Created at" }), _jsx("div", { style: { color: "#ccc", fontSize: "13px" }, children: new Date(post.created_at).toLocaleString() })] }), post.approved_at && (_jsxs("div", { children: [_jsx("div", { style: { color: "#666", fontSize: "11px" }, children: "Approved at" }), _jsx("div", { style: { color: "#ccc", fontSize: "13px" }, children: new Date(post.approved_at).toLocaleString() })] })), post.published_at && (_jsxs("div", { children: [_jsx("div", { style: { color: "#666", fontSize: "11px" }, children: "Published at" }), _jsx("div", { style: { color: "#ccc", fontSize: "13px" }, children: new Date(post.published_at).toLocaleString() })] }))] })] }), transitions.length > 0 && (_jsx("div", { style: {
                         padding: "16px 20px",
                         borderTop: "1px solid #222",
                         display: "flex",
                         justifyContent: "flex-end",
                         gap: "12px",
-                    }, children: [_jsx("button", { onClick: () => handleAction("reject"), disabled: acting, style: {
-                                padding: "10px 20px",
-                                background: acting ? "#333" : "#7f1d1d",
-                                border: "none",
-                                borderRadius: "6px",
-                                color: "#fff",
-                                cursor: acting ? "not-allowed" : "pointer",
-                                fontSize: "13px",
-                                fontWeight: 500,
-                            }, children: "\u274C Reject" }), _jsx("button", { onClick: () => handleAction("approve"), disabled: acting, style: {
-                                padding: "10px 20px",
-                                background: acting ? "#333" : "#166534",
-                                border: "none",
-                                borderRadius: "6px",
-                                color: "#fff",
-                                cursor: acting ? "not-allowed" : "pointer",
-                                fontSize: "13px",
-                                fontWeight: 500,
-                            }, children: "\u2705 Approve" })] }))] }) }));
+                    }, children: transitions.map((target) => (_jsx("button", { onClick: () => handleAction(target.status), disabled: acting, style: {
+                            padding: "10px 20px",
+                            background: acting ? "#333" : "#1f2937",
+                            border: "none",
+                            borderRadius: "6px",
+                            color: "#fff",
+                            cursor: acting ? "not-allowed" : "pointer",
+                            fontSize: "13px",
+                            fontWeight: 500,
+                        }, children: target.description ?? target.status }, target.status))) }))] }) }));
 }
-function PostCard({ post, onClick }) {
+function PostCard({ post, definition, onClick }) {
     const content = post.content || {};
     const caption = content.caption || "";
     const previewText = caption.slice(0, 100) + (caption.length > 100 ? "..." : "");
@@ -143,7 +129,7 @@ function PostCard({ post, onClick }) {
         }, onMouseLeave: (e) => {
             e.currentTarget.style.borderColor = "#222";
             e.currentTarget.style.transform = "translateY(0)";
-        }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "10px" }, children: [_jsxs("div", { children: [_jsxs("div", { style: { color: "#fff", fontSize: "13px", fontWeight: 500 }, children: ["@", post.account_username || "unknown"] }), _jsx("div", { style: { color: "#666", fontSize: "11px" }, children: post.account_platform || post.platform })] }), _jsx(StatusBadge, { status: post.status })] }), content.thumbnail_url || content.media_url ? (_jsx("div", { style: {
+        }, children: [_jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "10px" }, children: [_jsxs("div", { children: [_jsxs("div", { style: { color: "#fff", fontSize: "13px", fontWeight: 500 }, children: ["@", post.account_username || "unknown"] }), _jsx("div", { style: { color: "#666", fontSize: "11px" }, children: post.account_platform || post.platform })] }), _jsx(StatusBadge, { status: post.status, definition: definition })] }), content.thumbnail_url || content.media_url ? (_jsx("div", { style: {
                     width: "100%",
                     height: "120px",
                     marginBottom: "10px",
@@ -159,32 +145,25 @@ function PostCard({ post, onClick }) {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export function PostsPage() {
     const [posts, setPosts] = useState([]);
+    const [definitions, setDefinitions] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [selectedPost, setSelectedPost] = useState(null);
+    const [selectedTransitions, setSelectedTransitions] = useState([]);
     // Filters
     const [statusFilter, setStatusFilter] = useState("");
     const [platformFilter, setPlatformFilter] = useState("");
-    // Stats
-    const [stats, setStats] = useState({
-        pending: 0,
-        approved: 0,
-        rejected: 0,
-        published: 0,
-    });
     const fetchPosts = useCallback(async () => {
         try {
-            const data = await agencyApi.posts.list({
-                status: statusFilter || undefined,
-                pageSize: 100,
-            });
+            const [data, lifecycleDefinitions] = await Promise.all([
+                agencyApi.posts.list({
+                    status: statusFilter || undefined,
+                    pageSize: 100,
+                }),
+                agencyApi.posts.definitions(),
+            ]);
             setPosts(data.items);
-            // Calculate stats from data
-            const pending = data.items.filter((p) => p.status === "pending_approval").length;
-            const approved = data.items.filter((p) => p.status === "approved").length;
-            const rejected = data.items.filter((p) => p.status === "rejected").length;
-            const published = data.items.filter((p) => p.status === "published").length;
-            setStats({ pending, approved, rejected, published });
+            setDefinitions(lifecycleDefinitions);
             setError(null);
         }
         catch (e) {
@@ -216,18 +195,28 @@ export function PostsPage() {
     const sortedDates = Object.keys(groupedByDate).sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
     // Get unique platforms for filter
     const platforms = [...new Set(posts.map((p) => p.account_platform || p.platform))];
-    const handleAction = async (postId, action) => {
+    const definitionByStatus = new Map(definitions.map((definition) => [definition.status, definition]));
+    const statusStats = definitions.map((definition) => ({
+        definition,
+        count: posts.filter((post) => post.status === definition.status).length,
+    }));
+    const selectPost = async (post) => {
+        setSelectedPost(post);
         try {
-            if (action === "approve") {
-                await agencyApi.posts.approve(postId);
-            }
-            else {
-                await agencyApi.posts.reject(postId);
-            }
+            setSelectedTransitions(await agencyApi.posts.transitions(post.id));
+        }
+        catch (e) {
+            setSelectedTransitions([]);
+            setError(e.message);
+        }
+    };
+    const handleAction = async (postId, targetStatus) => {
+        try {
+            await agencyApi.posts.transition(postId, targetStatus);
             await fetchPosts();
         }
         catch (e) {
-            alert(`Failed to ${action}: ${e.message}`);
+            alert(`Transition failed: ${e.message}`);
         }
     };
     return (_jsxs(AgencyLayout, { currentRoute: "#/agency/posts", children: [_jsxs("div", { style: { marginBottom: "24px" }, children: [_jsx("h1", { style: { color: "#fff", margin: 0, fontSize: "24px" }, children: "\uD83D\uDCDD Posts" }), _jsx("p", { style: { color: "#666", margin: "8px 0 0", fontSize: "13px" }, children: "Review and approve content before publishing" })] }), _jsxs("div", { style: {
@@ -238,35 +227,14 @@ export function PostsPage() {
                     background: "#111",
                     borderRadius: "8px",
                     border: "1px solid #222",
-                }, children: [_jsxs("div", { onClick: () => setStatusFilter("pending_approval"), style: {
+                }, children: [statusStats.map(({ definition, count }) => (_jsxs("div", { onClick: () => setStatusFilter(definition.status), style: {
                             flex: 1,
                             padding: "12px",
-                            background: statusFilter === "pending_approval" ? "#3d3d00" : "#0a0a0a",
+                            background: statusFilter === definition.status ? "#1f2937" : "#0a0a0a",
                             borderRadius: "6px",
                             cursor: "pointer",
                             textAlign: "center",
-                        }, children: [_jsx("div", { style: { color: "#fbbf24", fontSize: "24px", fontWeight: 600 }, children: stats.pending }), _jsx("div", { style: { color: "#888", fontSize: "11px" }, children: "Pending" })] }), _jsxs("div", { onClick: () => setStatusFilter("approved"), style: {
-                            flex: 1,
-                            padding: "12px",
-                            background: statusFilter === "approved" ? "#0d3320" : "#0a0a0a",
-                            borderRadius: "6px",
-                            cursor: "pointer",
-                            textAlign: "center",
-                        }, children: [_jsx("div", { style: { color: "#4ade80", fontSize: "24px", fontWeight: 600 }, children: stats.approved }), _jsx("div", { style: { color: "#888", fontSize: "11px" }, children: "Approved" })] }), _jsxs("div", { onClick: () => setStatusFilter("rejected"), style: {
-                            flex: 1,
-                            padding: "12px",
-                            background: statusFilter === "rejected" ? "#3d1515" : "#0a0a0a",
-                            borderRadius: "6px",
-                            cursor: "pointer",
-                            textAlign: "center",
-                        }, children: [_jsx("div", { style: { color: "#f87171", fontSize: "24px", fontWeight: 600 }, children: stats.rejected }), _jsx("div", { style: { color: "#888", fontSize: "11px" }, children: "Rejected" })] }), _jsxs("div", { onClick: () => setStatusFilter("published"), style: {
-                            flex: 1,
-                            padding: "12px",
-                            background: statusFilter === "published" ? "#1e3a5f" : "#0a0a0a",
-                            borderRadius: "6px",
-                            cursor: "pointer",
-                            textAlign: "center",
-                        }, children: [_jsx("div", { style: { color: "#60a5fa", fontSize: "24px", fontWeight: 600 }, children: stats.published }), _jsx("div", { style: { color: "#888", fontSize: "11px" }, children: "Published" })] }), _jsxs("div", { onClick: () => setStatusFilter(""), style: {
+                        }, children: [_jsx("div", { style: { color: "#d4d4d8", fontSize: "24px", fontWeight: 600 }, children: count }), _jsx("div", { style: { color: "#888", fontSize: "11px" }, children: definition.description ?? definition.status })] }, definition.status))), _jsxs("div", { onClick: () => setStatusFilter(""), style: {
                             flex: 1,
                             padding: "12px",
                             background: statusFilter === "" ? "#1a1a2e" : "#0a0a0a",
@@ -307,5 +275,5 @@ export function PostsPage() {
                                 display: "grid",
                                 gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
                                 gap: "16px",
-                            }, children: groupedByDate[date].map((post) => (_jsx(PostCard, { post: post, onClick: () => setSelectedPost(post) }, post.id))) })] }, date))) })), selectedPost && (_jsx(PostModal, { post: selectedPost, onClose: () => setSelectedPost(null), onAction: (action) => handleAction(selectedPost.id, action) }))] }));
+                            }, children: groupedByDate[date].map((post) => (_jsx(PostCard, { post: post, definition: definitionByStatus.get(post.status), onClick: () => void selectPost(post) }, post.id))) })] }, date))) })), selectedPost && (_jsx(PostModal, { post: selectedPost, definition: definitionByStatus.get(selectedPost.status), transitions: selectedTransitions, onClose: () => setSelectedPost(null), onAction: (targetStatus) => handleAction(selectedPost.id, targetStatus) }))] }));
 }

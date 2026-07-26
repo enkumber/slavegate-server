@@ -336,14 +336,14 @@ function readyFromCache(
 async function readyFromComposition(
   composed: ComposedWorkflow,
   target: HumanWorkflowTarget,
-  artifactState: "candidate" | "promoted" = "promoted",
+  executable = true,
 ): Promise<HumanWorkflowCompileReady> {
   const compiledPlan = compileGeneratedWorkflowTemplate(composed.template);
   let cached = await workflowService.getGeneratedPlanCache(compiledPlan.cacheKey);
   if (!cached) {
-    const save = artifactState === "candidate"
-      ? workflowService.saveCandidateExecutableGeneratedPlanCache.bind(workflowService)
-      : workflowService.saveExecutableGeneratedPlanCache.bind(workflowService);
+    const save = executable
+      ? workflowService.saveExecutableGeneratedPlanCache.bind(workflowService)
+      : workflowService.saveCandidateExecutableGeneratedPlanCache.bind(workflowService);
     await save(
       composed.template,
       compiledPlan,
@@ -361,7 +361,7 @@ async function readyFromComposition(
       },
     );
     cached = await workflowService.getGeneratedPlanCache(compiledPlan.cacheKey, {
-      includeCandidate: artifactState === "candidate",
+      includeCandidate: !executable,
     });
   }
   if (!cached) {
@@ -503,7 +503,7 @@ export class HumanWorkflowCompilerService {
         code: "WORKFLOW_COMPOSITION_CANDIDATE_NOT_FOUND",
       });
     }
-    return readyFromComposition(composed, target, "candidate");
+    return readyFromComposition(composed, target, false);
   }
 
   async compile(input: {

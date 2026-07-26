@@ -32,13 +32,7 @@ function sourceTone(source) {
         return "red";
     return "green";
 }
-function stateTone(state) {
-    if (state === "enabled")
-        return "green";
-    if (state === "review_ready")
-        return "yellow";
-    if (state === "blocked")
-        return "red";
+function stateTone(_state) {
     return "gray";
 }
 function listText(values) {

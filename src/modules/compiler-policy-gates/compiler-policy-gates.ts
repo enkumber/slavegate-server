@@ -14,6 +14,12 @@ export interface CompilerPolicyGate {
     dispatchable: boolean;
     manual: boolean;
   };
+  stateMetadata?: Record<string, unknown>;
+  allowedStates?: Array<{
+    status: string;
+    description: string | null;
+    metadata: Record<string, unknown>;
+  }>;
   risk: CompilerPolicyGateRisk;
   owner: "product" | "engineering" | "qa" | "security";
   blocks: string[];
@@ -48,6 +54,8 @@ export interface CompilerPolicyGateConfigRow {
   state_administrative?: boolean | null;
   state_dispatchable?: boolean | null;
   state_manual?: boolean | null;
+  state_metadata?: Record<string, unknown> | null;
+  allowed_states?: unknown;
 }
 
 function strings(value: unknown): string[] {
@@ -88,6 +96,17 @@ function toGate(row: CompilerPolicyGateConfigRow): CompilerPolicyGate {
       dispatchable: row.state_dispatchable === true,
       manual: row.state_manual === true,
     },
+    stateMetadata: object(row.state_metadata),
+    allowedStates: Array.isArray(row.allowed_states)
+      ? row.allowed_states
+        .map((value) => object(value))
+        .filter((value) => typeof value.status === "string")
+        .map((value) => ({
+          status: String(value.status),
+          description: typeof value.description === "string" ? value.description : null,
+          metadata: object(value.metadata),
+        }))
+      : [],
     risk: risk(row.risk),
     owner: owner(row.owner),
     blocks: strings(config.blocks),

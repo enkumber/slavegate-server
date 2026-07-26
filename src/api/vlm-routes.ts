@@ -183,10 +183,10 @@ router.get("/health", async (_req: Request, res: Response) => {
     res.json({
       ok: true,
       provider: "vision-service",
-      status: "available",
+      availability: "available",
     });
   } catch {
-    res.status(503).json({ ok: false, status: "unavailable" });
+    res.status(503).json({ ok: false, availability: "unavailable" });
   }
 });
 

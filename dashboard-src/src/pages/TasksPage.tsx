@@ -5,20 +5,14 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { AgencyLayout } from "../components/AgencyLayout";
-import { agencyApi, Task } from "../api/agency";
+import { agencyApi, LifecycleStateDefinition, Task } from "../api/agency";
 
 // ─── Status Badge ─────────────────────────────────────────────────────────────
 
-const statusConfig: Record<Task["status"], { bg: string; color: string; label: string; pulse?: boolean }> = {
-  queued: { bg: "#374151", color: "#9ca3af", label: "Queued" },
-  running: { bg: "#1e3a5f", color: "#60a5fa", label: "Running", pulse: true },
-  completed: { bg: "#0d3320", color: "#4ade80", label: "Completed" },
-  failed: { bg: "#3d1515", color: "#f87171", label: "Failed" },
-  paused: { bg: "#3d3d00", color: "#fbbf24", label: "Paused" },
-};
-
-function StatusBadge({ status }: { status: Task["status"] }) {
-  const config = statusConfig[status];
+function StatusBadge({ status, definition }: { status: string; definition?: LifecycleStateDefinition }) {
+  const color = definition?.terminal
+    ? definition.retryable ? "#f87171" : "#4ade80"
+    : definition?.dispatchable ? "#60a5fa" : "#d4d4d8";
   return (
     <span
       style={{
@@ -26,13 +20,11 @@ function StatusBadge({ status }: { status: Task["status"] }) {
         borderRadius: "12px",
         fontSize: "11px",
         fontWeight: 500,
-        background: config.bg,
-        color: config.color,
-        animation: config.pulse ? "pulse 2s infinite" : undefined,
+        background: "#1f1f1f",
+        color,
       }}
     >
-      {status === "running" && "⚡ "}
-      {config.label}
+      {definition?.description ?? status}
     </span>
   );
 }
@@ -41,26 +33,24 @@ function StatusBadge({ status }: { status: Task["status"] }) {
 
 interface TaskModalProps {
   task: Task;
+  definition?: LifecycleStateDefinition;
+  transitions: LifecycleStateDefinition[];
   onClose: () => void;
-  onAction: (action: "pause" | "resume" | "cancel") => Promise<void>;
+  onAction: (targetStatus: string) => Promise<void>;
 }
 
-function TaskModal({ task, onClose, onAction }: TaskModalProps) {
+function TaskModal({ task, definition, transitions, onClose, onAction }: TaskModalProps) {
   const [acting, setActing] = useState(false);
 
-  const handleAction = async (action: "pause" | "resume" | "cancel") => {
+  const handleAction = async (targetStatus: string) => {
     setActing(true);
     try {
-      await onAction(action);
+      await onAction(targetStatus);
       onClose();
     } finally {
       setActing(false);
     }
   };
-
-  const canPause = task.status === "queued";
-  const canResume = task.status === "paused";
-  const canCancel = task.status === "queued" || task.status === "paused";
 
   return (
     <div
@@ -103,7 +93,7 @@ function TaskModal({ task, onClose, onAction }: TaskModalProps) {
               <span style={{ color: "#fff", fontSize: "15px", fontWeight: 500 }}>
                 Task Details
               </span>
-              <StatusBadge status={task.status} />
+              <StatusBadge status={task.status} definition={definition} />
             </div>
             <div style={{ color: "#666", fontSize: "12px", marginTop: "4px" }}>
               {task.routine}
@@ -201,7 +191,7 @@ function TaskModal({ task, onClose, onAction }: TaskModalProps) {
         </div>
 
         {/* Footer with actions */}
-        {(canPause || canResume || canCancel) && (
+        {transitions.length > 0 && (
           <div
             style={{
               padding: "16px 20px",
@@ -211,13 +201,14 @@ function TaskModal({ task, onClose, onAction }: TaskModalProps) {
               gap: "12px",
             }}
           >
-            {canPause && (
+            {transitions.map((target) => (
               <button
-                onClick={() => handleAction("pause")}
+                key={target.status}
+                onClick={() => handleAction(target.status)}
                 disabled={acting}
                 style={{
                   padding: "10px 20px",
-                  background: acting ? "#333" : "#854d0e",
+                  background: acting ? "#333" : "#1f2937",
                   border: "none",
                   borderRadius: "6px",
                   color: "#fff",
@@ -225,26 +216,9 @@ function TaskModal({ task, onClose, onAction }: TaskModalProps) {
                   fontSize: "13px",
                 }}
               >
-                ⏸️ Pause
+                {target.description ?? target.status}
               </button>
-            )}
-            {canResume && (
-              <button
-                onClick={() => handleAction("resume")}
-                disabled={acting}
-                style={{
-                  padding: "10px 20px",
-                  background: acting ? "#333" : "#166534",
-                  border: "none",
-                  borderRadius: "6px",
-                  color: "#fff",
-                  cursor: acting ? "not-allowed" : "pointer",
-                  fontSize: "13px",
-                }}
-              >
-                ▶️ Resume
-              </button>
-            )}
+            ))}
           </div>
         )}
       </div>
@@ -256,10 +230,11 @@ function TaskModal({ task, onClose, onAction }: TaskModalProps) {
 
 interface TaskRowProps {
   task: Task;
+  definition?: LifecycleStateDefinition;
   onClick: () => void;
 }
 
-function TaskRow({ task, onClick }: TaskRowProps) {
+function TaskRow({ task, definition, onClick }: TaskRowProps) {
   return (
     <div
       onClick={onClick}
@@ -309,7 +284,7 @@ function TaskRow({ task, onClick }: TaskRowProps) {
 
       {/* Status */}
       <div>
-        <StatusBadge status={task.status} />
+        <StatusBadge status={task.status} definition={definition} />
       </div>
     </div>
   );
@@ -319,6 +294,8 @@ function TaskRow({ task, onClick }: TaskRowProps) {
 
 export function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [definitions, setDefinitions] = useState<LifecycleStateDefinition[]>([]);
+  const [selectedTransitions, setSelectedTransitions] = useState<LifecycleStateDefinition[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
@@ -327,22 +304,21 @@ export function TasksPage() {
   const [statusFilter, setStatusFilter] = useState<string>("");
 
   // Stats
-  const stats = {
-    total: tasks.length,
-    queued: tasks.filter((t) => t.status === "queued").length,
-    running: tasks.filter((t) => t.status === "running").length,
-    completed: tasks.filter((t) => t.status === "completed").length,
-    failed: tasks.filter((t) => t.status === "failed").length,
-    paused: tasks.filter((t) => t.status === "paused").length,
-  };
+  const definitionByStatus = new Map(definitions.map((definition) => [definition.status, definition]));
+  const statusStats = definitions.map((definition) => ({
+    key: definition.status,
+    label: definition.description ?? definition.status,
+    count: tasks.filter((task) => task.status === definition.status).length,
+  }));
 
   const fetchTasks = useCallback(async () => {
     try {
-      const data = await agencyApi.tasks.list({
-        status: statusFilter || undefined,
-        pageSize: 100,
-      });
+      const [data, lifecycleDefinitions] = await Promise.all([
+        agencyApi.tasks.list({ status: statusFilter || undefined, pageSize: 100 }),
+        agencyApi.tasks.definitions(),
+      ]);
       setTasks(data.items);
+      setDefinitions(lifecycleDefinitions);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -374,17 +350,17 @@ export function TasksPage() {
     (a, b) => new Date(b).getTime() - new Date(a).getTime()
   );
 
-  const handleAction = async (taskId: string, action: "pause" | "resume" | "cancel") => {
+  const selectTask = async (task: Task) => {
+    setSelectedTask(task);
+    setSelectedTransitions(await agencyApi.tasks.transitions(task.id));
+  };
+
+  const handleAction = async (taskId: string, targetStatus: string) => {
     try {
-      if (action === "pause") {
-        await agencyApi.tasks.pause(taskId);
-      } else if (action === "resume") {
-        await agencyApi.tasks.resume(taskId);
-      }
-      // Note: cancel not implemented in API yet
+      await agencyApi.tasks.transition(taskId, targetStatus);
       await fetchTasks();
     } catch (e) {
-      alert(`Failed to ${action}: ${(e as Error).message}`);
+      alert(`Failed to transition task: ${(e as Error).message}`);
     }
   };
 
@@ -418,12 +394,8 @@ export function TasksPage() {
         }}
       >
         {[
-          { key: "", label: "All", count: stats.total, color: "#a78bfa" },
-          { key: "queued", label: "Queued", count: stats.queued, color: "#9ca3af" },
-          { key: "running", label: "Running", count: stats.running, color: "#60a5fa" },
-          { key: "completed", label: "Completed", count: stats.completed, color: "#4ade80" },
-          { key: "failed", label: "Failed", count: stats.failed, color: "#f87171" },
-          { key: "paused", label: "Paused", count: stats.paused, color: "#fbbf24" },
+          { key: "", label: "All", count: tasks.length },
+          ...statusStats,
         ].map((stat) => (
           <div
             key={stat.key}
@@ -438,7 +410,7 @@ export function TasksPage() {
               minWidth: "80px",
             }}
           >
-            <div style={{ color: stat.color, fontSize: "20px", fontWeight: 600 }}>{stat.count}</div>
+            <div style={{ color: "#d4d4d8", fontSize: "20px", fontWeight: 600 }}>{stat.count}</div>
             <div style={{ color: "#888", fontSize: "11px" }}>{stat.label}</div>
           </div>
         ))}
@@ -525,7 +497,12 @@ export function TasksPage() {
                 {groupedByDate[date]
                   .sort((a, b) => new Date(b.scheduled_time).getTime() - new Date(a.scheduled_time).getTime())
                   .map((task) => (
-                    <TaskRow key={task.id} task={task} onClick={() => setSelectedTask(task)} />
+                    <TaskRow
+                      key={task.id}
+                      task={task}
+                      definition={definitionByStatus.get(task.status)}
+                      onClick={() => void selectTask(task)}
+                    />
                   ))}
               </div>
             </div>
@@ -537,8 +514,10 @@ export function TasksPage() {
       {selectedTask && (
         <TaskModal
           task={selectedTask}
+          definition={definitionByStatus.get(selectedTask.status)}
+          transitions={selectedTransitions}
           onClose={() => setSelectedTask(null)}
-          onAction={(action) => handleAction(selectedTask.id, action)}
+          onAction={(targetStatus) => handleAction(selectedTask.id, targetStatus)}
         />
       )}
     </AgencyLayout>

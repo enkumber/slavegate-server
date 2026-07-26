@@ -49,6 +49,7 @@ import {
   transitionTask,
 } from "../task-lifecycle/task-lifecycle.service";
 import { transitionAgencyWorkflowRun } from "../workflows/agency-workflow-run-lifecycle.service";
+import { selectResourceLifecycleTransition } from "../lifecycle/lifecycle.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -110,7 +111,7 @@ interface TaskRunnerResult extends TaskResult {
     output?: Record<string, unknown>;
     failureCode?: string;
     selfHealing?: {
-      status: "recovered" | "repair_unavailable" | "retry_failed" | "exhausted";
+      outcome: string;
       attempts: number;
       sourceCacheKeys: string[];
       repairedCacheKeys: string[];
@@ -236,13 +237,35 @@ function isCompiledWorkflow(value: unknown): value is CompiledWorkflow {
 
 async function finalizeQueuedWorkflowRun(
   task: TaskRow,
-  status: "completed" | "failed",
+  succeeded: boolean,
   result: Record<string, unknown>,
   error?: string,
 ): Promise<void> {
   const workflowRunId = typeof task.params?.workflowRunId === "string" ? task.params.workflowRunId : null;
   if (!workflowRunId || !UUID_RE.test(workflowRunId)) return;
-  await getDb().query(
+  const db = getDb();
+  const current = await db.query(
+    `SELECT status FROM workflow_runs WHERE id = $1 FOR UPDATE`,
+    [workflowRunId],
+  );
+  const currentStatus = current.rows[0]?.status;
+  if (typeof currentStatus !== "string") return;
+  const transition = await selectResourceLifecycleTransition(
+    "workflow_runs",
+    currentStatus,
+    {
+      targetTerminal: true,
+      targetRetryable: !succeeded,
+      targetAdministrative: false,
+      transitionMarkCompleted: true,
+    },
+    "status",
+    db,
+  );
+  if (!transition) {
+    throw new Error("workflow run terminal transition is not configured");
+  }
+  await db.query(
     `UPDATE workflow_runs
         SET status = $2,
             result = $3,
@@ -251,7 +274,7 @@ async function finalizeQueuedWorkflowRun(
             completed_at = NOW(),
             updated_at = NOW()
       WHERE id = $1`,
-    [workflowRunId, status, JSON.stringify(result), error ?? null],
+    [workflowRunId, transition.toStatus, JSON.stringify(result), error ?? null],
   );
 }
 
@@ -259,7 +282,7 @@ async function executeCompiledWorkflowTask(task: TaskRow): Promise<TaskRunnerRes
   const startedAt = Date.now();
   const workflow = task.params?.compiledWorkflow;
   if (!isCompiledWorkflow(workflow)) {
-    await finalizeQueuedWorkflowRun(task, "failed", { phase: "edge_admission" }, "INVALID_COMPILED_WORKFLOW");
+    await finalizeQueuedWorkflowRun(task, false, { phase: "edge_admission" }, "INVALID_COMPILED_WORKFLOW");
     return {
       success: false,
       stepsCompleted: 0,
@@ -309,7 +332,7 @@ async function executeCompiledWorkflowTask(task: TaskRow): Promise<TaskRunnerRes
       variables: finalVariables,
     };
     const failReason = ok ? undefined : finalWorkflow.error ?? `Compiled edge workflow ended with status ${finalWorkflow.status}`;
-    await finalizeQueuedWorkflowRun(task, ok ? "completed" : "failed", output, failReason);
+    await finalizeQueuedWorkflowRun(task, ok, output, failReason);
     return {
       success: ok,
       stepsCompleted: finalWorkflow.currentStep,
@@ -322,7 +345,7 @@ async function executeCompiledWorkflowTask(task: TaskRow): Promise<TaskRunnerRes
   } catch (err) {
     const error = (err as Error).message;
     const output = { phase: "edge_dispatch", runtimeContract: "edge-workflow/v2", error };
-    await finalizeQueuedWorkflowRun(task, "failed", output, error);
+    await finalizeQueuedWorkflowRun(task, false, output, error);
     return {
       success: false,
       stepsCompleted: 0,
@@ -818,7 +841,7 @@ async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerR
 
   const learning = cached.sourceMetadata?.workflowLearning as Record<string, unknown> | undefined;
   const repair = cached.sourceMetadata?.workflowRepair as Record<string, unknown> | undefined;
-  if (repair?.status === "candidate_generated" && repair?.sourceCacheKey === cacheKey) return null;
+  if (typeof repair?.candidateGeneratedAt === "string" && repair?.sourceCacheKey === cacheKey) return null;
   if (typeof learning?.failureCount === "number" && learning.failureCount > 3) return null;
 
   try {
@@ -847,7 +870,7 @@ async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerR
         repairOfCacheKey: cached.cacheKey,
         repairOfWorkflowId: cached.workflow.id,
         workflowRepair: {
-          status: "candidate_generated",
+          candidateGeneratedAt: new Date().toISOString(),
           sourceCacheKey: cached.cacheKey,
           sourceWorkflowId: cached.workflow.id,
           sourceWorkflowVersion: cached.workflow.version,
@@ -861,7 +884,6 @@ async function attemptGeneratedWorkflowRepair(task: TaskRow, result: TaskRunnerR
           rationale: response.rationale ?? null,
           expectedFix: response.expectedFix ?? null,
           confidence: typeof response.confidence === "number" ? response.confidence : null,
-          generatedAt: new Date().toISOString(),
           nextAction: "retry_task_with_repaired_candidate",
         },
       },
@@ -917,7 +939,7 @@ async function executeGeneratedWorkflowTaskWithSelfHealing(
       await recordGeneratedWorkflowLearning(currentTask, result);
       if (attempt === 0) return result;
       return withGeneratedWorkflowSelfHealingMetadata(result, {
-        status: "recovered",
+        outcome: "recovered",
         attempts: attempt,
         sourceCacheKeys,
         repairedCacheKeys,
@@ -929,7 +951,7 @@ async function executeGeneratedWorkflowTaskWithSelfHealing(
 
     if (attempt >= maxSelfHealingAttempts) {
       return withGeneratedWorkflowSelfHealingMetadata(result, {
-        status: "exhausted",
+        outcome: "exhausted",
         attempts: attempt,
         sourceCacheKeys,
         repairedCacheKeys,
@@ -940,7 +962,7 @@ async function executeGeneratedWorkflowTaskWithSelfHealing(
     const repaired = await attemptGeneratedWorkflowRepair(currentTask, result);
     if (!repaired) {
       return withGeneratedWorkflowSelfHealingMetadata(result, {
-        status: "repair_unavailable",
+        outcome: "repair_unavailable",
         attempts: attempt,
         sourceCacheKeys,
         repairedCacheKeys,
@@ -968,7 +990,7 @@ async function executeGeneratedWorkflowTaskWithSelfHealing(
     "self-healing loop did not execute",
     Date.now(),
   ), {
-    status: "retry_failed",
+    outcome: "retry_failed",
     attempts: maxSelfHealingAttempts,
     sourceCacheKeys,
     repairedCacheKeys,

@@ -33,7 +33,7 @@ export interface Post {
   id: string;
   account_id: string;
   platform: string;
-  status: "pending_approval" | "approved" | "rejected" | "published";
+  status: string;
   content: {
     media_url?: string;
     caption?: string;
@@ -55,7 +55,7 @@ export interface Task {
   account_id: string;
   device_id: string;
   scheduled_time: string;
-  status: "queued" | "running" | "completed" | "failed" | "paused";
+  status: string;
   routine: string;
   params: Record<string, unknown>;
   created_at: string;
@@ -64,6 +64,16 @@ export interface Task {
   account_username?: string;
   account_platform?: string;
   device_name?: string;
+}
+
+export interface LifecycleStateDefinition {
+  status: string;
+  terminal: boolean;
+  retryable: boolean;
+  administrative: boolean;
+  dispatchable: boolean;
+  manual: boolean;
+  description: string | null;
 }
 
 export interface Report {
@@ -188,7 +198,7 @@ export type HumanWorkflowCompileJobResult =
 
 export interface HumanWorkflowRunResult {
   id: string;
-  status: "queued" | "compiling" | "running" | "completed" | "failed" | "paused";
+  status: string;
   taskId?: string;
   requestKey?: string;
   cacheKey?: string;
@@ -204,7 +214,7 @@ export interface AgencyWorkflowRun {
   safety_class: string;
   request_key: string;
   cache_key: string | null;
-  status: "queued" | "compiling" | "running" | "completed" | "failed" | "cancelled";
+  status: string;
   task_id: string | null;
   error: string | null;
   result: unknown;
@@ -219,7 +229,7 @@ export interface WorkflowRunTimelineStep {
   label: string;
   action: string | null;
   type: string | null;
-  status: "succeeded" | "running" | "failed" | "pending" | string;
+  status: string;
   durationMs: number | null;
   error: string | null;
   state: string | null;
@@ -244,7 +254,7 @@ export interface WorkflowRunStepCandidate {
   action: string | null;
   type: string | null;
   stepStatus: string | null;
-  candidateState: "step_candidate" | "validated_step" | "rejected" | string;
+  candidateState: string;
   requestKey: string | null;
   cacheKey: string | null;
   canonicalWorkflowId: string | null;
@@ -273,15 +283,15 @@ export interface StepLibraryEntry {
   name: string;
   action: string | null;
   type: string | null;
-  status: "validated_step" | string;
-  libraryState: "review_only" | string;
+  status: string;
+  libraryState: string;
   reuseScope: string;
   promotionScope: string | null;
   reusable: boolean;
   compilerEligible: boolean;
   confidence: number | null;
   readiness: {
-    state: "review_ready" | "needs_review" | string;
+    state: string;
     score: number;
     threshold: number;
     gates: Record<string, boolean>;
@@ -313,7 +323,7 @@ export interface StepLibraryPromotionEvent {
   id: string;
   stepCandidateId: string;
   action: "promote_limited" | "revoke" | string;
-  libraryState: "limited_reuse" | "revoked" | string;
+  libraryState: string;
   promotionScope: string | null;
   note: string | null;
   actor: string | null;
@@ -407,6 +417,20 @@ export interface CompilerPolicyGate {
   title: string;
   category: string;
   state: string;
+  stateCapabilities?: {
+    initial: boolean;
+    terminal: boolean;
+    retryable: boolean;
+    administrative: boolean;
+    dispatchable: boolean;
+    manual: boolean;
+  };
+  stateMetadata?: Record<string, unknown>;
+  allowedStates?: Array<{
+    status: string;
+    description: string | null;
+    metadata: Record<string, unknown>;
+  }>;
   risk: "low" | "medium" | "high" | string;
   owner: string;
   configState?: string;
@@ -695,7 +719,7 @@ export interface WorkflowDefinition {
   id: string;
   key: string;
   version: number;
-  status: "draft" | "active" | "deprecated" | "archived" | string;
+  status: string;
   title: string;
   description: string | null;
   platform: string;
@@ -1147,7 +1171,7 @@ export const agencyApi = {
       if (params?.owner) query.set("owner", params.owner);
       return api.get<CompilerPolicyGatesResponse>(`/agency/compiler-policy-gates?${query}`);
     },
-    update: (gateId: string, data: { state: "blocked" | "review_ready" | "enabled"; note?: string | null; config?: Record<string, unknown> }) =>
+    update: (gateId: string, data: { state: string; note?: string | null; config?: Record<string, unknown> }) =>
       api.patch<{ gate: CompilerPolicyGate; previousState: string; nextState: string; policy: Record<string, unknown> }>(`/agency/compiler-policy-gates/${gateId}`, data),
     listEvents: (params?: { page?: number; pageSize?: number; gateId?: string }) => {
       const query = new URLSearchParams();
@@ -1216,7 +1240,7 @@ export const agencyApi = {
     versions: (id: string) =>
       api.get<{ items: WorkflowDefinition[]; total: number; policy: Record<string, unknown> }>(`/agency/workflow-definitions/${id}/versions`),
     createVersion: (id: string, data: {
-      status?: "draft" | "active";
+      status?: string;
       title?: string;
       description?: string | null;
       goal?: string;
@@ -1353,8 +1377,12 @@ export const agencyApi = {
       return api.get<PaginatedResponse<Post>>(`/agency/posts?${query}`);
     },
     get: (id: string) => api.get<Post>(`/agency/posts/${id}`),
-    approve: (id: string) => api.patch<Post>(`/agency/posts/${id}`, { status: "approved" }),
-    reject: (id: string) => api.patch<Post>(`/agency/posts/${id}`, { status: "rejected" }),
+    definitions: () =>
+      api.get<LifecycleStateDefinition[]>("/agency/posts/status-definitions"),
+    transitions: (id: string) =>
+      api.get<LifecycleStateDefinition[]>(`/agency/posts/${id}/transitions`),
+    transition: (id: string, targetStatus: string) =>
+      api.patch<Post>(`/agency/posts/${id}`, { status: targetStatus }),
     update: (id: string, data: { status?: Post["status"]; content?: Post["content"] }) =>
       api.patch<Post>(`/agency/posts/${id}`, data),
   },
@@ -1372,8 +1400,12 @@ export const agencyApi = {
       if (params?.to) query.set("to", params.to);
       return api.get<PaginatedResponse<Task>>(`/agency/tasks?${query}`);
     },
-    pause: (id: string) => api.patch<Task>(`/agency/tasks/${id}`, { status: "paused" }),
-    resume: (id: string) => api.patch<Task>(`/agency/tasks/${id}`, { status: "queued" }),
+    definitions: () =>
+      api.get<LifecycleStateDefinition[]>("/agency/tasks/status-definitions"),
+    transitions: (id: string) =>
+      api.get<LifecycleStateDefinition[]>(`/agency/tasks/${id}/transitions`),
+    transition: (id: string, targetStatus: string) =>
+      api.patch<Task>(`/agency/tasks/${id}`, { status: targetStatus }),
   },
 
   // Reports

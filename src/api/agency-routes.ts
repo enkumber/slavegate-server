@@ -32,6 +32,7 @@ import { compileGeneratedWorkflowTemplate, computeGeneratedWorkflowCompiledPlanH
 import { taskRunnerService } from "../modules/task-runner";
 import {
   listStatusDefinitions,
+  getAllowedTransitions,
   transitionTask,
   transitionTaskManually,
 } from "../modules/task-lifecycle/task-lifecycle.service";
@@ -39,6 +40,8 @@ import { transitionWorkflow } from "../modules/workflows/workflow-lifecycle.serv
 import { transitionAgencyWorkflowRun } from "../modules/workflows/agency-workflow-run-lifecycle.service";
 import {
   getResourceLifecycleState,
+  getResourceLifecycleTransitionToState,
+  listResourceLifecycleStates,
   selectResourceLifecycleTransition,
 } from "../modules/lifecycle/lifecycle.service";
 
@@ -501,13 +504,30 @@ async function getCompilerPolicyGates(db: ReturnType<typeof getDb>, filters: {
             definition.retryable AS state_retryable,
             definition.administrative AS state_administrative,
             definition.dispatchable AS state_dispatchable,
-            definition.manual AS state_manual
+            definition.manual AS state_manual,
+            definition.metadata AS state_metadata,
+            COALESCE(allowed.targets, '[]'::jsonb) AS allowed_states
        FROM agency_compiler_policy_gate_config gate
        JOIN lifecycle_resource_bindings binding
          ON binding.resource_table = to_regclass('agency_compiler_policy_gate_config')
        JOIN lifecycle_state_definitions definition
          ON definition.lifecycle_key = binding.lifecycle_key
-        AND definition.status = gate.state`
+        AND definition.status = gate.state
+       LEFT JOIN LATERAL (
+         SELECT jsonb_agg(jsonb_build_object(
+           'status', target.status,
+           'description', target.description,
+           'metadata', target.metadata
+         ) ORDER BY target.sort_order, target.status) AS targets
+           FROM lifecycle_transitions transition
+           JOIN lifecycle_state_definitions target
+             ON target.lifecycle_key = transition.lifecycle_key
+            AND target.status = transition.to_status
+          WHERE transition.lifecycle_key = gate.lifecycle_key
+            AND transition.from_status = gate.state
+            AND transition.manual_allowed
+            AND target.manual
+       ) allowed ON TRUE`
   );
   return listCompilerPolicyGatesWithConfig(configRows.rows, filters);
 }
@@ -1630,10 +1650,40 @@ router.get("/posts/:id", async (req: Request, res: Response) => {
   res.json({ ok: true, data: result.rows[0] });
 });
 
+router.get("/posts/status-definitions", async (_req: Request, res: Response) => {
+  const definitions = await listResourceLifecycleStates("posts");
+  res.json({ ok: true, data: definitions });
+});
+
+router.get("/posts/:id/transitions", async (req: Request, res: Response) => {
+  const row = await getDb().query("SELECT status FROM posts WHERE id = $1", [req.params.id]);
+  const currentStatus = row.rows[0]?.status;
+  if (typeof currentStatus !== "string") {
+    return res.status(404).json({ ok: false, error: "Post not found" });
+  }
+  const result = await getDb().query(
+    `SELECT target.status, target.terminal, target.retryable, target.administrative,
+            target.dispatchable, target.manual, target.description
+       FROM lifecycle_resource_bindings binding
+       JOIN lifecycle_transitions transition
+         ON transition.lifecycle_key = binding.lifecycle_key
+        AND transition.from_status = $1
+        AND transition.manual_allowed
+       JOIN lifecycle_state_definitions target
+         ON target.lifecycle_key = transition.lifecycle_key
+        AND target.status = transition.to_status
+        AND target.manual
+      WHERE binding.resource_table = to_regclass('posts')
+      ORDER BY target.sort_order, target.status`,
+    [currentStatus],
+  );
+  res.json({ ok: true, data: result.rows });
+});
+
 router.patch("/posts/:id", async (req: Request, res: Response) => {
   const db = getDb();
   const { status, content } = req.body as {
-    status?: "pending_approval" | "approved" | "rejected" | "published";
+    status?: string;
     content?: Record<string, unknown>;
   };
 
@@ -1642,15 +1692,20 @@ router.patch("/posts/:id", async (req: Request, res: Response) => {
   let idx = 1;
 
   if (status !== undefined) {
+    const current = await db.query("SELECT status FROM posts WHERE id = $1", [req.params.id]);
+    const currentStatus = current.rows[0]?.status;
+    if (typeof currentStatus !== "string") {
+      return res.status(404).json({ ok: false, error: "Post not found" });
+    }
+    const transition = await getResourceLifecycleTransitionToState("posts", currentStatus, status);
+    const target = await getResourceLifecycleState("posts", status);
+    if (!transition?.manualAllowed || !target?.manual) {
+      return res.status(409).json({ ok: false, error: "Post transition is not allowed" });
+    }
     updates.push(`status = $${idx++}`);
     values.push(status);
-
-    // Set timestamps based on status
-    if (status === "approved") {
-      updates.push(`approved_at = NOW()`);
-    } else if (status === "published") {
-      updates.push(`published_at = NOW()`);
-    }
+    if (transition.markStarted) updates.push("approved_at = COALESCE(approved_at, NOW())");
+    if (transition.markCompleted) updates.push("published_at = COALESCE(published_at, NOW())");
   }
 
   if (content !== undefined) {
@@ -2235,7 +2290,24 @@ router.patch("/compiler-policy-gates/:gateId", requireAdminAuth, async (req: Req
   if (!gate) {
     return res.status(404).json({ ok: false, error: "Compiler policy gate not found", code: "COMPILER_POLICY_GATE_NOT_FOUND" });
   }
-  if (parsed.state === "enabled" && gate.risk === "high" && parsed.config.explicitApproval !== true) {
+  const transition = await getResourceLifecycleTransitionToState(
+    "agency_compiler_policy_gate_config",
+    gate.state,
+    parsed.state,
+  );
+  const target = await getResourceLifecycleState(
+    "agency_compiler_policy_gate_config",
+    parsed.state,
+  );
+  if (!transition?.manualAllowed || !target?.manual) {
+    return res.status(409).json({
+      ok: false,
+      error: "Compiler policy gate transition is not allowed",
+      code: "COMPILER_POLICY_GATE_TRANSITION_NOT_ALLOWED",
+    });
+  }
+  const targetPolicy = normalizeJsonObject(target.metadata);
+  if (targetPolicy.requiresExplicitApproval === true && gate.risk === "high" && parsed.config.explicitApproval !== true) {
     return res.status(400).json({
       ok: false,
       error: "High-risk gates require config.explicitApproval=true",
@@ -2246,8 +2318,8 @@ router.patch("/compiler-policy-gates/:gateId", requireAdminAuth, async (req: Req
   const policy = {
     manualOnly: true,
     editableGates: true,
-    compilerVisible: parsed.state === "enabled" && ["compiler_knowledge_application", "limited_reuse_scope_match", "compiler_auto_use"].includes(gate.id),
-    autoUseEnabled: parsed.state === "enabled" && gate.id === "compiler_auto_use",
+    compilerVisible: target.dispatchable && gate.config?.compilerVisible === true,
+    autoUseEnabled: target.dispatchable && gate.config?.autoUseEligible === true,
     executionChanging: false,
     workflowCacheChanging: false,
     wouldExecuteWorkflow: false,
@@ -5028,6 +5100,16 @@ router.get("/tasks", async (req: Request, res: Response) => {
 router.get("/tasks/status-definitions", async (_req: Request, res: Response) => {
   const definitions = await listStatusDefinitions();
   res.json({ ok: true, data: definitions });
+});
+
+router.get("/tasks/:id/transitions", async (req: Request, res: Response) => {
+  const row = await getDb().query("SELECT status FROM tasks WHERE id = $1", [req.params.id]);
+  const currentStatus = row.rows[0]?.status;
+  if (typeof currentStatus !== "string") {
+    return res.status(404).json({ ok: false, error: "Task not found" });
+  }
+  const definitions = await getAllowedTransitions(currentStatus);
+  res.json({ ok: true, data: definitions.filter((definition) => definition.manual) });
 });
 
 router.patch("/tasks/:id", async (req: Request, res: Response) => {

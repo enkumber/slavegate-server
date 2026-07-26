@@ -366,8 +366,9 @@ export const agencyApi = {
             return api.get(`/agency/posts?${query}`);
         },
         get: (id) => api.get(`/agency/posts/${id}`),
-        approve: (id) => api.patch(`/agency/posts/${id}`, { status: "approved" }),
-        reject: (id) => api.patch(`/agency/posts/${id}`, { status: "rejected" }),
+        definitions: () => api.get("/agency/posts/status-definitions"),
+        transitions: (id) => api.get(`/agency/posts/${id}/transitions`),
+        transition: (id, targetStatus) => api.patch(`/agency/posts/${id}`, { status: targetStatus }),
         update: (id, data) => api.patch(`/agency/posts/${id}`, data),
     },
     // Tasks
@@ -390,8 +391,9 @@ export const agencyApi = {
                 query.set("to", params.to);
             return api.get(`/agency/tasks?${query}`);
         },
-        pause: (id) => api.patch(`/agency/tasks/${id}`, { status: "paused" }),
-        resume: (id) => api.patch(`/agency/tasks/${id}`, { status: "queued" }),
+        definitions: () => api.get("/agency/tasks/status-definitions"),
+        transitions: (id) => api.get(`/agency/tasks/${id}/transitions`),
+        transition: (id, targetStatus) => api.patch(`/agency/tasks/${id}`, { status: targetStatus }),
     },
     // Reports
     reports: {

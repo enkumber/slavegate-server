@@ -35,10 +35,7 @@ function sourceTone(source: string): "blue" | "yellow" | "gray" | "green" | "red
   return "green";
 }
 
-function stateTone(state: string): "green" | "yellow" | "gray" | "red" | "blue" {
-  if (state === "enabled") return "green";
-  if (state === "review_ready") return "yellow";
-  if (state === "blocked") return "red";
+function stateTone(_state: string): "green" | "yellow" | "gray" | "red" | "blue" {
   return "gray";
 }
 

@@ -2666,7 +2666,7 @@ router.get("/health", (_req, res) => {
   res.json({
     ok: true,
     data: {
-      status: "healthy",
+      health: "healthy",
       ts: new Date().toISOString(),
       appVersion: process.env.PHONE_NETWORK_APP_VERSION ?? null,
       buildCommit: process.env.BUILD_COMMIT ?? process.env.GIT_SHA ?? null,
