@@ -286,9 +286,8 @@ export class CapabilityCatalogService {
          JOIN ui_graph_states s ON s.id = selector.state_id
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass('ui_graph_selectors')
-          AND binding.lifecycle_key = selector.lifecycle_key
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = selector.lifecycle_key
+           ON definition.lifecycle_key = binding.lifecycle_key
           AND definition.status = selector.status
          WHERE s.app_id = ANY($1::text[])
            AND definition.terminal
@@ -304,9 +303,8 @@ export class CapabilityCatalogService {
          FROM ui_graph_transitions
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass('ui_graph_transitions')
-          AND binding.lifecycle_key = ui_graph_transitions.lifecycle_key
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = ui_graph_transitions.lifecycle_key
+           ON definition.lifecycle_key = binding.lifecycle_key
           AND definition.status = ui_graph_transitions.status
          WHERE app_id = ANY($1::text[])
            AND definition.terminal

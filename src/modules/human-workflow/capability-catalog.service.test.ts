@@ -149,5 +149,17 @@ describe("retrieval-before-LLM compiler context", () => {
       packagesFromRejectedPlan: ["invalid.package"],
     });
     expect(formatCompilerRetrievalContext(context)).not.toContain("never-copy");
+
+    const selectorQuery = query.mock.calls
+      .map(([sql]) => sql)
+      .find((sql) => sql.includes("FROM ui_graph_selectors"));
+    const transitionQuery = query.mock.calls
+      .map(([sql]) => sql)
+      .find((sql) => sql.includes("FROM ui_graph_transitions"));
+
+    expect(selectorQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
+    expect(selectorQuery).not.toContain("selector.lifecycle_key");
+    expect(transitionQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
+    expect(transitionQuery).not.toContain("ui_graph_transitions.lifecycle_key");
   });
 });

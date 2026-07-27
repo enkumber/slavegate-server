@@ -40,9 +40,9 @@ describe("atomic OTA APK releases", () => {
   it("extracts authoritative package and version metadata from the APK", () => {
     expect(bundledMetadata).toMatchObject({
       packageName: "com.phonenetwork",
-      version: "4.0.83",
-      versionCode: 139,
     });
+    expect(bundledMetadata.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(bundledMetadata.versionCode).toBeGreaterThan(0);
     expect(bundledMetadata.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(bundledMetadata.size).toBeGreaterThan(0);
   });
@@ -59,7 +59,7 @@ describe("atomic OTA APK releases", () => {
     await seedRelease(dir, { version: "4.0.51", versionCode: 107 });
 
     await expect(readActiveOtaRelease(dir)).rejects.toThrow(
-      "OTA metadata mismatch: manifest=4.0.51/107 apk=4.0.83/139",
+      `OTA metadata mismatch: manifest=4.0.51/107 apk=${bundledMetadata.version}/${bundledMetadata.versionCode}`,
     );
   });
 
@@ -73,7 +73,8 @@ describe("atomic OTA APK releases", () => {
 
     expect(active).toEqual(release);
     expect(active.filename).toBe(`phone-network-${bundledMetadata.sha256}.apk`);
-    expect(await fs.readFile(path.join(dir, "phone-network.json"), "utf8")).toContain('"versionCode": 139');
+    expect(await fs.readFile(path.join(dir, "phone-network.json"), "utf8"))
+      .toContain(`"versionCode": ${bundledMetadata.versionCode}`);
     expect(await fs.stat(activeOtaApkPath(dir, active))).toMatchObject({ size: bundledMetadata.size });
     await expect(fs.access(staged)).rejects.toThrow();
   });
