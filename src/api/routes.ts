@@ -1188,9 +1188,7 @@ router.post("/jobs", async (req, res) => {
     res.status(202).json({ ok: true, data: { jobId, status: job?.status } });
   } catch (err) {
     const message = (err as Error).message;
-    const lifecyclePolicyUnavailable = err instanceof ResourceLifecyclePolicyUnavailableError
-      || message.includes("lifecycle transition selector is ambiguous")
-      || message.includes("root-kind policy is ambiguous");
+    const lifecyclePolicyUnavailable = err instanceof ResourceLifecyclePolicyUnavailableError;
     res.status(lifecyclePolicyUnavailable ? 503 : 400).json({
       ok: false,
       error: message,
