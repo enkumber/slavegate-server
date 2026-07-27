@@ -1982,7 +1982,7 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
   let cacheHit = false;
   let resolvedCache: GeneratedWorkflowPlanCacheRecord | null = null;
   try {
-    if (cacheKey || requestKey) {
+    if ((cacheKey || requestKey) && !allowsWorkflowRequestKeyPersistence) {
       const cached = cacheKey
         ? await workflowService.getGeneratedPlanCache(cacheKey)
         : await workflowService.getGeneratedPlanCacheByRequestKey(requestKey!);

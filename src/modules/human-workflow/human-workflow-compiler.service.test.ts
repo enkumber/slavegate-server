@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   completedSegmentBuildCapabilityKey,
   humanWorkflowArtifactMatchesIntent,
+  humanWorkflowExactCacheUsable,
 } from "./human-workflow-compiler.service";
 
 describe("human workflow artifact identity", () => {
@@ -62,5 +63,35 @@ describe("completed segment-build reconciliation", () => {
     expect(completedSegmentBuildCapabilityKey({
       result: {},
     })).toBeNull();
+  });
+});
+
+describe("exact canonical cache precedence", () => {
+  it("reuses a currently compiled canonical artifact with verifiable outputs", () => {
+    expect(humanWorkflowExactCacheUsable({
+      workflow: {
+        outputSchema: {
+          required: ["rustdeskReady"],
+          properties: {
+            rustdeskReady: { type: "boolean" },
+          },
+        },
+        postconditionContract: {
+          version: "1",
+          all: [{
+            left: { path: "outputs.rustdeskReady" },
+            operator: "truthy",
+          }],
+        },
+      },
+      sourceMetadata: {},
+    } as any, "current-control-plane")).toBe(true);
+  });
+
+  it("does not bypass capability discovery for an unverifiable legacy artifact", () => {
+    expect(humanWorkflowExactCacheUsable({
+      workflow: {},
+      sourceMetadata: {},
+    } as any, "current-control-plane")).toBe(false);
   });
 });

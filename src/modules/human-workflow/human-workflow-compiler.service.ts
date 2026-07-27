@@ -206,6 +206,15 @@ function humanWorkflowCacheUsable(
     && cached.sourceMetadata?.outputContractVersion === HUMAN_WORKFLOW_OUTPUT_CONTRACT_VERSION;
 }
 
+export function humanWorkflowExactCacheUsable(
+  cached: GeneratedWorkflowPlanCacheRecord,
+  compilerVersion: string,
+): boolean {
+  if (humanWorkflowCacheUsable(cached, compilerVersion)) return true;
+  return (cached.workflow.outputSchema?.required?.length ?? 0) > 0
+    && (cached.workflow.postconditionContract?.all?.length ?? 0) > 0;
+}
+
 export function humanWorkflowArtifactMatchesIntent(
   cached: GeneratedWorkflowPlanCacheRecord,
   intent: string,
@@ -543,6 +552,15 @@ export class HumanWorkflowCompilerService {
       throw Object.assign(new Error("Device or account not found"), { status: 400, code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND" });
     }
 
+    const exactCached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
+    if (
+      exactCached
+      && humanWorkflowExactCacheUsable(exactCached, controlPlane.version)
+      && humanWorkflowArtifactMatchesIntent(exactCached, intent)
+    ) {
+      return readyFromCache(exactCached, target, requestKey, "cache");
+    }
+
     const catalogContext = await capabilityCatalogService.retrieve(
       intent,
       target.account_platform,
@@ -619,11 +637,6 @@ export class HumanWorkflowCompilerService {
         source: "agent",
         reason: "composition_missing",
       };
-    }
-
-    const cached = await workflowService.getGeneratedPlanCacheByRequestKey(requestKey);
-    if (cached && humanWorkflowCacheUsable(cached, controlPlane.version)) {
-      return readyFromCache(cached, target, requestKey, "cache");
     }
 
     if (catalogContext.fullArtifactCacheKey) {

@@ -618,6 +618,36 @@ describe("generated workflow cache-only execution route", () => {
     expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
   });
 
+  it("replaces an exact request-key artifact during explicit validate-and-persist", async () => {
+    const cached = cacheRecord();
+    const replacement = redditHomeWorkflow();
+    replacement.version = "2.0.0";
+    mocks.workflowService.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    const response = await postGeneratedWorkflow({
+      workflow: replacement,
+      requestKey: cached.requestKey,
+      dryRun: true,
+      persist: true,
+    });
+
+    expect(response.status, JSON.stringify(response.json)).toBe(200);
+    expect(response.json.data).toMatchObject({
+      cacheHit: false,
+      canonicalHit: false,
+      canExecuteFromCache: true,
+      requestKey: cached.requestKey,
+      canonicalWorkflowVersion: "2.0.0",
+    });
+    expect(mocks.workflowService.getGeneratedPlanCacheByRequestKey).not.toHaveBeenCalled();
+    expect(mocks.workflowService.saveExecutableGeneratedPlanCache).toHaveBeenCalledWith(
+      expect.objectContaining({ version: "2.0.0" }),
+      expect.any(Object),
+      cached.requestKey,
+      expect.objectContaining({ persisted: true }),
+    );
+  });
+
   it("rejects stale app-map cache hits before dispatch", async () => {
     const cached = cacheRecord({ appMapBound: true, mapVersion: "map-v1" });
     mocks.workflowService.getGeneratedPlanCache.mockResolvedValue(cached);
