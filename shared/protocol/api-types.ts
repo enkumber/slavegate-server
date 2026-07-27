@@ -106,14 +106,14 @@ export interface DispatchJobRequest {
   workflowId?: string;
   stepIndex?: number;
   /** Passed through to JOB_DISPATCH WebSocket message */
-  verificationStrategy?: "local_only" | "local_with_screenshot" | "full_cascade" | "vlm_required";
+  verificationStrategy?: string;
   l1TimeoutMs?: number;
   l2SettleMs?: number;
 }
 
 export interface DispatchJobResponse {
   jobId: string;
-  status: "queued";
+  status: string;
 }
 
 // GET /api/jobs
@@ -162,34 +162,17 @@ export type OtaDeployResponse = DeployOtaResponse;
 
 // ─── Generated Workflows ─────────────────────────────────────────────────────
 
-export type GeneratedWorkflowPlatform = "instagram" | "reddit" | "threads" | "tiktok" | "twitter" | "youtube";
+export type GeneratedWorkflowPlatform = string;
 
-export type GeneratedWorkflowVerificationStrategy = "local_only" | "local_with_screenshot";
+export type GeneratedWorkflowVerificationStrategy = string;
 
-export type GeneratedWorkflowIntent = "reddit_account_health_scan";
+export type GeneratedWorkflowIntent = string;
 
-export type GeneratedWorkflowSafetyClass = "read_only";
+export type GeneratedWorkflowSafetyClass = string;
 
-export type GeneratedWorkflowAllowedAction =
-  | "close_app"
-  | "get_screen_state"
-  | "open_app"
-  | "press_key"
-  | "screen_wake"
-  | "screenshot"
-  | "scroll"
-  | "detect_current_screen"
-  | "classify_reddit_health_scan"
-  | "set_variable"
-  | "swipe"
-  | "ui_tree_dump"
-  | "unlock"
-  | "wait_for_idle";
+export type GeneratedWorkflowAllowedAction = string;
 
-export type GeneratedWorkflowAllowedRecoveryRequest =
-  | "refresh_screen_state"
-  | "retry_current_step"
-  | "abort_read_only_scan";
+export type GeneratedWorkflowAllowedRecoveryRequest = string;
 
 export interface GeneratedWorkflowOutputSchema {
   required: string[];
@@ -368,7 +351,7 @@ export type GeneratedWorkflowCacheResolveResponse =
       requestedCacheKey: string | null;
       requestedRequestKey: string | null;
       requestKey: string | null;
-      nextAction: "reuse_cached_workflow" | "validate_or_persist_before_execution";
+      nextAction: string;
       persisted: boolean;
     } & GeneratedWorkflowSummary);
 
@@ -435,7 +418,7 @@ export type GeneratedWorkflowDryRunResponse = {
 
 export type GeneratedWorkflowExecuteResponse = {
   workflowId: string;
-  status: "queued" | "running";
+  status: string;
   mode: "edge" | "server";
   templateId: string;
   generated: true;

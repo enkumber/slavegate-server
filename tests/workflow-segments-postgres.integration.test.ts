@@ -155,9 +155,10 @@ describe("generic workflow segment PostgreSQL migration", () => {
   it("enforces one promoted version per segment and capability composition", async () => {
     await pool.query(
       `INSERT INTO workflow_capabilities(
-         capability_key, platform, safety_class, portability_scope, compiler_retrievable
+         capability_key, platform, safety_class, portability_scope, compiler_retrievable,
+         min_match_score, ambiguity_margin
        )
-       VALUES ('fixture_capability', 'android', 'navigation', 'global', TRUE)`,
+       VALUES ('fixture_capability', 'android', 'navigation', 'global', TRUE, 0.8, 0.1)`,
     );
     await pool.query(
       `INSERT INTO workflow_segments(segment_key, status)

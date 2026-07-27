@@ -22,10 +22,13 @@ CREATE TABLE IF NOT EXISTS agency_compiler_control_plane_events (
   dry_run JSONB NOT NULL DEFAULT '{}'::jsonb,
   capability_manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
   limited_reuse_plan JSONB NOT NULL DEFAULT '{}'::jsonb,
-  actor TEXT NOT NULL DEFAULT 'dashboard',
-  source TEXT NOT NULL DEFAULT 'dashboard',
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE agency_compiler_control_plane_events
+  ALTER COLUMN actor DROP DEFAULT;
 
 CREATE INDEX IF NOT EXISTS idx_agency_compiler_control_plane_events_created
   ON agency_compiler_control_plane_events(created_at DESC);

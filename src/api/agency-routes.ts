@@ -20,7 +20,6 @@ import {
   buildWorkflowDefinitionResolution,
   rowToWorkflowDefinition,
   workflowDefinitionScopeFor,
-  workflowDefinitionToExecutableTemplate,
   workflowDefinitionRegistryPolicy,
 } from "../modules/workflow-definition-registry/workflow-definition-registry";
 import {
@@ -2777,34 +2776,6 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
     deviceId,
     accountId,
   });
-
-  if (!cached) {
-    template = workflowDefinitionToExecutableTemplate(definition);
-    if (template) {
-      const compiledPlan = compileGeneratedWorkflowTemplate(template);
-      await workflowService.saveTemplate(template);
-      await workflowService.saveExecutableGeneratedPlanCache(template, compiledPlan, requestKey, {
-          source: "workflow_definition_auto_use",
-          definitionId: definition.id,
-          definitionKey: definition.key,
-          definitionVersion: definition.version,
-          promotionScope: scope,
-          autoUseEnabled: true,
-          safeToAutoApply: true,
-      });
-      cached = {
-        cache_key: compiledPlan.cacheKey,
-        request_key: requestKey,
-        canonical_workflow_id: template.id,
-        canonical_workflow_version: template.version,
-        compiled_plan_hash: computeGeneratedWorkflowCompiledPlanHash(compiledPlan),
-        artifact_state: "promoted",
-        workflow: template,
-        compiled_plan: compiledPlan,
-        platform: template.platform,
-      };
-    }
-  }
 
   if (!cached || !template) {
     return res.status(409).json({

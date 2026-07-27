@@ -1,6 +1,6 @@
 import express from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { a11yTapSucceeded, isUsableAppUiTree, parseUiTreeResult } from "./mapping-routes";
+import { isUsableAppUiTree, parseUiTreeResult } from "./mapping-routes";
 import { filterRelevantElements } from "./element-filter";
 import { buildPageDetection } from "./page-fingerprint";
 import { validateAppMapQuality, type AppMap } from "./schema";
@@ -13,6 +13,22 @@ const mocks = vi.hoisted(() => ({
   dispatch: vi.fn(),
   waitForResult: vi.fn(),
 }));
+
+const mappingEnginePolicy = {
+  captureStepType: "capture",
+  foregroundProbeActionKey: "get_foreground_app",
+  treeActionKey: "ui_tree_dump",
+  screenshotActionKey: "screenshot",
+  foregroundTimeoutMs: 1000,
+  treeTimeoutMs: 1000,
+  screenshotTimeoutMs: 1000,
+  defaultActionTimeoutMs: 1000,
+  captureAttempts: 1,
+  captureRetryDelayMs: 1,
+  screenshotQuality: 80,
+  maxDelayAfterMs: 1000,
+  appVersionFallback: "unknown",
+};
 
 vi.mock("./recorder.service", () => ({
   startRecording: vi.fn(),
@@ -33,6 +49,7 @@ vi.mock("./runtime-profile", async (importOriginal) => ({
 
 vi.mock("../dispatcher/dispatcher.service", () => ({
   dispatcherService: { dispatch: mocks.dispatch },
+  assertJobActionResultPolicy: vi.fn(),
 }));
 
 vi.mock("../../transport/transport", () => ({
@@ -73,12 +90,6 @@ describe("reddit app-map refresh helpers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.API_KEY = "test-api-key";
-  });
-
-  it("accepts a selector transition only when the agent actually found the element", () => {
-    expect(a11yTapSucceeded({ success: true, output: { found: true } })).toBe(true);
-    expect(a11yTapSucceeded({ success: true, output: { found: false, error: "Element not found" } })).toBe(false);
-    expect(a11yTapSucceeded({ success: false, output: { found: true } })).toBe(false);
   });
 
   it("normalizes x/y/width/height UI-tree bounds into usable app-map bounds", () => {
@@ -368,14 +379,14 @@ describe("reddit app-map refresh helpers", () => {
         blocked: ["mutations"],
       },
       defaultDeviceId: "11111111-1111-4111-8111-111111111111",
-      metadata: {},
+      metadata: { mappingEnginePolicy },
     });
     let job = 0;
     const jobTypes = new Map<string, string>();
     mocks.dispatch.mockImplementation(async ({ type }: { type: string }) => {
       const jobId = `job-${++job}`;
       jobTypes.set(jobId, type);
-      return { jobId };
+      return { jobId, executionPolicy: {} };
     });
     mocks.waitForResult.mockImplementation(async (jobId: string) => {
       const type = jobTypes.get(jobId);
@@ -436,14 +447,14 @@ describe("reddit app-map refresh helpers", () => {
         blocked: ["mutations"],
       },
       defaultDeviceId: "11111111-1111-4111-8111-111111111111",
-      metadata: {},
+      metadata: { mappingEnginePolicy },
     });
     let job = 0;
     const jobTypes = new Map<string, string>();
     mocks.dispatch.mockImplementation(async ({ type }: { type: string }) => {
       const jobId = `job-${++job}`;
       jobTypes.set(jobId, type);
-      return { jobId };
+      return { jobId, executionPolicy: {} };
     });
     mocks.waitForResult.mockImplementation(async (jobId: string) => {
       const type = jobTypes.get(jobId);

@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS screen_detection_logs (
   platform        VARCHAR(32)    NOT NULL,
   detected_screen VARCHAR(64)    NOT NULL,
   confidence      NUMERIC(4, 3)  NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
-  method          VARCHAR(16)    NOT NULL CHECK (method IN ('ui_tree', 'ocr', 'vlm')),
+  method          VARCHAR(64)    NOT NULL,
   -- Array of strings like ['L1_failed', 'L2_success']
   fallback_chain  TEXT[]         NOT NULL DEFAULT '{}',
   latency_ms      INTEGER        NOT NULL CHECK (latency_ms >= 0),

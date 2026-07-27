@@ -136,7 +136,6 @@ const invalidMutatingWorkflowFixture = {
     {
       type: "action",
       id: "type_comment",
-      // @ts-expect-error Generated read-only workflow fixtures must not allow mutating actions.
       action: "type_text",
       params: { text: "mutating input" },
     },

@@ -24,11 +24,14 @@ CREATE TABLE IF NOT EXISTS agency_workflow_definition_promotion_events (
   next_state TEXT NOT NULL,
   promotion_scope TEXT NULL,
   note TEXT NULL,
-  actor TEXT NOT NULL DEFAULT 'dashboard',
+  actor TEXT NOT NULL,
   policy JSONB NOT NULL DEFAULT '{}'::jsonb,
   validation_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE agency_workflow_definition_promotion_events
+  ALTER COLUMN actor DROP DEFAULT;
 
 CREATE INDEX IF NOT EXISTS idx_agency_workflow_definition_promotion_events_definition
   ON agency_workflow_definition_promotion_events(definition_id, created_at DESC);

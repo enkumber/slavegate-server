@@ -108,10 +108,11 @@ export class PnqV2RuntimeRepository {
   async claimAndStart(legacyJobId: string, epoch: number, executionId: string): Promise<PnqV2LegacyMapping | null> {
     const mapping = await this.mappingForLegacyJob(legacyJobId);
     if (!mapping) return null;
-    const claimed = await db(this.pool).query("SELECT * FROM pnq_claim_next_job($1, $2, $3)", [
+    const claimed = await db(this.pool).query("SELECT * FROM pnq_claim_next_job($1, $2, $3, $4)", [
       mapping.pnqNodeId,
       epoch,
       executionId,
+      "pnq-v2-shadow-runtime",
     ]);
     const claimedJob = claimed.rows[0] ? toJob(claimed.rows[0]) : null;
     if (!claimedJob || claimedJob.id !== mapping.pnqJobId) return mapping;

@@ -4,6 +4,7 @@
   "description": "Phone Network — Control server",
   "main": "dist/phone-network-server/src/index.js",
   "scripts": {
+    "audit:no-hardcoding": "node scripts/audit-no-hardcoding.mjs",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/phone-network-server/src/index.js",

@@ -459,13 +459,12 @@ function isReviewedCallBoundary(finding: EgressFinding): boolean {
   if (finding.kind.startsWith("directWsServer.")) {
     if (
       finding.file === "src/transport/transport.ts" &&
-      ["directWsServer.sendJob", "directWsServer.sendBatch", "directWsServer.sendWorkflowStart"].includes(finding.kind)
+      ["directWsServer.sendJob", "directWsServer.sendWorkflowStart"].includes(finding.kind)
     ) {
       return finding.importedName === "directWsServer" &&
         finding.sourceKind === "direct-ws" &&
         [
           "sendObserveOnlyJobToDevice",
-          "sendObserveOnlyBatchToDevice",
           "sendObserveOnlyWorkflowStartToDevice",
         ].includes(finding.enclosingFunction ?? "");
     }
@@ -538,14 +537,12 @@ describe("PNQ-001 production egress inventory guard", () => {
     const observeOnlyDirectWsCalls = findings
       .filter((finding) => [
         "directWsServer.sendJob",
-        "directWsServer.sendBatch",
         "directWsServer.sendWorkflowStart",
       ].includes(finding.kind))
       .map((finding) => `${finding.kind}:${finding.enclosingFunction ?? "none"}`)
       .sort();
 
     expect(observeOnlyDirectWsCalls).toEqual([
-      "directWsServer.sendBatch:sendObserveOnlyBatchToDevice",
       "directWsServer.sendJob:sendObserveOnlyJobToDevice",
       "directWsServer.sendWorkflowStart:sendObserveOnlyWorkflowStartToDevice",
     ]);

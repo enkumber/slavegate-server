@@ -107,10 +107,11 @@ describe("dashboard human workflow integrity contract", () => {
     const contract = {
       version: "1" as const,
       all: [
-        { left: { path: "outputs.navigationResult.launched" }, operator: "truthy" as const },
+        { left: { path: "outputs.navigationResult.launched" }, operator: "truthy" as const, operatorOpcode: 0 },
         {
           left: { path: "outputs.navigationResult.observedUri" },
           operator: "uri_equivalent" as const,
+          operatorOpcode: 11,
           right: { path: "inputs.target" },
         },
       ],

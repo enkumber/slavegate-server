@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">Phone Network Agent</string>
-    <string name="accessibility_description">Phone Network automation service</string>
-</resources>

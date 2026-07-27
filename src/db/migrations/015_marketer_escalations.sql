@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS marketer_escalations (
   account_id      UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   account_username TEXT       NOT NULL,
   client_name     TEXT        NOT NULL,
-  category        TEXT        NOT NULL CHECK (category IN ('session_config', 'daily_limits', 'timing', 'engagement', 'safety')),
+  category        TEXT        NOT NULL,
   question        TEXT        NOT NULL,
   context         JSONB       NOT NULL DEFAULT '{}'::jsonb,
   options         JSONB,      -- Array de opțiuni sugerate

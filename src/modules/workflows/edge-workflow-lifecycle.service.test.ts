@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   sendWorkflowCancellationControl: vi.fn(),
   get: vi.fn(),
   publish: vi.fn(),
+  getWorkflowInterpreterPolicy: vi.fn(),
 }));
 
 vi.mock("./workflow.service", () => ({
@@ -40,6 +41,10 @@ vi.mock("../../transport/transport", () => ({
   sendWorkflowCancellationControl: mocks.sendWorkflowCancellationControl,
 }));
 
+vi.mock("../dispatcher/dispatcher.service", () => ({
+  getWorkflowInterpreterPolicy: mocks.getWorkflowInterpreterPolicy,
+}));
+
 const WORKFLOW_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_ID = "22222222-2222-4222-8222-222222222222";
 
@@ -55,6 +60,16 @@ describe("replayed edge workflow lifecycle", () => {
     mocks.listActive.mockResolvedValue({ items: [], total: 0 });
     mocks.getTemplate.mockResolvedValue(null);
     mocks.sendWorkflowCancellationControl.mockResolvedValue(true);
+    mocks.getWorkflowInterpreterPolicy.mockResolvedValue({
+      enginePolicy: {
+        ackTimeoutMs: 5,
+        progressSweepMs: 1000,
+        progressGraceMs: 15_000,
+        minStaleMs: 30_000,
+        maxStaleMs: 300_000,
+        localStepBudgetMs: 15_000,
+      },
+    });
   });
 
   it("fails and cancels an acknowledged workflow whose current step stopped making progress", async () => {

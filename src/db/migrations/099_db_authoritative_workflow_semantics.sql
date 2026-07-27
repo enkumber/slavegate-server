@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS runtime_semantic_entries (
   entry_key TEXT NOT NULL,
   platform TEXT NOT NULL DEFAULT '*',
   status TEXT,
-  priority INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER NOT NULL,
   payload JSONB NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

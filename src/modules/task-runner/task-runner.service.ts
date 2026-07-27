@@ -53,6 +53,7 @@ import {
   getResourceLifecycleState,
   selectResourceLifecycleTransition,
 } from "../lifecycle/lifecycle.service";
+import { hydrateWorkflowNativePolicies } from "../dispatcher/dispatcher.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1560,7 +1561,9 @@ async function executeGeneratedWorkflowTask(
       ...(clientId ? { clientId } : {}),
       ...(campaignId ? { campaignId } : {}),
     };
-    const executableWorkflow = normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata);
+    const executableWorkflow = await hydrateWorkflowNativePolicies(
+      normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata) as unknown as Record<string, unknown>,
+    ) as unknown as WorkflowTemplate;
     const dispatch = await dispatchGeneratedWorkflowTemplate({
       templateId: executableWorkflow.id,
       template: executableWorkflow,
@@ -1627,8 +1630,8 @@ async function executeGeneratedWorkflowTask(
       };
     }
 
-    if (cached.workflow.postconditionContract) {
-      const postcondition = evaluatePostconditionContract(cached.workflow.postconditionContract, {
+    if (executableWorkflow.postconditionContract) {
+      const postcondition = evaluatePostconditionContract(executableWorkflow.postconditionContract, {
         outputs: finalOutput,
         inputs: suppliedVariables?.inputs ?? {},
         variables: finalVariables,

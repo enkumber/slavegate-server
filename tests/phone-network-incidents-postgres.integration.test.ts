@@ -58,17 +58,27 @@ describe("Phone Network incident and audit migration", () => {
       INSERT INTO devices VALUES ('11111111-1111-4111-8111-111111111111');
       INSERT INTO tasks VALUES ('22222222-2222-4222-8222-222222222222');
       INSERT INTO phone_network_incidents (
-        incident_key, source_type, source_id, task_id, device_id, status, summary
+        incident_key, source_type, source_id, task_id, device_id, category, severity,
+        status, assigned_agent, recovery_exhausted, summary
       ) VALUES (
         'task:22222222-2222-4222-8222-222222222222', 'task',
         '22222222-2222-4222-8222-222222222222',
         '22222222-2222-4222-8222-222222222222',
-        '11111111-1111-4111-8111-111111111111', 'test_open', 'terminal failure'
+        '11111111-1111-4111-8111-111111111111',
+        'fixture_category', 'fixture_severity', 'test_open',
+        'fixture_agent', TRUE, 'terminal failure'
       );
     `);
     await expect(pool.query(`
-      INSERT INTO phone_network_incidents (incident_key, source_type, source_id, status, summary)
-      VALUES ('task:22222222-2222-4222-8222-222222222222', 'task', 'duplicate', 'test_open', 'duplicate')
+      INSERT INTO phone_network_incidents (
+        incident_key, source_type, source_id, category, severity, status,
+        assigned_agent, recovery_exhausted, summary
+      )
+      VALUES (
+        'task:22222222-2222-4222-8222-222222222222', 'task', 'duplicate',
+        'fixture_category', 'fixture_severity', 'test_open',
+        'fixture_agent', TRUE, 'duplicate'
+      )
     `)).rejects.toMatchObject({ code: "23505" });
 
     const tables = await pool.query(`

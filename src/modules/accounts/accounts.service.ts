@@ -58,10 +58,49 @@ export interface CreateAccountInput {
   username:          string;
   deviceId:          string;
   clientId?:         string;
-  type?:             "business" | "farming";
+  type?:             string;
   simulatedTimezone?: string;
   /** Optional initial notes */
   notes?:            string;
+}
+
+interface AccountProvisioningPolicy {
+  defaultType: string;
+  defaultTimezone: string;
+  researchActionKey: string;
+  researchPriority: number;
+}
+
+async function loadAccountProvisioningPolicy(): Promise<AccountProvisioningPolicy> {
+  const result = await getDb().query<{ policy: Record<string, unknown> }>(
+    `SELECT entry.payload->'accountProvisioningPolicy' AS policy
+       FROM runtime_semantic_entries entry
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = entry.lifecycle_key
+        AND definition.status = entry.status
+      WHERE definition.dispatchable
+        AND jsonb_typeof(entry.payload->'accountProvisioningPolicy') = 'object'
+      ORDER BY entry.priority DESC, entry.id`,
+  );
+  if (result.rows.length !== 1) {
+    throw new Error("PostgreSQL must expose exactly one active account provisioning policy");
+  }
+  const policy = result.rows[0].policy;
+  const defaultType = typeof policy.defaultType === "string" ? policy.defaultType.trim() : "";
+  const defaultTimezone = typeof policy.defaultTimezone === "string" ? policy.defaultTimezone.trim() : "";
+  const researchActionKey = typeof policy.researchActionKey === "string"
+    ? policy.researchActionKey.trim()
+    : "";
+  const researchPriority = Number(policy.researchPriority);
+  if (
+    !defaultType
+    || !defaultTimezone
+    || !researchActionKey
+    || !Number.isSafeInteger(researchPriority)
+  ) {
+    throw new Error("invalid PostgreSQL account provisioning policy");
+  }
+  return { defaultType, defaultTimezone, researchActionKey, researchPriority };
 }
 
 export interface AccountStats {
@@ -81,6 +120,7 @@ export class AccountsService {
   async create(input: CreateAccountInput): Promise<Account> {
     const db = getDb();
     const id = uuidv4();
+    const provisioningPolicy = await loadAccountProvisioningPolicy();
 
     // Enforce UNIQUE(platform, device_id) at service layer — clear error before DB constraint
     const existing = await db.query(
@@ -110,9 +150,9 @@ export class AccountsService {
         input.username,
         input.deviceId,
         input.clientId ?? null,
-        input.type ?? "farming",
+        input.type ?? provisioningPolicy.defaultType,
         encryptionKeyRef,
-        input.simulatedTimezone ?? "Europe/Bucharest",
+        input.simulatedTimezone ?? provisioningPolicy.defaultTimezone,
         input.notes ?? null,
       ]
     );
@@ -122,9 +162,9 @@ export class AccountsService {
     // Runtime behavior is selected from the PostgreSQL capability catalog.
     // Fire-and-forget — don't block account creation if research queue is full.
     researchService.requestResearch(
-      "research_profile",
+      provisioningPolicy.researchActionKey,
       { username: account.username, platform: account.platform, deviceId: account.deviceId },
-      1  // Slightly elevated priority vs. nightly batch (0)
+      provisioningPolicy.researchPriority,
     ).then(jobId => {
       console.log(`[accounts] Auto-research queued for @${account.username} (${account.platform}): job ${jobId}`);
     }).catch(err => {
@@ -385,14 +425,14 @@ function rowToAccount(row: Record<string, unknown>): Account {
     username:          row.username as string,
     deviceId:          row.device_id as string,
     clientId:          (row.client_id as string) ?? null,
-    type:              (row.type as string) ?? "farming",
+    type:              row.type as string,
     status:            row.status as AccountStatus,
     encryptionKeyRef:  row.encryption_key_ref as string,
     ageDays,
     sessionCount:      (row.session_count as number) ?? 0,
     totalActions:      (row.total_actions as number) ?? 0,
     lastActiveAt:      row.last_active_at ? (row.last_active_at as Date).toISOString() : null,
-    simulatedTimezone: (row.simulated_timezone as string) ?? "Europe/Bucharest",
+    simulatedTimezone: row.simulated_timezone as string,
     createdAt:         createdAt.toISOString(),
     notes:             (row.notes as string) ?? null,
     metrics:           (row.metrics as Record<string, unknown>) ?? {},

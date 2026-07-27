@@ -304,6 +304,15 @@ async function patchAgency(path: string, body: Record<string, unknown>, headers:
 describe("agency workflow runs API", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.db.query.mockReset();
+    mocks.db.connect.mockReset();
+    mocks.client.query.mockReset();
+    mocks.client.release.mockReset();
+    mocks.lifecycle.getState.mockReset();
+    mocks.lifecycle.getTransition.mockReset();
+    mocks.lifecycle.getTransitionToState.mockReset();
+    mocks.lifecycle.listStates.mockReset();
+    mocks.lifecycle.selectTransition.mockReset();
     process.env.API_KEY = "test-api-key";
     process.env.JWT_SECRET = "test-jwt-secret";
     mocks.db.connect.mockResolvedValue(mocks.client);
@@ -2557,6 +2566,22 @@ describe("agency workflow runs API", () => {
       request_key: null,
       context: { source: "workflow_definition_auto_use" },
     });
+    const lockedArtifact = cachedArtifact({
+      platform: "android",
+      cache_key: "0123456789abcdef01234567",
+      canonical_workflow_id: "workflow_definition_device_unlock_v1",
+      canonical_workflow_version: "1.0.0",
+      workflow: {
+        id: "workflow_definition_device_unlock_v1",
+        version: "1.0.0",
+        platform: "android",
+        safetyClass: "standard",
+        intent: "device_unlock",
+        steps: [],
+      },
+      source_metadata: { source: "workflow_definition_auto_use", safetyClass: "standard", intent: "device_unlock" },
+      compiled_plan: { metadata: { safetyClass: "standard", intent: "device_unlock" }, llmBudget: { happyPathRequests: 0 } },
+    });
     mocks.db.query
       .mockResolvedValueOnce({ rows: [definition] })
       .mockResolvedValueOnce({
@@ -2567,24 +2592,8 @@ describe("agency workflow runs API", () => {
           enabledCompilerGate({ gate_id: "execution_path_change", owner: "security", risk: "high" }),
         ],
       })
-      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [lockedArtifact] })
       .mockResolvedValueOnce({ rows: [] });
-    const lockedArtifact = cachedArtifact({
-        platform: "android",
-        cache_key: "0123456789abcdef01234567",
-        canonical_workflow_id: "workflow_definition_device_unlock_v1",
-        canonical_workflow_version: "1.0.0",
-        workflow: {
-          id: "workflow_definition_device_unlock_v1",
-          version: "1.0.0",
-          platform: "android",
-          safetyClass: "standard",
-          intent: "device_unlock",
-          steps: [],
-        },
-        source_metadata: { source: "workflow_definition_auto_use", safetyClass: "standard", intent: "device_unlock" },
-        compiled_plan: { metadata: { safetyClass: "standard", intent: "device_unlock" }, llmBudget: { happyPathRequests: 0 } },
-      });
     mocks.client.query.mockImplementation(async (sql) => {
       const text = String(sql);
       if (text.includes("SELECT * FROM generated_workflow_plan_cache")) return { rows: [lockedArtifact] };

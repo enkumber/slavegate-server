@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   reconcileSupersededTaskIncidents: vi.fn(),
   getResourceLifecycleState: vi.fn(),
   selectResourceLifecycleTransition: vi.fn(),
+  hydrateWorkflowNativePolicies: vi.fn(async (template: Record<string, unknown>) => template),
 }));
 
 vi.mock("../../db/client", () => ({
@@ -72,6 +73,10 @@ vi.mock("../../utils/llm", () => ({
 
 vi.mock("../workflow-compiler/edge-template.adapter", () => ({
   compiledWorkflowToEdgeTemplate: mocks.compiledWorkflowToEdgeTemplate,
+}));
+
+vi.mock("../dispatcher/dispatcher.service", () => ({
+  hydrateWorkflowNativePolicies: mocks.hydrateWorkflowNativePolicies,
 }));
 
 vi.mock("../workflow-events", () => ({

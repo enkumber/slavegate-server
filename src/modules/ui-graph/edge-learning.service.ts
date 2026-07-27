@@ -122,7 +122,7 @@ function verifiedBoundary(steps: WorkflowStep[], actionIndex: number): number | 
   for (let index = actionIndex + 1; index < steps.length; index++) {
     const step = steps[index];
     if (step.type === "action" || step.type === "condition" || step.type === "loop") break;
-    if (step.type === "wait" && step.until?.action === "ui_tree_dump") lastVerification = index;
+    if (step.type === "wait" && step.until) lastVerification = index;
   }
   return lastVerification;
 }

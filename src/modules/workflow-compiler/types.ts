@@ -68,17 +68,8 @@ export interface CompiledStep {
   description: string;
 }
 
-export type CompiledAction =
-  | "screen_wake"
-  | "unlock"
-  | "tap"
-  | "type"
-  | "swipe"
-  | "press_key"
-  | "wait"
-  | "open_app"
-  | "intent_send"
-  | "screenshot";
+/** Action key resolved from the PostgreSQL runtime/action catalog. */
+export type CompiledAction = string;
 
 export interface StepTarget {
   /** Element ID from app map */
@@ -97,12 +88,14 @@ export interface StepTarget {
 // RECOVERY ACTIONS — Output of AI Recovery (Level 2)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export type RecoveryAction =
-  | { type: "retry_step" }
-  | { type: "retry_with_adaptation"; adaptedStep: CompiledStep }
-  | { type: "dismiss_and_retry"; dismissActions: CompiledStep[] }
-  | { type: "navigate_back_and_retry"; backSteps: number }
-  | { type: "abort"; reason: string };
+export interface RecoveryAction {
+  /** Decision key supplied by the active PostgreSQL recovery policy. */
+  type: string;
+  adaptedStep?: CompiledStep;
+  dismissActions?: CompiledStep[];
+  backSteps?: number;
+  reason?: string;
+}
 
 export interface RecoveryContext {
   /** The step that failed */
@@ -167,12 +160,7 @@ export interface CompileResult {
 // EXECUTION TYPES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export type WorkflowExecutionStatus =
-  | "compiled"
-  | "running"
-  | "completed"
-  | "failed"
-  | "aborted";
+export type WorkflowExecutionStatus = string;
 
 export interface ExecutionProgress {
   workflowId: string;

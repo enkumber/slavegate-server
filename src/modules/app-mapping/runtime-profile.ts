@@ -21,6 +21,22 @@ export interface RuntimeRecipeStep {
   transition?: RuntimeRecipeTransition;
 }
 
+export interface AppMappingEnginePolicy {
+  captureStepType: string;
+  foregroundProbeActionKey: string;
+  treeActionKey: string;
+  screenshotActionKey: string;
+  foregroundTimeoutMs: number;
+  treeTimeoutMs: number;
+  screenshotTimeoutMs: number;
+  defaultActionTimeoutMs: number;
+  captureAttempts: number;
+  captureRetryDelayMs: number;
+  screenshotQuality: number;
+  maxDelayAfterMs: number;
+  appVersionFallback: string;
+}
+
 export interface AppRuntimeProfile {
   appId: string;
   appName: string;
@@ -32,6 +48,12 @@ export interface AppRuntimeProfile {
     mode?: string;
     allowedActions: SafeMappingAction[];
     allowedUriHosts?: string[];
+    packageScopedActions?: string[];
+    uriActions?: Record<string, {
+      allowedSchemes?: string[];
+      allowedHosts?: string[];
+      allowedParams?: Record<string, unknown[]>;
+    }>;
     blocked?: string[];
   };
   defaultDeviceId?: string;
@@ -127,19 +149,58 @@ function validateStep(raw: unknown, index: number): RuntimeRecipeStep {
   if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(type)) {
     throw new Error(`runtime profile step ${id} uses an invalid action identifier`);
   }
-  if (type === "capture" && (!String(step.stateKey ?? "").trim() || !String(step.name ?? "").trim())) {
-    throw new Error(`capture step ${id} requires stateKey and name`);
-  }
   return step as unknown as RuntimeRecipeStep;
+}
+
+export function appMappingEnginePolicy(profile: AppRuntimeProfile): AppMappingEnginePolicy {
+  const raw = profile.metadata?.mappingEnginePolicy;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("runtime profile metadata.mappingEnginePolicy is required");
+  }
+  const source = raw as Record<string, unknown>;
+  const requiredString = (key: keyof AppMappingEnginePolicy): string => {
+    const value = source[key];
+    if (typeof value !== "string" || !value.trim()) {
+      throw new Error(`mappingEnginePolicy.${key} must be a non-empty string`);
+    }
+    return value.trim();
+  };
+  const requiredPositiveInteger = (key: keyof AppMappingEnginePolicy): number => {
+    const value = source[key];
+    if (!Number.isSafeInteger(value) || Number(value) < 1) {
+      throw new Error(`mappingEnginePolicy.${key} must be a positive integer`);
+    }
+    return Number(value);
+  };
+  return {
+    captureStepType: requiredString("captureStepType"),
+    foregroundProbeActionKey: requiredString("foregroundProbeActionKey"),
+    treeActionKey: requiredString("treeActionKey"),
+    screenshotActionKey: requiredString("screenshotActionKey"),
+    foregroundTimeoutMs: requiredPositiveInteger("foregroundTimeoutMs"),
+    treeTimeoutMs: requiredPositiveInteger("treeTimeoutMs"),
+    screenshotTimeoutMs: requiredPositiveInteger("screenshotTimeoutMs"),
+    defaultActionTimeoutMs: requiredPositiveInteger("defaultActionTimeoutMs"),
+    captureAttempts: requiredPositiveInteger("captureAttempts"),
+    captureRetryDelayMs: requiredPositiveInteger("captureRetryDelayMs"),
+    screenshotQuality: requiredPositiveInteger("screenshotQuality"),
+    maxDelayAfterMs: requiredPositiveInteger("maxDelayAfterMs"),
+    appVersionFallback: requiredString("appVersionFallback"),
+  };
 }
 
 export function validateRuntimeProfile(profile: AppRuntimeProfile): AppRuntimeProfile {
   if (!profile.appId || !profile.packageName || !profile.appName) {
     throw new Error("runtime profile requires appId, packageName and appName");
   }
+  const enginePolicy = appMappingEnginePolicy(profile);
   const allowed = new Set(profile.safetyPolicy.allowedActions ?? []);
   for (const step of [...profile.resetRecipe, ...profile.mappingRecipe]) {
-    if (step.type !== "capture" && !allowed.has(step.type)) {
+    if (step.type === enginePolicy.captureStepType) {
+      if (!String(step.stateKey ?? "").trim() || !String(step.name ?? "").trim()) {
+        throw new Error(`capture step ${step.id} requires stateKey and name`);
+      }
+    } else if (!allowed.has(step.type)) {
       throw new Error(`runtime profile action ${step.type} is not allowed by its safety policy`);
     }
   }
@@ -259,25 +320,31 @@ export function assertRuntimeActionSafe(
   step: RuntimeRecipeStep,
   params: Record<string, unknown>,
 ): void {
-  if (step.type === "capture") return;
+  if (step.type === appMappingEnginePolicy(profile).captureStepType) return;
   if (!profile.safetyPolicy.allowedActions.includes(step.type)) {
     throw new Error(`action ${step.type} is not allowed for ${profile.appId}`);
   }
-  if (step.type === "open_app" && params.packageName !== profile.packageName) {
-    throw new Error("open_app packageName must match the runtime profile");
+  if ((profile.safetyPolicy.packageScopedActions ?? []).includes(step.type)
+    && params.packageName !== profile.packageName) {
+    throw new Error(`${step.type} packageName must match the runtime profile`);
   }
-  if (step.type === "intent_send") {
+  const uriPolicy = profile.safetyPolicy.uriActions?.[step.type];
+  if (uriPolicy) {
     if (params.packageName !== profile.packageName) {
-      throw new Error("intent_send packageName must match the runtime profile");
-    }
-    if (params.action !== "android.intent.action.VIEW") {
-      throw new Error("mapping intent_send only permits android.intent.action.VIEW");
+      throw new Error(`${step.type} packageName must match the runtime profile`);
     }
     const uri = String(params.uri ?? "");
     const parsed = new URL(uri);
-    const hosts = profile.safetyPolicy.allowedUriHosts ?? [];
-    if (parsed.protocol !== "https:" || !hosts.some((host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`))) {
+    const schemes = uriPolicy.allowedSchemes ?? [];
+    const hosts = uriPolicy.allowedHosts ?? profile.safetyPolicy.allowedUriHosts ?? [];
+    if (!schemes.includes(parsed.protocol)
+      || !hosts.some((host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`))) {
       throw new Error(`URI host is not allowed by runtime profile: ${parsed.hostname}`);
+    }
+    for (const [key, allowedValues] of Object.entries(uriPolicy.allowedParams ?? {})) {
+      if (!Array.isArray(allowedValues) || !allowedValues.some((allowed) => Object.is(allowed, params[key]))) {
+        throw new Error(`${step.type} parameter '${key}' is not allowed by runtime profile`);
+      }
     }
   }
 }

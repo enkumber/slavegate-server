@@ -181,7 +181,7 @@ describe("workflow executor package resolution", () => {
     );
 
     expect(source).not.toContain("com.reddit.frontpage");
-    expect(source).toContain("requires packageName from the DB-authored workflow or runtime profile");
+    expect(source).toContain("dispatcherService.dispatchLegacyGeneratedWorkflow");
   });
 });
 
@@ -256,7 +256,7 @@ describe("Generated workflow contract validation", () => {
     expect(result.errors).toContain("workflow.steps[2].steps must be a non-empty step array for loop steps");
   });
 
-  it("rejects generated workflows that try to open blocked Android packages", async () => {
+  it("leaves Android package authorization to the PostgreSQL runtime contract", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
 
     const result = validateGeneratedWorkflowTemplate({
@@ -275,8 +275,8 @@ describe("Generated workflow contract validation", () => {
       ],
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.errors).toContain("workflow.steps[0].params.packageName is blocked for generated workflows: com.android.settings");
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
   });
 
   it("leaves generated workflow action authorization to the PostgreSQL runtime contract", async () => {
@@ -351,7 +351,7 @@ describe("Generated workflow contract validation", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("rejects semantic_tap generated workflow actions without a target before runtime", async () => {
+  it("leaves action-specific parameter requirements to the PostgreSQL action policy", async () => {
     const { validateGeneratedWorkflowTemplate } = await import("./workflow-validator");
 
     const result = validateGeneratedWorkflowTemplate({
@@ -378,8 +378,8 @@ describe("Generated workflow contract validation", () => {
       ],
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.errors).toContain("workflow.steps[1].params.target is required for semantic_tap actions");
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
   });
 
   it("accepts read-only Reddit account health generated workflows with canonical output metadata", async () => {
@@ -461,11 +461,18 @@ describe("Generated workflow contract validation", () => {
       path.join(__dirname, "..", "observability", "metrics.ts"),
       "utf8"
     );
+    const dispatcherSource = fs.readFileSync(
+      path.join(__dirname, "..", "dispatcher", "dispatcher.service.ts"),
+      "utf8"
+    );
 
     expect(executorSource).toContain('export const RECOVERY_BUDGET_EXCEEDED = "RECOVERY_BUDGET_EXCEEDED"');
     expect(executorSource).toContain("generatedWorkflowRuntimeRecoveryPolicy");
     expect(executorSource).toContain("aiRecoveryEnabled: explicit?.aiRecoveryEnabled === true");
-    expect(executorSource).toContain("explicit?.maxAttemptsPerStep ?? 0");
+    expect(executorSource).not.toContain("explicit?.maxAttemptsPerStep ?? 0");
+    expect(dispatcherSource).toContain(
+      'sourceRecovery.maxAttemptsPerStep ?? runtimeDefault("recoveryMaxAttemptsPerStep")'
+    );
     expect(executorSource).toContain("GENERATED_WORKFLOW_RECOVERY_TOTAL_ATTEMPTS_KEY");
     expect(executorSource).toContain("recordGeneratedWorkflowRecoveryEvent");
     expect(executorSource).toContain("attemptGeneratedWorkflowAiRecovery");
@@ -477,8 +484,8 @@ describe("Generated workflow contract validation", () => {
     expect(executorSource).toContain("stats.recoveryBudgetExhausted++");
     expect(executorSource).toContain("stats.recoveryLlmCalls++");
     expect(executorSource).toContain("stats.runtimeLlmCalls++");
-    expect(executorSource).toContain("normalizeA11yFindTapParams(finalParams)");
-    expect(executorSource).toContain('params["resourceId"] = "add_comment_button"');
+    expect(executorSource).toContain("dispatcherService.dispatchLegacyGeneratedWorkflow");
+    expect(executorSource).not.toContain('params["resourceId"] =');
     expect(executorSource).toContain("never advances a workflow without a correlated JOB_RESULT");
     expect(executorSource).toContain("return false;");
     expect(executorSource).toContain("timeoutMs: dispatchedTimeoutMs");
@@ -491,13 +498,8 @@ describe("Generated workflow contract validation", () => {
     expect(executorSource).toContain("generatedWorkflowRecoveryAttempts?.labels(platform, recoveryReasonFromError(err)).inc()");
     expect(executorSource).toContain("generatedWorkflowRecoveryBudgetExhausted?.labels(platform).inc()");
 
-    const batchExecutionCatch = executorSource.match(
-      /batchResult = await executeBatchSteps[\s\S]*?catch \(err\) \{([\s\S]*?)\n  \}/
-    )?.[1] ?? "";
-    expect(batchExecutionCatch).toContain("executionStats(checkpoint).failedSteps++");
-    expect(batchExecutionCatch).toContain("const budgetErr = recordGeneratedWorkflowRecoveryFailure(template, checkpoint, stepIndex, err)");
-    expect(batchExecutionCatch).toContain("await workflowService.saveCheckpoint");
-    expect(batchExecutionCatch).toContain("throw budgetErr ?? err");
+    expect(executorSource).not.toContain("executeBatchSteps");
+    expect(executorSource).not.toContain("BATCHABLE_ACTIONS");
 
     expect(metricsSource).toContain("phone_network_generated_workflow_recovery_attempt_total");
     expect(metricsSource).toContain('labelNames: ["platform", "reason"]');
@@ -746,15 +748,15 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).toContain("safetyClass: GeneratedWorkflowSafetyClass | null");
     expect(source).toContain("outputSchema: GeneratedWorkflowOutputSchema | null");
     expect(source).toContain("allowedRecoveryRequests: GeneratedWorkflowAllowedRecoveryRequest[]");
-    expect(source).toContain('export type GeneratedWorkflowSafetyClass = "read_only"');
-    expect(source).toContain('export type GeneratedWorkflowIntent = "reddit_account_health_scan"');
+    expect(source).toContain("export type GeneratedWorkflowSafetyClass = string");
+    expect(source).toContain("export type GeneratedWorkflowIntent = string");
     expect(source).toContain("export type GeneratedWorkflowAllowedAction");
     expect(source).toContain("export type GeneratedWorkflowExecuteRequest");
     expect(source).toContain("workflow?: never");
     expect(source).toContain("cacheKey?: never");
     expect(source).toContain("requestKey?: never");
     expect(source).toContain("export type GeneratedWorkflowExecuteResponse");
-    expect(source).toContain('status: "queued" | "running"');
+    expect(source).toContain("status: string");
     expect(source).toContain("canonicalHit: boolean");
     expect(source).toContain("canExecuteFromCache: true");
   });
@@ -771,7 +773,7 @@ describe("POST /workflows/generated — dry-run validation", () => {
     expect(source).not.toContain("deviceId: id.slice(0, 8)");
   });
 
-  it("invalidates stale cached Reddit comments plans after shortcut shape changes", async () => {
+  it("does not package product-specific cache mutations in migrations", async () => {
     const fs = await import("fs");
     const path = await import("path");
     const source = fs.readFileSync(
@@ -779,11 +781,10 @@ describe("POST /workflows/generated — dry-run validation", () => {
       "utf8"
     );
 
-    expect(source).toContain("DELETE FROM generated_workflow_plan_cache");
-    expect(source).toContain("dashboard_human_reddit_first_post_comments_v1");
-    expect(source).toContain("tap_first_post_comments");
-    expect(source).toContain("post.comments");
-    expect(source).toContain("a72b2ed5edde9bc384738b5b");
+    expect(source).toContain("SELECT 1");
+    expect(source).not.toContain("DELETE FROM");
+    expect(source.toLowerCase()).not.toContain("reddit");
+    expect(source).not.toContain("tap_first_post_comments");
   });
 });
 
@@ -801,7 +802,8 @@ describe("Generated workflow validator module", () => {
     expect(source).toContain(".action must be a non-empty string for action steps");
     expect(source).toContain("wait step must define duration, condition, or until");
     expect(source).toContain(".type must be one of: ${GENERATED_WORKFLOW_STEP_TYPES.join");
-    expect(source).toContain("isBlockedPackage");
+    expect(source).not.toContain("isBlockedPackage");
+    expect(source).toContain("safe runtime-contract identifier");
     expect(source).toContain("compileGeneratedWorkflowTemplate");
     expect(source).toContain("happyPathRequests: explicitLlmRequests");
     expect(source).toContain("canExecuteFromCache");

@@ -132,7 +132,10 @@ async function dispatchAndAwait(deviceId: string, type: string, params: Record<s
   const sendResult = await sendStandaloneJobToDevice(deviceId, {
     jobId: job.jobId,
     type: type as any,
-    params,
+    nativeOpcode: job.nativeOpcode,
+    observationOnly: job.observationOnly,
+    verificationOpcode: job.verificationOpcode,
+    params: job.params,
     timeoutMs,
   });
   if (!sendResult.sent) {

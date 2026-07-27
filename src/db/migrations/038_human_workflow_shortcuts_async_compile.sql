@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS workflow_shortcuts (
   name TEXT NOT NULL,
   description TEXT,
   status TEXT NOT NULL,
-  priority INTEGER NOT NULL DEFAULT 100,
+  priority INTEGER NOT NULL,
   intent_patterns JSONB NOT NULL DEFAULT '[]'::jsonb,
   aliases JSONB NOT NULL DEFAULT '[]'::jsonb,
   match_config JSONB NOT NULL DEFAULT '{}'::jsonb,

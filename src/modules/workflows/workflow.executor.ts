@@ -21,11 +21,12 @@ import { Queue, Worker } from "bullmq";
 import { createHash } from "crypto";
 import { getRedisConnectionOptions } from "../../redis/client";
 import { workflowService } from "./workflow.service";
-import { hbeService } from "../hbe/hbe.service";
-import { dispatcherService } from "../dispatcher/dispatcher.service";
+import {
+  assertJobActionResultPolicy,
+  dispatcherService,
+} from "../dispatcher/dispatcher.service";
 import {
   LEGACY_GENERATED_WORKFLOW_RESULT_GRACE_MS,
-  sendServerWorkflowBatchChildToDevice,
   sendDeviceExecutionJobToDevice,
   sendLegacyGeneratedWorkflowJobToDevice,
   isDeviceOnline,
@@ -46,9 +47,7 @@ import type {
   VerificationStrategy,
   WorkflowExecutionStats,
 } from "./types";
-import { PHASE2_UNSUPPORTED_STRATEGIES } from "./types";
 import { normal, logNormal, uniform, clamp } from "../hbe/distributions";
-import type { HbeSessionParams } from "../hbe/hbe.service";
 import {
   generatedWorkflowRecoveryAttempts,
   generatedWorkflowRecoveryBudgetExhausted,
@@ -121,10 +120,19 @@ interface GeneratedWorkflowRuntimeRecoveryPolicy {
   allowedRecoveryRequests: string[];
   requireStateVerification: boolean;
   learnFromFailure: boolean;
+  plannerInstruction: string;
+  executeDecisionKey: string;
+  retryDecisionKey: string;
+  abortDecisionKey: string;
+  probeActionKey: string;
+  probeTimeoutMs: number;
+  plannerSystem: string;
+  plannerMaxTokens: number;
+  plannerTimeoutMs: number;
 }
 
 interface GeneratedWorkflowRecoveryPlan {
-  action: "recover" | "retry_only" | "abort";
+  decision: string;
   rationale?: string;
   expectedState?: string;
   steps?: WorkflowStep[];
@@ -142,8 +150,6 @@ function isGeneratedWorkflowTemplate(template: WorkflowTemplate): boolean {
 function recoveryReasonFromError(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   if (message.includes("Screen mismatch")) return "screen_mismatch";
-  if (message.includes("Batch timeout")) return "batch_timeout";
-  if (message.includes("Batch failed")) return "batch_failed";
   if (message.includes("Cascade tap failed")) return "cascade_failed";
   if (message.includes("JOB_RESULT timeout")) return "job_timeout";
   if (message.includes("failed")) return "action_failed";
@@ -189,13 +195,35 @@ function setGeneratedWorkflowRecoveryTotalAttempts(checkpoint: WorkflowCheckpoin
 
 function generatedWorkflowRuntimeRecoveryPolicy(template: WorkflowTemplate): GeneratedWorkflowRuntimeRecoveryPolicy {
   const explicit = template.recoveryPolicy;
+  const requiredString = (value: unknown, field: string): string => {
+    const normalized = typeof value === "string" ? value.trim() : "";
+    if (explicit?.aiRecoveryEnabled === true && !normalized) {
+      throw new Error(`AI recovery policy requires ${field}`);
+    }
+    return normalized;
+  };
+  const requiredPositiveInteger = (value: unknown, field: string): number => {
+    if (explicit?.aiRecoveryEnabled === true && (!Number.isSafeInteger(value) || Number(value) <= 0)) {
+      throw new Error(`AI recovery policy requires positive integer ${field}`);
+    }
+    return Number.isSafeInteger(value) ? Number(value) : 0;
+  };
+  const requiredNonnegativeInteger = (value: unknown, field: string): number => {
+    if (!Number.isSafeInteger(value) || Number(value) < 0) {
+      throw new Error(`PostgreSQL recovery policy requires nonnegative integer ${field}`);
+    }
+    return Number(value);
+  };
 
   return {
     autonomy: typeof explicit?.autonomy === "string" ? explicit.autonomy : null,
     aiRecoveryEnabled: explicit?.aiRecoveryEnabled === true,
-    maxAttemptsPerStep: Math.max(0, explicit?.maxAttemptsPerStep ?? 0),
-    maxAttemptsPerWorkflow: Math.max(0, explicit?.maxAttemptsPerWorkflow ?? 0),
-    maxRecoveryActionsPerAttempt: Math.max(0, explicit?.maxRecoveryActionsPerAttempt ?? 0),
+    maxAttemptsPerStep: requiredNonnegativeInteger(explicit?.maxAttemptsPerStep, "maxAttemptsPerStep"),
+    maxAttemptsPerWorkflow: requiredNonnegativeInteger(explicit?.maxAttemptsPerWorkflow, "maxAttemptsPerWorkflow"),
+    maxRecoveryActionsPerAttempt: requiredNonnegativeInteger(
+      explicit?.maxRecoveryActionsPerAttempt,
+      "maxRecoveryActionsPerAttempt",
+    ),
     allowedRecoveryRequests: explicit?.allowedRecoveryRequests?.length
       ? explicit.allowedRecoveryRequests
       : template.allowedRecoveryRequests?.length
@@ -203,6 +231,15 @@ function generatedWorkflowRuntimeRecoveryPolicy(template: WorkflowTemplate): Gen
         : [],
     requireStateVerification: explicit?.requireStateVerification === true,
     learnFromFailure: explicit?.learnFromFailure === true,
+    plannerInstruction: requiredString(explicit?.plannerInstruction, "plannerInstruction"),
+    executeDecisionKey: requiredString(explicit?.executeDecisionKey, "executeDecisionKey"),
+    retryDecisionKey: requiredString(explicit?.retryDecisionKey, "retryDecisionKey"),
+    abortDecisionKey: requiredString(explicit?.abortDecisionKey, "abortDecisionKey"),
+    probeActionKey: requiredString(explicit?.probeActionKey, "probeActionKey"),
+    probeTimeoutMs: requiredPositiveInteger(explicit?.probeTimeoutMs, "probeTimeoutMs"),
+    plannerSystem: requiredString(explicit?.plannerSystem, "plannerSystem"),
+    plannerMaxTokens: requiredPositiveInteger(explicit?.plannerMaxTokens, "plannerMaxTokens"),
+    plannerTimeoutMs: requiredPositiveInteger(explicit?.plannerTimeoutMs, "plannerTimeoutMs"),
   };
 }
 
@@ -274,11 +311,17 @@ async function dispatchGeneratedWorkflowProbe(
   workflowId: string,
   deviceId: string,
   stepIndex: number,
-  type: "ui_tree_dump" | "screenshot",
+  type: string,
   timeoutMs: number,
 ): Promise<JobStepResult | null> {
   try {
-    const { jobId } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
+    const {
+      jobId,
+      nativeOpcode,
+      observationOnly,
+      verificationOpcode,
+      params,
+    } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
       deviceId,
       type,
       params: {},
@@ -292,7 +335,7 @@ async function dispatchGeneratedWorkflowProbe(
     try {
       dispatch = await sendLegacyGeneratedWorkflowJobToDevice(
         deviceId,
-        { jobId, type, params: {}, timeoutMs },
+        { jobId, type, nativeOpcode, observationOnly, verificationOpcode, params, timeoutMs },
         { resultTimeoutMs },
       );
     } catch (err) {
@@ -326,52 +369,43 @@ function buildGeneratedWorkflowRecoveryPrompt(input: {
   policy: GeneratedWorkflowRuntimeRecoveryPolicy;
   uiState: string;
 }): string {
-  return [
-    "Return JSON only. You are the AI Recovery Autopilot for a Phone Network Android workflow.",
-    "A deterministic generated workflow step failed. Create a bounded recovery plan, then the executor will retry the original failed step.",
-    "",
-    "Workflow:",
-    `- id: ${input.template.id}`,
-    `- platform: ${input.template.platform}`,
-    `- safetyClass: ${input.template.safetyClass ?? "standard"}`,
-    `- intent: ${input.template.intent ?? "unknown"}`,
-    "",
-    "Failed step:",
-    summarizeRecoveryOutput(input.step, 2500),
-    `Step index: ${input.stepIndex}`,
-    `Failure: ${input.err instanceof Error ? input.err.message : String(input.err)}`,
-    "",
-    "Current UI state:",
-    input.uiState,
-    "",
-    "Policy:",
-    `- autonomy: ${input.policy.autonomy}`,
-    `- max recovery actions in this plan: ${input.policy.maxRecoveryActionsPerAttempt}`,
-    `- allowed recovery requests: ${input.policy.allowedRecoveryRequests.join(", ")}`,
-    `- require state verification: ${input.policy.requireStateVerification}`,
-    "",
-    "Respond with one of:",
-    `{"action":"retry_only","rationale":"...","expectedState":"..."}`,
-    `{"action":"abort","rationale":"...","expectedState":"..."}`,
-    `{"action":"recover","rationale":"...","expectedState":"...","steps":[WorkflowStep...]}`,
-    "",
-    "Recovery steps may use normal WorkflowStep JSON. Prefer safe navigation/read actions:",
-    "action steps: ui_tree_dump, screenshot, wait_for_idle, press_key, scroll, swipe, tap, a11y_find_tap, semantic_tap, detect_current_screen, open_app, intent_send",
-    "wait steps with duration are allowed.",
-    "Do not post, submit, send, follow, delete, vote, join, type text, or perform irreversible social actions in recovery.",
-    "If the state already looks recoverable, use retry_only.",
-    "If the UI is ambiguous or the account/app is in a risky state, use abort.",
-  ].join("\n");
+  return `${input.policy.plannerInstruction}\n\n${JSON.stringify({
+    workflow: {
+      id: input.template.id,
+      platform: input.template.platform,
+      safetyClass: input.template.safetyClass ?? null,
+      intent: input.template.intent ?? null,
+    },
+    failedStep: input.step,
+    stepIndex: input.stepIndex,
+    failure: input.err instanceof Error ? input.err.message : String(input.err),
+    currentUiState: input.uiState,
+    policy: {
+      autonomy: input.policy.autonomy,
+      maxRecoveryActionsPerAttempt: input.policy.maxRecoveryActionsPerAttempt,
+      allowedRecoveryRequests: input.policy.allowedRecoveryRequests,
+      requireStateVerification: input.policy.requireStateVerification,
+      decisionKeys: {
+        execute: input.policy.executeDecisionKey,
+        retry: input.policy.retryDecisionKey,
+        abort: input.policy.abortDecisionKey,
+      },
+    },
+  })}`;
 }
 
-function normalizeGeneratedWorkflowRecoveryPlan(raw: unknown): GeneratedWorkflowRecoveryPlan {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { action: "retry_only" };
+function normalizeGeneratedWorkflowRecoveryPlan(
+  raw: unknown,
+  policy: GeneratedWorkflowRuntimeRecoveryPolicy,
+): GeneratedWorkflowRecoveryPlan {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { decision: policy.retryDecisionKey };
   const candidate = raw as Record<string, unknown>;
-  const action = candidate.action === "recover" || candidate.action === "abort" || candidate.action === "retry_only"
-    ? candidate.action
-    : "retry_only";
+  const allowed = new Set([policy.executeDecisionKey, policy.retryDecisionKey, policy.abortDecisionKey]);
+  const decision = typeof candidate.decision === "string" && allowed.has(candidate.decision)
+    ? candidate.decision
+    : policy.retryDecisionKey;
   return {
-    action,
+    decision,
     rationale: typeof candidate.rationale === "string" ? candidate.rationale.slice(0, 1000) : undefined,
     expectedState: typeof candidate.expectedState === "string" ? candidate.expectedState.slice(0, 1000) : undefined,
     steps: Array.isArray(candidate.steps) ? candidate.steps as WorkflowStep[] : undefined,
@@ -380,14 +414,10 @@ function normalizeGeneratedWorkflowRecoveryPlan(raw: unknown): GeneratedWorkflow
 
 function normalizeGeneratedWorkflowRecoveryStep(step: WorkflowStep, index: number): WorkflowStep {
   if (!step || typeof step !== "object" || Array.isArray(step)) return step;
-  const normalized = {
+  return {
     id: (step as { id?: string }).id ?? `ai_recovery_step_${index + 1}`,
     ...step,
-  } as WorkflowStep & { duration?: unknown; condition?: unknown };
-  if (normalized.type === "wait" && normalized.duration === undefined && normalized.condition === undefined) {
-    normalized.duration = { min: 1000, max: 2000, distribution: "uniform" };
-  }
-  return normalized;
+  } as WorkflowStep;
 }
 
 function validateGeneratedWorkflowRecoverySteps(
@@ -405,10 +435,10 @@ function validateGeneratedWorkflowRecoverySteps(
     description: "Bounded AI-generated recovery workflow",
     version: template.version,
     safetyClass: template.safetyClass,
-    recoveryPolicy: { autonomy: "bounded", maxAttemptsPerStep: 0, maxAttemptsPerWorkflow: 0 },
+    recoveryPolicy: { ...template.recoveryPolicy, aiRecoveryEnabled: false, maxAttemptsPerStep: 0, maxAttemptsPerWorkflow: 0 },
     steps: bounded,
-    defaultVerificationStrategy: "local_only",
-    dataRetentionDays: 0,
+    defaultVerificationStrategy: template.defaultVerificationStrategy,
+    dataRetentionDays: template.dataRetentionDays,
   };
   const validation = validateGeneratedWorkflowTemplate(candidate);
   if (!validation.ok) return { ok: false, error: validation.errors.join("; ") };
@@ -434,18 +464,24 @@ async function attemptGeneratedWorkflowAiRecovery(
   stats.recoveryLlmCalls++;
   stats.runtimeLlmCalls++;
 
-  const uiDump = await dispatchGeneratedWorkflowProbe(workflowId, deviceId, stepIndex, "ui_tree_dump", 10_000);
+  const uiDump = await dispatchGeneratedWorkflowProbe(
+    workflowId,
+    deviceId,
+    stepIndex,
+    policy.probeActionKey,
+    policy.probeTimeoutMs,
+  );
   const uiState = summarizeRecoveryOutput(uiDump?.output, 6000);
   const prompt = buildGeneratedWorkflowRecoveryPrompt({ template, step: failedStep, stepIndex, err, policy, uiState });
 
   let plan: GeneratedWorkflowRecoveryPlan;
   try {
     plan = normalizeGeneratedWorkflowRecoveryPlan(await llmJson<GeneratedWorkflowRecoveryPlan>(prompt, undefined, {
-      max_tokens: 2048,
-      timeoutMs: 20_000,
+      max_tokens: policy.plannerMaxTokens,
+      timeoutMs: policy.plannerTimeoutMs,
       temperature: 0,
-      system: "You are an Android AI recovery planner. Respond ONLY with valid JSON.",
-    }));
+      system: policy.plannerSystem,
+    }), policy);
   } catch (plannerErr) {
     console.warn(`[workflow] ${workflowId} AI recovery planner failed at step ${stepIndex}: ${(plannerErr as Error).message}`);
     checkpoint.variables._lastAiRecoveryPlannerError = (plannerErr as Error).message;
@@ -455,17 +491,17 @@ async function attemptGeneratedWorkflowAiRecovery(
   checkpoint.variables._lastAiRecoveryPlan = {
     at: new Date().toISOString(),
     stepIndex,
-    action: plan.action,
+    decision: plan.decision,
     rationale: plan.rationale ?? null,
     expectedState: plan.expectedState ?? null,
     stepCount: plan.steps?.length ?? 0,
   };
 
-  if (plan.action === "abort") {
+  if (plan.decision === policy.abortDecisionKey) {
     checkpoint.variables._lastAiRecoveryAbort = plan.rationale ?? "AI recovery planner aborted";
     return false;
   }
-  if (plan.action === "retry_only") {
+  if (plan.decision === policy.retryDecisionKey) {
     return true;
   }
 
@@ -481,7 +517,13 @@ async function attemptGeneratedWorkflowAiRecovery(
     console.log(`[workflow] ${workflowId} executing AI recovery plan (${validated.steps.length} steps) before retrying step ${stepIndex}`);
     await executeSteps(workflowId, deviceId, template, validated.steps, checkpoint, 0, job, true);
     if (policy.requireStateVerification) {
-      await dispatchGeneratedWorkflowProbe(workflowId, deviceId, stepIndex, "ui_tree_dump", 10_000);
+      await dispatchGeneratedWorkflowProbe(
+        workflowId,
+        deviceId,
+        stepIndex,
+        policy.probeActionKey,
+        policy.probeTimeoutMs,
+      );
     }
     return true;
   } catch (recoveryErr) {
@@ -746,8 +788,11 @@ export async function runWorkflow(workflowId: string, job: import("bullmq").Job)
   }
 
   if (!wf.templateId) throw new Error(`Workflow ${workflowId} has no template`);
-  const template = await workflowService.getTemplate(wf.templateId);
-  if (!template) throw new Error(`Template ${wf.templateId} not found`);
+  const persistedTemplate = await workflowService.getTemplate(wf.templateId);
+  if (!persistedTemplate) throw new Error(`Template ${wf.templateId} not found`);
+  const template = await dispatcherService.hydrateWorkflowNativePolicies(
+    persistedTemplate as unknown as Record<string, unknown>,
+  ) as unknown as WorkflowTemplate;
 
   if (!wf.deviceId) throw new Error(`Workflow ${workflowId} has no deviceId`);
 
@@ -790,16 +835,10 @@ export async function runWorkflow(workflowId: string, job: import("bullmq").Job)
     }
   }
 
-  // Build (or restore) HBE session params from checkpoint
-  const hbeParams = wf.checkpoint.hbeParams && Object.keys(wf.checkpoint.hbeParams).length > 0
-    ? wf.checkpoint.hbeParams as unknown as HbeSessionParams
-    : buildHbeSession(wf);
-
   // Start from checkpoint (resume after crash/pause)
   const startStep = wf.checkpoint.stepIndex ?? 0;
   const checkpoint: WorkflowCheckpoint = {
     ...wf.checkpoint,
-    hbeParams:  hbeParams as unknown as Record<string, unknown>,
     loopStack:  wf.checkpoint.loopStack ?? [],   // Ensure loopStack always exists (old checkpoints)
   };
 
@@ -837,154 +876,78 @@ async function executeSteps(
   job?: import("bullmq").Job,
   isNested: boolean = false  // true when called from loop/condition (skip checkpoint)
 ): Promise<void> {
-  // ── Batch checkpoint recovery ─────────────────────────────────────────────
-  // If resuming from a checkpoint that had an in-progress batch,
-  // load the partial results and resume from the failed step.
-  const cp = checkpoint as unknown as Record<string, unknown>;
-  if (!isNested && cp.batchId) {
-    const batchId = cp.batchId as string;
-    const batchResults = (cp.batchResults as import("../../protocol/batch-types").StepResult[]) ?? [];
-    const nextIdx = cp.nextStepIndex as number | undefined;
-
-    if (batchId && nextIdx !== undefined && nextIdx < steps.length) {
-      console.log(`[workflow] ${workflowId}: resuming batch ${batchId.slice(0,8)} from step ${nextIdx} (${batchResults.length} results already collected)`);
-
-      // Find first failed step in batchResults to resume from
-      const firstFailed = batchResults.findIndex(
-        (result) => !result.successful && !result.skipped,
-      );
-
-      if (firstFailed >= 0) {
-        // There was a failure in the partial batch — retry remaining steps
-        const resumeFrom = startIndex + firstFailed;
-        console.log(`[workflow] ${workflowId}: batch had failure at step ${firstFailed} → retry from index ${resumeFrom}`);
-        // Continue execution from the failed step (batchResults already collected for earlier steps)
-        // This effectively skips re-running already-completed steps in the batch
-        // but since device state has advanced, we accept the re-execution risk for retries
-        startIndex = resumeFrom;
-      } else {
-        // No failure in collected results — batch was still running
-        // Resume from nextStepIndex
-        startIndex = nextIdx;
-      }
-    }
-
-    // Clear batch checkpoint fields (don't carry over to next checkpoint)
-    delete cp.batchId;
-    delete cp.batchResults;
-    delete cp.nextStepIndex;
-  }
-
-  // ── Compile steps into batch segments ────────────────────────────────────
-  const segments = compileBatchSegments(steps, startIndex);
-  console.log(`[workflow] ${workflowId} compiled ${steps.length} steps into ${segments.length} segments (starting at ${startIndex})`);
-
-  for (const segment of segments) {
-    // ── Cancellation / pause check ─────────────────────────────────────────
+  for (let segIdx = startIndex; segIdx < steps.length; segIdx++) {
+    const step = steps[segIdx];
     const current = await withTimeout(
       workflowService.get(workflowId),
       scalabilityConfig.cancelCheckTimeout,
-      `workflowService.get(${workflowId}) timeout during cancel check`
+      `workflowService.get(${workflowId}) timeout at step ${segIdx}`,
     );
-    if (current?.lifecycleTerminal) {
-      console.log(`[workflow] ${workflowId} cancelled`);
-      return;
-    }
+    if (current?.lifecycleTerminal) return;
     if (current?.lifecycleAdministrative && !current.lifecycleTerminal) {
-      throw new Error(`Workflow paused`);
+      throw new Error(`Workflow paused at step ${segIdx}`);
     }
 
-    if (segment.isBatched) {
-      // ══ BATCH SEGMENT ════════════════════════════════════════════════════
-      // 2+ consecutive batchable steps → execute as one Fast-Path batch
-      await executeBatchSegment(
-        workflowId, deviceId, template, segment, checkpoint, job, isNested
+    try {
+      await executeStep(workflowId, deviceId, template, step, checkpoint, segIdx, job);
+      executionStats(checkpoint).deterministicSteps++;
+    } catch (err) {
+      executionStats(checkpoint).failedSteps++;
+      if (isNested) throw err;
+
+      const budgetErr = recordGeneratedWorkflowRecoveryFailure(template, checkpoint, segIdx, err);
+      await workflowService.saveCheckpoint(
+        workflowId,
+        { ...checkpoint, checkpointAt: new Date().toISOString() },
+        segIdx,
+        segIdx,
       );
-    } else {
-      // ══ SINGLE STEP ═══════════════════════════════════════════════════════
-      // Control flow, skill actions, singletons → execute individually
-      for (const step of segment.steps) {
-        const segIdx = segment.startIndex + segment.steps.indexOf(step);
+      if (budgetErr) throw budgetErr;
 
-        // Cancellation / pause check per step
-        const cur = await withTimeout(
-          workflowService.get(workflowId),
-          scalabilityConfig.cancelCheckTimeout,
-          `workflowService.get(${workflowId}) timeout at step ${segIdx}`
+      const recovered = await attemptGeneratedWorkflowAiRecovery(
+        workflowId,
+        deviceId,
+        template,
+        step,
+        checkpoint,
+        segIdx,
+        err,
+        job,
+      );
+      if (!recovered) throw err;
+
+      try {
+        executionStats(checkpoint).retriedSteps++;
+        await executeStep(workflowId, deviceId, template, step, checkpoint, segIdx, job);
+        executionStats(checkpoint).deterministicSteps++;
+      } catch (retryErr) {
+        await workflowService.saveCheckpoint(
+          workflowId,
+          { ...checkpoint, checkpointAt: new Date().toISOString() },
+          segIdx,
+          segIdx,
         );
-        if (cur?.lifecycleTerminal) { return; }
-        if (cur?.lifecycleAdministrative && !cur.lifecycleTerminal) { throw new Error(`Workflow paused at step ${segIdx}`); }
-
-        try {
-          await executeStep(workflowId, deviceId, template, step, checkpoint, segIdx, job);
-          executionStats(checkpoint).deterministicSteps++;
-        } catch (err) {
-          executionStats(checkpoint).failedSteps++;
-          if (isNested) throw err;
-
-          const budgetErr = recordGeneratedWorkflowRecoveryFailure(template, checkpoint, segIdx, err);
-          if (!isNested) {
-            await workflowService.saveCheckpoint(
-              workflowId,
-              { ...checkpoint, checkpointAt: new Date().toISOString() },
-              segIdx,
-              segIdx,
-            );
-          }
-          if (budgetErr) throw budgetErr;
-
-          const recovered = await attemptGeneratedWorkflowAiRecovery(
-            workflowId,
-            deviceId,
-            template,
-            step,
-            checkpoint,
-            segIdx,
-            err,
-            job,
-          );
-          if (!recovered) throw err;
-
-          try {
-            executionStats(checkpoint).retriedSteps++;
-            await executeStep(workflowId, deviceId, template, step, checkpoint, segIdx, job);
-            executionStats(checkpoint).deterministicSteps++;
-          } catch (retryErr) {
-            if (!isNested) {
-              await workflowService.saveCheckpoint(
-                workflowId,
-                { ...checkpoint, checkpointAt: new Date().toISOString() },
-                segIdx,
-                segIdx,
-              );
-            }
-            throw retryErr;
-          }
-        }
-
-        // Extend BullMQ lock after each step
-        if (job) {
-          try {
-            await job.extendLock(job.token!, 60000);
-          } catch (lockErr) {
-            console.warn(`[workflow] ${workflowId} failed to extend lock at step ${segIdx}: ${lockErr}`);
-          }
-        }
-
-        // Checkpoint after each step (top-level only)
-        if (!isNested) {
-          const saved = await workflowService.saveCheckpoint(
-            workflowId,
-            { ...checkpoint, stepIndex: segIdx + 1, checkpointAt: new Date().toISOString() },
-            segIdx + 1,
-            segIdx
-          );
-          if (!saved) {
-            throw new Error(`Checkpoint conflict at step ${segIdx} — aborting`);
-          }
-          checkpoint.stepIndex = segIdx + 1;
-        }
+        throw retryErr;
       }
+    }
+
+    if (job) {
+      try {
+        await job.extendLock(job.token!, 60000);
+      } catch (lockErr) {
+        console.warn(`[workflow] ${workflowId} failed to extend lock at step ${segIdx}: ${lockErr}`);
+      }
+    }
+
+    if (!isNested) {
+      const saved = await workflowService.saveCheckpoint(
+        workflowId,
+        { ...checkpoint, stepIndex: segIdx + 1, checkpointAt: new Date().toISOString() },
+        segIdx + 1,
+        segIdx,
+      );
+      if (!saved) throw new Error(`Checkpoint conflict at step ${segIdx} — aborting`);
+      checkpoint.stepIndex = segIdx + 1;
     }
   }
 }
@@ -1012,7 +975,7 @@ async function executeStep(
     }
 
     case "wait": {
-      const delayMs = resolveWaitDuration(step, checkpoint.hbeParams as unknown as HbeSessionParams);
+      const delayMs = resolveWaitDuration(step);
       if (delayMs > 0) {
         console.log(`[workflow] ${workflowId} step ${stepIndex} wait ${delayMs}ms`);
         await sleep(delayMs);
@@ -1093,93 +1056,29 @@ async function executeActionStep(
     throw new Error(`Device ${deviceId} offline at step ${stepIndex}`);
   }
 
-  const rawStrategy = (step.verification ?? template.defaultVerificationStrategy) as VerificationStrategy;
-  const strategy    = enforcePhase2Strategy(rawStrategy, workflowId, stepIndex);
-  const hbeSession  = checkpoint.hbeParams as unknown as HbeSessionParams;
+  const strategy = (step.verification ?? template.defaultVerificationStrategy) as VerificationStrategy;
+  let finalParams: Record<string, unknown> = { ...(step.params ?? {}) };
 
-  // HBE: timing and jitter for this action
-  const hbeStep = hbeService.getActionParams(
-    mapActionToHbeType(step.action),
-    hbeSession,
-    {
-      targetX: step.x,
-      targetY: step.y,
-      text:    step.params?.text as string | undefined,
-      scrollDistancePx: step.params?.distancePx as number | undefined,
-      verificationStrategy: strategy,
-    }
-  );
-
-  // Pre-action HBE delay (human micro-pause before acting)
-  if (hbeStep.action.preActionDelayMs > 0) {
-    await sleep(hbeStep.action.preActionDelayMs);
+  if (!Number.isSafeInteger(step.timeoutMs) || Number(step.timeoutMs) < 1) {
+    throw new Error(`Step ${stepIndex} is missing its PostgreSQL-hydrated timeoutMs`);
   }
-
-  // Build final params with HBE-applied values
-  const finalParams: Record<string, unknown> = { ...(step.params ?? {}) };
-  if (hbeStep.action.jitteredCoords) {
-    finalParams["x"] = hbeStep.action.jitteredCoords.x;
-    finalParams["y"] = hbeStep.action.jitteredCoords.y;
-  }
-  if (hbeStep.action.keystrokeDelaysMs) {
-    finalParams["keystrokeDelaysMs"] = hbeStep.action.keystrokeDelaysMs;
-  }
-  if (hbeStep.action.scrollParams) {
-    finalParams["distancePx"] = hbeStep.action.scrollParams.distancePx;
-    finalParams["durationMs"] = hbeStep.action.scrollParams.durationMs;
-  }
-
-  // Resolve textFromVariable for type_text action
-  if (step.action === "type_text" && finalParams["textFromVariable"] && !finalParams["text"]) {
-    const varName = finalParams["textFromVariable"] as string;
-    const textValue = checkpoint.variables[varName] as string | undefined;
-    if (textValue) {
-      finalParams["text"] = textValue;
-      console.log(`[workflow] ${workflowId} step ${stepIndex}: resolved text from variable "${varName}" (${textValue.length} chars)`);
-    } else {
-      console.warn(`[workflow] ${workflowId} step ${stepIndex}: textFromVariable "${varName}" is empty/undefined`);
-      finalParams["text"] = "";
-    }
-    delete finalParams["textFromVariable"]; // Remove meta-param before sending to device
-  }
-
-  if (step.action === "a11y_find_tap") {
-    normalizeA11yFindTapParams(finalParams);
-  }
-
-  // Resolve packageName for open_app/close_app actions
-  if ((step.action === "open_app" || step.action === "close_app") && !finalParams["packageName"]) {
-    const resolved = checkpoint.variables?.packageName as string | undefined;
-    if (!resolved) {
-      throw new Error("open_app/close_app requires packageName from the DB-authored workflow or runtime profile");
-    }
-    finalParams["packageName"] = resolved;
-    console.log(`[workflow] ${workflowId} resolved packageName from workflow runtime profile`);
-  }
-
-  // Error simulation (before the real action — human corrects their mistake)
-  if (hbeStep.action.simulateError) {
-    await simulateError(hbeStep.action.errorType, deviceId);
-  }
-
-  const timeoutMs = step.timeoutMs ?? 30_000;
+  const timeoutMs = Number(step.timeoutMs);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // CASCADE TAP: If this is a tap action with a target element, use skill system
   // ═══════════════════════════════════════════════════════════════════════════
-  const stepTarget = (step as { target?: string }).target;
-
-  if (step.action === "tap" && stepTarget && !step.x && !step.y) {
-    throw new Error(`Named target "${stepTarget}" requires the data-driven semantic_tap primitive`);
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // REGULAR DISPATCH: For non-cascade actions (or tap with explicit x/y coords)
-  // ═══════════════════════════════════════════════════════════════════════════
-  // action string → JobType (validated by dispatcher whitelist)
   const jobType = step.action as import("../../../shared/protocol/messages").JobType;
 
-  const { jobId, timeoutMs: dispatchedTimeoutMs, requiresRoot } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
+  const {
+    jobId,
+    timeoutMs: dispatchedTimeoutMs,
+    requiresRoot,
+    nativeOpcode,
+    observationOnly,
+    verificationOpcode,
+    executionPolicy,
+    params: dispatchedParams,
+  } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
     deviceId,
     type:        jobType,
     params:      finalParams as import("../../../shared/protocol/messages").JobParams,
@@ -1188,9 +1087,10 @@ async function executeActionStep(
     workflowId,
     stepIndex,
     verificationStrategy: strategy,
-    l1TimeoutMs: hbeStep.l1TimeoutMs,
-    l2SettleMs:  hbeStep.l2SettleMs,
   });
+
+  finalParams = { ...dispatchedParams };
+  applyWorkflowParameterBindings(finalParams, checkpoint.variables, executionPolicy);
 
   // Write audit log entry at dispatch
   const db = getDb();
@@ -1219,12 +1119,12 @@ async function executeActionStep(
     dispatch = await sendLegacyGeneratedWorkflowJobToDevice(deviceId, {
       jobId,
       type:     jobType,
+      nativeOpcode,
+      observationOnly,
+      verificationOpcode,
       params:   finalParams as import("../../../shared/protocol/messages").JobParams,
       timeoutMs: dispatchedTimeoutMs,
       requiresRoot,
-      verificationStrategy: strategy,
-      l1TimeoutMs:          hbeStep.l1TimeoutMs,
-      l2SettleMs:           hbeStep.l2SettleMs,
     }, { resultTimeoutMs });
   } catch (err) {
     prepared.cancel();
@@ -1294,14 +1194,9 @@ async function executeActionStep(
     throw new Error(`Step ${stepIndex} (${step.action}) failed: ${result.error ?? "device reported failure"}`);
   }
 
-  if (step.action === "unlock" && result.output && typeof result.output === "object") {
-    const unlocked = (result.output as Record<string, unknown>).unlocked;
-    if (unlocked === false) {
-      throw new Error(`Step ${stepIndex} (unlock) failed: device remained locked`);
-    }
-  }
-
-  if (step.action === "screenshot") {
+  assertJobActionResultPolicy(result, executionPolicy, `Step ${stepIndex}`);
+  if (result.output && typeof result.output === "object"
+    && typeof (result.output as Record<string, unknown>).image_base64 === "string") {
     materializeScreenshotArtifact(checkpoint, jobId, result);
   }
 
@@ -1310,425 +1205,13 @@ async function executeActionStep(
     checkpoint.variables[outputVariable] = result.output ?? null;
   }
 
-  // Post-action HBE delay (human settle time after action)
-  if (hbeStep.action.postActionDelayMs > 0) {
-    await sleep(hbeStep.action.postActionDelayMs);
+  if (!Number.isSafeInteger(step.delayAfterMs) || Number(step.delayAfterMs) < 0) {
+    throw new Error(`Step ${stepIndex} is missing its PostgreSQL-hydrated delayAfterMs`);
+  }
+  if (Number(step.delayAfterMs) > 0) {
+    await sleep(Number(step.delayAfterMs));
   }
 
-}
-
-// ─── Batch segmentation ───────────────────────────────────────────────────────
-
-/**
- * A segment of steps that can be executed as one batch, or a single control-flow step.
- */
-export interface BatchSegment {
-  /** Steps in this segment (length === 1 for non-batchable, length >= 1 for batchable) */
-  steps: WorkflowStep[];
-  /** If true: execute as single BATCH_START. If false: execute steps individually. */
-  isBatched: boolean;
-  /** Starting step index in the original workflow steps array */
-  startIndex: number;
-}
-
-/**
- * Actions that can be executed inside a batch (Fast-Path).
- * These map directly to BatchStepActionType in batch-types.ts.
- */
-const BATCHABLE_ACTIONS = new Set([
-  "tap", "type", "swipe", "scroll",
-  "press_back", "press_home", "press_recent",
-  "open_app", "close_app",
-  "keyevent", "long_press", "double_tap",
-]);
-
-/**
- * Actions that require server-side hooks and cannot be batched.
- */
-const NON_BATCHABLE_ACTIONS = new Set([
-  "cascade_tap", "ui_tree_dump", "screenshot",
-  "pm_install", "pm_uninstall", "reboot",
-  "ota_update", "screen_detect",
-]);
-
-/**
- * Check if a workflow action step is batchable (can run Fast-Path in a batch).
- */
-function isBachableActionStep(step: WorkflowStep): boolean {
-  if (step.type !== "action") return false;
-  const actionStep = step as ActionStep;
-
-  // Must be a batchable action type
-  if (!BATCHABLE_ACTIONS.has(actionStep.action)) return false;
-
-  // Non-batchable action types
-  if (NON_BATCHABLE_ACTIONS.has(actionStep.action)) return false;
-
-  // Cascade tap (target element without explicit coords) → NOT batchable
-  if ((actionStep as { target?: string }).target && !actionStep.x && !actionStep.y) return false;
-
-  // Screen verification required → NOT batchable (needs server-side cascade)
-  if ((actionStep as { expectedScreen?: string }).expectedScreen) return false;
-
-  // Error simulation → NOT batchable (HBE server-side hook)
-  const hasErrorSim = (actionStep.params as Record<string, unknown>)?.["errorSimulation"];
-  if (hasErrorSim) return false;
-
-  // textFromVariable resolution → NOT batchable (server-side)
-  const textFromVar = (actionStep.params as Record<string, unknown>)?.["textFromVariable"];
-  if (textFromVar) return false;
-
-  // Needs retry logic → batched retries complicate state; execute individually
-  if ((actionStep as { retries?: number }).retries && (actionStep as { retries?: number }).retries! > 0) return false;
-
-  return true;
-}
-
-/**
- * Compile consecutive workflow steps into BatchSegments.
- *
- * Rule: group consecutive batchable action steps into segments of size >= 2.
- * Singletons and non-batchable steps become their own segments.
- * Control flow steps (condition, loop, checkpoint) are always separate segments.
- *
- * Example:
- *   [tap, tap, condition, tap, tap, tap, wait]
- *   → [{batched:[tap,tap]}, {batched:false:[condition]},
- *      {batched:[tap,tap,tap]}, {batched:false:[wait]}]
- */
-export function compileBatchSegments(steps: WorkflowStep[], startIndex = 0): BatchSegment[] {
-  const segments: BatchSegment[] = [];
-  const slice = steps.slice(startIndex);
-
-  let i = 0;
-  while (i < slice.length) {
-    const step = slice[i];
-
-    // Non-action steps → always their own segment (not batched)
-    if (step.type !== "action") {
-      segments.push({ steps: [step], isBatched: false, startIndex: startIndex + i });
-      i++;
-      continue;
-    }
-
-    // Collect consecutive batchable action steps
-    const batchRun: WorkflowStep[] = [];
-    const batchStartIndex = i;
-
-    while (i < slice.length && isBachableActionStep(slice[i])) {
-      batchRun.push(slice[i]);
-      i++;
-    }
-
-    if (batchRun.length >= 2) {
-      // 2+ consecutive batchable steps → batch segment
-      segments.push({ steps: batchRun, isBatched: true, startIndex: startIndex + batchStartIndex });
-    } else if (batchRun.length === 1) {
-      // Single batchable step → execute individually (overhead not worth a round-trip)
-      segments.push({ steps: batchRun, isBatched: false, startIndex: startIndex + batchStartIndex });
-    } else {
-      // Non-batchable action step (screen_wake, unlock, screenshot, etc.) → singleton, execute individually
-      // MUST increment i to avoid infinite loop!
-      segments.push({ steps: [slice[i]], isBatched: false, startIndex: startIndex + i });
-      i++;
-    }
-    // which is handled at the top of the next iteration
-  }
-
-  return segments;
-}
-
-/**
- * Convert a WorkflowStep (action) to a BatchStep for executeBatchSteps.
- */
-function workflowStepToBatchStep(step: WorkflowStep, stepId: number): import("../../protocol/batch-types").BatchStep | null {
-  if (step.type !== "action") return null;
-  const ws = step as ActionStep;
-
-  const batchStep: import("../../protocol/batch-types").ActionStep = {
-    id: stepId,
-    type: "action",
-    action: ws.action as import("../../protocol/batch-types").ActionType,
-    target: (ws as { target?: string }).target ?? null,
-    params: {
-      ...(ws.params as Record<string, unknown>),
-      // Resolve explicit coords if present (normalized 0.0-1.0 from workflow)
-      ...(ws.x !== undefined && ws.y !== undefined
-        ? ({ x: ws.x, y: ws.y } as Record<string, unknown>)
-        : {}),
-    } as Record<string, unknown>,
-    verify: (ws as unknown as Record<string, unknown>).verification as import("../../protocol/batch-types").VerificationConfig | null ?? undefined,
-  };
-
-  return batchStep as import("../../protocol/batch-types").BatchStep;
-}
-
-// ─── Batch segment execution ────────────────────────────────────────────────
-
-/**
- * Execute a batch segment with checkpoint support.
- *
- * Flow:
- *   1. Build BATCH_START from segment steps
- *   2. Execute via executeBatchSteps()
- *   3. On success / partial_failure (continueOnError=true): checkpoint + continue
- *   4. On failure (continueOnError=false): checkpoint with batchResults + throw → retry
- *   5. On timeout: checkpoint + throw → retry
- */
-async function executeBatchSegment(
-  workflowId: string,
-  deviceId:   string,
-  template:   WorkflowTemplate,
-  segment:    BatchSegment,
-  checkpoint: WorkflowCheckpoint,
-  job:        import("bullmq").Job | undefined,
-  isNested:   boolean,
-): Promise<void> {
-  const batchId = uuidv4Batch();
-  const stepIndex = segment.startIndex; // global step index of first step in batch
-
-  // Convert workflow steps → batch steps (with 1-based ids matching step position in segment)
-  const batchSteps: import("../../protocol/batch-types").BatchStep[] = [];
-  for (let i = 0; i < segment.steps.length; i++) {
-    const converted = workflowStepToBatchStep(segment.steps[i], i + 1);
-    if (converted) batchSteps.push(converted);
-  }
-
-  // HBE: compute timing for the batch.
-  // Pre-compute post-action delays for the last step only (all other HBE delays
-  // are absorbed into the batch execution on device).
-  const hbeSession = checkpoint.hbeParams as unknown as HbeSessionParams;
-  const lastStep = segment.steps[segment.steps.length - 1] as ActionStep;
-  const hbeLast = hbeService.getActionParams(
-    mapActionToHbeType(lastStep?.action ?? "tap"),
-    hbeSession,
-    { verificationStrategy: "local_only" }
-  );
-
-  const batchTimeoutMs =
-    30_000 * segment.steps.length * 2;
-
-  // Pre-action HBE delay (human micro-pause before batch)
-  if (hbeLast.action.preActionDelayMs > 0) {
-    await sleep(hbeLast.action.preActionDelayMs);
-  }
-
-  let batchResult: import("../../protocol/batch-types").BATCH_RESULT;
-
-  try {
-    batchResult = await executeBatchSteps(deviceId, workflowId, stepIndex, batchSteps, {
-      continueOnError: false, // We handle continueOnError per-step via retry logic
-      timeoutMs: 30_000,
-      batchTimeoutMs,
-    });
-  } catch (err) {
-    // Batch failed to execute (device offline, timeout, network error)
-    // Save checkpoint with batch state for retry
-    executionStats(checkpoint).failedSteps++;
-    const budgetErr = recordGeneratedWorkflowRecoveryFailure(template, checkpoint, stepIndex, err);
-    if (!isNested) {
-      await workflowService.saveCheckpoint(
-        workflowId,
-        {
-          ...checkpoint,
-          stepIndex: stepIndex, // retry from first step of this batch
-          checkpointAt: new Date().toISOString(),
-        },
-        stepIndex,
-        stepIndex - 1,
-      );
-    }
-    throw budgetErr ?? err;
-  }
-
-  const { completed, partial, timedOut, results } = batchResult;
-  const failedStepIdx = results.findIndex(
-    (result) => !result.successful && !result.skipped,
-  );
-
-  if (completed) {
-    // All steps succeeded → checkpoint after last step
-    const lastStepIndex = stepIndex + segment.steps.length;
-    const stats = executionStats(checkpoint);
-    stats.deterministicSteps += results.length;
-    stats.batchedSteps += results.length;
-
-    if (!isNested) {
-      const saved = await workflowService.saveCheckpoint(
-        workflowId,
-        {
-          ...checkpoint,
-          stepIndex: lastStepIndex,
-          checkpointAt: new Date().toISOString(),
-        },
-        lastStepIndex,
-        stepIndex + segment.steps.length - 1,
-      );
-      if (!saved) throw new Error(`Checkpoint conflict after batch — aborting`);
-      checkpoint.stepIndex = lastStepIndex;
-    }
-
-    // Post-batch HBE settle
-    if (hbeLast.action.postActionDelayMs > 0) {
-      await sleep(hbeLast.action.postActionDelayMs);
-    }
-
-    console.log(`[workflow] ${workflowId} batch ${batchId.slice(0,8)} completed: ${results.length} steps`);
-    return;
-  }
-
-  if (partial) {
-    // Some steps failed, but continueOnError=true on device → we got partial results
-    // Log failures and continue to next segment
-    const successfulSteps = results.filter((result) => result.successful).length;
-    const failedSteps = results.length - successfulSteps;
-    const stats = executionStats(checkpoint);
-    stats.deterministicSteps += successfulSteps;
-    stats.batchedSteps += successfulSteps;
-    stats.failedSteps += failedSteps;
-
-    for (const r of results) {
-      if (!r.successful && !r.skipped && !r.timedOut) {
-        console.warn(`[workflow] ${workflowId} batch step ${r.id} failed: ${r.error}`);
-      } else if (r.timedOut) {
-        console.warn(`[workflow] ${workflowId} batch step ${r.id} timed out`);
-      }
-    }
-
-    const nextStepIndex = stepIndex + segment.steps.length;
-
-    if (!isNested) {
-      const saved = await workflowService.saveCheckpoint(
-        workflowId,
-        {
-          ...checkpoint,
-          stepIndex: nextStepIndex,
-          checkpointAt: new Date().toISOString(),
-        },
-        nextStepIndex,
-        stepIndex + segment.steps.length - 1,
-      );
-      if (!saved) throw new Error(`Checkpoint conflict after partial batch — aborting`);
-      checkpoint.stepIndex = nextStepIndex;
-    }
-
-    // Post-batch HBE settle
-    if (hbeLast.action.postActionDelayMs > 0) {
-      await sleep(hbeLast.action.postActionDelayMs);
-    }
-
-    console.log(`[workflow] ${workflowId} batch ${batchId.slice(0,8)} partial_failure at step ${failedStepIdx} — continuing`);
-    return;
-  }
-
-  // Any non-partial terminal batch result aborts the workflow.
-  // Save batch state for retry (resume from failed step on next attempt)
-  const failedGlobalIndex = stepIndex + (failedStepIdx >= 0 ? failedStepIdx : 0);
-  executionStats(checkpoint).failedSteps++;
-  const budgetErr = recordGeneratedWorkflowRecoveryFailure(
-    template,
-    checkpoint,
-    failedGlobalIndex,
-    new Error(
-      timedOut
-        ? `Batch timeout after ${batchTimeoutMs}ms`
-        : `Batch failed at step ${failedStepIdx + 1}`,
-    ),
-  );
-
-  if (!isNested) {
-    const saved = await workflowService.saveCheckpoint(
-      workflowId,
-      {
-        ...checkpoint,
-        stepIndex: failedGlobalIndex, // retry from this step on next attempt
-        checkpointAt: new Date().toISOString(),
-      },
-      failedGlobalIndex,
-      stepIndex + segment.steps.length - 1,
-    );
-    if (!saved) throw new Error(`Checkpoint conflict on batch failure — aborting`);
-    checkpoint.stepIndex = failedGlobalIndex;
-  }
-
-  const errorMsg =
-    timedOut
-      ? `Batch timeout after ${batchTimeoutMs}ms`
-      : `Batch failed at step ${failedStepIdx + 1} (global=${failedGlobalIndex}): ${
-          results.find((result) => !result.successful && !result.skipped)?.error ?? "Unknown"
-        }`;
-
-  throw budgetErr ?? new Error(errorMsg);
-}
-
-// ─── Batch execution (Fast-Path) ────────────────────────────────────────────
-
-/**
- * Send a BATCH_START to a device and await BATCH_RESULT.
- *
- * This replaces multiple individual JOB/JOB_RESULT round-trips with a single
- * message pair. Used for consecutive steps that don't need server-side decisions.
- *
- * @param deviceId   Target device
- * @param workflowId Workflow ID (for tracking)
- * @param stepIndex  Starting step index in workflow
- * @param steps      Array of BatchStep objects (from batch-types.ts)
- * @param options    Batch options (timeout, continueOnError)
- * @returns BATCH_RESULT from device
- */
-export async function executeBatchSteps(
-  deviceId:   string,
-  workflowId: string,
-  stepIndex:  number,
-  steps:      import("../../protocol/batch-types").BatchStep[],
-  options?:   Partial<import("../../protocol/batch-types").BatchOptions>,
-): Promise<import("../../protocol/batch-types").BATCH_RESULT> {
-  const batchId = uuidv4Batch();
-
-  const batchPayload = {
-    type:       "BATCH_START",
-    batchId,
-    workflowId,
-    stepIndex,
-    steps,
-    options: {
-      continueOnError: options?.continueOnError ?? false,
-      timeoutMs:       options?.timeoutMs ?? 30_000,
-      batchTimeoutMs:  options?.batchTimeoutMs ??
-        (options?.timeoutMs ?? 30_000) * steps.length * 2,
-    },
-  };
-
-  console.log(`[workflow] Batch ${batchId.slice(0,8)} sent to ${deviceId.slice(0,8)}: ${steps.length} steps`);
-
-  const result = await sendServerWorkflowBatchChildToDevice(
-    deviceId,
-    workflowId,
-    batchPayload,
-    (batchPayload.options as Record<string, unknown>).batchTimeoutMs as number + 30_000,
-  );
-
-  console.log(`[workflow] Batch ${batchId.slice(0,8)} result: completed=${result.completed === true} steps=${result.results.length} totalMs=${result.totalDurationMs}`);
-
-  return {
-    type:       "BATCH_RESULT",
-    batchId:    result.batchId,
-    workflowId: result.workflowId,
-    completed:  result.completed === true,
-    partial:    result.partial === true,
-    timedOut:   result.timedOut === true,
-    results:    result.results as import("../../protocol/batch-types").StepResult[],
-    executedAt: result.executedAt,
-  };
-}
-
-/**
- * Generate a batch UUID (v4).
- * Uses the same uuid library as the rest of the executor.
- */
-function uuidv4Batch(): string {
-  const { v4 } = require("uuid");
-  return v4();
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
@@ -1767,111 +1250,133 @@ export async function startWorkflow(workflowId: string): Promise<void> {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function normalizeA11yFindTapParams(params: Record<string, unknown>): void {
-  const label = typeof params["label"] === "string" ? params["label"].trim() : "";
-  const textContains = typeof params["textContains"] === "string" ? params["textContains"].trim() : "";
-  const targetText = textContains || label;
-
-  if (targetText && !params["text"] && !params["contentDescription"]) {
-    params["text"] = targetText;
-    params["contentDescription"] = targetText;
-    params["partialMatch"] = true;
+function readObjectPath(value: unknown, path: string): unknown {
+  let current = value;
+  for (const segment of path.split(".").filter(Boolean)) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[segment];
   }
-
-  const normalized = targetText.toLowerCase();
-  if (
-    !params["resourceId"] &&
-    (normalized.includes("add a comment") ||
-      normalized.includes("join the conversation") ||
-      normalized.includes("your comment"))
-  ) {
-    params["resourceId"] = "add_comment_button";
-  }
-
-  delete params["label"];
-  delete params["textContains"];
+  return current;
 }
 
-function buildHbeSession(wf: { checkpoint: WorkflowCheckpoint }): HbeSessionParams {
-  // Fresh session — pick mood and drift from account age.
-  // Account age stored in HBE params (from account management, Phase 3).
-  // Phase 2: default 30 days (growth phase) and Europe/Bucharest timezone.
-  const accountAgeDays    = (wf.checkpoint.variables?.["accountAgeDays"] as number) ?? 30;
-  const simulatedTimezone = (wf.checkpoint.variables?.["timezone"] as string) ?? "Europe/Bucharest";
-  return hbeService.initSession(accountAgeDays, simulatedTimezone);
+function applyWorkflowParameterBindings(
+  params: Record<string, unknown>,
+  variables: Record<string, unknown>,
+  policy: Record<string, unknown>,
+): void {
+  const bindings = Array.isArray(policy.parameterBindings) ? policy.parameterBindings : [];
+  for (const raw of bindings) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const binding = raw as Record<string, unknown>;
+    const sourceParam = typeof binding.sourceParam === "string" ? binding.sourceParam : "";
+    const targetParam = typeof binding.targetParam === "string" ? binding.targetParam : "";
+    if (!sourceParam || !targetParam || params[targetParam] !== undefined) continue;
+    const variableName = params[sourceParam];
+    if (typeof variableName !== "string") continue;
+    const resolved = readObjectPath(variables, variableName);
+    if (resolved === undefined && binding.required === true) {
+      throw new Error(`Required workflow variable '${variableName}' is unavailable`);
+    }
+    params[targetParam] = resolved ?? binding.defaultValue ?? null;
+    if (binding.removeSource !== false) delete params[sourceParam];
+  }
+  const fallbacks = Array.isArray(policy.parameterFallbacks) ? policy.parameterFallbacks : [];
+  for (const raw of fallbacks) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const fallback = raw as Record<string, unknown>;
+    const targetParam = typeof fallback.targetParam === "string" ? fallback.targetParam : "";
+    const variablePath = typeof fallback.variablePath === "string" ? fallback.variablePath : "";
+    if (!targetParam || !variablePath || params[targetParam] !== undefined) continue;
+    const resolved = readObjectPath(variables, variablePath);
+    if (resolved === undefined && fallback.required === true) {
+      throw new Error(`Required workflow variable '${variablePath}' is unavailable`);
+    }
+    if (resolved !== undefined) params[targetParam] = resolved;
+  }
 }
 
-function resolveWaitDuration(step: WaitStep, hbeSession: HbeSessionParams): number {
+function resolveWaitDuration(step: WaitStep): number {
   if (!step.duration) return 0;
-  const { min, max, distribution, mean } = step.duration;
-  const m = hbeSession?.timingMultiplier ?? 1.0;
+  const { min, max, distributionOpcode, mean } = step.duration;
   const baseMean = mean ?? (min + max) / 2;
-  switch (distribution) {
-    case "lognormal": return clamp(logNormal(baseMean * m, 0.4), min, max);
-    case "normal":    return clamp(normal(baseMean * m, (max - min) / 6), min, max);
-    //                                                   ^^^^^^^^^^^^^^
-    //                                                   stddev ≈ (max-min)/6 → ~99.7% within [min,max]
-    //                                                   Previously used Math.random() uniform — not Gaussian
-    default:          return uniform(min * m, max * m);
+  switch (distributionOpcode) {
+    case 0: return uniform(min, max);
+    case 1: return clamp(logNormal(baseMean, 0.4), min, max);
+    case 2: return clamp(normal(baseMean, (max - min) / 6), min, max);
+    default: throw new Error(`Unknown PostgreSQL distribution opcode: ${String(distributionOpcode)}`);
   }
 }
 
 function resolveLoopCount(step: LoopStep): number {
-  const { min, max, distribution } = step.count;
-  if (distribution === "normal") {
-    return Math.round(clamp(normal((min + max) / 2, (max - min) / 6), min, max));
+  const { min, max, distributionOpcode } = step.count;
+  switch (distributionOpcode) {
+    case 0: return Math.round(uniform(min, max));
+    case 2: return Math.round(clamp(normal((min + max) / 2, (max - min) / 6), min, max));
+    default: throw new Error(`Unknown PostgreSQL loop distribution opcode: ${String(distributionOpcode)}`);
   }
-  return Math.round(uniform(min, max));
 }
 
 function evaluateCondition(step: ConditionStep, checkpoint: WorkflowCheckpoint): boolean {
-  switch (step.check) {
-    case "random_probability":
-      return Math.random() < (step.probability ?? 0.5);
-
-    case "mood_engaged":
-    case "mood_explorer": {
-      // hbeParams.mood is a MoodProfile object: { mood: "engaged"|"casual"|... }
-      // NOT a plain string — must navigate one level deeper.
-      const moodProfile = (checkpoint.hbeParams as Record<string, unknown>)?.["mood"] as Record<string, unknown> | undefined;
-      const moodName = moodProfile?.["mood"] as string | undefined;
-      return moodName === (step.check === "mood_engaged" ? "engaged" : "explorer");
-    }
-
-    case "account_warmup": {
-      // hbeParams.drift is a DriftProfile object, not a flat phase key.
-      const drift = (checkpoint.hbeParams as Record<string, unknown>)?.["drift"] as Record<string, unknown> | undefined;
-      return drift?.["phase"] === "warmup";
-    }
-
+  switch (step.checkOpcode) {
+    case 0:
+      if (typeof step.probability !== "number") {
+        throw new Error("PostgreSQL-hydrated probability is missing");
+      }
+      return Math.random() < step.probability;
+    case 1:
+      if (typeof step.expression !== "string" || !step.expression.trim()) {
+        throw new Error("PostgreSQL condition opcode requires an expression");
+      }
+      return evaluateWorkflowExpression(step.expression, checkpoint.variables);
     default:
-      return false;
+      throw new Error(`Unknown PostgreSQL condition opcode: ${String(step.checkOpcode)}`);
   }
 }
 
-function enforcePhase2Strategy(
-  strategy:   VerificationStrategy,
-  workflowId: string,
-  stepIndex:  number
-): "local_only" | "local_with_screenshot" {
-  if (PHASE2_UNSUPPORTED_STRATEGIES.includes(strategy)) {
-    console.warn(`[workflow] ${workflowId} step ${stepIndex}: "${strategy}" requires VLM (Phase 3) — downgrading to local_with_screenshot`);
-    return "local_with_screenshot";
+function evaluateWorkflowExpression(expression: string, variables: Record<string, unknown>): boolean {
+  const source = expression.trim();
+  const orParts = source.split(/\s+\|\|\s+/);
+  if (orParts.length > 1) return orParts.some((part) => evaluateWorkflowExpression(part, variables));
+  const andParts = source.split(/\s+&&\s+/);
+  if (andParts.length > 1) return andParts.every((part) => evaluateWorkflowExpression(part, variables));
+  const comparison = source.match(/^(.*?)\s*(==|!=|>=|<=|>|<)\s*(.*?)$/);
+  if (!comparison) return isTruthy(resolveWorkflowExpressionValue(source, variables));
+  const [, leftRaw, operator, rightRaw] = comparison;
+  const left = resolveWorkflowExpressionValue(leftRaw, variables);
+  const right = resolveWorkflowExpressionValue(rightRaw, variables);
+  if (operator === "==") return left === right;
+  if (operator === "!=") return left !== right;
+  if (typeof left !== "number" || typeof right !== "number") return false;
+  if (operator === ">") return left > right;
+  if (operator === "<") return left < right;
+  if (operator === ">=") return left >= right;
+  return left <= right;
+}
+
+function resolveWorkflowExpressionValue(source: string, variables: Record<string, unknown>): unknown {
+  const value = source.trim();
+  if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
   }
-  return strategy as "local_only" | "local_with_screenshot";
+  if (value === "true") return true;
+  if (value === "false") return false;
+  if (value === "null") return null;
+  const numeric = Number(value);
+  if (value !== "" && Number.isFinite(numeric)) return numeric;
+  const path = value.replace(/^\$/, "").split(".").filter(Boolean);
+  let current: unknown = variables;
+  for (const part of path) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
 }
 
-function mapActionToHbeType(action: string): "tap" | "swipe" | "type" | "scroll" | "navigate" | "wait" {
-  const map: Record<string, "tap" | "swipe" | "type" | "scroll" | "navigate" | "wait"> = {
-    tap: "tap", swipe: "swipe", type_text: "type", scroll: "scroll",
-    open_app: "navigate", close_app: "navigate", intent_send: "navigate",
-  };
-  return map[action] ?? "tap";
-}
-
-async function simulateError(errorType: string | undefined, _deviceId: string): Promise<void> {
-  // Brief pause for human-like error simulation (actual error gesture in Phase 3)
-  await sleep(errorType === "scroll_past" ? 150 : 300);
+function isTruthy(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") return value.length > 0;
+  return value !== null && value !== undefined;
 }
 
 function sleep(ms: number): Promise<void> {

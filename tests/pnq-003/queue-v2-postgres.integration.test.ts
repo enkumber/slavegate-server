@@ -413,16 +413,16 @@ async function startExecution(
   dispatchGeneration = 0,
 ) {
   const result = await pool.query(
-    `SELECT * FROM pnq_start_execution($1, $2, $3, $4, $5)`,
-    [jobId, epoch, jobVersion, dispatchGeneration, executionId],
+    `SELECT * FROM pnq_start_execution($1, $2, $3, $4, $5, $6)`,
+    [jobId, epoch, jobVersion, dispatchGeneration, executionId, "fixture-actor"],
   );
   return result.rows[0];
 }
 
 async function claimNextJob(nodeId: string, executionId: string, epoch = 0) {
   const result = await pool.query(
-    `SELECT * FROM pnq_claim_next_job($1, $2, $3)`,
-    [nodeId, epoch, executionId],
+    `SELECT * FROM pnq_claim_next_job($1, $2, $3, $4)`,
+    [nodeId, epoch, executionId, "fixture-actor"],
   );
   return result.rows[0]?.id ? result.rows[0] : undefined;
 }
@@ -447,16 +447,16 @@ async function recordResult(
   epoch = 0,
 ) {
   const result = await pool.query(
-    `SELECT * FROM pnq_record_result($1, $2, $3, $4, $5, '{"ok": true}'::jsonb)`,
-    [jobId, executionId, epoch, dispatchGeneration, success],
+    `SELECT * FROM pnq_record_result($1, $2, $3, $4, $5, '{"ok": true}'::jsonb, $6)`,
+    [jobId, executionId, epoch, dispatchGeneration, success, "fixture-actor"],
   );
   return result.rows[0];
 }
 
 async function markStuck(jobId: string, reason: string) {
   const result = await pool.query(
-    `SELECT * FROM pnq_mark_stuck($1, $2, '{"source": "test"}'::jsonb)`,
-    [jobId, reason],
+    `SELECT * FROM pnq_mark_stuck($1, $2, '{"source": "test"}'::jsonb, $3)`,
+    [jobId, reason, "fixture-actor"],
   );
   return result.rows[0];
 }

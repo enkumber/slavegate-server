@@ -11,46 +11,16 @@ import type {
   WorkflowInteractionEffect,
   WorkflowOutputSchema,
   WorkflowPostconditionContract,
-  WorkflowPostconditionOperator,
   WorkflowRecoveryPolicy,
   WorkflowStep,
   WorkflowTemplate,
 } from "./types";
 import { parseWorkflowGoalContract, workflowGoalContractReason } from "./goal-contract";
 
-// ── Allowed step types ──────────────────────────────────────────────────────
-const ALLOWED_STEP_TYPES = [
-  "screen_wake",
-  "unlock",
-  "open_app",
-  "cascade_tap",
-  "tap",
-  "wait",
-  "decide",
-  "check_screen",
-] as const;
-
-// ── Blocked packages for open_app (security) ────────────────────────────────
-const BLOCKED_PACKAGES = [
-  "com.android.settings",
-  "com.android.providers.settings",
-  "com.android.packageinstaller",
-  "com.android.vending",           // Play Store
-  "com.android.shell",             // ADB shell
-  "com.termux",                    // Terminal access
-  "com.noshufou.android.su",       // SuperSU
-  "eu.chainfire.supersu",          // SuperSU
-  "com.topjohnwu.magisk",          // Magisk root
-  "com.google.android.apps.wallet", // Google Wallet
-  "com.squareup.pos",              // Square POS
-  "com.paypal.android.p2pmobile",  // PayPal
-  "com.banking",
-];
-
 // ── Zod schemas ─────────────────────────────────────────────────────────────
 const WorkflowStepSchema = z.object({
   id: z.string().min(1).max(64),
-  type: z.enum(ALLOWED_STEP_TYPES),
+  type: z.string().regex(/^[a-z0-9][a-z0-9._/-]{0,199}$/),
   package: z.string().optional(),
   target: z.string().optional(),
   element: z.string().optional(),
@@ -76,33 +46,6 @@ export type WorkflowDispatchInput = z.infer<typeof WorkflowDispatchSchema>;
 // ValidationResult moved below — see end of file
 
 // ── Semantic validators ─────────────────────────────────────────────────────
-
-function validateOpenAppPackages(steps: { type: string; package?: string }[]): string[] {
-  const errors: string[] = [];
-  for (const step of steps) {
-    if (step.type === "open_app" && step.package) {
-      if (BLOCKED_PACKAGES.some((bp) => step.package!.toLowerCase().includes(bp))) {
-        errors.push(`Step with open_app blocked package: ${step.package}`);
-      }
-    }
-  }
-  return errors;
-}
-
-function isBlockedPackage(packageName: string): boolean {
-  const normalized = packageName.toLowerCase();
-  return BLOCKED_PACKAGES.some((blocked) => normalized.includes(blocked));
-}
-
-function validateWaitSteps(steps: { type: string; delay_after?: number }[]): string[] {
-  const errors: string[] = [];
-  for (const step of steps) {
-    if (step.type === "wait" && step.delay_after !== undefined && step.delay_after <= 0) {
-      errors.push(`Step "${step.type}" has invalid delay_after: must be > 0`);
-    }
-  }
-  return errors;
-}
 
 /**
  * Detect cycles in the `requires` dependency graph via topological sort (Kahn's algorithm).
@@ -191,8 +134,6 @@ export function validateWorkflowDispatch(body: unknown, bodySizeBytes: number): 
   const steps = parsed.data.workflow.steps;
   const errors: string[] = [
     ...validateUniqueIds(steps),
-    ...validateOpenAppPackages(steps),
-    ...validateWaitSteps(steps),
     ...detectCycles(steps),
   ];
 
@@ -208,23 +149,6 @@ const GENERATED_WORKFLOW_STEP_TYPES = [
   "loop",
   "checkpoint",
 ] as const;
-
-const GENERATED_WORKFLOW_VERIFICATION_STRATEGIES = [
-  "local_only",
-  "local_with_screenshot",
-] as const;
-
-const WORKFLOW_POSTCONDITION_OPERATORS: WorkflowPostconditionOperator[] = [
-  "equals",
-  "not_equals",
-  "truthy",
-  "falsy",
-  "exists",
-  "missing",
-  "contains",
-  "matches_regex",
-  "uri_equivalent",
-];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -287,7 +211,7 @@ function validateWorkflowPostconditionContract(
       errors.push(`${predicatePath}.left must be a value reference`);
       return;
     }
-    if (!WORKFLOW_POSTCONDITION_OPERATORS.includes(predicate.operator as WorkflowPostconditionOperator)) {
+    if (typeof predicate.operator !== "string" || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(predicate.operator)) {
       errors.push(`${predicatePath}.operator is invalid`);
     }
     for (const [name, reference] of [["left", predicate.left], ["right", predicate.right]] as const) {
@@ -333,7 +257,6 @@ function validateRangeObject(
   value: unknown,
   path: string,
   errors: string[],
-  distributions: readonly string[]
 ): void {
   if (!isRecord(value)) {
     errors.push(`${path} must be an object`);
@@ -344,8 +267,11 @@ function validateRangeObject(
   if (typeof value.min === "number" && typeof value.max === "number" && value.min > value.max) {
     errors.push(`${path}.min must be <= ${path}.max`);
   }
-  if (typeof value.distribution !== "string" || !distributions.includes(value.distribution)) {
-    errors.push(`${path}.distribution must be one of: ${distributions.join(", ")}`);
+  if (
+    typeof value.distribution !== "string"
+    || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(value.distribution)
+  ) {
+    errors.push(`${path}.distribution must be a safe runtime-contract identifier`);
   }
 }
 
@@ -387,108 +313,9 @@ function validateGeneratedWorkflowStepInput(
       }
       if (
         step.effect !== undefined
-        && !["none", "observation", "navigation", "ui_input", "business_mutation", "sensitive", "destructive"]
-          .includes(String(step.effect))
+        && (typeof step.effect !== "string" || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(step.effect))
       ) {
         errors.push(`${path}.effect is invalid`);
-      }
-      if (step.action === "request_llm") {
-        const params = isRecord(step.params) ? step.params : {};
-        if (typeof params.prompt !== "string" || !params.prompt.trim()) {
-          errors.push(`${path}.params.prompt is required for request_llm`);
-        }
-        if (params.responseFormat !== undefined && !["text", "json"].includes(String(params.responseFormat))) {
-          errors.push(`${path}.params.responseFormat must be text or json`);
-        }
-        if (params.requiredKeys !== undefined && (!Array.isArray(params.requiredKeys) || params.requiredKeys.some((key) => typeof key !== "string" || !key))) {
-          errors.push(`${path}.params.requiredKeys must be an array of non-empty strings`);
-        }
-        if (params.captureScreenshot === true && params.screenshotVariable !== undefined) {
-          errors.push(`${path}.params must not define both captureScreenshot and screenshotVariable`);
-        }
-      }
-      if (step.action === "observe_and_transition") {
-        const params = isRecord(step.params) ? step.params : {};
-        if (
-          !Array.isArray(params.selectors)
-          || params.selectors.length === 0
-          || params.selectors.some((selector) => !isRecord(selector))
-        ) {
-          errors.push(`${path}.params.selectors must be a non-empty array of selector objects`);
-        }
-        if (!isRecord(params.postcondition)) {
-          errors.push(`${path}.params.postcondition must be an object`);
-        } else {
-          const action = params.postcondition.action;
-          if (
-            typeof action !== "string"
-            || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(action)
-            || action === step.action
-          ) {
-            errors.push(`${path}.params.postcondition.action must be a non-recursive deterministic edge primitive`);
-          }
-          if (
-            typeof params.postcondition.operator !== "string"
-            || !["truthy", "falsy", "equals", "not_equals", "contains", "contains_ci", "not_contains", "not_contains_ci", "exists", "missing"]
-              .includes(params.postcondition.operator)
-          ) {
-            errors.push(`${path}.params.postcondition.operator is invalid`);
-          }
-        }
-      }
-      if (step.action === "run_state_machine") {
-        const params = isRecord(step.params) ? step.params : {};
-        if (typeof params.stateVariable !== "string" || !params.stateVariable.trim()) {
-          errors.push(`${path}.params.stateVariable is required`);
-        }
-        if (!isRecord(params.resolver) || !isRecord(params.resolver.outputs)) {
-          errors.push(`${path}.params.resolver.outputs must be an object`);
-        } else if (
-          typeof params.stateVariable === "string"
-          && !Object.prototype.hasOwnProperty.call(params.resolver.outputs, params.stateVariable)
-        ) {
-          errors.push(`${path}.params.resolver.outputs must define params.stateVariable`);
-        }
-        if (
-          !Array.isArray(params.goalStates)
-          || params.goalStates.length === 0
-          || params.goalStates.some((state) => typeof state !== "string" || !state.trim())
-        ) {
-          errors.push(`${path}.params.goalStates must be a non-empty array of state names`);
-        }
-        if (!isRecord(params.transitions) || Object.keys(params.transitions).length === 0) {
-          errors.push(`${path}.params.transitions must be a non-empty state-to-action object`);
-        } else {
-          for (const [state, transition] of Object.entries(params.transitions)) {
-            if (!isRecord(transition)) {
-              errors.push(`${path}.params.transitions.${state} must be an action object`);
-              continue;
-            }
-            if (transition.action === "run_state_machine") {
-              errors.push(`${path}.params.transitions.${state} cannot recursively invoke run_state_machine`);
-              continue;
-            }
-            validateGeneratedWorkflowStepInput(
-              { ...transition, type: "action", id: transition.id ?? `${String(step.id ?? "state_machine")}_${state}` },
-              `${path}.params.transitions.${state}`,
-              errors,
-              seenIds,
-              runtimeContract,
-            );
-          }
-        }
-        if (
-          params.maxIterations !== undefined
-          && (typeof params.maxIterations !== "number" || params.maxIterations < 1 || params.maxIterations > 100)
-        ) {
-          errors.push(`${path}.params.maxIterations must be between 1 and 100`);
-        }
-      }
-      if (step.action === "semantic_tap") {
-        const target = isRecord(step.params) ? step.params.target : undefined;
-        if (typeof target !== "string" || target.trim().length === 0) {
-          errors.push(`${path}.params.target is required for semantic_tap actions`);
-        }
       }
       if (step.x !== undefined && typeof step.x !== "number") {
         errors.push(`${path}.x must be a number when provided`);
@@ -498,9 +325,9 @@ function validateGeneratedWorkflowStepInput(
       }
       if (
         step.verification !== undefined &&
-        (typeof step.verification !== "string" || !GENERATED_WORKFLOW_VERIFICATION_STRATEGIES.includes(step.verification as typeof GENERATED_WORKFLOW_VERIFICATION_STRATEGIES[number]))
+        (typeof step.verification !== "string" || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(step.verification))
       ) {
-        errors.push(`${path}.verification must be one of: ${GENERATED_WORKFLOW_VERIFICATION_STRATEGIES.join(", ")}`);
+        errors.push(`${path}.verification must be a safe runtime policy identifier`);
       }
       if (step.expectedScreen !== undefined) {
         const screens = Array.isArray(step.expectedScreen) ? step.expectedScreen : [step.expectedScreen];
@@ -508,28 +335,6 @@ function validateGeneratedWorkflowStepInput(
           if (typeof screen !== "string" || !screen.trim()) {
             errors.push(`${path}.expectedScreen must contain non-empty state identifiers`);
           }
-        }
-      }
-      if ((step.action === "open_app" || step.action === "close_app") && isRecord(step.params)) {
-        const packageName = step.params.packageName;
-        if (typeof packageName === "string" && isBlockedPackage(packageName)) {
-          errors.push(`${path}.params.packageName is blocked for generated workflows: ${packageName}`);
-        }
-      }
-      if (step.action === "intent_send") {
-        const params = isRecord(step.params) ? step.params : {};
-        const uri = typeof params.uri === "string" ? params.uri.trim() : "";
-        const action = typeof params.action === "string" ? params.action.trim() : "";
-        const uriBinding = isRecord(params.uri)
-          && Object.keys(params.uri).length === 1
-          && typeof params.uri.$bind === "string"
-          && params.uri.$bind.trim().length > 0;
-        const actionBinding = isRecord(params.action)
-          && Object.keys(params.action).length === 1
-          && typeof params.action.$bind === "string"
-          && params.action.$bind.trim().length > 0;
-        if (!uri && !action && !uriBinding && !actionBinding) {
-          errors.push(`${path}.params.uri or params.action is required for intent_send actions`);
         }
       }
       if (step.retries !== undefined && (typeof step.retries !== "number" || step.retries < 0)) {
@@ -543,11 +348,11 @@ function validateGeneratedWorkflowStepInput(
       if (step.saveOutputAs !== undefined && (typeof step.saveOutputAs !== "string" || step.saveOutputAs.length === 0)) {
         errors.push(`${path}.saveOutputAs must be a non-empty string when provided`);
       }
-      if (
-        step.failureMode !== undefined &&
-        !["abort", "continue", "run_branch", "run_branch_then_retry"].includes(String(step.failureMode))
-      ) {
-        errors.push(`${path}.failureMode is invalid`);
+      if (step.failureOpcode !== undefined
+        && (typeof step.failureOpcode !== "number"
+          || !Number.isSafeInteger(step.failureOpcode)
+          || step.failureOpcode < 0)) {
+        errors.push(`${path}.failureOpcode must be a non-negative integer`);
       }
       if (step.onFailureSteps !== undefined) {
         if (!Array.isArray(step.onFailureSteps)) {
@@ -568,7 +373,7 @@ function validateGeneratedWorkflowStepInput(
         errors.push(`${path} wait step must define duration, condition, or until`);
       }
       if (step.duration !== undefined) {
-        validateRangeObject(step.duration, `${path}.duration`, errors, ["uniform", "lognormal", "normal"]);
+        validateRangeObject(step.duration, `${path}.duration`, errors);
       }
       if (step.condition !== undefined && typeof step.condition !== "string") {
         errors.push(`${path}.condition must be a string when provided`);
@@ -583,8 +388,11 @@ function validateGeneratedWorkflowStepInput(
           if (step.until.params !== undefined && !isRecord(step.until.params)) {
             errors.push(`${path}.until.params must be an object when provided`);
           }
-          if (typeof step.until.operator !== "string" || !["truthy", "falsy", "equals", "not_equals", "contains", "contains_ci", "not_contains", "not_contains_ci", "exists", "missing"].includes(step.until.operator)) {
-            errors.push(`${path}.until.operator is invalid`);
+          if (
+            typeof step.until.operator !== "string"
+            || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(step.until.operator)
+          ) {
+            errors.push(`${path}.until.operator must be a safe runtime-contract identifier`);
           }
           if (typeof step.until.timeoutMs !== "number" || step.until.timeoutMs < 1 || step.until.timeoutMs > 600_000) {
             errors.push(`${path}.until.timeoutMs must be between 1 and 600000`);
@@ -617,7 +425,7 @@ function validateGeneratedWorkflowStepInput(
       }
       break;
     case "loop":
-      validateRangeObject(step.count, `${path}.count`, errors, ["uniform", "normal"]);
+      validateRangeObject(step.count, `${path}.count`, errors);
       if (!Array.isArray(step.steps) || step.steps.length === 0) {
         errors.push(`${path}.steps must be a non-empty step array for loop steps`);
       } else {
@@ -889,9 +697,12 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
   }
   if (
     candidate.defaultVerificationStrategy !== undefined &&
-    !GENERATED_WORKFLOW_VERIFICATION_STRATEGIES.includes(candidate.defaultVerificationStrategy as typeof GENERATED_WORKFLOW_VERIFICATION_STRATEGIES[number])
+    (
+      typeof candidate.defaultVerificationStrategy !== "string"
+      || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(candidate.defaultVerificationStrategy)
+    )
   ) {
-    errors.push(`workflow.defaultVerificationStrategy must be one of: ${GENERATED_WORKFLOW_VERIFICATION_STRATEGIES.join(", ")}`);
+    errors.push("workflow.defaultVerificationStrategy must be a safe runtime policy identifier");
   }
   if (candidate.dataRetentionDays !== undefined && (typeof candidate.dataRetentionDays !== "number" || candidate.dataRetentionDays < 0)) {
     errors.push("workflow.dataRetentionDays must be a non-negative number when provided");
@@ -954,7 +765,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
 
       if (step.type === "action") {
         actionCount++;
-        if (step.action === "request_llm") explicitLlmRequests++;
+        if (isRecord(step.params) && typeof step.params.prompt === "string") explicitLlmRequests++;
         compiledStep.action = step.action;
         compiledStep.goalStage = step.goalStage;
         compiledStep.effect = step.effect;
@@ -1269,27 +1080,6 @@ function stableStringify(value: unknown): string {
 }
 
 export function getGeneratedWorkflowContract(): Record<string, unknown> {
-  const exampleSteps: WorkflowStep[] = [
-    {
-      type: "action",
-      id: "open_target",
-      action: "open_app",
-      params: { packageName: "{{runtime.packageName}}" },
-      goalStage: "open_surface",
-      effect: "navigation",
-    },
-    {
-      type: "action",
-      id: "observe_target",
-      action: "classify_ui_tree",
-      params: { outputs: { state: { patterns: ["{{catalog.statePattern}}"] } } },
-      saveOutputAs: "state",
-      goalStage: "observe_surface",
-      effect: "observation",
-    },
-    { type: "checkpoint", id: "goal_verified", reason: "Catalog-defined goal state was observed" },
-  ];
-
   return {
     sourceOfTruth: "Agents generate workflow templates dynamically; server validates, optionally persists, then dispatches.",
     endpoints: {
@@ -1317,8 +1107,8 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
       safetyClasses: "catalog_managed",
       allowedRecoveryRequests: "catalog_managed",
       recoveryAutonomy: "catalog_managed",
-      defaultVerificationStrategy: GENERATED_WORKFLOW_VERIFICATION_STRATEGIES,
-      stepTypes: GENERATED_WORKFLOW_STEP_TYPES,
+      defaultVerificationStrategy: "catalog_managed",
+      stepTypes: "catalog_managed",
     },
     steps: {
       action: {
@@ -1342,52 +1132,6 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
         required: ["type", "id"],
         optional: ["reason"],
       },
-    },
-    example: {
-      id: "agent_generated_catalog_example_v1",
-      name: "Catalog-driven workflow example",
-      platform: "android",
-      description: "Minimal data-driven generated workflow contract example.",
-      version: "1.0.0",
-      safetyClass: "read_only",
-      goalContract: {
-        version: "1",
-        allowedEffects: ["navigation", "observation"],
-        requiredOutputs: ["state"],
-        stages: [
-          {
-            id: "open_surface",
-            allowedActions: ["open_app"],
-            allowedEffects: ["navigation"],
-          },
-          {
-            id: "observe_surface",
-            allowedActions: ["classify_ui_tree"],
-            allowedEffects: ["observation"],
-            after: ["open_surface"],
-            produces: ["state"],
-          },
-        ],
-      },
-      outputSchema: {
-        required: ["state"],
-        properties: {
-          state: { type: "string" },
-        },
-      },
-      allowedRecoveryRequests: ["refresh_screen_state"],
-      recoveryPolicy: {
-        autonomy: "ai_autopilot",
-        maxAttemptsPerStep: 3,
-        maxAttemptsPerWorkflow: 6,
-        maxRecoveryActionsPerAttempt: 6,
-        allowedRecoveryRequests: ["ai_recovery_workflow", "refresh_screen_state", "retry_current_step", "return_to_anchor", "verify_anchor"],
-        requireStateVerification: true,
-        learnFromFailure: true,
-      },
-      defaultVerificationStrategy: "local_with_screenshot",
-      dataRetentionDays: 7,
-      steps: exampleSteps,
     },
   };
 }

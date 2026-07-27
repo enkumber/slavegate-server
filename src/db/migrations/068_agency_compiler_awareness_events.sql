@@ -9,11 +9,9 @@ CREATE TABLE IF NOT EXISTS agency_compiler_awareness_events (
   summary JSONB NOT NULL DEFAULT '{}'::jsonb,
   policy JSONB NOT NULL DEFAULT '{}'::jsonb,
   candidates JSONB NOT NULL DEFAULT '{}'::jsonb,
-  actor TEXT NOT NULL DEFAULT 'dashboard',
-  source TEXT NOT NULL DEFAULT 'dashboard',
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT chk_agency_compiler_awareness_events_source
-    CHECK (source IN ('dashboard', 'api', 'system')),
   CONSTRAINT chk_agency_compiler_awareness_events_policy_read_only
     CHECK (COALESCE((policy->>'readOnly')::boolean, false) = true),
   CONSTRAINT chk_agency_compiler_awareness_events_auto_use_disabled
@@ -21,6 +19,9 @@ CREATE TABLE IF NOT EXISTS agency_compiler_awareness_events (
   CONSTRAINT chk_agency_compiler_awareness_events_execution_unchanged
     CHECK (COALESCE((policy->>'executionChanging')::boolean, true) = false)
 );
+
+ALTER TABLE agency_compiler_awareness_events
+  ALTER COLUMN actor DROP DEFAULT;
 
 CREATE INDEX IF NOT EXISTS idx_compiler_awareness_events_created
   ON agency_compiler_awareness_events(created_at DESC);

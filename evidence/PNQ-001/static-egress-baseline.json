@@ -19,12 +19,6 @@
   },
   {
     "file": "src/transport/transport.ts",
-    "kind": "directWsServer.sendBatch",
-    "count": 1,
-    "classification": "pnq-003-observe-only-batch-compatibility-helper"
-  },
-  {
-    "file": "src/transport/transport.ts",
     "kind": "directWsServer.sendJob",
     "count": 1,
     "classification": "pnq-003-observe-only-job-compatibility-helper"

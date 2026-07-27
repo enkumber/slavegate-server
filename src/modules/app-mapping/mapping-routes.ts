@@ -6,7 +6,10 @@
 import { Router, Request, Response } from "express";
 import fs from "fs/promises";
 import path from "path";
-import { dispatcherService } from "../dispatcher/dispatcher.service";
+import {
+  assertJobActionResultPolicy,
+  dispatcherService,
+} from "../dispatcher/dispatcher.service";
 import { isDeviceOnline, sendStandaloneJobToDevice, waitForResult } from "../../transport/transport";
 import { buildPageDetection } from "./page-fingerprint";
 import { filterRelevantElements, generateElementId } from "./element-filter";
@@ -22,6 +25,7 @@ import {
 import { validateAppMapQuality, type AppMap, type UiTreeNode } from "./schema";
 import {
   assertRuntimeActionSafe,
+  appMappingEnginePolicy,
   listRuntimeProfiles,
   loadRuntimeProfile,
   renderRuntimeParams,
@@ -64,19 +68,18 @@ async function dispatchAndAwaitRefresh(
   const sendResult = await sendStandaloneJobToDevice(deviceId, {
     jobId: job.jobId,
     type: type as any,
-    params,
+    nativeOpcode: job.nativeOpcode,
+    observationOnly: job.observationOnly,
+    verificationOpcode: job.verificationOpcode,
+    params: job.params,
     timeoutMs,
   });
   if (!sendResult.sent) {
     throw new Error(`Job ${job.jobId} was not dispatched (${sendResult.decision}${sendResult.reason ? `: ${sendResult.reason}` : ""})`);
   }
-  return resultPromise;
-}
-
-export function a11yTapSucceeded(result: any): boolean {
-  return result?.success === true
-    && result?.output?.found === true
-    && result?.output?.error == null;
+  const result = await resultPromise;
+  assertJobActionResultPolicy(result, job.executionPolicy, `App mapping action ${type}`);
+  return result;
 }
 
 function normalizeBounds(rawBounds: any): UiTreeNode["bounds"] {
@@ -355,12 +358,18 @@ router.post("/refresh/:appId", async (req: Request, res: Response) => {
 
   try {
     const captures: Array<{ id: string; name: string; nodes: UiTreeNode[]; width: number; height: number }> = [];
+    const enginePolicy = appMappingEnginePolicy(profile);
     const successfulSteps = new Set<string>();
     const transitions: NonNullable<RuntimeRecipeStep["transition"]>[] = [];
     let observedAppVersion: string | undefined;
 
     async function ensureProfileAppForeground(context: string): Promise<void> {
-      const foreground = await dispatchAndAwaitRefresh(deviceId, "get_foreground_app", {}, 10000).catch(() => null);
+      const foreground = await dispatchAndAwaitRefresh(
+        deviceId,
+        enginePolicy.foregroundProbeActionKey,
+        {},
+        enginePolicy.foregroundTimeoutMs,
+      ).catch(() => null);
       const observedPackage = foregroundPackageFromResult(foreground);
       // Accessibility can briefly report no active window immediately after an
       // app launch/deep-link. Treat an explicit foreign package as a hard
@@ -373,19 +382,24 @@ router.post("/refresh/:appId", async (req: Request, res: Response) => {
 
     async function capture(id: string, name: string): Promise<void> {
       let lastReject = "";
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
+      for (let attempt = 1; attempt <= enginePolicy.captureAttempts; attempt += 1) {
         await ensureProfileAppForeground(`${id} attempt ${attempt}`);
         const tree = parseUiTreeResult(await dispatchAndAwaitRefresh(
           deviceId,
-          "ui_tree_dump",
+          enginePolicy.treeActionKey,
           { packageName: profile.packageName },
-          12000,
+          enginePolicy.treeTimeoutMs,
         ));
         if (isUsableAppUiTree(tree, profile.packageName)) {
           observedAppVersion ??= tree.appVersion;
           captures.push({ id, name, ...tree });
           if (body.captureScreenshots) {
-            const shot = await dispatchAndAwaitRefresh(deviceId, "screenshot_for_vlm", { quality: 80 }, 20000);
+            const shot = await dispatchAndAwaitRefresh(
+              deviceId,
+              enginePolicy.screenshotActionKey,
+              { quality: enginePolicy.screenshotQuality },
+              enginePolicy.screenshotTimeoutMs,
+            );
             const imageBase64 = shot?.output?.image_base64 ?? shot?.output?.screenshotBase64;
             if (imageBase64) {
               await fs.mkdir(MAPPING_REFRESH_ARTIFACT_DIR, { recursive: true });
@@ -399,7 +413,7 @@ router.post("/refresh/:appId", async (req: Request, res: Response) => {
 
         lastReject = `package=${tree.packageName ?? "unknown"} nodeCount=${tree.nodeCount}`;
         failures.push(`${id} attempt ${attempt}: rejected mismatched/empty UI tree (${lastReject})`);
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, enginePolicy.captureRetryDelayMs));
       }
 
       throw new Error(`${id}: unable to capture usable app UI tree after retries (${lastReject || "no tree"})`);
@@ -415,19 +429,18 @@ router.post("/refresh/:appId", async (req: Request, res: Response) => {
         return;
       }
       try {
-        if (step.type === "capture") {
+        if (step.type === enginePolicy.captureStepType) {
           await capture(step.stateKey!, step.name!);
         } else {
           const params = renderRuntimeParams(step.params ?? {}, profile, body) as Record<string, unknown>;
           assertRuntimeActionSafe(profile, step, params);
-          const timeoutMs = step.type === "open_app" || step.type === "intent_send" ? 25000 : 15000;
-          const result = await dispatchAndAwaitRefresh(deviceId, step.type, params, timeoutMs);
-          if (step.type === "a11y_find_tap" && !a11yTapSucceeded(result)) {
-            throw new Error(String(result?.output?.error ?? "selector was not found"));
-          }
+          await dispatchAndAwaitRefresh(deviceId, step.type, params, enginePolicy.defaultActionTimeoutMs);
         }
         if (step.delayAfterMs) {
-          await new Promise((resolve) => setTimeout(resolve, Math.min(5000, Math.max(0, step.delayAfterMs!))));
+          await new Promise((resolve) => setTimeout(
+            resolve,
+            Math.min(enginePolicy.maxDelayAfterMs, Math.max(0, step.delayAfterMs!)),
+          ));
         }
         successfulSteps.add(step.id);
         if (step.transition) transitions.push(step.transition);
@@ -478,7 +491,7 @@ router.post("/refresh/:appId", async (req: Request, res: Response) => {
       appId: profile.appId,
       appName: profile.appName,
       version: `runtime-profile-${profile.profileVersion}-${startedAt.toISOString()}`,
-      appVersion: observedAppVersion ?? "observed-live",
+      appVersion: observedAppVersion ?? enginePolicy.appVersionFallback,
       deviceProfile: captures[0] ? { width: captures[0].width, height: captures[0].height } : undefined,
       pages,
       createdAt: now,

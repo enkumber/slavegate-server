@@ -430,34 +430,3 @@ export function workflowDefinitionRegistryPolicy(): JsonObject {
 export function workflowDefinitionScopeFor(definition: Pick<WorkflowDefinition, "key" | "version" | "platform" | "intent">): string {
   return `auto_use:test:${definition.platform}:${definition.intent}:v${definition.version}`;
 }
-
-export function workflowDefinitionToExecutableTemplate(definition: WorkflowDefinition): WorkflowTemplate | null {
-  if (definition.key !== "device_unlock") return null;
-  return {
-    id: `workflow_definition_${definition.key}_v${definition.version}`,
-    name: `${definition.title} auto-use`,
-    platform: definition.platform,
-    description: definition.description ?? definition.goal,
-    version: `${definition.version}.0.0`,
-    intent: definition.intent,
-    safetyClass: "standard",
-    defaultVerificationStrategy: "local_only",
-    dataRetentionDays: 1,
-    recoveryPolicy: {
-      autonomy: "bounded",
-      maxAttemptsPerStep: 2,
-      maxAttemptsPerWorkflow: 3,
-      maxRecoveryActionsPerAttempt: 0,
-      allowedRecoveryRequests: ["retry_current_step", "refresh_screen_state"],
-      requireStateVerification: true,
-      learnFromFailure: true,
-    },
-    steps: [
-      { id: "wake_screen", type: "action", action: "screen_wake", params: {}, timeoutMs: 10_000 },
-      { id: "unlock_device", type: "action", action: "unlock", params: {}, timeoutMs: 15_000 },
-      { id: "settle_device", type: "action", action: "wait_for_idle", params: { timeoutMs: 1_500 }, timeoutMs: 5_000 },
-      { id: "capture_screen_state", type: "action", action: "ui_tree_dump", params: { outputVariable: "_finalUiTree" }, timeoutMs: 10_000 },
-      { id: "device_ready", type: "checkpoint", reason: "Device unlock workflow completed and final UI state captured" },
-    ],
-  };
-}

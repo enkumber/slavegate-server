@@ -36,7 +36,21 @@ interface IncidentRecoveryContext {
   recoveryBudget?: number;
 }
 
-const SAFE_TIMEZONES = new Set(["Europe/Bucharest", "UTC"]);
+interface IncidentOperationsPolicy {
+  maximumRetryCount: number;
+  defaultTimezone: string;
+  allowedTimezones: Set<string>;
+  defaultActor: string;
+  incidentCommander: string;
+  recoveryExhausted: boolean;
+  eventTypes: {
+    created: string;
+    reopened: string;
+    superseded: string;
+    ownershipChanged: string;
+  };
+}
+
 function cleanText(value: unknown, max = 1000): string {
   return String(value ?? "Unknown failure").replace(/[\r\n\t]+/g, " ").slice(0, max);
 }
@@ -90,6 +104,66 @@ function optionalText(value: unknown, max = 200): string | null {
   return typeof value === "string" && value.trim() ? cleanText(value, max) : null;
 }
 
+async function loadIncidentOperationsPolicy(): Promise<IncidentOperationsPolicy> {
+  const result = await getDb().query<{ policy: Record<string, unknown> }>(
+    `SELECT entry.payload->'incidentAuditPolicy' AS policy
+       FROM runtime_semantic_entries entry
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = entry.lifecycle_key
+        AND definition.status = entry.status
+      WHERE definition.dispatchable
+        AND jsonb_typeof(entry.payload->'incidentAuditPolicy') = 'object'
+      ORDER BY entry.priority DESC, entry.id`,
+  );
+  if (result.rows.length !== 1) {
+    throw new Error("PostgreSQL must expose exactly one active incident audit policy");
+  }
+  const policy = result.rows[0].policy;
+  const maximumRetryCount = Number(policy.maximumRetryCount);
+  const defaultTimezone = optionalText(policy.defaultTimezone, 120);
+  const allowedTimezones = Array.isArray(policy.allowedTimezones)
+    ? policy.allowedTimezones
+      .map((value) => optionalText(value, 120))
+      .filter((value): value is string => value !== null)
+    : [];
+  const defaultActor = optionalText(policy.defaultActor, 80);
+  const incidentCommander = optionalText(policy.incidentCommander, 80);
+  const rawEventTypes = policy.eventTypes && typeof policy.eventTypes === "object" && !Array.isArray(policy.eventTypes)
+    ? policy.eventTypes as Record<string, unknown>
+    : {};
+  const eventTypes = {
+    created: optionalText(rawEventTypes.created, 100),
+    reopened: optionalText(rawEventTypes.reopened, 100),
+    superseded: optionalText(rawEventTypes.superseded, 100),
+    ownershipChanged: optionalText(rawEventTypes.ownershipChanged, 100),
+  };
+  if (
+    !Number.isInteger(maximumRetryCount)
+    || maximumRetryCount < 0
+    || !defaultTimezone
+    || allowedTimezones.length === 0
+    || !allowedTimezones.includes(defaultTimezone)
+    || !defaultActor
+    || !incidentCommander
+    || typeof policy.recoveryExhausted !== "boolean"
+    || !eventTypes.created
+    || !eventTypes.reopened
+    || !eventTypes.superseded
+    || !eventTypes.ownershipChanged
+  ) {
+    throw new Error("invalid PostgreSQL incident audit policy");
+  }
+  return {
+    maximumRetryCount,
+    defaultTimezone,
+    allowedTimezones: new Set(allowedTimezones),
+    defaultActor,
+    incidentCommander,
+    recoveryExhausted: policy.recoveryExhausted,
+    eventTypes: eventTypes as IncidentOperationsPolicy["eventTypes"],
+  };
+}
+
 async function addEvent(
   incidentId: string,
   eventType: string,
@@ -127,6 +201,7 @@ export async function reconcileSupersededTaskIncidents(
 ): Promise<number> {
   const context = taskContext(task);
   if (!context.intent || !task.account_id || !context.clientId) return 0;
+  const operationsPolicy = await loadIncidentOperationsPolicy();
   const resolved = await getDb().query<{ id: string }>(
     `UPDATE phone_network_incidents incident
         SET status = lifecycle_transition_target(
@@ -179,8 +254,8 @@ export async function reconcileSupersededTaskIncidents(
   for (const incident of resolved.rows) {
     await addEvent(
       incident.id,
-      "superseded",
-      "phone-network",
+      operationsPolicy.eventTypes.superseded,
+      operationsPolicy.defaultActor,
       {
         supersededByTaskId: task.id,
         workflowId: result.generatedWorkflow?.workflowId ?? null,
@@ -200,6 +275,7 @@ export async function recordExhaustedTaskIncident(
   try {
     const reason = cleanText(result.failReason);
     const classification = await classifyFailure(reason);
+    const operationsPolicy = await loadIncidentOperationsPolicy();
     const owner = classification.owner;
     const selfHealingAttempts = actualRecoveryAttempts(result);
     const taskRetryAttempts = Math.max(0, recovery.taskRetryAttempts ?? task.retry_count ?? 0);
@@ -224,10 +300,10 @@ export async function recordExhaustedTaskIncident(
          incident_key, source_type, source_id, task_id, workflow_id, device_id,
          category, severity, error_code, summary, recovery_attempts,
          recovery_budget, task_retry_attempts, incident_commander,
-         remediation_owner, assigned_agent, telemetry
+         remediation_owner, assigned_agent, recovery_exhausted, telemetry
        ) VALUES (
          $1, 'task', $2, $3, $4, $5, $6, $7, $8, $9, $10,
-         $11, $12, 'kraken', $13, 'kraken', $14::jsonb
+         $11, $12, $13, $14, $13, $15, $16::jsonb
        )
        ON CONFLICT (incident_key) DO UPDATE SET
          status = COALESCE(
@@ -245,9 +321,10 @@ export async function recordExhaustedTaskIncident(
          recovery_attempts = GREATEST(phone_network_incidents.recovery_attempts, EXCLUDED.recovery_attempts),
          recovery_budget = EXCLUDED.recovery_budget,
          task_retry_attempts = GREATEST(phone_network_incidents.task_retry_attempts, EXCLUDED.task_retry_attempts),
-         incident_commander = 'kraken',
+         incident_commander = EXCLUDED.incident_commander,
          remediation_owner = EXCLUDED.remediation_owner,
-         assigned_agent = 'kraken',
+         assigned_agent = EXCLUDED.assigned_agent,
+         recovery_exhausted = EXCLUDED.recovery_exhausted,
          telemetry = EXCLUDED.telemetry,
          occurrence_count = phone_network_incidents.occurrence_count + 1,
          last_detected_at = NOW(),
@@ -267,20 +344,25 @@ export async function recordExhaustedTaskIncident(
         selfHealingAttempts,
         recovery.recoveryBudget ?? null,
         taskRetryAttempts,
+        operationsPolicy.incidentCommander,
         owner,
+        operationsPolicy.recoveryExhausted,
         JSON.stringify(telemetry),
       ],
     );
     const row = saved.rows[0];
     if (row) {
-      await addEvent(row.id, row.inserted ? "created" : "reopened", "phone-network", {
+      const eventType = row.inserted
+        ? operationsPolicy.eventTypes.created
+        : operationsPolicy.eventTypes.reopened;
+      await addEvent(row.id, eventType, operationsPolicy.defaultActor, {
         source: "task-runner",
         taskId: task.id,
         recoveryAttemptsActual: selfHealingAttempts,
         taskRetryAttempts,
         recoveryBudget: recovery.recoveryBudget ?? null,
         remediationOwner: owner,
-      }, `${row.inserted ? "created" : "reopened"}:${task.id}:${selfHealingAttempts}:${taskRetryAttempts}`);
+      }, `${eventType}:${task.id}:${selfHealingAttempts}:${taskRetryAttempts}`);
     }
   } catch (err) {
     console.error("[incidents] Failed to persist exhausted task incident:", (err as Error).message);
@@ -295,13 +377,22 @@ export async function listIncidents(filters: {
 } = {}): Promise<unknown[]> {
   const limit = Math.min(200, Math.max(1, filters.limit ?? 50));
   const result = await getDb().query(
-    `SELECT * FROM phone_network_incidents
+    `SELECT incident.* FROM phone_network_incidents incident
       WHERE ($1::text IS NULL OR status = $1)
         AND ($2::text IS NULL OR severity = $2)
         AND ($3::timestamptz IS NULL OR last_detected_at >= $3)
       ORDER BY
-        CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,
-        last_detected_at DESC
+        COALESCE((
+          SELECT MAX(entry.priority)
+            FROM runtime_semantic_entries entry
+            JOIN lifecycle_state_definitions definition
+              ON definition.lifecycle_key = entry.lifecycle_key
+             AND definition.status = entry.status
+           WHERE definition.dispatchable
+             AND entry.namespace = 'incident_routing_rule'
+             AND entry.payload->>'severity' = incident.severity
+        ), 0) DESC,
+        incident.last_detected_at DESC
       LIMIT $4`,
     [filters.status ?? null, filters.severity ?? null, filters.since ?? null, limit],
   );
@@ -321,7 +412,7 @@ export async function getIncident(id: string): Promise<{ incident: unknown; even
 export async function updateIncidentStatus(input: {
   id: string;
   status: IncidentStatus;
-  actor: string;
+  actor?: string;
   note?: string;
 }): Promise<unknown | null> {
   const current = await getDb().query(
@@ -345,7 +436,9 @@ export async function updateIncidentStatus(input: {
     [input.id, input.status, transition.markStarted, transition.markCompleted, transition.clearCompleted],
   );
   if (!result.rows[0]) return null;
-  await addEvent(input.id, transition.actionKey, input.actor, { note: cleanText(input.note ?? "", 2000) });
+  const actor = optionalText(input.actor, 80)
+    ?? (await loadIncidentOperationsPolicy()).defaultActor;
+  await addEvent(input.id, transition.actionKey, actor, { note: cleanText(input.note ?? "", 2000) });
   return result.rows[0];
 }
 
@@ -353,10 +446,10 @@ export async function updateIncidentOwnership(input: {
   id: string;
   incidentCommander?: string;
   remediationOwner?: string | null;
-  actor: string;
+  actor?: string;
   note?: string;
 }): Promise<{ changed: boolean; incident: unknown } | null> {
-  const commander = optionalText(input.incidentCommander, 80) ?? "kraken";
+  const commander = optionalText(input.incidentCommander, 80);
   const owner = input.remediationOwner === null ? null : optionalText(input.remediationOwner, 80);
   const result = await getDb().query(
     `WITH previous AS (
@@ -366,17 +459,17 @@ export async function updateIncidentOwnership(input: {
        FOR UPDATE
      )
      UPDATE phone_network_incidents incident
-        SET incident_commander = $2,
+        SET incident_commander = COALESCE($2, previous.incident_commander),
             remediation_owner = $3,
-            assigned_agent = $2,
+            assigned_agent = COALESCE($2, previous.incident_commander),
             updated_at = CASE
-              WHEN previous.incident_commander IS DISTINCT FROM $2
+              WHEN previous.incident_commander IS DISTINCT FROM COALESCE($2, previous.incident_commander)
                 OR previous.remediation_owner IS DISTINCT FROM $3
               THEN NOW() ELSE incident.updated_at END
        FROM previous
       WHERE incident.id = previous.id
       RETURNING incident.*,
-        (previous.incident_commander IS DISTINCT FROM $2
+        (previous.incident_commander IS DISTINCT FROM COALESCE($2, previous.incident_commander)
           OR previous.remediation_owner IS DISTINCT FROM $3) AS ownership_changed`,
     [input.id, commander, owner],
   );
@@ -384,12 +477,13 @@ export async function updateIncidentOwnership(input: {
   if (!incident) return null;
   const changed = incident.ownership_changed === true;
   if (changed) {
+    const operationsPolicy = await loadIncidentOperationsPolicy();
     await addEvent(
       input.id,
-      "ownership_changed",
-      input.actor,
+      operationsPolicy.eventTypes.ownershipChanged,
+      optionalText(input.actor, 80) ?? operationsPolicy.defaultActor,
       {
-        incidentCommander: commander,
+        incidentCommander: incident.incident_commander,
         remediationOwner: owner,
         note: cleanText(input.note ?? "", 2000),
       },
@@ -400,36 +494,25 @@ export async function updateIncidentOwnership(input: {
 
 export async function addIncidentEvent(input: {
   id: string;
-  eventType: "shadow_check" | "quarantined" | "routed" | "note";
-  actor: string;
+  eventType: string;
+  actor?: string;
   details?: Record<string, unknown>;
   idempotencyKey?: string;
 }): Promise<boolean> {
-  return addEvent(input.id, input.eventType, input.actor, input.details ?? {}, input.idempotencyKey);
+  const eventType = optionalText(input.eventType, 100);
+  if (!eventType) throw new Error("incident event type is required");
+  const actor = optionalText(input.actor, 80)
+    ?? (await loadIncidentOperationsPolicy()).defaultActor;
+  return addEvent(input.id, eventType, actor, input.details ?? {}, input.idempotencyKey);
 }
 
-export async function getDailyAuditSnapshot(date: string, timezone = "Europe/Bucharest"): Promise<Record<string, unknown>> {
+export async function getDailyAuditSnapshot(date: string, requestedTimezone?: string): Promise<Record<string, unknown>> {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("date must use YYYY-MM-DD");
-  if (!SAFE_TIMEZONES.has(timezone)) throw new Error("unsupported timezone");
   const db = getDb();
-  const auditPolicyResult = await db.query<{ policy: Record<string, unknown> }>(
-    `SELECT entry.payload->'incidentAuditPolicy' AS policy
-       FROM runtime_semantic_entries entry
-       JOIN lifecycle_state_definitions definition
-         ON definition.lifecycle_key = entry.lifecycle_key
-        AND definition.status = entry.status
-      WHERE definition.dispatchable
-        AND jsonb_typeof(entry.payload->'incidentAuditPolicy') = 'object'
-      ORDER BY entry.priority DESC, entry.id`,
-  );
-  if (auditPolicyResult.rows.length !== 1) {
-    throw new Error("PostgreSQL must expose exactly one active incident audit policy");
-  }
-  const maximumRetryCount = Number(auditPolicyResult.rows[0].policy.maximumRetryCount);
-  if (!Number.isInteger(maximumRetryCount) || maximumRetryCount < 0) {
-    throw new Error("invalid PostgreSQL incident audit policy");
-  }
-  const params = [date, timezone, maximumRetryCount];
+  const operationsPolicy = await loadIncidentOperationsPolicy();
+  const timezone = optionalText(requestedTimezone, 120) ?? operationsPolicy.defaultTimezone;
+  if (!operationsPolicy.allowedTimezones.has(timezone)) throw new Error("unsupported timezone");
+  const params = [date, timezone, operationsPolicy.maximumRetryCount];
   const windowSql = `(SELECT ($1::date::timestamp AT TIME ZONE $2) AS start_at,
                               (($1::date + 1)::timestamp AT TIME ZONE $2) AS end_at)`;
   const [tasks, runs, artifacts, candidates, incidents, findings, changedArtifacts, changedCandidates] = await Promise.all([
@@ -564,9 +647,10 @@ export async function saveAuditRun(input: {
   }>;
 }): Promise<{ id: string }> {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) throw new Error("date must use YYYY-MM-DD");
-  const timezone = input.timezone ?? "Europe/Bucharest";
-  if (!SAFE_TIMEZONES.has(timezone)) throw new Error("unsupported timezone");
-  const actor = cleanText(input.actor ?? "kraken", 80);
+  const operationsPolicy = await loadIncidentOperationsPolicy();
+  const timezone = optionalText(input.timezone, 120) ?? operationsPolicy.defaultTimezone;
+  if (!operationsPolicy.allowedTimezones.has(timezone)) throw new Error("unsupported timezone");
+  const actor = optionalText(input.actor, 80) ?? operationsPolicy.defaultActor;
   const run = await getDb().query<{ id: string }>(
     `INSERT INTO phone_network_audit_runs (
        audit_date, timezone, actor, status, window_start, window_end, summary, completed_at

@@ -15,7 +15,7 @@ ALTER TABLE devices
 CREATE TABLE IF NOT EXISTS kill_switch_log (
   id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   activated    BOOLEAN     NOT NULL,                  -- true = activate, false = deactivate
-  scope        TEXT        NOT NULL DEFAULT 'fleet',  -- 'fleet' | 'device:{id}' | 'platform:{name}'
+  scope        TEXT        NOT NULL,
   initiated_by TEXT        NOT NULL DEFAULT 'admin',
   reason       TEXT,
   ts           TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -61,9 +61,5 @@ CREATE TABLE IF NOT EXISTS system_config (
   value      JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
--- Seed: kill switch starts inactive
-INSERT INTO system_config (key, value) VALUES ('kill_switch_active', 'false')
-  ON CONFLICT (key) DO NOTHING;
 
 COMMIT;

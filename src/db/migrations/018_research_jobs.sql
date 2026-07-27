@@ -9,11 +9,11 @@ BEGIN;
 
 CREATE TABLE IF NOT EXISTS research_jobs (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    job_type      TEXT NOT NULL CHECK (job_type IN ('research_profile', 'research_hashtag', 'research_followers')),
+    job_type      TEXT NOT NULL,
     input         JSONB NOT NULL,        -- {username: "x"} or {hashtag: "y", limit: 50}
     output        JSONB,                  -- results when completed
     status        TEXT,
-    priority      INT DEFAULT 0,          -- 0=low (research), 10=normal, 20=high
+    priority      INT NOT NULL,
     device_id     UUID REFERENCES devices(id) ON DELETE SET NULL,
     error         TEXT,
     expires_at    TIMESTAMPTZ,            -- cache validity (default: created_at + 7 days)

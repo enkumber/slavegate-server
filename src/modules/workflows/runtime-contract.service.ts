@@ -9,44 +9,16 @@ interface RuntimeContractRecord {
   active: boolean;
 }
 
-function collectActions(steps: WorkflowStep[], output: string[] = []): string[] {
-  for (const step of steps) {
-    if (step.type === "action") {
-      output.push(step.action);
-      if (step.action === "observe_and_transition") {
-        const postcondition = step.params?.postcondition;
-        if (postcondition && typeof postcondition === "object" && !Array.isArray(postcondition)) {
-          const action = (postcondition as Record<string, unknown>).action;
-          if (typeof action === "string") output.push(action);
-        }
-      }
-      if (step.action === "run_state_machine") {
-        const transitions = step.params?.transitions;
-        if (transitions && typeof transitions === "object" && !Array.isArray(transitions)) {
-          for (const transition of Object.values(transitions as Record<string, unknown>)) {
-            if (!transition || typeof transition !== "object" || Array.isArray(transition)) continue;
-            const action = (transition as Record<string, unknown>).action;
-            if (typeof action === "string") output.push(action);
-            const postcondition = (transition as Record<string, unknown>).params;
-            if (postcondition && typeof postcondition === "object" && !Array.isArray(postcondition)) {
-              const nested = (postcondition as Record<string, unknown>).postcondition;
-              if (nested && typeof nested === "object" && !Array.isArray(nested)) {
-                const nestedAction = (nested as Record<string, unknown>).action;
-                if (typeof nestedAction === "string") output.push(nestedAction);
-              }
-            }
-          }
-        }
-      }
-      if (step.onFailureSteps) collectActions(step.onFailureSteps, output);
-    } else if (step.type === "wait" && step.until) {
-      output.push(step.until.action);
-    } else if (step.type === "condition") {
-      collectActions(step.if_true, output);
-      if (step.if_false) collectActions(step.if_false, output);
-    } else if (step.type === "loop") {
-      collectActions(step.steps, output);
-    }
+function collectActions(value: unknown, output: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    for (const item of value) collectActions(item, output);
+    return output;
+  }
+  if (!value || typeof value !== "object") return output;
+
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "action" && typeof nested === "string") output.push(nested);
+    else collectActions(nested, output);
   }
   return output;
 }

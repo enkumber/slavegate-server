@@ -46,27 +46,37 @@ export function evaluatePostconditionContract(
     const left = resolveValue(context, predicate.left);
     const right = resolveValue(context, predicate.right);
     let passed = false;
-    if (predicate.operator === "equals") passed = Object.is(left, right);
-    else if (predicate.operator === "not_equals") passed = !Object.is(left, right);
-    else if (predicate.operator === "truthy") passed = Boolean(left);
-    else if (predicate.operator === "falsy") passed = !left;
-    else if (predicate.operator === "exists") passed = left !== undefined && left !== null;
-    else if (predicate.operator === "missing") passed = left === undefined || left === null;
-    else if (predicate.operator === "contains") passed = typeof left === "string" && left.includes(String(right ?? ""));
-    else if (predicate.operator === "matches_regex") {
-      try {
-        passed = typeof left === "string" && typeof right === "string" && new RegExp(right).test(left);
-      } catch {
-        passed = false;
+    switch (predicate.operatorOpcode) {
+      case 0: passed = Boolean(left); break;
+      case 1: passed = !left; break;
+      case 2: passed = Object.is(left, right); break;
+      case 3: passed = !Object.is(left, right); break;
+      case 4: passed = typeof left === "string" && left.includes(String(right ?? "")); break;
+      case 5: passed = typeof left === "string" && left.toLowerCase().includes(String(right ?? "").toLowerCase()); break;
+      case 6: passed = typeof left !== "string" || !left.includes(String(right ?? "")); break;
+      case 7: passed = typeof left !== "string" || !left.toLowerCase().includes(String(right ?? "").toLowerCase()); break;
+      case 8: passed = left !== undefined && left !== null; break;
+      case 9: passed = left === undefined || left === null; break;
+      case 10:
+        try {
+          passed = typeof left === "string" && typeof right === "string" && new RegExp(right).test(left);
+        } catch {
+          passed = false;
+        }
+        break;
+      case 11: {
+        const normalizedLeft = normalizedUri(left, predicate.options);
+        const normalizedRight = normalizedUri(right, predicate.options);
+        const redirects = (predicate.options?.acceptedRedirects ?? [])
+          .map((value) => normalizedUri(value, predicate.options))
+          .filter((value): value is string => !!value);
+        passed = !!normalizedLeft && !!normalizedRight
+          && (normalizedLeft === normalizedRight || redirects.includes(normalizedLeft));
+        break;
       }
-    } else if (predicate.operator === "uri_equivalent") {
-      const normalizedLeft = normalizedUri(left, predicate.options);
-      const normalizedRight = normalizedUri(right, predicate.options);
-      const redirects = (predicate.options?.acceptedRedirects ?? [])
-        .map((value) => normalizedUri(value, predicate.options))
-        .filter((value): value is string => !!value);
-      passed = !!normalizedLeft && !!normalizedRight
-        && (normalizedLeft === normalizedRight || redirects.includes(normalizedLeft));
+      default:
+        failures.push(`predicate ${index} has no PostgreSQL-resolved operator opcode`);
+        return;
     }
     if (!passed) failures.push(`predicate ${index} failed (${predicate.operator})`);
   });

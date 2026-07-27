@@ -12,7 +12,10 @@ import { Router, Request, Response, NextFunction } from "express";
 import crypto from "crypto";
 import { requireAdminAuth, requireApiGateAuth, signJwt, verifyJwt } from "./auth.middleware";
 import { devicesService } from "../modules/devices/devices.service";
-import { dispatcherService } from "../modules/dispatcher/dispatcher.service";
+import {
+  dispatcherService,
+  listJobActionPolicyDefinitions,
+} from "../modules/dispatcher/dispatcher.service";
 import {
   listJobStatusDefinitions,
   transitionJobManually,
@@ -446,10 +449,9 @@ export async function queueHumanAgencyWorkflowRun(input: {
 
 function inferGeneratedWorkflowAppId(template: WorkflowTemplate): string | null {
   for (const step of template.steps) {
-    if (step.type === "action" && step.action === "open_app") {
-      const packageName = step.params?.packageName;
-      if (typeof packageName === "string" && packageName.trim().length > 0) return packageName;
-    }
+    if (step.type !== "action") continue;
+    const packageName = step.params?.packageName;
+    if (typeof packageName === "string" && packageName.trim().length > 0) return packageName;
   }
   return null;
 }
@@ -681,7 +683,7 @@ router.post("/incidents/:id/status", async (req, res) => {
     const data = await incidentService.updateIncidentStatus({
       id: req.params.id,
       status: req.body?.status as IncidentStatus,
-      actor: typeof req.body?.actor === "string" ? req.body.actor : "kraken",
+      actor: typeof req.body?.actor === "string" ? req.body.actor : undefined,
       note: typeof req.body?.note === "string" ? req.body.note : undefined,
     });
     if (!data) return res.status(404).json({ ok: false, error: "Incident not found" });
@@ -694,13 +696,13 @@ router.post("/incidents/:id/status", async (req, res) => {
 router.post("/incidents/:id/events", async (req, res) => {
   if (!UUID_RE.test(req.params.id)) return res.status(400).json({ ok: false, error: "Invalid incident id" });
   const eventType = req.body?.eventType;
-  if (!["shadow_check", "quarantined", "routed", "note"].includes(eventType)) {
+  if (typeof eventType !== "string" || !eventType.trim()) {
     return res.status(400).json({ ok: false, error: "Invalid incident event type" });
   }
   const inserted = await incidentService.addIncidentEvent({
     id: req.params.id,
     eventType,
-    actor: typeof req.body?.actor === "string" ? req.body.actor : "kraken",
+    actor: typeof req.body?.actor === "string" ? req.body.actor : undefined,
     details: req.body?.details && typeof req.body.details === "object" ? req.body.details : {},
     idempotencyKey: typeof req.body?.idempotencyKey === "string" ? req.body.idempotencyKey : undefined,
   });
@@ -712,11 +714,11 @@ router.post("/incidents/:id/ownership", async (req, res) => {
   try {
     const data = await incidentService.updateIncidentOwnership({
       id: req.params.id,
-      incidentCommander: typeof req.body?.incidentCommander === "string" ? req.body.incidentCommander : "kraken",
+      incidentCommander: typeof req.body?.incidentCommander === "string" ? req.body.incidentCommander : undefined,
       remediationOwner: req.body?.remediationOwner === null || typeof req.body?.remediationOwner === "string"
         ? req.body.remediationOwner
         : undefined,
-      actor: typeof req.body?.actor === "string" ? req.body.actor : "kraken",
+      actor: typeof req.body?.actor === "string" ? req.body.actor : undefined,
       note: typeof req.body?.note === "string" ? req.body.note : undefined,
     });
     if (!data) return res.status(404).json({ ok: false, error: "Incident not found" });
@@ -729,7 +731,7 @@ router.post("/incidents/:id/ownership", async (req, res) => {
 router.get("/audits/daily", async (req, res) => {
   try {
     const date = typeof req.query.date === "string" ? req.query.date : new Date().toISOString().slice(0, 10);
-    const timezone = typeof req.query.timezone === "string" ? req.query.timezone : "Europe/Bucharest";
+    const timezone = typeof req.query.timezone === "string" ? req.query.timezone : undefined;
     const data = await incidentService.getDailyAuditSnapshot(date, timezone);
     res.json({ ok: true, data });
   } catch (err) {
@@ -851,6 +853,10 @@ router.get("/jobs", async (req, res) => {
 
 router.get("/jobs/status-definitions", async (_req, res) => {
   res.json({ ok: true, data: await listJobStatusDefinitions() });
+});
+
+router.get("/jobs/action-policies", requireAdminAuth, async (_req, res) => {
+  res.json({ ok: true, data: await listJobActionPolicyDefinitions() });
 });
 
 router.get("/runtime-semantics", requireAdminAuth, async (req, res) => {
@@ -1168,11 +1174,21 @@ router.post("/jobs", async (req, res) => {
     return res.status(409).json({ ok: false, error: "Device is not connected" });
   }
   try {
-    const { jobId, timeoutMs } = await dispatcherService.dispatch(body);
+    const {
+      jobId,
+      timeoutMs,
+      nativeOpcode,
+      observationOnly,
+      verificationOpcode,
+      params,
+    } = await dispatcherService.dispatch(body);
     const sendResult = await sendStandaloneJobToDevice(body.deviceId, {
       jobId,
       type: body.type,
-      params: body.params,
+      nativeOpcode,
+      observationOnly,
+      verificationOpcode,
+      params,
       timeoutMs,
       requiresRoot: body.confirmRoot,
     });

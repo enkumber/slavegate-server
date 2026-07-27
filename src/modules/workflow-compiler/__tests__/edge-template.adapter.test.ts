@@ -2,9 +2,34 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppMap } from "../../app-mapping/schema";
 import type { CompiledWorkflow } from "../types";
 
-const mocks = vi.hoisted(() => ({ loadMap: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  loadMap: vi.fn(),
+  dbQuery: vi.fn().mockResolvedValue({
+    rows: [{
+      policy: {
+        runtimeContract: "edge-workflow/v2",
+        verificationStrategy: "local_only",
+        dataRetentionDays: 1,
+        stepTimeoutMs: 15000,
+        actionRetries: 0,
+        actionRetryDelayMs: 0,
+        stateObservation: {
+          actionKey: "ui_tree_dump",
+          outputPath: "uiTree",
+          containsOperator: "contains_ci",
+          excludesOperator: "not_contains_ci",
+          pollIntervalMs: 100,
+          timeoutMs: 1000,
+        },
+      },
+    }],
+  }),
+}));
 
 vi.mock("../../app-mapping/recorder.service", () => ({ loadMap: mocks.loadMap }));
+vi.mock("../../../db/client", () => ({
+  getDb: vi.fn(() => ({ query: mocks.dbQuery })),
+}));
 
 import { compiledWorkflowToEdgeTemplate } from "../edge-template.adapter";
 
@@ -114,7 +139,7 @@ describe("compiledWorkflowToEdgeTemplate", () => {
       expect.objectContaining({ type: "action", action: "screen_wake" }),
       expect.objectContaining({
         type: "action",
-        action: "a11y_find_tap",
+        action: "tap",
         params: { resourceId: "search_button" },
         retries: 2,
         retryDelayMs: 400,
@@ -129,8 +154,9 @@ describe("compiledWorkflowToEdgeTemplate", () => {
         }),
       }),
       expect.objectContaining({
-        type: "wait",
-        duration: { min: 600, max: 600, distribution: "uniform" },
+        type: "action",
+        action: "wait",
+        params: { durationMs: 600 },
       }),
     ]));
   });

@@ -1,8 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Job } from "bullmq";
 import { deviceExecutionArbiter } from "../device-execution";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
-import { hbeService } from "../hbe/hbe.service";
 import * as transport from "../../transport/transport";
 import { workflowService, type WorkflowRecord } from "./workflow.service";
 import {
@@ -30,6 +29,31 @@ vi.mock("../../transport/transport", async (importOriginal) => {
 vi.mock("../../db/client", () => ({
   getDb: vi.fn(() => ({ query: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }) })),
 }));
+
+function hydrateForUnitTest(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(hydrateForUnitTest);
+    if (!value || typeof value !== "object") return value;
+    const source = value as Record<string, unknown>;
+    const hydrated = {
+      ...Object.fromEntries(Object.entries(source).map(([key, item]) => [key, hydrateForUnitTest(item)])),
+      ...(source.type === "action" ? { delayAfterMs: source.delayAfterMs ?? 0 } : {}),
+    };
+    if (Array.isArray(source.steps) && typeof source.platform === "string") {
+      const recovery = source.recoveryPolicy && typeof source.recoveryPolicy === "object"
+        ? source.recoveryPolicy as Record<string, unknown>
+        : {};
+      return {
+        ...hydrated,
+        recoveryPolicy: {
+          ...recovery,
+          maxAttemptsPerStep: recovery.maxAttemptsPerStep ?? 0,
+          maxAttemptsPerWorkflow: recovery.maxAttemptsPerWorkflow ?? 0,
+          maxRecoveryActionsPerAttempt: recovery.maxRecoveryActionsPerAttempt ?? 0,
+        },
+      };
+    }
+    return hydrated;
+}
 
 const WORKFLOW_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_ID = "22222222-2222-4222-8222-222222222222";
@@ -87,6 +111,11 @@ function job(): Job {
     extendLock: vi.fn().mockResolvedValue(undefined),
   } as unknown as Job;
 }
+
+beforeEach(() => {
+  vi.spyOn(dispatcherService, "hydrateWorkflowNativePolicies")
+    .mockImplementation(async (value) => hydrateForUnitTest(value) as typeof value);
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -154,16 +183,15 @@ describe("workflow BullMQ retry semantics", () => {
       vi.spyOn(deviceExecutionArbiter, "finishServerWorkflowRoot")
         .mockResolvedValue({ decision: "terminal", root: null });
       vi.mocked(transport.isDeviceOnline).mockReturnValue(true);
-      vi.spyOn(hbeService, "getActionParams").mockReturnValue({
-        action: { preActionDelayMs: 0, postActionDelayMs: 0, simulateError: false },
-        verificationStrategy: "local_only",
-        l1TimeoutMs: 1,
-        l2SettleMs: 0,
-      } as ReturnType<typeof hbeService.getActionParams>);
       vi.spyOn(dispatcherService, "dispatchLegacyGeneratedWorkflow").mockImplementation(async (input) => ({
         jobId: `job-${++jobCounter}-${input.type}`,
         timeoutMs: input.timeoutMs ?? 1,
         requiresRoot: false,
+        nativeOpcode: 0,
+        observationOnly: false,
+        verificationOpcode: 0,
+        executionPolicy: {},
+        params: input.params,
       }));
       vi.mocked(transport.sendLegacyGeneratedWorkflowJobToDevice).mockImplementation(async (_deviceId, command) => {
         dispatched.push(command.type);

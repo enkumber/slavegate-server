@@ -57,6 +57,8 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
       "src/db/migrations/090_edge_workflow_runtime_contract.sql",
       "src/db/migrations/097_verified_ui_state_machine_runtime.sql",
       "src/db/migrations/099_db_authoritative_workflow_semantics.sql",
+      "src/db/migrations/116_ui_graph_runtime_structural_enablement.sql",
+      "src/db/migrations/117_runtime_semantic_entry_lifecycle_compatibility.sql",
       "src/db/migrations/081_device_execution_queue.sql",
     ]) {
       await applySql(file);
@@ -85,7 +87,8 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
         ('phase1_task_fixture', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40),
         ('phase1_task_fixture', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50),
         ('phase1_artifact_fixture', 'candidate_fixture', TRUE, FALSE, FALSE, FALSE, FALSE, TRUE, 10),
-        ('phase1_artifact_fixture', 'executable_fixture', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 20);
+        ('phase1_artifact_fixture', 'executable_fixture', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 20),
+        ('phase1_runtime_fixture', 'enabled_fixture', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 10);
       INSERT INTO lifecycle_transitions
         (lifecycle_key, action_key, from_status, to_status, external_allowed,
          automatic, manual_allowed, mark_started, mark_completed)
@@ -117,6 +120,95 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
         'phase1_artifact_fixture',
         'artifact_state'
       );
+      SELECT configure_lifecycle_resource_binding(
+        'runtime_semantic_entries'::regclass,
+        'phase1_runtime_fixture',
+        'status'
+      );
+
+      INSERT INTO runtime_semantic_entries
+        (namespace, entry_key, platform, status, lifecycle_key, priority, payload)
+      VALUES
+        (
+          'phase1_fixture',
+          'workflow_interpreter',
+          '*',
+          'enabled_fixture',
+          'phase1_runtime_fixture',
+          100,
+          '{
+            "workflowInterpreterPolicy": {
+              "distributionOpcodes": {"fixture_distribution": 0},
+              "conditionOpcodes": {"fixture_condition": 0},
+              "predicateOpcodes": {"fixture_predicate": 0},
+              "failureOpcodes": {"fixture_fail": 0},
+              "defaultFailureMode": "fixture_fail",
+              "verificationOpcodes": {"local_with_screenshot": 0},
+              "defaultVerificationMode": "local_with_screenshot",
+              "runtimeDefaults": {
+                "actionRetries": 0,
+                "actionRetryDelayMs": 0,
+                "actionDelayAfterMs": 0,
+                "actionTimeoutMs": 15000,
+                "pollIntervalMs": 1,
+                "pollTimeoutMs": 1,
+                "conditionProbability": 1,
+                "regexGroup": 0,
+                "recoveryAutonomy": "fixture_disabled",
+                "recoveryAiEnabled": false,
+                "recoveryMaxAttemptsPerStep": 0,
+                "recoveryMaxAttemptsPerWorkflow": 0,
+                "recoveryMaxActionsPerAttempt": 0,
+                "recoveryAllowedRequests": [],
+                "recoveryRequireStateVerification": false,
+                "recoveryLearnFromFailure": false,
+                "recoveryPlannerInstruction": "",
+                "recoveryExecuteDecisionKey": "",
+                "recoveryRetryDecisionKey": "",
+                "recoveryAbortDecisionKey": "",
+                "recoveryProbeActionKey": "fixture_probe",
+                "recoveryProbeTimeoutMs": 1,
+                "recoveryPlannerSystem": "",
+                "recoveryPlannerMaxTokens": 1,
+                "recoveryPlannerTimeoutMs": 1
+              },
+              "enginePolicy": {
+                "maxNestedDepth": 1,
+                "minActionTimeoutMs": 1,
+                "captureTimeoutMs": 1,
+                "defaultSubstepTimeoutMs": 1,
+                "substepTimeoutPaddingMs": 1,
+                "ackTimeoutMs": 60000,
+                "progressSweepMs": 1000,
+                "progressGraceMs": 1000,
+                "minStaleMs": 1000,
+                "maxStaleMs": 120000,
+                "localStepBudgetMs": 15000
+              }
+            }
+          }'::jsonb
+        ),
+        (
+          'phase1_fixture',
+          'open_app',
+          '*',
+          'enabled_fixture',
+          'phase1_runtime_fixture',
+          100,
+          '{
+            "jobActionPolicy": {
+              "actionKey": "open_app",
+              "allowed": true,
+              "requiresRoot": false,
+              "nativeOpcode": 0,
+              "verificationOpcode": 0,
+              "observationOnly": false,
+              "defaultParams": {},
+              "executionPolicy": {},
+              "parameterTransforms": []
+            }
+          }'::jsonb
+        );
     `);
     await pool.query(`
       INSERT INTO workflow_runtime_contracts (
@@ -267,7 +359,7 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
     } finally {
       await close(server);
     }
-  });
+  }, 10_000);
 });
 
 function workflow(): WorkflowTemplate {
@@ -307,8 +399,8 @@ async function seedRows(): Promise<void> {
     [DEVICE_ID],
   );
   await pool.query(
-    `INSERT INTO accounts (id, platform, username, device_id, status)
-     VALUES ($1, 'reddit', 'pnq003_test_account', $2, 'active')`,
+    `INSERT INTO accounts (id, platform, username, device_id, status, simulated_timezone)
+     VALUES ($1, 'reddit', 'pnq003_test_account', $2, 'active', 'fixture/timezone')`,
     [ACCOUNT_ID, DEVICE_ID],
   );
   await pool.query(

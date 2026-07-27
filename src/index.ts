@@ -15,7 +15,6 @@ import apiRouter from "./api/routes";
 import agencyRouter from "./api/agency-routes";
 import workflowRunRouter from "./api/workflow-run-routes";
 import vlmRouter from "./api/vlm-routes";
-import workflowDispatchRoutes from "./api/workflow-dispatch-routes";
 import deviceTokenRouter from "./api/device-tokens.routes";
 import mappingRoutes from "./modules/app-mapping/mapping-routes";
 import { compilerRoutes } from "./modules/workflow-compiler";
@@ -170,7 +169,7 @@ async function bootstrap(): Promise<void> {
       `${workflowQueuePolicy.error ?? "configuration required"}.`,
     );
   }
-  startEdgeWorkflowProgressWatchdog();
+  await startEdgeWorkflowProgressWatchdog();
   console.log("[server] Edge workflow progress watchdog started.");
 
   // ─── Kill switch — warm up cache from DB (makes isKillSwitchActiveSync reliable) ──
@@ -213,7 +212,6 @@ async function bootstrap(): Promise<void> {
   app.use("/api/workflow-runs", workflowRunRouter);
   app.use("/api/agency", agencyRouter);
   // Generic data-driven workflow control plane.
-  app.use("/api/hydra/workflow", workflowDispatchRoutes);
   // Workflow compiler — compile-and-run, compile, run-compiled, compiled/:id
   app.use("/api/hydra/workflow", compilerRoutes);
   app.use("/api/mapping", mappingRoutes);

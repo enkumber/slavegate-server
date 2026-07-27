@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS agency_workflow_step_library_promotion_events (
   library_state TEXT NOT NULL,
   promotion_scope TEXT NULL,
   note TEXT NULL,
-  actor TEXT NOT NULL DEFAULT 'dashboard',
+  actor TEXT NOT NULL,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT chk_agency_workflow_step_library_promotion_events_action_present
@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS agency_workflow_step_library_promotion_events (
   CONSTRAINT chk_agency_workflow_step_library_promotion_events_library_state_present
     CHECK (NULLIF(BTRIM(library_state), '') IS NOT NULL)
 );
+
+ALTER TABLE agency_workflow_step_library_promotion_events
+  ALTER COLUMN actor DROP DEFAULT;
 
 CREATE INDEX IF NOT EXISTS idx_step_library_promotion_events_step_created
   ON agency_workflow_step_library_promotion_events(step_candidate_id, created_at DESC);

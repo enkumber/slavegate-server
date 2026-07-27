@@ -9,6 +9,7 @@
 import { Queue } from "bullmq";
 import { getRedisConnectionOptions } from "../../redis/client";
 import { getDb } from "../../db/client";
+import { getResourceLifecycleExecutionStatusContract } from "../lifecycle/lifecycle.service";
 import { isKillSwitchActive } from "../../api/routes";
 import { deviceExecutionArbiter } from "../device-execution";
 import { isDeviceExecutionEnforced } from "../device-execution/device-execution-authority";
@@ -33,6 +34,279 @@ const MAX_TIMEOUT_MS = 600_000;
 interface JobActionPolicy {
   allowed: boolean;
   requiresRoot: boolean;
+  nativeOpcode: number;
+  observationOnly: boolean;
+  verificationOpcode: number;
+  timeoutPerUnitMs: number | null;
+  timeoutBaseMs: number;
+  timeoutInputPath: string | null;
+  executionPolicy: Record<string, unknown>;
+  parameterTransforms: unknown[];
+  defaultParams: Record<string, unknown>;
+}
+
+function readPolicyPath(value: unknown, path: string): unknown {
+  let current = value;
+  for (const segment of path.split(".").filter(Boolean)) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+export function assertJobActionResultPolicy(
+  result: unknown,
+  policy: Record<string, unknown>,
+  context: string,
+): void {
+  const assertions = Array.isArray(policy.resultAssertions) ? policy.resultAssertions : [];
+  for (const raw of assertions) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const assertion = raw as Record<string, unknown>;
+    const path = typeof assertion.path === "string" ? assertion.path : "";
+    if (!path) continue;
+    const actual = readPolicyPath(result, path);
+    const passed = Object.prototype.hasOwnProperty.call(assertion, "equals")
+      ? actual === assertion.equals
+      : assertion.exists === true
+        ? actual !== undefined
+        : assertion.exists === false
+          ? actual === undefined
+          : false;
+    if (!passed) {
+      throw new Error(typeof assertion.error === "string"
+        ? assertion.error
+        : `${context} result policy failed at '${path}'`);
+    }
+  }
+}
+
+export interface JobActionPolicyDefinition extends JobActionPolicy {
+  actionKey: string;
+  label: string;
+  defaultParams: Record<string, unknown>;
+}
+
+export async function listJobActionPolicyDefinitions(): Promise<JobActionPolicyDefinition[]> {
+  const result = await getDb().query<{ policy: Record<string, unknown> }>(
+    `SELECT entry.payload->'jobActionPolicy' AS policy
+       FROM runtime_semantic_entries entry
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = entry.lifecycle_key
+        AND definition.status = entry.status
+      WHERE definition.dispatchable
+        AND entry.payload ? 'jobActionPolicy'
+      ORDER BY entry.priority DESC, entry.id`,
+  );
+  return result.rows.flatMap(({ policy }) => {
+    const actionKey = typeof policy.actionKey === "string" ? policy.actionKey.trim() : "";
+    if (
+      !actionKey
+      || typeof policy.allowed !== "boolean"
+      || typeof policy.requiresRoot !== "boolean"
+      || !Number.isSafeInteger(policy.nativeOpcode)
+      || Number(policy.nativeOpcode) < 0
+      || !Number.isSafeInteger(policy.verificationOpcode)
+      || Number(policy.verificationOpcode) < 0
+    ) {
+      return [];
+    }
+    const defaultParams = policy.defaultParams;
+    return [{
+      actionKey,
+      allowed: policy.allowed,
+      requiresRoot: policy.requiresRoot,
+      nativeOpcode: Number(policy.nativeOpcode),
+      observationOnly: policy.observationOnly === true,
+      verificationOpcode: Number(policy.verificationOpcode),
+      timeoutPerUnitMs: typeof policy.timeoutPerUnitMs === "number" && policy.timeoutPerUnitMs >= 0
+        ? policy.timeoutPerUnitMs
+        : null,
+      timeoutBaseMs: typeof policy.timeoutBaseMs === "number" && policy.timeoutBaseMs >= 0
+        ? policy.timeoutBaseMs
+        : 0,
+      timeoutInputPath: typeof policy.timeoutInputPath === "string" && policy.timeoutInputPath.trim()
+        ? policy.timeoutInputPath.trim()
+        : null,
+      executionPolicy: policy.executionPolicy && typeof policy.executionPolicy === "object" && !Array.isArray(policy.executionPolicy)
+        ? policy.executionPolicy as Record<string, unknown>
+        : {},
+      parameterTransforms: Array.isArray(policy.parameterTransforms) ? policy.parameterTransforms : [],
+      label: typeof policy.label === "string" && policy.label.trim()
+        ? policy.label.trim()
+        : actionKey,
+      defaultParams: defaultParams && typeof defaultParams === "object" && !Array.isArray(defaultParams)
+        ? defaultParams as Record<string, unknown>
+        : {},
+    }];
+  });
+}
+
+export async function getWorkflowInterpreterPolicy(): Promise<Record<string, unknown>> {
+  const result = await getDb().query<{ policy: Record<string, unknown> }>(
+    `SELECT entry.payload->'workflowInterpreterPolicy' AS policy
+       FROM runtime_semantic_entries entry
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = entry.lifecycle_key
+        AND definition.status = entry.status
+      WHERE definition.dispatchable
+        AND entry.payload ? 'workflowInterpreterPolicy'
+      ORDER BY entry.priority DESC, entry.id`,
+  );
+  if (result.rows.length !== 1) {
+    throw new Error("PostgreSQL workflow interpreter policy is missing or ambiguous");
+  }
+  return result.rows[0].policy;
+}
+
+/**
+ * Materialize the current PostgreSQL action ABI into an edge-workflow payload.
+ * Product action names remain data; Android receives only the numeric primitive
+ * slot and structural observation flag needed to execute them.
+ */
+export async function hydrateWorkflowNativePolicies<T extends Record<string, unknown>>(template: T): Promise<T> {
+  const definitions = await listJobActionPolicyDefinitions();
+  const executionStates = await getResourceLifecycleExecutionStatusContract("workflows");
+  const interpreterPolicy = await getWorkflowInterpreterPolicy();
+  const runtimeDefaults = interpreterPolicy.runtimeDefaults;
+  if (!runtimeDefaults || typeof runtimeDefaults !== "object" || Array.isArray(runtimeDefaults)) {
+    throw new Error("PostgreSQL workflow interpreter runtimeDefaults are missing");
+  }
+  const runtimeDefault = (key: string): unknown => {
+    if (!Object.prototype.hasOwnProperty.call(runtimeDefaults, key)) {
+      throw new Error(`PostgreSQL workflow interpreter runtime default is missing for '${key}'`);
+    }
+    return (runtimeDefaults as Record<string, unknown>)[key];
+  };
+  if (
+    !interpreterPolicy.enginePolicy
+    || typeof interpreterPolicy.enginePolicy !== "object"
+    || Array.isArray(interpreterPolicy.enginePolicy)
+  ) {
+    throw new Error("PostgreSQL workflow interpreter enginePolicy is missing");
+  }
+  const opcodeFrom = (catalogKey: string, value: unknown): number => {
+    const catalog = interpreterPolicy[catalogKey];
+    const opcode = typeof value === "string"
+      && catalog
+      && typeof catalog === "object"
+      && !Array.isArray(catalog)
+      ? (catalog as Record<string, unknown>)[value]
+      : undefined;
+    if (!Number.isSafeInteger(opcode) || Number(opcode) < 0) {
+      throw new Error(`PostgreSQL workflow interpreter opcode is missing for ${catalogKey}.${String(value)}`);
+    }
+    return Number(opcode);
+  };
+  const policies = new Map(definitions.map((definition) => [definition.actionKey, definition]));
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (!value || typeof value !== "object") return value;
+    const source = value as Record<string, unknown>;
+    const hydrated = Object.fromEntries(Object.entries(source).map(([key, item]) => [key, visit(item)]));
+    if (typeof source.distribution === "string") {
+      hydrated.distributionOpcode = opcodeFrom("distributionOpcodes", source.distribution);
+    }
+    if (typeof source.check === "string") {
+      hydrated.checkOpcode = opcodeFrom("conditionOpcodes", source.check);
+      hydrated.probability = source.probability ?? runtimeDefault("conditionProbability");
+    }
+    if (typeof source.operator === "string") {
+      hydrated.operatorOpcode = opcodeFrom("predicateOpcodes", source.operator);
+    }
+    if (typeof source.regex === "string") {
+      hydrated.group = source.group ?? runtimeDefault("regexGroup");
+    }
+    const actionKey = typeof source.action === "string" ? source.action.trim() : "";
+    const actionShaped = source.type === "action"
+      || source.primitive === true
+      || Object.prototype.hasOwnProperty.call(source, "outputPath")
+      || Object.prototype.hasOwnProperty.call(source, "postcondition");
+    if (!actionKey || !actionShaped) return hydrated;
+    const policy = policies.get(actionKey);
+    if (!policy) throw new Error(`PostgreSQL job action policy is missing for edge action '${actionKey}'`);
+    if (!policy.allowed) throw new Error(`PostgreSQL job action policy blocks edge action '${actionKey}'`);
+    const failureMode = typeof source.failureMode === "string" ? source.failureMode.trim() : "";
+    const verificationMode = typeof source.verification === "string" && source.verification.trim()
+      ? source.verification.trim()
+      : interpreterPolicy.defaultVerificationMode;
+    const mergedParams = visit({
+        ...policy.defaultParams,
+        ...(source.params && typeof source.params === "object" && !Array.isArray(source.params)
+          ? source.params as Record<string, unknown>
+          : {}),
+      }) as Record<string, unknown>;
+    const transformedParams = applyParameterTransforms(
+      mergedParams,
+      policy.parameterTransforms,
+    );
+    const actionExecutionFields = source.type === "action"
+      ? {
+          retries: source.retries ?? runtimeDefault("actionRetries"),
+          retryDelayMs: source.retryDelayMs ?? source.retryDelay ?? runtimeDefault("actionRetryDelayMs"),
+          delayAfterMs: source.delayAfterMs ?? source.delay_after ?? runtimeDefault("actionDelayAfterMs"),
+          timeoutMs: source.timeoutMs ?? runtimeDefault("actionTimeoutMs"),
+        }
+      : {};
+    const pollingFields = Object.prototype.hasOwnProperty.call(source, "outputPath")
+      ? {
+          pollIntervalMs: source.pollIntervalMs ?? runtimeDefault("pollIntervalMs"),
+          timeoutMs: source.timeoutMs ?? runtimeDefault("pollTimeoutMs"),
+        }
+      : {};
+    return {
+      ...hydrated,
+      ...actionExecutionFields,
+      ...pollingFields,
+      params: transformedParams,
+      nativeOpcode: policy.nativeOpcode,
+      observationOnly: policy.observationOnly,
+      verificationOpcode: opcodeFrom("verificationOpcodes", verificationMode),
+      ...(source.type === "action"
+        && source.failureOpcode === undefined
+        ? {
+            failureOpcode: failureMode
+              ? opcodeFrom("failureOpcodes", failureMode)
+              : opcodeFrom("failureOpcodes", interpreterPolicy.defaultFailureMode),
+          }
+        : {}),
+    };
+  };
+  const visited = visit(template) as T & Record<string, unknown>;
+  const sourceRecovery = template.recoveryPolicy
+    && typeof template.recoveryPolicy === "object"
+    && !Array.isArray(template.recoveryPolicy)
+    ? template.recoveryPolicy as Record<string, unknown>
+    : {};
+  return {
+    ...visited,
+    recoveryPolicy: {
+      ...sourceRecovery,
+      autonomy: sourceRecovery.autonomy ?? runtimeDefault("recoveryAutonomy"),
+      aiRecoveryEnabled: sourceRecovery.aiRecoveryEnabled ?? runtimeDefault("recoveryAiEnabled"),
+      maxAttemptsPerStep: sourceRecovery.maxAttemptsPerStep ?? runtimeDefault("recoveryMaxAttemptsPerStep"),
+      maxAttemptsPerWorkflow: sourceRecovery.maxAttemptsPerWorkflow ?? runtimeDefault("recoveryMaxAttemptsPerWorkflow"),
+      maxRecoveryActionsPerAttempt: sourceRecovery.maxRecoveryActionsPerAttempt
+        ?? runtimeDefault("recoveryMaxActionsPerAttempt"),
+      allowedRecoveryRequests: sourceRecovery.allowedRecoveryRequests
+        ?? template.allowedRecoveryRequests
+        ?? runtimeDefault("recoveryAllowedRequests"),
+      requireStateVerification: sourceRecovery.requireStateVerification
+        ?? runtimeDefault("recoveryRequireStateVerification"),
+      learnFromFailure: sourceRecovery.learnFromFailure ?? runtimeDefault("recoveryLearnFromFailure"),
+      plannerInstruction: sourceRecovery.plannerInstruction ?? runtimeDefault("recoveryPlannerInstruction"),
+      executeDecisionKey: sourceRecovery.executeDecisionKey ?? runtimeDefault("recoveryExecuteDecisionKey"),
+      retryDecisionKey: sourceRecovery.retryDecisionKey ?? runtimeDefault("recoveryRetryDecisionKey"),
+      abortDecisionKey: sourceRecovery.abortDecisionKey ?? runtimeDefault("recoveryAbortDecisionKey"),
+      probeActionKey: sourceRecovery.probeActionKey ?? runtimeDefault("recoveryProbeActionKey"),
+      probeTimeoutMs: sourceRecovery.probeTimeoutMs ?? runtimeDefault("recoveryProbeTimeoutMs"),
+      plannerSystem: sourceRecovery.plannerSystem ?? runtimeDefault("recoveryPlannerSystem"),
+      plannerMaxTokens: sourceRecovery.plannerMaxTokens ?? runtimeDefault("recoveryPlannerMaxTokens"),
+      plannerTimeoutMs: sourceRecovery.plannerTimeoutMs ?? runtimeDefault("recoveryPlannerTimeoutMs"),
+    },
+    executionStates,
+    enginePolicy: interpreterPolicy.enginePolicy,
+  };
 }
 
 async function loadJobActionPolicy(type: JobType): Promise<JobActionPolicy> {
@@ -51,10 +325,114 @@ async function loadJobActionPolicy(type: JobType): Promise<JobActionPolicy> {
     throw new Error(`PostgreSQL job action policy is missing or ambiguous for '${type}'`);
   }
   const policy = result.rows[0].policy;
-  if (typeof policy.allowed !== "boolean" || typeof policy.requiresRoot !== "boolean") {
+  if (
+    typeof policy.allowed !== "boolean"
+    || typeof policy.requiresRoot !== "boolean"
+    || !Number.isSafeInteger(policy.nativeOpcode)
+    || Number(policy.nativeOpcode) < 0
+    || !Number.isSafeInteger(policy.verificationOpcode)
+    || Number(policy.verificationOpcode) < 0
+  ) {
     throw new Error(`PostgreSQL job action policy is invalid for '${type}'`);
   }
-  return { allowed: policy.allowed, requiresRoot: policy.requiresRoot };
+  return {
+    allowed: policy.allowed,
+    requiresRoot: policy.requiresRoot,
+    nativeOpcode: Number(policy.nativeOpcode),
+    observationOnly: policy.observationOnly === true,
+    verificationOpcode: Number(policy.verificationOpcode),
+    timeoutPerUnitMs: typeof policy.timeoutPerUnitMs === "number" && policy.timeoutPerUnitMs >= 0
+      ? policy.timeoutPerUnitMs
+      : null,
+    timeoutBaseMs: typeof policy.timeoutBaseMs === "number" && policy.timeoutBaseMs >= 0
+      ? policy.timeoutBaseMs
+      : 0,
+    timeoutInputPath: typeof policy.timeoutInputPath === "string" && policy.timeoutInputPath.trim()
+      ? policy.timeoutInputPath.trim()
+      : null,
+    executionPolicy: policy.executionPolicy && typeof policy.executionPolicy === "object" && !Array.isArray(policy.executionPolicy)
+      ? policy.executionPolicy as Record<string, unknown>
+      : {},
+    parameterTransforms: Array.isArray(policy.parameterTransforms) ? policy.parameterTransforms : [],
+    defaultParams: policy.defaultParams && typeof policy.defaultParams === "object" && !Array.isArray(policy.defaultParams)
+      ? policy.defaultParams as Record<string, unknown>
+      : {},
+  };
+}
+
+function readTimeoutInput(params: unknown, path: string | null): unknown {
+  if (!path) return undefined;
+  let current: unknown = params;
+  for (const segment of path.split(".").filter(Boolean)) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function writePath(target: Record<string, unknown>, path: string, value: unknown): void {
+  const segments = path.split(".").map((segment) => segment.trim()).filter(Boolean);
+  if (segments.length === 0) throw new Error("PostgreSQL parameter transform targetPath is empty");
+  let current = target;
+  for (const segment of segments.slice(0, -1)) {
+    const existing = current[segment];
+    if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+      current[segment] = {};
+    }
+    current = current[segment] as Record<string, unknown>;
+  }
+  current[segments.at(-1)!] = value;
+}
+
+export function applyParameterTransforms(
+  params: Record<string, unknown>,
+  transforms: unknown[],
+): Record<string, unknown> {
+  const output = structuredClone(params);
+  for (const rawTransform of transforms) {
+    if (!rawTransform || typeof rawTransform !== "object" || Array.isArray(rawTransform)) {
+      throw new Error("PostgreSQL parameter transform must be an object");
+    }
+    const transform = rawTransform as Record<string, unknown>;
+    const sourcePath = typeof transform.sourcePath === "string" ? transform.sourcePath.trim() : "";
+    const sourceValue = readTimeoutInput(output, sourcePath);
+    if (sourceValue === undefined) continue;
+    const values = transform.values;
+    if (!values || typeof values !== "object" || Array.isArray(values)) {
+      throw new Error(`PostgreSQL parameter transform values are invalid for '${sourcePath}'`);
+    }
+    const lookup = values as Record<string, unknown>;
+    const transformOpcode = transform.transformOpcode;
+    if (transformOpcode === 0) {
+      const mapped = lookup[String(sourceValue)];
+      if (!mapped || typeof mapped !== "object" || Array.isArray(mapped)) {
+        throw new Error(`PostgreSQL parameter mapping is missing for '${sourcePath}.${String(sourceValue)}'`);
+      }
+      const mapping = mapped as Record<string, unknown>;
+      const targetPath = typeof mapping.targetPath === "string" ? mapping.targetPath.trim() : "";
+      if (!targetPath || !Object.prototype.hasOwnProperty.call(mapping, "value")) {
+        throw new Error(`PostgreSQL scalar parameter mapping is invalid for '${sourcePath}.${String(sourceValue)}'`);
+      }
+      writePath(output, targetPath, mapping.value);
+    } else if (transformOpcode === 1) {
+      if (!Array.isArray(sourceValue)) {
+        throw new Error(`PostgreSQL array parameter transform expected an array at '${sourcePath}'`);
+      }
+      const targetPath = typeof transform.targetPath === "string" ? transform.targetPath.trim() : "";
+      if (!targetPath) throw new Error(`PostgreSQL array parameter transform targetPath is invalid for '${sourcePath}'`);
+      const mapped = sourceValue.map((item) => {
+        const value = lookup[String(item)];
+        if (value === undefined) {
+          throw new Error(`PostgreSQL parameter mapping is missing for '${sourcePath}.${String(item)}'`);
+        }
+        return value;
+      });
+      writePath(output, targetPath, mapped);
+    } else {
+      throw new Error(`PostgreSQL parameter transform opcode is invalid for '${sourcePath}'`);
+    }
+  }
+  return output;
 }
 
 export function workflowChildTimeoutDisposition(
@@ -80,6 +458,10 @@ interface DispatchCoreOptions {
 }
 
 export class DispatcherService {
+  async hydrateWorkflowNativePolicies<T extends Record<string, unknown>>(template: T): Promise<T> {
+    return hydrateWorkflowNativePolicies(template);
+  }
+
   private queues = new Map<string, Queue>();
 
   private getQueue(deviceId: string): Queue {
@@ -98,18 +480,45 @@ export class DispatcherService {
     return this.queues.get(deviceId)!;
   }
 
-  async dispatch(req: DispatchJobRequest): Promise<{ jobId: string; timeoutMs: number; requiresRoot: boolean }> {
+  async dispatch(req: DispatchJobRequest): Promise<{
+    jobId: string;
+    timeoutMs: number;
+    requiresRoot: boolean;
+    nativeOpcode: number;
+    observationOnly: boolean;
+    verificationOpcode: number;
+    executionPolicy: Record<string, unknown>;
+    params: JobParams;
+  }> {
     return this.dispatchCore(req, {});
   }
 
-  async dispatchLegacyGeneratedWorkflow(req: DispatchJobRequest): Promise<{ jobId: string; timeoutMs: number; requiresRoot: boolean }> {
+  async dispatchLegacyGeneratedWorkflow(req: DispatchJobRequest): Promise<{
+    jobId: string;
+    timeoutMs: number;
+    requiresRoot: boolean;
+    nativeOpcode: number;
+    observationOnly: boolean;
+    verificationOpcode: number;
+    executionPolicy: Record<string, unknown>;
+    params: JobParams;
+  }> {
     return this.dispatchCore(req, { legacyCompatibilityLane: true });
   }
 
   private async dispatchCore(
     req: DispatchJobRequest,
     { legacyCompatibilityLane = false }: DispatchCoreOptions,
-  ): Promise<{ jobId: string; timeoutMs: number; requiresRoot: boolean }> {
+  ): Promise<{
+    jobId: string;
+    timeoutMs: number;
+    requiresRoot: boolean;
+    nativeOpcode: number;
+    observationOnly: boolean;
+    verificationOpcode: number;
+    executionPolicy: Record<string, unknown>;
+    params: JobParams;
+  }> {
 
     // 0. Kill switch — block all dispatches when active (B4 fix)
     if (await isKillSwitchActive()) {
@@ -128,24 +537,27 @@ export class DispatcherService {
         `Job type '${req.type}' is a root command and requires confirmRoot=true.`
       );
     }
+    const resolvedParams = applyParameterTransforms(
+      {
+        ...actionPolicy.defaultParams,
+        ...(req.params as Record<string, unknown>),
+      },
+      actionPolicy.parameterTransforms,
+    ) as JobParams;
 
-    // 3. Calculate timeout (dynamic for type_text based on text length)
+    // 3. Calculate timeout from the PostgreSQL action policy. The engine does
+    // not branch on action names; policy may size a timeout from any string or
+    // array field selected by timeoutInputPath.
     let calculatedTimeout = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     let skipMaxClamp = false;
-    
-    if (req.type === "type_text") {
-      const params = req.params as Record<string, unknown>;
-      const text = params?.text;
-      if (typeof text === "string" && text.length > 0) {
-        // Calculate realistic timeout:
-        // Observed: ~660ms per character in practice (includes all delays, typos, pauses)
-        // Using 700ms per char as safe estimate + 15s buffer
-        const textLength = text.length;
-        const estimatedMs = textLength * 700 + 15000;
-        calculatedTimeout = estimatedMs;
-        skipMaxClamp = true; // type_text gets exact calculated timeout
-        console.log(`[dispatcher] type_text: ${textLength} chars → timeout ${calculatedTimeout}ms (${Math.round(estimatedMs/1000)}s)`);
-      }
+
+    const timeoutInput = readTimeoutInput(resolvedParams, actionPolicy.timeoutInputPath);
+    const timeoutUnits = typeof timeoutInput === "string" || Array.isArray(timeoutInput)
+      ? timeoutInput.length
+      : 0;
+    if (actionPolicy.timeoutPerUnitMs !== null && timeoutUnits > 0) {
+      calculatedTimeout = actionPolicy.timeoutBaseMs + timeoutUnits * actionPolicy.timeoutPerUnitMs;
+      skipMaxClamp = true;
     }
     
     const timeoutMs = skipMaxClamp ? calculatedTimeout : Math.min(calculatedTimeout, MAX_TIMEOUT_MS);
@@ -156,7 +568,7 @@ export class DispatcherService {
     await db.query(
       `INSERT INTO jobs (id, device_id, job_type, params, timeout_ms)
        VALUES ($1, $2, $3, $4, $5)`,
-      [jobId, req.deviceId, req.type, JSON.stringify(req.params), timeoutMs]
+      [jobId, req.deviceId, req.type, JSON.stringify(resolvedParams), timeoutMs]
     );
     recordJobExecutionEventDetached({
       jobId,
@@ -195,7 +607,7 @@ export class DispatcherService {
       await db.query(
         `INSERT INTO command_log (device_id, job_id, command_type, command_raw, command_params)
          VALUES ($1, $2, $3, $4, $5)`,
-        [req.deviceId, jobId, req.type, `${req.type} → ${req.deviceId}`, JSON.stringify(req.params)]
+        [req.deviceId, jobId, req.type, `${req.type} → ${req.deviceId}`, JSON.stringify(resolvedParams)]
       );
     }
 
@@ -205,7 +617,7 @@ export class DispatcherService {
     const queue = this.getQueue(req.deviceId);
     await queue.add(
       "job",
-      { jobId, deviceId: req.deviceId, type: req.type, params: req.params, timeoutMs },
+      { jobId, deviceId: req.deviceId, type: req.type, params: resolvedParams, timeoutMs },
       { jobId }
     );
 
@@ -216,7 +628,7 @@ export class DispatcherService {
         const shadowEnqueueObservation = pnqV2RuntimeService.enqueueShadowJob({
           deviceId: req.deviceId,
           legacyJobId: jobId,
-          payload: { type: req.type, params: req.params, workflowId: req.workflowId ?? null },
+          payload: { type: req.type, params: resolvedParams, workflowId: req.workflowId ?? null },
           timeoutMs,
         });
         runPnqV2ShadowSideEffect("enqueue", () => shadowEnqueueObservation);
@@ -322,7 +734,16 @@ export class DispatcherService {
     const timeoutHandle = setTimeout(enforceTimeout, timeoutMs + 5_000); // +5s grace period for network latency
     timeoutHandle.unref?.();
 
-    return { jobId, timeoutMs, requiresRoot: actionPolicy.requiresRoot };
+    return {
+      jobId,
+      timeoutMs,
+      requiresRoot: actionPolicy.requiresRoot,
+      nativeOpcode: actionPolicy.nativeOpcode,
+      observationOnly: actionPolicy.observationOnly,
+      verificationOpcode: actionPolicy.verificationOpcode,
+      executionPolicy: actionPolicy.executionPolicy,
+      params: resolvedParams,
+    };
   }
 
   /**

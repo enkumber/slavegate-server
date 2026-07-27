@@ -12,8 +12,6 @@ import { statusLabel, statusStyle } from "../utils/statusPresentation";
 type DeviceCardHealth = NonNullable<Device["health"]> & {
   publicIp?: string;
   connectionType?: "wireguard" | "relay" | string;
-  rustdeskId?: string;
-  rustdeskRunning?: boolean;
 };
 
 interface Props {
@@ -160,9 +158,6 @@ export function DeviceCard({ device, accountsCount, onApprove, onDispatchJob, on
               {health.connectionType === "wireguard" ? "🛡 WireGuard" : "☁️ Relay"}
             </span>
           </div>
-        )}
-        {health?.rustdeskId && (
-          <div>🖥 RustDesk: {health.rustdeskId} {health.rustdeskRunning ? "✅" : "❌"}</div>
         )}
         {!health?.publicIp && device.lastIp && <div>IP: {device.lastIp}</div>}
         {device.lastSeenAt && (

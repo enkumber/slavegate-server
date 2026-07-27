@@ -2,15 +2,42 @@ import { workflowEvents } from "../workflow-events";
 import { workflowService } from "./workflow.service";
 import type { WorkflowStep, WorkflowTemplate } from "./types";
 import { getResourceLifecycleExecutionStatusContract } from "../lifecycle/lifecycle.service";
-
-const EDGE_WORKFLOW_ACK_TIMEOUT_MS = Number(process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS ?? 20_000);
-const EDGE_WORKFLOW_ACK_TIMEOUT_ERROR = "Edge workflow did not acknowledge WORKFLOW_START";
-const EDGE_WORKFLOW_PROGRESS_SWEEP_MS = Number(process.env.EDGE_WORKFLOW_PROGRESS_SWEEP_MS ?? 30_000);
-const EDGE_WORKFLOW_PROGRESS_GRACE_MS = Number(process.env.EDGE_WORKFLOW_PROGRESS_GRACE_MS ?? 15_000);
-const EDGE_WORKFLOW_MIN_STALE_MS = Number(process.env.EDGE_WORKFLOW_MIN_STALE_MS ?? 30_000);
-const EDGE_WORKFLOW_MAX_STALE_MS = Number(process.env.EDGE_WORKFLOW_MAX_STALE_MS ?? 660_000);
+import { getWorkflowInterpreterPolicy } from "../dispatcher/dispatcher.service";
 
 let progressSweepTimer: NodeJS.Timeout | null = null;
+
+interface EdgeWatchdogPolicy {
+  ackTimeoutMs: number;
+  progressSweepMs: number;
+  progressGraceMs: number;
+  minStaleMs: number;
+  maxStaleMs: number;
+  localStepBudgetMs: number;
+}
+
+async function loadEdgeWatchdogPolicy(): Promise<EdgeWatchdogPolicy> {
+  const interpreter = await getWorkflowInterpreterPolicy();
+  const raw = interpreter.enginePolicy;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("PostgreSQL workflow interpreter enginePolicy is missing");
+  }
+  const policy = raw as Record<string, unknown>;
+  const positiveInteger = (key: keyof EdgeWatchdogPolicy): number => {
+    const value = policy[key];
+    if (!Number.isSafeInteger(value) || Number(value) < 1) {
+      throw new Error(`PostgreSQL workflow engine policy requires positive integer ${key}`);
+    }
+    return Number(value);
+  };
+  return {
+    ackTimeoutMs: positiveInteger("ackTimeoutMs"),
+    progressSweepMs: positiveInteger("progressSweepMs"),
+    progressGraceMs: positiveInteger("progressGraceMs"),
+    minStaleMs: positiveInteger("minStaleMs"),
+    maxStaleMs: positiveInteger("maxStaleMs"),
+    localStepBudgetMs: positiveInteger("localStepBudgetMs"),
+  };
+}
 
 function edgeCheckpointAcknowledged(checkpoint: unknown): boolean {
   return !!checkpoint &&
@@ -24,9 +51,9 @@ function checkpointTimestamp(checkpoint: unknown): string | null {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
 }
 
-function stepBudgetMs(step: WorkflowStep | undefined): number {
-  if (!step) return 15_000;
-  if (step.type === "action") return step.timeoutMs ?? 15_000;
+function stepBudgetMs(step: WorkflowStep | undefined, policy: EdgeWatchdogPolicy): number {
+  if (!step) return policy.localStepBudgetMs;
+  if (step.type === "action") return step.timeoutMs ?? policy.localStepBudgetMs;
   if (step.type === "wait") {
     if (step.until?.timeoutMs) return step.until.timeoutMs;
     if (step.timeoutMs) return step.timeoutMs;
@@ -34,20 +61,25 @@ function stepBudgetMs(step: WorkflowStep | undefined): number {
   }
   // Conditions/checkpoints are local and loops report progress through their
   // nested actions. Keep a bounded default if no explicit duration exists.
-  return 30_000;
+  return policy.localStepBudgetMs;
 }
 
-export function edgeProgressStaleAfterMs(template: WorkflowTemplate | null, currentStep: number): number {
-  const budget = stepBudgetMs(template?.steps[currentStep]);
+export function edgeProgressStaleAfterMs(
+  template: WorkflowTemplate | null,
+  currentStep: number,
+  policy: EdgeWatchdogPolicy,
+): number {
+  const budget = stepBudgetMs(template?.steps[currentStep], policy);
   return Math.min(
-    EDGE_WORKFLOW_MAX_STALE_MS,
-    Math.max(EDGE_WORKFLOW_MIN_STALE_MS, budget + EDGE_WORKFLOW_PROGRESS_GRACE_MS),
+    policy.maxStaleMs,
+    Math.max(policy.minStaleMs, budget + policy.progressGraceMs),
   );
 }
 
 export async function sweepStaleEdgeWorkflows(nowMs = Date.now()): Promise<{ checked: number; failed: number }> {
   const running = await workflowService.listActive(1, 500);
   const lifecycleStatusContract = await getResourceLifecycleExecutionStatusContract("workflows");
+  const watchdogPolicy = await loadEdgeWatchdogPolicy();
   let checked = 0;
   let failed = 0;
 
@@ -58,7 +90,7 @@ export async function sweepStaleEdgeWorkflows(nowMs = Date.now()): Promise<{ che
     checked += 1;
 
     const template = workflow.templateId ? await workflowService.getTemplate(workflow.templateId) : null;
-    const staleAfterMs = edgeProgressStaleAfterMs(template, workflow.currentStep);
+    const staleAfterMs = edgeProgressStaleAfterMs(template, workflow.currentStep, watchdogPolicy);
     const ageMs = nowMs - Date.parse(checkpointAt);
     if (ageMs <= staleAfterMs) continue;
 
@@ -99,13 +131,14 @@ export async function sweepStaleEdgeWorkflows(nowMs = Date.now()): Promise<{ che
   return { checked, failed };
 }
 
-export function startEdgeWorkflowProgressWatchdog(): NodeJS.Timeout {
+export async function startEdgeWorkflowProgressWatchdog(): Promise<NodeJS.Timeout> {
   if (progressSweepTimer) return progressSweepTimer;
+  const policy = await loadEdgeWatchdogPolicy();
   progressSweepTimer = setInterval(() => {
     sweepStaleEdgeWorkflows().catch((err) =>
       console.error(`[edge-watchdog] Progress sweep failed: ${(err as Error).message}`),
     );
-  }, EDGE_WORKFLOW_PROGRESS_SWEEP_MS);
+  }, policy.progressSweepMs);
   progressSweepTimer.unref?.();
   void sweepStaleEdgeWorkflows().catch((err) =>
     console.error(`[edge-watchdog] Startup progress sweep failed: ${(err as Error).message}`),
@@ -113,11 +146,13 @@ export function startEdgeWorkflowProgressWatchdog(): NodeJS.Timeout {
   return progressSweepTimer;
 }
 
-export function scheduleEdgeWorkflowAckWatchdog(
+export async function scheduleEdgeWorkflowAckWatchdog(
   workflowId: string,
   deviceId: string,
   logPrefix: string,
-): void {
+): Promise<void> {
+  const policy = await loadEdgeWatchdogPolicy();
+  const timeoutError = "Edge workflow did not acknowledge WORKFLOW_START";
   const timeout = setTimeout(async () => {
     try {
       const latest = await workflowService.get(workflowId);
@@ -126,7 +161,7 @@ export function scheduleEdgeWorkflowAckWatchdog(
 
       const failed = await workflowService.markFailedIfEdgeStartUnacknowledged(
         workflowId,
-        `${EDGE_WORKFLOW_ACK_TIMEOUT_ERROR} within ${EDGE_WORKFLOW_ACK_TIMEOUT_MS}ms`,
+        `${timeoutError} within ${policy.ackTimeoutMs}ms`,
       );
       if (!failed) return;
       workflowEvents.publish({
@@ -137,17 +172,17 @@ export function scheduleEdgeWorkflowAckWatchdog(
         mode: "edge",
         status: (await getResourceLifecycleExecutionStatusContract("workflows")).failed,
         currentStep: 0,
-        error: EDGE_WORKFLOW_ACK_TIMEOUT_ERROR,
+        error: timeoutError,
         details: {
           reason: "edge_ack_timeout",
-          timeoutMs: EDGE_WORKFLOW_ACK_TIMEOUT_MS,
+          timeoutMs: policy.ackTimeoutMs,
         },
       });
-      console.warn(`[${logPrefix}] Edge workflow ${workflowId} on ${deviceId.slice(0, 8)} did not acknowledge start within ${EDGE_WORKFLOW_ACK_TIMEOUT_MS}ms`);
+      console.warn(`[${logPrefix}] Edge workflow ${workflowId} on ${deviceId.slice(0, 8)} did not acknowledge start within ${policy.ackTimeoutMs}ms`);
     } catch (err) {
       console.error(`[${logPrefix}] Edge workflow ack watchdog failed for ${workflowId}: ${(err as Error).message}`);
     }
-  }, EDGE_WORKFLOW_ACK_TIMEOUT_MS);
+  }, policy.ackTimeoutMs);
   timeout.unref?.();
 }
 
@@ -168,7 +203,7 @@ export async function promoteReplayedEdgeWorkflowToRunning(input: {
       if (edgeCheckpointAcknowledged(latest.checkpoint)) return;
     }
 
-    scheduleEdgeWorkflowAckWatchdog(workflowId, deviceId, actor);
+    await scheduleEdgeWorkflowAckWatchdog(workflowId, deviceId, actor);
     const context = variables?.controlPlaneContext;
     const controlPlaneContext = context && typeof context === "object" && !Array.isArray(context)
       ? context as Record<string, unknown>

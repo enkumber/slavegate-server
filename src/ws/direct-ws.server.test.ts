@@ -155,7 +155,6 @@ describe("OTA terminal reconciliation", () => {
 describe("DirectWS Android result handle compatibility", () => {
   it.each([
     { type: "JOB_RESULT", jobId: expectedHandle.operationId, success: true, output: {}, durationMs: 12 },
-    { type: "BATCH_RESULT", batchId: expectedHandle.operationId, status: "completed", results: [], totalDurationMs: 12 },
     { type: "WORKFLOW_STATUS", workflowId: expectedHandle.operationId, status: "running", currentStep: 0, totalSteps: 1 },
   ])("accepts authenticated Android-shaped $type without pnqHandle against the exact pending handle", (message) => {
     expect(resolveDirectWsResultHandle(expectedHandle, message)).toEqual({
@@ -185,7 +184,7 @@ describe("DirectWS Android result handle compatibility", () => {
   });
 
   it("rejects a malformed reported handle instead of treating it as missing", () => {
-    expect(resolveDirectWsResultHandle(expectedHandle, { type: "BATCH_RESULT", pnqHandle: { bad: true } })).toEqual({
+    expect(resolveDirectWsResultHandle(expectedHandle, { type: "JOB_RESULT", pnqHandle: { bad: true } })).toEqual({
       accepted: false,
       reportedHandle: null,
       compatibility: "rejected",
@@ -303,25 +302,6 @@ describe("PNQ v2 shadow DirectWS side effects", () => {
   });
 });
 
-describe("DirectWS typed BATCH serializer identity", () => {
-  const valid: DeviceExecutionHandle = {
-    ...expectedHandle,
-    rootKind: "server_workflow",
-    operationKind: "batch",
-    operationId: "batch-child",
-  };
-
-  it.each([
-    { ...valid, rootKind: "edge_workflow" as const },
-    { ...valid, operationKind: "job" as const },
-    { ...valid, operationId: "wrong-batch" },
-  ])("rejects an invalid typed BATCH identity before connection or wire", (handle) => {
-    const server = new DirectWsServer();
-    expect(() => server.sendBatchWithHandle(handle, { type: "BATCH_START", batchId: "batch-child" }))
-      .toThrow("DirectWS BATCH handle does not match payload identity");
-  });
-});
-
 describe("PNQ-003 observe-only DirectWS ingress compatibility", () => {
   function connection(send = vi.fn(), deviceId = expectedHandle.deviceId) {
     return {
@@ -335,107 +315,6 @@ describe("PNQ-003 observe-only DirectWS ingress compatibility", () => {
       agentVersion: "4.0.0",
     };
   }
-
-  it("resolves observe-only BATCH_RESULT without a typed PNQ waiter handle", async () => {
-    setDeviceExecutionAuthorityForTest("observe_only");
-    const server = new DirectWsServer();
-    const internals = server as unknown as {
-      waitForBatchResult: (batchId: string, timeoutMs: number, deviceId?: string) => Promise<unknown>;
-      _handleBatchResult: (conn: ReturnType<typeof connection>, msg: Record<string, unknown>) => Promise<void>;
-    };
-    const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal").mockResolvedValue({
-      decision: "terminal",
-      transitionApplied: true,
-      root: null,
-    });
-    const pending = internals.waitForBatchResult("observe-batch", 60_000, expectedHandle.deviceId);
-
-    await internals._handleBatchResult(connection(), {
-      type: "BATCH_RESULT",
-      batchId: "observe-batch",
-      workflowId: "observe-workflow",
-      completed: true,
-      partial: false,
-      timedOut: false,
-      results: [{ id: 1, successful: true }],
-      totalDurationMs: 42,
-    });
-
-    await expect(pending).resolves.toMatchObject({
-      batchId: "observe-batch",
-      workflowId: "observe-workflow",
-      completed: true,
-      totalDurationMs: 42,
-    });
-    expect(observeTerminal).toHaveBeenCalledWith(expect.objectContaining({
-      rootKind: "batch",
-      externalId: "observe-batch",
-      terminalSelector: expect.objectContaining({
-        targetTerminal: true,
-        targetRetryable: false,
-      }),
-      actor: "direct_ws.observe_only",
-    }));
-  });
-
-  it("rejects a mismatched device result without consuming the observe-only BATCH waiter", async () => {
-    setDeviceExecutionAuthorityForTest("observe_only");
-    const server = new DirectWsServer();
-    const internals = server as unknown as {
-      waitForBatchResult: (batchId: string, timeoutMs: number, deviceId?: string) => Promise<unknown>;
-      rejectObserveOnlyBatchWaiter: (batchId: string, deviceId: string, reason: string) => void;
-      observeOnlyPendingBatches: Map<string, unknown>;
-      _handleBatchResult: (conn: ReturnType<typeof connection>, msg: Record<string, unknown>) => Promise<void>;
-    };
-    const rejected = vi.spyOn(deviceExecutionArbiter, "recordRejectedEgress").mockResolvedValue(undefined as never);
-    const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal");
-    const pending = internals.waitForBatchResult("device-bound-batch", 60_000, expectedHandle.deviceId);
-
-    await internals._handleBatchResult(
-      connection(vi.fn(), "99999999-9999-4999-8999-999999999999"),
-      { type: "BATCH_RESULT", batchId: "device-bound-batch", status: "completed", results: [] },
-    );
-
-    expect(rejected).toHaveBeenCalledWith(expect.objectContaining({ reason: "batch_result_device_mismatch" }));
-    expect(observeTerminal).not.toHaveBeenCalled();
-    expect(internals.observeOnlyPendingBatches.has("device-bound-batch")).toBe(true);
-    internals.rejectObserveOnlyBatchWaiter("device-bound-batch", expectedHandle.deviceId, "test_cleanup");
-    await expect(pending).rejects.toThrow("test_cleanup");
-  });
-
-  it("drains observe-only BATCH waiters during shutdown", async () => {
-    setDeviceExecutionAuthorityForTest("observe_only");
-    const server = new DirectWsServer();
-    const pending = server.waitForBatchResult("shutdown-batch", 60_000, expectedHandle.deviceId);
-
-    await server.close();
-
-    await expect(pending).rejects.toThrow("Server shutting down");
-  });
-
-  it("keeps enforced BATCH_RESULT fail-closed without a typed PNQ waiter", async () => {
-    setDeviceExecutionAuthorityForTest("enforced");
-    const server = new DirectWsServer();
-    const internals = server as unknown as {
-      _handleBatchResult: (conn: ReturnType<typeof connection>, msg: Record<string, unknown>) => Promise<void>;
-    };
-    const rejected = vi.spyOn(deviceExecutionArbiter, "recordRejectedEgress").mockResolvedValue(undefined as never);
-    const observeTerminal = vi.spyOn(deviceExecutionArbiter, "observeTerminal");
-
-    await internals._handleBatchResult(connection(), {
-      type: "BATCH_RESULT",
-      batchId: "untyped-batch",
-      status: "completed",
-      results: [],
-    });
-
-    expect(rejected).toHaveBeenCalledWith(expect.objectContaining({
-      operationId: "untyped-batch",
-      wireType: "BATCH_RESULT",
-      reason: "batch_result_without_waiter",
-    }));
-    expect(observeTerminal).not.toHaveBeenCalled();
-  });
 
   it("persists and publishes observe-only terminal WORKFLOW_STATUS without a pending PNQ handle", async () => {
     setDeviceExecutionAuthorityForTest("observe_only");
@@ -534,15 +413,6 @@ describe("DirectWS LLM_REQUEST safety", () => {
 });
 
 describe("DirectWS typed pending lifecycle", () => {
-  const deviceB = "00000000-0000-4000-8000-000000000099";
-  const batchHandle = (deviceId: string, operationId: string): DeviceExecutionHandle => ({
-    rootId: `root-${operationId}`,
-    deviceId,
-    rootKind: "batch",
-    ownerGeneration: 1,
-    operationKind: "batch",
-    operationId,
-  });
   const workflowHandle = (deviceId: string, operationId: string): DeviceExecutionHandle => ({
     rootId: `root-${operationId}`,
     deviceId,
@@ -567,65 +437,13 @@ describe("DirectWS typed pending lifecycle", () => {
     };
   };
 
-  it("awaits ambiguity writes and drains only the disconnected device", async () => {
+  it("blocks workflow roots before clearing their timeout state", async () => {
     const server = new DirectWsServer();
-    const batchA = batchHandle(expectedHandle.deviceId, "batch-a");
-    const batchB = batchHandle(deviceB, "batch-b");
-    const pendingA = server.registerBatchWaiterWithHandle(batchA, 60_000);
-    const pendingB = server.registerBatchWaiterWithHandle(batchB, 60_000);
-    const workflowA = workflowHandle(expectedHandle.deviceId, "workflow-a");
-    const workflowB = workflowHandle(deviceB, "workflow-b");
-    const workflowTimerA = setTimeout(() => {}, 60_000);
-    const workflowTimerB = setTimeout(() => {}, 60_000);
-    workflowTimerA.unref();
-    workflowTimerB.unref();
-    const internals = server as unknown as {
-      pendingBatches: Map<string, unknown>;
-      pendingWorkflows: Map<string, { handle: DeviceExecutionHandle; timer: ReturnType<typeof setTimeout> }>;
-      blockPendingForDisconnectedDevice: (deviceId: string, code: number, reason: string) => Promise<{ jobs: number; batches: number; workflows: number }>;
-    };
-    internals.pendingWorkflows.set(workflowA.operationId, { handle: workflowA, timer: workflowTimerA });
-    internals.pendingWorkflows.set(workflowB.operationId, { handle: workflowB, timer: workflowTimerB });
-
-    let releaseWrites!: () => void;
-    const writesReleased = new Promise<void>((resolve) => { releaseWrites = resolve; });
-    const markAmbiguous = vi.spyOn(deviceExecutionArbiter, "markAmbiguous").mockImplementation(async () => {
-      await writesReleased;
-      return { decision: "ambiguous", transitionApplied: true, root: null };
-    });
-    let batchARejected = false;
-    void pendingA.catch(() => { batchARejected = true; });
-    const draining = internals.blockPendingForDisconnectedDevice(expectedHandle.deviceId, 1006, "lost");
-    await Promise.resolve();
-    expect(batchARejected).toBe(false);
-    expect(internals.pendingBatches.has(batchA.operationId)).toBe(true);
-
-    releaseWrites();
-    await expect(draining).resolves.toEqual({ jobs: 0, batches: 1, workflows: 1 });
-    await expect(pendingA).rejects.toThrow("disconnected during batch batch-a");
-    expect(markAmbiguous).toHaveBeenCalledTimes(2);
-    expect(internals.pendingBatches.has(batchA.operationId)).toBe(false);
-    expect(internals.pendingWorkflows.has(workflowA.operationId)).toBe(false);
-    expect(internals.pendingBatches.has(batchB.operationId)).toBe(true);
-    expect(internals.pendingWorkflows.has(workflowB.operationId)).toBe(true);
-
-    server.rejectBatchWaiterWithHandle(batchB, "test cleanup");
-    await expect(pendingB).rejects.toThrow("test cleanup");
-    clearTimeout(workflowTimerB);
-    internals.pendingWorkflows.delete(workflowB.operationId);
-  });
-
-  it("blocks batch and workflow roots before clearing their timeout state", async () => {
-    const server = new DirectWsServer();
-    const batch = batchHandle(expectedHandle.deviceId, "batch-timeout");
     const workflow = workflowHandle(expectedHandle.deviceId, "workflow-timeout");
-    const pendingBatch = server.registerBatchWaiterWithHandle(batch, 60_000);
     const workflowTimer = setTimeout(() => {}, 60_000);
     workflowTimer.unref();
     const internals = server as unknown as {
-      pendingBatches: Map<string, unknown>;
       pendingWorkflows: Map<string, { handle: DeviceExecutionHandle; timer: ReturnType<typeof setTimeout> }>;
-      expirePendingBatch: (handle: DeviceExecutionHandle, timeoutMs: number) => Promise<void>;
       expirePendingWorkflow: (handle: DeviceExecutionHandle) => Promise<void>;
     };
     internals.pendingWorkflows.set(workflow.operationId, { handle: workflow, timer: workflowTimer });
@@ -635,13 +453,9 @@ describe("DirectWS typed pending lifecycle", () => {
       root: null,
     });
 
-    await internals.expirePendingBatch(batch, 1234);
     await internals.expirePendingWorkflow(workflow);
 
-    await expect(pendingBatch).rejects.toThrow("timed out after 1234ms");
-    expect(markAmbiguous).toHaveBeenCalledWith(expect.objectContaining({ handle: batch, reason: "batch_result_timeout" }));
     expect(markAmbiguous).toHaveBeenCalledWith(expect.objectContaining({ handle: workflow, reason: "workflow_status_timeout" }));
-    expect(internals.pendingBatches.has(batch.operationId)).toBe(false);
     expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(false);
   });
 
@@ -670,22 +484,18 @@ describe("DirectWS typed pending lifecycle", () => {
     expect(internals.pendingJobs.has(permit.handle.operationId)).toBe(false);
   });
 
-  it("retains JOB, BATCH, and WORKFLOW pending state until a bounded ambiguity retry succeeds", async () => {
+  it("retains JOB and WORKFLOW pending state until a bounded ambiguity retry succeeds", async () => {
     vi.useFakeTimers();
     try {
       const server = new DirectWsServer();
       const permit = jobPermit("job-retry");
-      const batch = batchHandle(expectedHandle.deviceId, "batch-retry");
       const workflow = workflowHandle(expectedHandle.deviceId, "workflow-retry");
       const pendingJob = server.registerJobWaiterWithPermit(permit, 60_000);
-      const pendingBatch = server.registerBatchWaiterWithHandle(batch, 60_000);
       const workflowTimer = setTimeout(() => {}, 60_000);
       const internals = server as unknown as {
         pendingJobs: Map<string, unknown>;
-        pendingBatches: Map<string, unknown>;
         pendingWorkflows: Map<string, { handle: DeviceExecutionHandle; timer: ReturnType<typeof setTimeout> }>;
         expirePendingJob: (jobId: string, timeoutMs: number, jobDispatchPermit: ReturnType<typeof jobPermit>) => Promise<void>;
-        expirePendingBatch: (handle: DeviceExecutionHandle, timeoutMs: number) => Promise<void>;
         expirePendingWorkflow: (handle: DeviceExecutionHandle) => Promise<void>;
       };
       internals.pendingWorkflows.set(workflow.operationId, { handle: workflow, timer: workflowTimer });
@@ -707,18 +517,14 @@ describe("DirectWS typed pending lifecycle", () => {
 
       await Promise.all([
         internals.expirePendingJob(permit.handle.operationId, 1234, permit),
-        internals.expirePendingBatch(batch, 1234),
         internals.expirePendingWorkflow(workflow),
       ]);
       expect(internals.pendingJobs.has(permit.handle.operationId)).toBe(true);
-      expect(internals.pendingBatches.has(batch.operationId)).toBe(true);
       expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(true);
 
       await vi.advanceTimersByTimeAsync(250);
       await expect(pendingJob).rejects.toThrow("timed out after 1234ms");
-      await expect(pendingBatch).rejects.toThrow("timed out after 1234ms");
       expect(internals.pendingJobs.has(permit.handle.operationId)).toBe(false);
-      expect(internals.pendingBatches.has(batch.operationId)).toBe(false);
       expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(false);
     } finally {
       vi.useRealTimers();
@@ -730,14 +536,11 @@ describe("DirectWS typed pending lifecycle", () => {
     try {
       const server = new DirectWsServer();
       const permit = jobPermit("job-disconnect-retry");
-      const batch = batchHandle(expectedHandle.deviceId, "batch-disconnect-retry");
       const workflow = workflowHandle(expectedHandle.deviceId, "workflow-disconnect-retry");
       const pendingJob = server.registerJobWaiterWithPermit(permit, 60_000);
-      const pendingBatch = server.registerBatchWaiterWithHandle(batch, 60_000);
       const workflowTimer = setTimeout(() => {}, 60_000);
       const internals = server as unknown as {
         pendingJobs: Map<string, unknown>;
-        pendingBatches: Map<string, unknown>;
         pendingWorkflows: Map<string, { handle: DeviceExecutionHandle; timer: ReturnType<typeof setTimeout> }>;
         blockPendingForDisconnectedDevice: (deviceId: string, code: number, reason: string) => Promise<unknown>;
       };
@@ -753,14 +556,11 @@ describe("DirectWS typed pending lifecycle", () => {
 
       await internals.blockPendingForDisconnectedDevice(expectedHandle.deviceId, 1006, "lost");
       expect(internals.pendingJobs.has(permit.handle.operationId)).toBe(true);
-      expect(internals.pendingBatches.has(batch.operationId)).toBe(true);
       expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(true);
 
       await vi.advanceTimersByTimeAsync(250);
       await expect(pendingJob).rejects.toThrow("disconnected");
-      await expect(pendingBatch).rejects.toThrow("disconnected");
       expect(internals.pendingJobs.has(permit.handle.operationId)).toBe(false);
-      expect(internals.pendingBatches.has(batch.operationId)).toBe(false);
       expect(internals.pendingWorkflows.has(workflow.operationId)).toBe(false);
     } finally {
       vi.useRealTimers();

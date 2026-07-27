@@ -7,8 +7,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_states (
   app_id TEXT NOT NULL,
   state_key TEXT NOT NULL,
   name TEXT NOT NULL,
-  kind TEXT NOT NULL DEFAULT 'screen'
-    CHECK (kind IN ('screen', 'overlay', 'system', 'unknown')),
+  kind TEXT NOT NULL,
   safety_class TEXT NOT NULL,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -28,7 +27,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_state_variants (
   app_version_pattern TEXT NULL,
   locale_pattern TEXT NULL,
   device_class TEXT NULL,
-  confidence_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.72
+  confidence_threshold DOUBLE PRECISION NOT NULL
     CHECK (confidence_threshold >= 0 AND confidence_threshold <= 1),
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -41,12 +40,11 @@ CREATE TABLE IF NOT EXISTS ui_graph_selectors (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   state_id UUID NOT NULL REFERENCES ui_graph_states(id) ON DELETE CASCADE,
   element_key TEXT NOT NULL,
-  strategy TEXT NOT NULL
-    CHECK (strategy IN ('resource_id', 'content_description', 'semantic_id', 'text', 'text_contains', 'structural', 'normalized_coords')),
+  strategy TEXT NOT NULL,
   selector JSONB NOT NULL,
-  priority INT NOT NULL DEFAULT 100,
+  priority INT NOT NULL,
   dynamic BOOLEAN NOT NULL DEFAULT FALSE,
-  confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5
+  confidence DOUBLE PRECISION NOT NULL
     CHECK (confidence >= 0 AND confidence <= 1),
   status TEXT,
   app_version_pattern TEXT NULL,
@@ -70,9 +68,9 @@ CREATE TABLE IF NOT EXISTS ui_graph_transitions (
   action JSONB NOT NULL,
   preconditions JSONB NOT NULL DEFAULT '{}'::jsonb,
   postconditions JSONB NOT NULL DEFAULT '{}'::jsonb,
-  cost DOUBLE PRECISION NOT NULL DEFAULT 1 CHECK (cost > 0),
+  cost DOUBLE PRECISION NOT NULL CHECK (cost > 0),
   safety_class TEXT NOT NULL,
-  confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5
+  confidence DOUBLE PRECISION NOT NULL
     CHECK (confidence >= 0 AND confidence <= 1),
   status TEXT,
   success_count INT NOT NULL DEFAULT 0,
@@ -92,7 +90,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_observations (
   resolved_state_id UUID NULL REFERENCES ui_graph_states(id) ON DELETE SET NULL,
   resolved_variant_id UUID NULL REFERENCES ui_graph_state_variants(id) ON DELETE SET NULL,
   resolution_method TEXT NOT NULL,
-  confidence DOUBLE PRECISION NOT NULL DEFAULT 0,
+  confidence DOUBLE PRECISION NOT NULL,
   fingerprint TEXT NULL,
   ui_tree_hash TEXT NULL,
   screenshot_artifact_id TEXT NULL,
@@ -109,8 +107,8 @@ CREATE TABLE IF NOT EXISTS ui_graph_action_events (
   step_id TEXT NULL,
   source_state_id UUID NULL REFERENCES ui_graph_states(id) ON DELETE SET NULL,
   target_state_id UUID NULL REFERENCES ui_graph_states(id) ON DELETE SET NULL,
-  state_resolution_method TEXT NOT NULL DEFAULT 'unknown',
-  target_resolution_method TEXT NOT NULL DEFAULT 'unknown',
+  state_resolution_method TEXT NOT NULL,
+  target_resolution_method TEXT NOT NULL,
   outcome TEXT NOT NULL,
   latency_ms INT NOT NULL DEFAULT 0,
   llm_calls INT NOT NULL DEFAULT 0,
@@ -133,7 +131,7 @@ CREATE TABLE IF NOT EXISTS ui_graph_learning_candidates (
   evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
   contexts JSONB NOT NULL DEFAULT '[]'::jsonb,
   discovery_method TEXT NOT NULL,
-  confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5
+  confidence DOUBLE PRECISION NOT NULL
     CHECK (confidence >= 0 AND confidence <= 1),
   success_count INT NOT NULL DEFAULT 0,
   failure_count INT NOT NULL DEFAULT 0,
@@ -179,11 +177,11 @@ CREATE TABLE IF NOT EXISTS ui_graph_runtime_flags (
   scope_type TEXT NOT NULL,
   scope_value TEXT NOT NULL DEFAULT '*',
   mode TEXT NOT NULL,
-  selector_first BOOLEAN NOT NULL DEFAULT TRUE,
-  graph_runtime BOOLEAN NOT NULL DEFAULT TRUE,
-  ai_recovery BOOLEAN NOT NULL DEFAULT TRUE,
-  candidate_learning BOOLEAN NOT NULL DEFAULT TRUE,
-  auto_promotion BOOLEAN NOT NULL DEFAULT FALSE,
+  selector_first BOOLEAN NOT NULL,
+  graph_runtime BOOLEAN NOT NULL,
+  ai_recovery BOOLEAN NOT NULL,
+  candidate_learning BOOLEAN NOT NULL,
+  auto_promotion BOOLEAN NOT NULL,
   config JSONB NOT NULL DEFAULT '{}'::jsonb,
   updated_by TEXT NOT NULL DEFAULT 'system',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

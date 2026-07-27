@@ -12,6 +12,21 @@ import {
   updateIncidentStatus,
 } from "./incident.service";
 
+const INCIDENT_POLICY = {
+  maximumRetryCount: 3,
+  defaultTimezone: "fixture/timezone",
+  allowedTimezones: ["fixture/timezone"],
+  defaultActor: "fixture-actor",
+  incidentCommander: "fixture-commander",
+  recoveryExhausted: true,
+  eventTypes: {
+    created: "fixture-created",
+    reopened: "fixture-reopened",
+    superseded: "fixture-superseded",
+    ownershipChanged: "fixture-ownership-changed",
+  },
+};
+
 describe("incident service", () => {
   beforeEach(() => mocks.db.query.mockReset());
 
@@ -28,6 +43,7 @@ describe("incident service", () => {
           },
         }],
       })
+      .mockResolvedValueOnce({ rows: [{ policy: INCIDENT_POLICY }] })
       .mockResolvedValueOnce({ rows: [{ id: "incident-1", inserted: true }] })
       .mockResolvedValueOnce({ rows: [] });
 
@@ -50,7 +66,7 @@ describe("incident service", () => {
       generatedWorkflow: { selfHealing: { attempts: 0, status: "exhausted" } },
     }, { taskRetryAttempts: 0, recoveryBudget: 3 });
 
-    const params = mocks.db.query.mock.calls[1][1];
+    const params = mocks.db.query.mock.calls[2][1];
     expect(params[0]).toBe("task:11111111-1111-4111-8111-111111111111");
     expect(JSON.stringify(params)).not.toContain("must-not-persist");
     expect(params).toContain("integrity");
@@ -58,18 +74,25 @@ describe("incident service", () => {
     expect(params[9]).toBe(0);
     expect(params[10]).toBe(3);
     expect(params[11]).toBe(0);
-    expect(params[12]).toBe("nox");
-    expect(JSON.parse(params[13])).toMatchObject({
+    expect(params[12]).toBe("fixture-commander");
+    expect(params[13]).toBe("nox");
+    expect(params[14]).toBe(true);
+    expect(JSON.parse(params[15])).toMatchObject({
       cacheKey: "abc123",
       recoveryBudget: 3,
       recoveryAttemptsActual: 0,
       taskRetryAttempts: 0,
     });
-    expect(mocks.db.query.mock.calls[2][1].slice(0, 3)).toEqual(["incident-1", "created", "phone-network"]);
+    expect(mocks.db.query.mock.calls[3][1].slice(0, 3)).toEqual([
+      "incident-1",
+      "fixture-created",
+      "fixture-actor",
+    ]);
   });
 
   it("resolves only strictly matching older incidents after a verified successful task", async () => {
     mocks.db.query
+      .mockResolvedValueOnce({ rows: [{ policy: INCIDENT_POLICY }] })
       .mockResolvedValueOnce({ rows: [{ id: "incident-1" }, { id: "incident-2" }] })
       .mockResolvedValueOnce({ rows: [{ id: "event-1" }] })
       .mockResolvedValueOnce({ rows: [{ id: "event-2" }] });
@@ -89,9 +112,9 @@ describe("incident service", () => {
     });
 
     expect(count).toBe(2);
-    expect(String(mocks.db.query.mock.calls[0][0])).toContain("failed_task.params->>'clientId' = $6");
-    expect(String(mocks.db.query.mock.calls[0][0])).toContain("superseded_by_task_id");
-    expect(mocks.db.query.mock.calls[1][1][4]).toBe("superseded:11111111-1111-4111-8111-111111111111");
+    expect(String(mocks.db.query.mock.calls[1][0])).toContain("failed_task.params->>'clientId' = $6");
+    expect(String(mocks.db.query.mock.calls[1][0])).toContain("superseded_by_task_id");
+    expect(mocks.db.query.mock.calls[2][1][4]).toBe("superseded:11111111-1111-4111-8111-111111111111");
   });
 
   it("does not reconcile incidents when account/client identity is incomplete", async () => {
@@ -149,6 +172,7 @@ describe("incident service", () => {
         remediation_owner: "nox",
         ownership_changed: true,
       }] })
+      .mockResolvedValueOnce({ rows: [{ policy: INCIDENT_POLICY }] })
       .mockResolvedValueOnce({ rows: [{ id: "event-1" }] });
 
     const result = await updateIncidentOwnership({
@@ -160,11 +184,16 @@ describe("incident service", () => {
 
     expect(result?.changed).toBe(true);
     expect(String(mocks.db.query.mock.calls[0][0])).toContain("previous.remediation_owner IS DISTINCT FROM $3");
-    expect(mocks.db.query.mock.calls[1][1].slice(0, 3)).toEqual(["incident-1", "ownership_changed", "kraken"]);
+    expect(mocks.db.query.mock.calls[2][1].slice(0, 3)).toEqual([
+      "incident-1",
+      "fixture-ownership-changed",
+      "kraken",
+    ]);
   });
 
-  it("rejects unsupported audit timezones before querying", async () => {
+  it("rejects audit timezones not allowed by PostgreSQL policy", async () => {
+    mocks.db.query.mockResolvedValueOnce({ rows: [{ policy: INCIDENT_POLICY }] });
     await expect(getDailyAuditSnapshot("2026-07-22", "Etc/Unsafe")).rejects.toThrow("unsupported timezone");
-    expect(mocks.db.query).not.toHaveBeenCalled();
+    expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
 });

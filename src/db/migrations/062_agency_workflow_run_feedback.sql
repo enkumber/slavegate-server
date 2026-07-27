@@ -10,26 +10,6 @@ ALTER TABLE agency_workflow_runs
 DO $$
 BEGIN
   IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'chk_agency_workflow_runs_feedback_rating'
-  ) THEN
-    ALTER TABLE agency_workflow_runs
-      ADD CONSTRAINT chk_agency_workflow_runs_feedback_rating
-      CHECK (feedback_rating IS NULL OR feedback_rating IN ('ok', 'not_ok', 'partial'));
-  END IF;
-
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'chk_agency_workflow_runs_feedback_partial_boundary'
-  ) THEN
-    ALTER TABLE agency_workflow_runs
-      ADD CONSTRAINT chk_agency_workflow_runs_feedback_partial_boundary
-      CHECK (
-        feedback_rating IS NULL
-        OR feedback_rating <> 'partial'
-        OR feedback_last_good_step_index IS NOT NULL
-      );
-  END IF;
-
-  IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'chk_agency_workflow_runs_feedback_last_good_nonnegative'
   ) THEN
     ALTER TABLE agency_workflow_runs

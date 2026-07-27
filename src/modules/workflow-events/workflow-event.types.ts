@@ -1,41 +1,6 @@
-export type WorkflowEventSource =
-  | "task_runner"
-  | "workflow_compiler"
-  | "edge_device"
-  | "workflow_executor"
-  | "agency"
-  | "workflow_runs";
-
-export type WorkflowEventType =
-  | "queued"
-  | "started"
-  | "step_started"
-  | "step_completed"
-  | "step_failed"
-  | "batch_started"
-  | "batch_completed"
-  | "batch_failed"
-  | "recovery_started"
-  | "recovery_succeeded"
-  | "recovery_failed"
-  | "checkpoint_updated"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "dispatch_accepted"
-  | "dispatch_queued"
-  | "dispatch_running"
-  | "task_running"
-  | "task_completed"
-  | "task_failed"
-  | "workflow_started"
-  | "workflow_status"
-  | "workflow_completed"
-  | "workflow_failed"
-  | "recovery_attempt"
-  | "recovery_result";
-
-export type WorkflowExecutionMode = "edge" | "server";
+export type WorkflowEventSource = string;
+export type WorkflowEventType = string;
+export type WorkflowExecutionMode = string;
 
 export interface WorkflowEvent {
   type: "workflow_event";

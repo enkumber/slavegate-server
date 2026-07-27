@@ -524,55 +524,47 @@ function Badge({ label, value, color }: { label: string; value: number; color: s
 
 // ─── JobDispatchModal ────────────────────────────────────────────────────────
 
-const JOB_TYPES: { value: string; label: string; defaultParams: string; customEndpoint?: string }[] = [
-  // UI Automation
-  { value: "tap",           label: "tap",           defaultParams: '{"x":540,"y":960}' },
-  { value: "long_press",    label: "long_press",    defaultParams: '{"x":540,"y":960}' },
-  { value: "swipe",         label: "swipe",         defaultParams: '{"startX":540,"startY":1200,"endX":540,"endY":400,"durationMs":400}' },
-  { value: "scroll",        label: "scroll",        defaultParams: '{"direction":"down","distancePx":800,"durationMs":400}' },
-  { value: "type_text",     label: "type_text",     defaultParams: '{"text":"hello world"}' },
-  { value: "press_key",     label: "press_key",     defaultParams: '{"key":"back"}' },
-  // App Control
-  { value: "open_app",      label: "open_app",      defaultParams: '{"packageName":"com.instagram.android"}' },
-  { value: "close_app",     label: "close_app",     defaultParams: '{"packageName":"com.instagram.android"}' },
-  { value: "pm_uninstall",  label: "pm_uninstall ⚠️", defaultParams: '{"packageName":"com.example.app"}' },
-  // Screen
-  { value: "screenshot",    label: "screenshot",    defaultParams: '{"quality":80}' },
-  { value: "screen_record", label: "screen_record", defaultParams: '{"durationMs":5000}' },
-  { value: "ui_tree_dump",  label: "ui_tree_dump",  defaultParams: '{}' },
-  { value: "screen_wake",   label: "screen_wake",   defaultParams: '{}' },
-  { value: "screen_off",    label: "screen_off",    defaultParams: '{}' },
-  { value: "get_screen_state", label: "get_screen_state", defaultParams: '{}' },
-  { value: "unlock",        label: "unlock",        defaultParams: '{}' },
-  // Clipboard
-  { value: "get_clipboard", label: "get_clipboard", defaultParams: '{}' },
-  { value: "set_clipboard", label: "set_clipboard", defaultParams: '{"text":"clipboard content"}' },
-  // Files
-  { value: "file_push",     label: "file_push",     defaultParams: '{"path":"/sdcard/test.txt","content":"base64content"}' },
-  { value: "file_delete",   label: "file_delete",   defaultParams: '{"path":"/sdcard/test.txt"}' },
-  // System
-  { value: "wait_for_idle", label: "wait_for_idle", defaultParams: '{"timeoutMs":5000}' },
-  { value: "reboot",        label: "reboot ⚠️",     defaultParams: '{}' },
-  { value: "ota_update",    label: "ota_update ⚠️", defaultParams: '{"apkUrl":"","apkSha256":"","apkSignature":""}' },
-  // ─── Remote Access ────────────────────────────────────────────────────────
-  { value: "rustdesk_enable", label: "🖥️ RustDesk Enable (a11y)", defaultParams: '{}', customEndpoint: "/hydra/rustdesk/enable" },
-  { value: "rustdesk_enable_cascade", label: "🖥️ RustDesk Enable (cascade)", defaultParams: '{}', customEndpoint: "/hydra/rustdesk/enable-cascade" },
-  { value: "rustdesk_enable_cascade_fast", label: "⚡ RustDesk Enable (fast)", defaultParams: '{}', customEndpoint: "/hydra/rustdesk/enable-cascade-fast" },
-  { value: "rustdesk_workflow", label: "🔄 RustDesk (workflow)", defaultParams: '{}', customEndpoint: "/hydra/workflow/rustdesk-enable/dispatch" },
-];
+interface JobActionPolicyDefinition {
+  actionKey: string;
+  label: string;
+  allowed: boolean;
+  requiresRoot: boolean;
+  defaultParams: Record<string, unknown>;
+}
 
 function JobDispatchModal({ device, onClose, onDispatched }: {
   device: Device; onClose: () => void; onDispatched: () => void;
 }) {
-  const [jobType, setJobType] = useState("open_app");
-  const [params, setParams]   = useState('{"packageName":"com.instagram.android"}');
+  const [jobTypes, setJobTypes] = useState<JobActionPolicyDefinition[]>([]);
+  const [jobType, setJobType] = useState("");
+  const [params, setParams]   = useState("{}");
   const [busy, setBusy]       = useState(false);
   const [paramsError, setParamsError] = useState<string | null>(null);
 
+  useEffect(() => {
+    let cancelled = false;
+    api.get<JobActionPolicyDefinition[]>("/jobs/action-policies")
+      .then((definitions) => {
+        if (cancelled) return;
+        const allowed = definitions.filter((definition) => definition.allowed);
+        setJobTypes(allowed);
+        if (allowed[0]) {
+          setJobType(allowed[0].actionKey);
+          setParams(JSON.stringify(allowed[0].defaultParams ?? {}, null, 2));
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setParamsError((error as Error).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const handleTypeChange = (newType: string) => {
     setJobType(newType);
-    const preset = JOB_TYPES.find(j => j.value === newType);
-    if (preset) setParams(preset.defaultParams);
+    const preset = jobTypes.find((definition) => definition.actionKey === newType);
+    if (preset) setParams(JSON.stringify(preset.defaultParams ?? {}, null, 2));
     setParamsError(null);
   };
 
@@ -587,22 +579,11 @@ function JobDispatchModal({ device, onClose, onDispatched }: {
     setParamsError(null);
     setBusy(true);
     try {
-      const jobDef = JOB_TYPES.find(j => j.value === jobType);
-      
-      if (jobDef?.customEndpoint) {
-        // Custom endpoint: send deviceId in body (e.g., rustdesk_enable)
-        await api.post(jobDef.customEndpoint, {
-          deviceId: device.id,
-          ...parsed as object,
-        });
-      } else {
-        // Standard job dispatch
-        await api.post("/jobs", {
-          deviceId: device.id,
-          type: jobType,
-          params: parsed,
-        });
-      }
+      await api.post("/jobs", {
+        deviceId: device.id,
+        type: jobType,
+        params: parsed,
+      });
       onDispatched();
       onClose();
     } catch (e) {
@@ -611,7 +592,7 @@ function JobDispatchModal({ device, onClose, onDispatched }: {
     }
   };
 
-  const isDangerous = jobType === "pm_uninstall" || jobType === "reboot";
+  const requiresRoot = jobTypes.find((definition) => definition.actionKey === jobType)?.requiresRoot === true;
 
   return (
     <div style={{
@@ -634,25 +615,25 @@ function JobDispatchModal({ device, onClose, onDispatched }: {
           onChange={e => handleTypeChange(e.target.value)}
           style={{
             width: "100%", boxSizing: "border-box", background: "#1e293b",
-            border: `1px solid ${isDangerous ? "#ef4444" : "#334155"}`,
+            border: `1px solid ${requiresRoot ? "#ef4444" : "#334155"}`,
             borderRadius: "6px", padding: "7px 10px",
-            color: isDangerous ? "#fca5a5" : "#e2e8f0",
+            color: requiresRoot ? "#fca5a5" : "#e2e8f0",
             fontFamily: "monospace", fontSize: "12px",
             marginBottom: "12px", marginTop: "4px", cursor: "pointer",
           }}
         >
-          {JOB_TYPES.map(j => (
-            <option key={j.value} value={j.value}>{j.label}</option>
+          {jobTypes.map((definition) => (
+            <option key={definition.actionKey} value={definition.actionKey}>{definition.label}</option>
           ))}
         </select>
 
-        {isDangerous && (
+        {requiresRoot && (
           <div style={{
             background: "rgba(239,68,68,0.1)", border: "1px solid #ef4444",
             borderRadius: "6px", padding: "8px 12px", marginBottom: "12px",
             fontSize: "11px", color: "#fca5a5", fontFamily: "monospace",
           }}>
-            ⚠️ Destructive operation — requires root. Confirm params carefully.
+            ⚠️ Privileged operation — requires root. Confirm params carefully.
           </div>
         )}
 
@@ -681,13 +662,13 @@ function JobDispatchModal({ device, onClose, onDispatched }: {
           </button>
           <button onClick={dispatch} disabled={busy}
             style={{
-              background: isDangerous ? "#7f1d1d" : "#1d4ed8",
-              color: isDangerous ? "#fca5a5" : "#bfdbfe",
+              background: requiresRoot ? "#7f1d1d" : "#1d4ed8",
+              color: requiresRoot ? "#fca5a5" : "#bfdbfe",
               border: "none", borderRadius: "6px", padding: "7px 20px",
               cursor: "pointer", fontFamily: "monospace", fontSize: "12px", fontWeight: "bold",
               opacity: busy ? 0.6 : 1,
             }}>
-            {busy ? "Sending…" : isDangerous ? "⚠️ Dispatch" : "Dispatch"}
+            {busy ? "Sending…" : requiresRoot ? "⚠️ Dispatch" : "Dispatch"}
           </button>
         </div>
       </div>

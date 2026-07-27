@@ -101,11 +101,12 @@ describe("workflow capability catalog PostgreSQL migration", () => {
         'active', 0.62, 0.12
       );
       INSERT INTO workflow_capability_artifacts (
-        capability_key, cache_key, role, status
+        capability_key, cache_key, role, priority, status
       ) VALUES (
         'remote_support_enable_screen_share',
         'aaaaaaaaaaaaaaaaaaaaaaaa',
         'complete',
+        100,
         'active'
       );
     `);

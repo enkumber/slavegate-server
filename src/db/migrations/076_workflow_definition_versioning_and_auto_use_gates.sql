@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS agency_workflow_definition_version_events (
   next_status TEXT NULL,
   target_definition_id UUID REFERENCES agency_workflow_definitions(id) ON DELETE SET NULL,
   note TEXT NULL,
-  actor TEXT NOT NULL DEFAULT 'dashboard',
+  actor TEXT NOT NULL,
   diff JSONB NOT NULL DEFAULT '{}'::jsonb,
   impact_preview JSONB NOT NULL DEFAULT '{}'::jsonb,
   policy JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -42,11 +42,17 @@ CREATE TABLE IF NOT EXISTS agency_compiler_policy_gate_events (
   next_state TEXT NOT NULL,
   version INTEGER NOT NULL,
   note TEXT NULL,
-  actor TEXT NOT NULL DEFAULT 'dashboard',
+  actor TEXT NOT NULL,
   config JSONB NOT NULL DEFAULT '{}'::jsonb,
   policy JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE agency_workflow_definition_version_events
+  ALTER COLUMN actor DROP DEFAULT;
+
+ALTER TABLE agency_compiler_policy_gate_events
+  ALTER COLUMN actor DROP DEFAULT;
 
 CREATE INDEX IF NOT EXISTS idx_compiler_policy_gate_events_gate
   ON agency_compiler_policy_gate_events(gate_id, created_at DESC);

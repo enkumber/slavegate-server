@@ -4,12 +4,12 @@ import type {
   CatalogSafetyClass,
 } from "./capability-catalog.service";
 
-export type CompilerWorkflowSafetyClass = "read_only" | "standard" | "destructive";
+export type CompilerWorkflowSafetyClass = string;
 
 export interface HumanWorkflowCompilerControlPlane {
   version: string;
-  missingCapabilityPolicy: "fail_closed";
-  normalizationPolicy: "strict_reject";
+  missingCapabilityPolicy: string;
+  normalizationPolicy: string;
   promptKeys: {
     compile: string;
     repair: string;
@@ -95,8 +95,10 @@ export async function loadHumanWorkflowCompilerControlPlane(): Promise<HumanWork
   const safetyClassMap = payload.safetyClassMap as HumanWorkflowCompilerControlPlane["safetyClassMap"] | undefined;
   if (
     typeof payload.version !== "string"
-    || payload.missingCapabilityPolicy !== "fail_closed"
-    || payload.normalizationPolicy !== "strict_reject"
+    || typeof payload.missingCapabilityPolicy !== "string"
+    || !payload.missingCapabilityPolicy.trim()
+    || typeof payload.normalizationPolicy !== "string"
+    || !payload.normalizationPolicy.trim()
     || !promptKeys
     || !llm
     || !validRetrievalPolicy(retrievalPolicy)

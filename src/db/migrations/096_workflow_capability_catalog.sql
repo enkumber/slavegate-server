@@ -14,9 +14,9 @@ CREATE TABLE IF NOT EXISTS workflow_capabilities (
   portability_scope TEXT NOT NULL,
   compiler_retrievable BOOLEAN NOT NULL,
   status TEXT,
-  min_match_score DOUBLE PRECISION NOT NULL DEFAULT 0.62
+  min_match_score DOUBLE PRECISION NOT NULL
     CHECK (min_match_score >= 0 AND min_match_score <= 1),
-  ambiguity_margin DOUBLE PRECISION NOT NULL DEFAULT 0.12
+  ambiguity_margin DOUBLE PRECISION NOT NULL
     CHECK (ambiguity_margin >= 0 AND ambiguity_margin <= 1),
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -26,10 +26,9 @@ CREATE TABLE IF NOT EXISTS workflow_capabilities (
 CREATE TABLE IF NOT EXISTS workflow_capability_artifacts (
   capability_key TEXT NOT NULL REFERENCES workflow_capabilities(capability_key) ON DELETE CASCADE,
   cache_key TEXT NOT NULL REFERENCES generated_workflow_plan_cache(cache_key) ON DELETE CASCADE,
-  role TEXT NOT NULL DEFAULT 'complete'
-    CHECK (role IN ('complete', 'fragment')),
+  role TEXT NOT NULL,
   coverage JSONB NOT NULL DEFAULT '{}'::jsonb,
-  priority INT NOT NULL DEFAULT 100,
+  priority INT NOT NULL,
   status TEXT,
   evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

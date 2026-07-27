@@ -19,7 +19,7 @@ import { transitionResearchJob } from "./research-lifecycle.service";
 // TYPES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export type ResearchJobType = 'research_profile' | 'research_hashtag' | 'research_followers';
+export type ResearchJobType = string;
 export type ResearchJobStatus = string;
 
 export interface ResearchJob {

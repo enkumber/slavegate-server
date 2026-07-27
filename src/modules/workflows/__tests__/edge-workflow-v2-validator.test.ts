@@ -20,7 +20,7 @@ function workflow() {
         retries: 2,
         retryDelayMs: 250,
         delayAfterMs: 300,
-        failureMode: "run_branch_then_retry",
+        failureOpcode: 2,
         onFailureSteps: [
           { id: "back", type: "action", action: "press_key", params: { key: "back" } },
         ],
@@ -73,18 +73,18 @@ describe("edge-workflow/v2 validation", () => {
         targetVariable: "decision",
       },
       timeoutMs: 30_000,
-      failureMode: "abort",
+      failureOpcode: 0,
     } as never);
     const result = validateGeneratedWorkflowTemplate(candidate);
     expect(result.ok).toBe(true);
     expect(compileGeneratedWorkflowTemplate(result.template!).llmBudget.happyPathRequests).toBe(1);
   });
 
-  it("rejects request_llm without an explicit prompt", () => {
+  it("does not infer an LLM request from a product action name", () => {
     const candidate = workflow();
     candidate.steps.push({ id: "decide", type: "action", action: "request_llm", params: {} } as never);
     const result = validateGeneratedWorkflowTemplate(candidate);
-    expect(result.ok).toBe(false);
-    expect(result.errors.join(" ")).toContain("params.prompt");
+    expect(result.ok).toBe(true);
+    expect(compileGeneratedWorkflowTemplate(result.template!).llmBudget.happyPathRequests).toBe(0);
   });
 });

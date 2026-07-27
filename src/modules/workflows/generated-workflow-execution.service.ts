@@ -1,7 +1,6 @@
 import { scalabilityConfig } from "../../config/scalability.config";
 import { directWsServer } from "../../ws/direct-ws.server";
 import { sendEdgeWorkflowToDeviceEnforced } from "../../transport/transport";
-import { hbeService } from "../hbe/hbe.service";
 import { workflowService } from "./workflow.service";
 import type { WorkflowCheckpoint, WorkflowTemplate } from "./types";
 import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
@@ -36,13 +35,12 @@ export function resolveGeneratedWorkflowDeviceId(deviceId: string): string {
 
 function createGeneratedWorkflowCheckpoint(
   variables: Record<string, unknown> | undefined,
-  hbeSession: Record<string, unknown>,
 ): WorkflowCheckpoint {
   return {
     stepIndex: 0,
     loopStack: [],
     variables: variables ?? {},
-    hbeParams: hbeSession,
+    hbeParams: {},
     executionStats: {
       compileLlmCalls: 0,
       recoveryLlmCalls: 0,
@@ -59,17 +57,6 @@ function createGeneratedWorkflowCheckpoint(
     },
     checkpointAt: new Date().toISOString(),
   };
-}
-
-function containsLegacySemanticOpcode(template: WorkflowTemplate): boolean {
-  const visit = (steps: WorkflowTemplate["steps"]): boolean => steps.some((step) => {
-    if (step.type === "action" && step.action === "semantic_tap") return true;
-    if (step.type === "action" && step.onFailureSteps && visit(step.onFailureSteps)) return true;
-    if (step.type === "condition") return visit(step.if_true) || visit(step.if_false ?? []);
-    if (step.type === "loop") return visit(step.steps);
-    return false;
-  });
-  return visit(template.steps);
 }
 
 export interface GeneratedWorkflowControlPlaneContext {
@@ -103,12 +90,6 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     throw err;
   }
   await assertOperationalRuntimeContract(validation.template);
-  if (containsLegacySemanticOpcode(validation.template)) {
-    const err = new Error("semantic_tap is a legacy server-resolved opcode; recompile the workflow with explicit selectors or normalized coordinates");
-    (err as Error & { status?: number; code?: string }).status = 409;
-    (err as Error & { status?: number; code?: string }).code = "WORKFLOW_RECOMPILE_REQUIRED";
-    throw err;
-  }
   if (!directWsServer.supportsEdgeExecution(deviceId)) {
     const err = new Error("Full workflow execution requires an edge-capable Android agent");
     (err as Error & { status?: number; code?: string }).status = 409;
@@ -150,9 +131,6 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     },
   });
 
-  const accountAgeDays = (variables?.["accountAgeDays"] as number) ?? 30;
-  const simulatedTimezone = (variables?.["timezone"] as string) ?? "Europe/Bucharest";
-  const hbeSession = hbeService.initSession(accountAgeDays, simulatedTimezone) as unknown as Record<string, unknown>;
   const edgeLearningBindings = await prepareEdgeLearningBindings(validation.template);
   const edgeTemplate = {
     ...attachEdgeLearningBindings(validation.template, edgeLearningBindings),
@@ -172,8 +150,8 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
       deviceId,
       accountId,
       totalSteps: template.steps.length,
-      hbeParams: hbeSession,
-      checkpoint: createGeneratedWorkflowCheckpoint(edgeVariables, hbeSession),
+      hbeParams: {},
+      checkpoint: createGeneratedWorkflowCheckpoint(edgeVariables),
     });
     const dispatch = await sendEdgeWorkflowToDeviceEnforced(
       deviceId,
@@ -185,7 +163,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     if (dispatch.sent) {
       const started = await workflowService.markRunning(wf.id);
       if (!started) throw new Error(`Workflow ${wf.id} was cancelled before edge dispatch`);
-      scheduleEdgeWorkflowAckWatchdog(wf.id, deviceId, logPrefix);
+      await scheduleEdgeWorkflowAckWatchdog(wf.id, deviceId, logPrefix);
       workflowEvents.publish({
         source: "workflow_executor",
         event: "dispatch_running",

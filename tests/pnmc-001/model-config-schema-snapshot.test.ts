@@ -22,7 +22,7 @@ function extractBetween(sql: string, start: string, end: string): string {
 }
 
 describe("PNMC-001 model_configs schema snapshot", () => {
-  it("keeps schema.sql consistent with migration 031 model_configs DDL and seed rows", () => {
+  it("keeps schema.sql consistent with migration 031 model_configs DDL without product seed rows", () => {
     const migration = readRepoFile("src/db/migrations/031_model_configs.sql");
     const schema = readRepoFile("src/db/schema.sql");
 
@@ -34,13 +34,11 @@ describe("PNMC-001 model_configs schema snapshot", () => {
       "CREATE OR REPLACE FUNCTION set_model_configs_updated_at()",
       "DROP TRIGGER IF EXISTS trg_model_configs_updated_at ON model_configs;",
       "CREATE TRIGGER trg_model_configs_updated_at",
-      "INSERT INTO model_configs (role, provider, endpoint, model, enabled)",
-      "('decision_llm', 'openai_compatible', NULL, 'configure-me', FALSE)",
-      "('vision_vlm', 'openai_compatible', NULL, 'configure-me', FALSE)",
-      "ON CONFLICT (role) DO NOTHING;",
     ]) {
       expect(schema).toContain(requiredSql);
       expect(migration).toContain(requiredSql);
     }
+    expect(schema).not.toContain("INSERT INTO model_configs");
+    expect(migration).not.toContain("INSERT INTO model_configs");
   });
 });

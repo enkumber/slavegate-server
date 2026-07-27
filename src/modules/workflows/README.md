@@ -5,8 +5,11 @@ DAG-based workflow engine: template registry, execution tracking, checkpointing.
 ## What goes here
 
 - `workflow-engine.ts` — DAG execution, step dispatch, checkpoint persistence
-- `templates/` — YAML/JSON workflow templates (instagram_browse_and_like, tiktok_watch_videos, etc.)
 - `workflow.service.ts` — CRUD for workflow instances, status tracking
+
+Workflow definitions, application selectors, transitions, postconditions, and
+operational policy are PostgreSQL data. This directory must never contain
+release-packaged YAML/JSON workflow catalogs.
 
 ## Key design decisions
 

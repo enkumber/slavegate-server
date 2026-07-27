@@ -39,9 +39,6 @@ const mocks = vi.hoisted(() => {
       getConnectedDeviceIds: vi.fn(),
       broadcastTemplate: vi.fn(),
     },
-    hbeService: {
-      initSession: vi.fn(),
-    },
     appMapping: {
       loadMap: vi.fn(),
     },
@@ -60,7 +57,30 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock("../../../modules/devices/devices.service", () => ({ devicesService: {} }));
-vi.mock("../../../modules/dispatcher/dispatcher.service", () => ({ dispatcherService: {} }));
+vi.mock("../../../modules/dispatcher/dispatcher.service", () => ({
+  getWorkflowInterpreterPolicy: vi.fn().mockResolvedValue({
+    enginePolicy: {
+      ackTimeoutMs: 5,
+      progressSweepMs: 5,
+      progressGraceMs: 5,
+      minStaleMs: 5,
+      maxStaleMs: 100,
+      localStepBudgetMs: 100,
+    },
+  }),
+  dispatcherService: {
+    getWorkflowInterpreterPolicy: vi.fn().mockResolvedValue({
+      enginePolicy: {
+        ackTimeoutMs: 5,
+        progressSweepMs: 5,
+        progressGraceMs: 5,
+        minStaleMs: 5,
+        maxStaleMs: 100,
+        localStepBudgetMs: 100,
+      },
+    }),
+  },
+}));
 vi.mock("../../../modules/auth/auth.service", () => ({ authService: {} }));
 vi.mock("../../../ws/direct-ws.server", () => ({ directWsServer: mocks.directWsServer }));
 vi.mock("../../../transport/transport", () => ({
@@ -84,7 +104,6 @@ vi.mock("../../../modules/workflows/workflow.service", () => ({
   workflowService: mocks.workflowService,
 }));
 vi.mock("../../../modules/workflows/workflow.executor", () => ({ startWorkflow: vi.fn(() => Promise.resolve()) }));
-vi.mock("../../../modules/hbe/hbe.service", () => ({ hbeService: mocks.hbeService }));
 vi.mock("../../../modules/accounts/accounts.service", () => ({ accountsService: {} }));
 vi.mock("../../../modules/data-pipeline/data-pipeline.service", () => ({ dataPipelineService: {} }));
 vi.mock("../../../modules/vision/vision.service", () => ({ visionService: {} }));
@@ -305,7 +324,6 @@ describe("generated workflow cache-only execution route", () => {
       "22222222-3333-4333-8333-333333333333",
     ]);
     mocks.directWsServer.getAgentVersion.mockReturnValue("4.0.0");
-    mocks.hbeService.initSession.mockReturnValue({});
     mocks.appMapping.loadMap.mockResolvedValue(null);
     mocks.db.query.mockImplementation((sql: string) => Promise.resolve({
       rows: sql.includes("transition.mark_started")

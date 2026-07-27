@@ -52,14 +52,39 @@ vi.mock("../../redis/client", () => ({
   getRedisConnectionOptions: vi.fn(() => ({})),
 }));
 
-import { dispatcherService, shouldBlockRootForTimedOutJob, workflowChildTimeoutDisposition } from "./dispatcher.service";
+vi.mock("../lifecycle/lifecycle.service", () => ({
+  getResourceLifecycleExecutionStatusContract: vi.fn().mockResolvedValue({
+    initial: "db_initial",
+    active: "db_active",
+    succeeded: "db_succeeded",
+    failed: "db_failed",
+    cancelled: "db_cancelled",
+  }),
+}));
+
+import {
+  applyParameterTransforms,
+  dispatcherService,
+  hydrateWorkflowNativePolicies,
+  listJobActionPolicyDefinitions,
+  shouldBlockRootForTimedOutJob,
+  workflowChildTimeoutDisposition,
+} from "./dispatcher.service";
 
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.dbQuery.mockImplementation(async (sql: string) => {
     if (String(sql).includes("jobActionPolicy")) {
       return {
-        rows: [{ policy: { actionKey: "fixture", allowed: true, requiresRoot: false } }],
+        rows: [{
+          policy: {
+            actionKey: "fixture",
+            allowed: true,
+            requiresRoot: false,
+            nativeOpcode: 0,
+            verificationOpcode: 0,
+          },
+        }],
         rowCount: 1,
       };
     }
@@ -103,6 +128,201 @@ describe("server-workflow child timeout clock", () => {
   it("leaves a timed-out child under workflow ownership instead of blocking the canonical root", () => {
     expect(shouldBlockRootForTimedOutJob("workflow-1")).toBe(false);
     expect(shouldBlockRootForTimedOutJob()).toBe(true);
+  });
+});
+
+describe("PostgreSQL job action catalog", () => {
+  it("returns dashboard definitions exclusively from active database policies", async () => {
+    mocks.dbQuery.mockResolvedValueOnce({
+      rows: [{
+        policy: {
+          actionKey: "database_action",
+          allowed: true,
+          requiresRoot: false,
+          nativeOpcode: 7,
+          verificationOpcode: 2,
+          observationOnly: true,
+          label: "Database action",
+          defaultParams: { sample: true },
+        },
+      }],
+    });
+
+    await expect(listJobActionPolicyDefinitions()).resolves.toEqual([{
+      actionKey: "database_action",
+      allowed: true,
+      requiresRoot: false,
+      nativeOpcode: 7,
+      verificationOpcode: 2,
+      observationOnly: true,
+      timeoutPerUnitMs: null,
+      timeoutBaseMs: 0,
+      timeoutInputPath: null,
+      executionPolicy: {},
+      parameterTransforms: [],
+      label: "Database action",
+      defaultParams: { sample: true },
+    }]);
+  });
+
+  it("drops malformed policies instead of inventing release defaults", async () => {
+    mocks.dbQuery.mockResolvedValueOnce({
+      rows: [{ policy: { actionKey: "incomplete" } }],
+    });
+
+    await expect(listJobActionPolicyDefinitions()).resolves.toEqual([]);
+  });
+
+  it("translates symbolic parameters exclusively through PostgreSQL mappings", () => {
+    expect(applyParameterTransforms(
+      { key: "database_key", flags: ["database_flag_a", "database_flag_b"] },
+      [
+        {
+          transformOpcode: 0,
+          sourcePath: "key",
+          values: {
+            database_key: { targetPath: "keyCode", value: 42 },
+          },
+        },
+        {
+          transformOpcode: 1,
+          sourcePath: "flags",
+          targetPath: "flags",
+          values: {
+            database_flag_a: 8,
+            database_flag_b: 16,
+          },
+        },
+      ],
+    )).toEqual({
+      key: "database_key",
+      keyCode: 42,
+      flags: [8, 16],
+    });
+  });
+
+  it("hydrates the complete edge interpreter ABI only from PostgreSQL policies", async () => {
+    mocks.dbQuery
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            policy: {
+              actionKey: "database_action",
+              allowed: true,
+              requiresRoot: false,
+              nativeOpcode: 100,
+              verificationOpcode: 0,
+            },
+          },
+          {
+            policy: {
+              actionKey: "database_observer",
+              allowed: true,
+              requiresRoot: false,
+              nativeOpcode: 12,
+              verificationOpcode: 0,
+              observationOnly: true,
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          policy: {
+            distributionOpcodes: { database_distribution: 2 },
+            conditionOpcodes: { database_condition: 4 },
+            predicateOpcodes: { database_predicate: 6 },
+            failureOpcodes: { database_failure: 3, database_default: 0 },
+            defaultFailureMode: "database_default",
+            verificationOpcodes: { database_verification: 2 },
+            defaultVerificationMode: "database_verification",
+            runtimeDefaults: {
+              actionRetries: 0,
+              actionRetryDelayMs: 0,
+              actionDelayAfterMs: 0,
+              actionTimeoutMs: 1000,
+              pollIntervalMs: 100,
+              pollTimeoutMs: 1000,
+              conditionProbability: 0.5,
+              regexGroup: 0,
+              recoveryAutonomy: "disabled",
+              recoveryAiEnabled: false,
+              recoveryMaxAttemptsPerStep: 0,
+              recoveryMaxAttemptsPerWorkflow: 0,
+              recoveryMaxActionsPerAttempt: 0,
+              recoveryAllowedRequests: [],
+              recoveryRequireStateVerification: false,
+              recoveryLearnFromFailure: false,
+              recoveryPlannerInstruction: "",
+              recoveryExecuteDecisionKey: "",
+              recoveryRetryDecisionKey: "",
+              recoveryAbortDecisionKey: "",
+              recoveryProbeActionKey: "",
+              recoveryProbeTimeoutMs: 0,
+              recoveryPlannerSystem: "",
+              recoveryPlannerMaxTokens: 0,
+              recoveryPlannerTimeoutMs: 0,
+            },
+            enginePolicy: {
+              maxNestedDepth: 8,
+              minActionTimeoutMs: 100,
+              captureTimeoutMs: 1000,
+              defaultSubstepTimeoutMs: 1000,
+              substepTimeoutPaddingMs: 100,
+            },
+          },
+        }],
+      });
+
+    await expect(hydrateWorkflowNativePolicies({
+      steps: [{
+        type: "action",
+        action: "database_action",
+        failureMode: "database_failure",
+        duration: { distribution: "database_distribution" },
+        branch: { check: "database_condition" },
+        selectorPrimitive: {
+          primitive: true,
+          action: "database_observer",
+          operator: "database_predicate",
+          regex: "database-(.+)",
+        },
+      }],
+    })).resolves.toEqual(expect.objectContaining({
+      executionStates: {
+        initial: "db_initial",
+        active: "db_active",
+        succeeded: "db_succeeded",
+        failed: "db_failed",
+        cancelled: "db_cancelled",
+      },
+      enginePolicy: {
+        maxNestedDepth: 8,
+        minActionTimeoutMs: 100,
+        captureTimeoutMs: 1000,
+        defaultSubstepTimeoutMs: 1000,
+        substepTimeoutPaddingMs: 100,
+      },
+      steps: [expect.objectContaining({
+        nativeOpcode: 100,
+        verificationOpcode: 2,
+        observationOnly: false,
+        failureOpcode: 3,
+        retries: 0,
+        retryDelayMs: 0,
+        delayAfterMs: 0,
+        timeoutMs: 1000,
+        duration: expect.objectContaining({ distributionOpcode: 2 }),
+        branch: expect.objectContaining({ checkOpcode: 4 }),
+        selectorPrimitive: expect.objectContaining({
+          nativeOpcode: 12,
+          verificationOpcode: 2,
+          observationOnly: true,
+          operatorOpcode: 6,
+          group: 0,
+        }),
+      })],
+    }));
   });
 });
 

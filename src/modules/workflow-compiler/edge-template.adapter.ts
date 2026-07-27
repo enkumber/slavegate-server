@@ -1,13 +1,88 @@
 import { loadMap } from "../app-mapping/recorder.service";
+import { getDb } from "../../db/client";
 import type { AppMap, ElementDef, PageDef } from "../app-mapping/schema";
 import type { ActionStep, WaitStep, WorkflowStep, WorkflowTemplate } from "../workflows/types";
 import type { CompiledStep, CompiledWorkflow } from "./types";
 
-const DEFAULT_STEP_TIMEOUT_MS = 30_000;
-const DEFAULT_STATE_TIMEOUT_MS = 15_000;
+interface CompiledWorkflowEdgePolicy {
+  runtimeContract: string;
+  verificationStrategy: string;
+  dataRetentionDays: number;
+  stepTimeoutMs: number;
+  actionRetries: number;
+  actionRetryDelayMs: number;
+  stateObservation: {
+    actionKey: string;
+    outputPath: string;
+    containsOperator: string;
+    excludesOperator: string;
+    pollIntervalMs: number;
+    timeoutMs: number;
+  };
+}
+
+async function loadCompiledWorkflowEdgePolicy(): Promise<CompiledWorkflowEdgePolicy> {
+  const result = await getDb().query<{ policy: unknown }>(
+    `SELECT entry.payload->'compiledWorkflowEdgePolicy' AS policy
+       FROM runtime_semantic_entries entry
+       JOIN lifecycle_state_definitions definition
+         ON definition.lifecycle_key = entry.lifecycle_key
+        AND definition.status = entry.status
+      WHERE definition.dispatchable
+        AND entry.payload ? 'compiledWorkflowEdgePolicy'
+      ORDER BY entry.priority DESC, entry.id`,
+  );
+  if (result.rows.length !== 1) {
+    throw new Error("PostgreSQL compiled workflow edge policy is missing or ambiguous");
+  }
+  const value = result.rows[0].policy;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("PostgreSQL compiled workflow edge policy is invalid");
+  }
+  const policy = value as Record<string, unknown>;
+  const observation = policy.stateObservation;
+  if (!observation || typeof observation !== "object" || Array.isArray(observation)) {
+    throw new Error("PostgreSQL compiled workflow state observation policy is invalid");
+  }
+  const stateObservation = observation as Record<string, unknown>;
+  const requiredString = (source: Record<string, unknown>, key: string): string => {
+    const candidate = source[key];
+    if (typeof candidate !== "string" || !candidate.trim()) {
+      throw new Error(`PostgreSQL compiled workflow edge policy requires ${key}`);
+    }
+    return candidate.trim();
+  };
+  const requiredNumber = (source: Record<string, unknown>, key: string): number => {
+    const candidate = source[key];
+    if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate < 0) {
+      throw new Error(`PostgreSQL compiled workflow edge policy requires numeric ${key}`);
+    }
+    return candidate;
+  };
+  return {
+    runtimeContract: requiredString(policy, "runtimeContract"),
+    verificationStrategy: requiredString(policy, "verificationStrategy"),
+    dataRetentionDays: requiredNumber(policy, "dataRetentionDays"),
+    stepTimeoutMs: requiredNumber(policy, "stepTimeoutMs"),
+    actionRetries: requiredNumber(policy, "actionRetries"),
+    actionRetryDelayMs: requiredNumber(policy, "actionRetryDelayMs"),
+    stateObservation: {
+      actionKey: requiredString(stateObservation, "actionKey"),
+      outputPath: requiredString(stateObservation, "outputPath"),
+      containsOperator: requiredString(stateObservation, "containsOperator"),
+      excludesOperator: requiredString(stateObservation, "excludesOperator"),
+      pollIntervalMs: requiredNumber(stateObservation, "pollIntervalMs"),
+      timeoutMs: requiredNumber(stateObservation, "timeoutMs"),
+    },
+  };
+}
 
 function finite(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function configuredNumber(value: unknown, configured: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : configured;
 }
 
 function selectorParams(step: CompiledStep, appMap: AppMap): Record<string, unknown> | null {
@@ -36,41 +111,28 @@ function selectorParams(step: CompiledStep, appMap: AppMap): Record<string, unkn
   return null;
 }
 
-function actionStep(step: CompiledStep, appMap: AppMap): ActionStep {
+function actionStep(
+  step: CompiledStep,
+  appMap: AppMap,
+  policy: CompiledWorkflowEdgePolicy,
+): ActionStep {
   const common = {
     type: "action" as const,
     id: step.id,
-    retries: Math.max(0, step.retries ?? 0),
-    retryDelayMs: Math.max(0, step.retryDelay ?? 0),
-    verification: "local_only" as const,
-    timeoutMs: DEFAULT_STEP_TIMEOUT_MS,
-    failureMode: "abort" as const,
+    retries: Math.max(0, configuredNumber(step.retries, policy.actionRetries)),
+    retryDelayMs: Math.max(0, configuredNumber(step.retryDelay, policy.actionRetryDelayMs)),
+    verification: policy.verificationStrategy,
+    timeoutMs: policy.stepTimeoutMs,
   };
-
-  switch (step.action) {
-    case "screen_wake":
-    case "unlock":
-    case "open_app":
-    case "intent_send":
-    case "press_key":
-    case "swipe":
-    case "screenshot":
-      return { ...common, action: step.action, params: { ...(step.params ?? {}) } };
-    case "type":
-      return { ...common, action: "set_focused_text", params: { ...(step.params ?? {}) } };
-    case "tap": {
-      const target = selectorParams(step, appMap);
-      if (!target) throw new Error(`Compiled step ${step.id} has no portable selector or normalized coordinates`);
-      if (finite(target.x) && finite(target.y)) {
-        return { ...common, action: "tap", params: { x: target.x, y: target.y } };
-      }
-      return { ...common, action: "a11y_find_tap", params: target };
-    }
-    case "wait":
-      throw new Error("wait is converted as a workflow wait step");
-    default:
-      throw new Error(`Compiled action is not an edge-workflow/v2 primitive: ${String(step.action)}`);
+  const target = selectorParams(step, appMap);
+  if (step.target && !target) {
+    throw new Error(`Compiled step ${step.id} has no portable selector`);
   }
+  return {
+    ...common,
+    action: step.action,
+    params: { ...(step.params ?? {}), ...(target ?? {}) },
+  };
 }
 
 function anchorValue(anchor: string): string {
@@ -78,21 +140,25 @@ function anchorValue(anchor: string): string {
   return (separator >= 0 ? anchor.slice(separator + 1) : anchor).trim();
 }
 
-function stateWaits(step: CompiledStep, page: PageDef | undefined): WaitStep[] {
-  if (!page || step.action === "screen_wake" || step.action === "unlock" || step.action === "wait") return [];
+function stateWaits(
+  step: CompiledStep,
+  page: PageDef | undefined,
+  policy: CompiledWorkflowEdgePolicy,
+): WaitStep[] {
+  if (!page) return [];
   const waits: WaitStep[] = [];
   page.detection.anchors.filter(Boolean).forEach((anchor, index) => {
     waits.push({
       type: "wait",
       id: `${step.id}__state_required_${index}`,
       until: {
-        action: "ui_tree_dump",
+        action: policy.stateObservation.actionKey,
         params: {},
-        outputPath: "uiTree",
-        operator: "contains_ci",
+        outputPath: policy.stateObservation.outputPath,
+        operator: policy.stateObservation.containsOperator,
         expected: anchorValue(anchor),
-        pollIntervalMs: 250,
-        timeoutMs: DEFAULT_STATE_TIMEOUT_MS,
+        pollIntervalMs: policy.stateObservation.pollIntervalMs,
+        timeoutMs: policy.stateObservation.timeoutMs,
       },
     });
   });
@@ -101,33 +167,25 @@ function stateWaits(step: CompiledStep, page: PageDef | undefined): WaitStep[] {
       type: "wait",
       id: `${step.id}__state_forbidden_${index}`,
       until: {
-        action: "ui_tree_dump",
+        action: policy.stateObservation.actionKey,
         params: {},
-        outputPath: "uiTree",
-        operator: "not_contains_ci",
+        outputPath: policy.stateObservation.outputPath,
+        operator: policy.stateObservation.excludesOperator,
         expected: anchorValue(anchor),
-        pollIntervalMs: 250,
-        timeoutMs: DEFAULT_STATE_TIMEOUT_MS,
+        pollIntervalMs: policy.stateObservation.pollIntervalMs,
+        timeoutMs: policy.stateObservation.timeoutMs,
       },
     });
   });
   return waits;
 }
 
-function compiledStepToEdgeSteps(step: CompiledStep, appMap: AppMap): WorkflowStep[] {
-  if (step.action === "wait") {
-    const durationMs = typeof step.params?.durationMs === "number" ? step.params.durationMs : step.retryDelay;
-    if (!finite(durationMs) || durationMs < 0) {
-      throw new Error(`Compiled wait step ${step.id} requires params.durationMs`);
-    }
-    return [{
-      type: "wait",
-      id: step.id,
-      duration: { min: durationMs, max: durationMs, distribution: "uniform" },
-    }];
-  }
-
-  const action = actionStep(step, appMap);
+function compiledStepToEdgeSteps(
+  step: CompiledStep,
+  appMap: AppMap,
+  policy: CompiledWorkflowEdgePolicy,
+): WorkflowStep[] {
+  const action = actionStep(step, appMap, policy);
   const expectedPage = step.expectedPage ? appMap.pages[step.expectedPage] : undefined;
   if (step.expectedPage && !expectedPage) {
     throw new Error(`Compiled step ${step.id} references unknown expected page ${step.expectedPage}`);
@@ -139,24 +197,25 @@ function compiledStepToEdgeSteps(step: CompiledStep, appMap: AppMap): WorkflowSt
   ) {
     throw new Error(`Expected page ${step.expectedPage} has no portable state anchors`);
   }
-  return [action, ...stateWaits(step, expectedPage)];
+  return [action, ...stateWaits(step, expectedPage, policy)];
 }
 
 export async function compiledWorkflowToEdgeTemplate(workflow: CompiledWorkflow): Promise<WorkflowTemplate> {
   const appMap = await loadMap(workflow.appId);
   if (!appMap) throw new Error(`App map not found for ${workflow.appId}`);
+  const policy = await loadCompiledWorkflowEdgePolicy();
 
-  const steps = workflow.steps.flatMap((step) => compiledStepToEdgeSteps(step, appMap));
+  const steps = workflow.steps.flatMap((step) => compiledStepToEdgeSteps(step, appMap, policy));
   return {
     id: workflow.id,
     name: workflow.name,
     platform: workflow.appId,
     description: workflow.source,
     version: `compiled-${workflow.appMapVersion}`,
-    runtimeContract: "edge-workflow/v2",
+    runtimeContract: policy.runtimeContract,
     steps,
-    defaultVerificationStrategy: "local_only",
-    dataRetentionDays: 0,
+    defaultVerificationStrategy: policy.verificationStrategy,
+    dataRetentionDays: policy.dataRetentionDays,
     compatibleAppVersions: appMap.appVersion ? [appMap.appVersion] : undefined,
   };
 }

@@ -15,29 +15,15 @@ function template(step: Record<string, unknown>) {
 }
 
 describe("verified UI state-machine contract", () => {
-  it("accepts observe_and_transition with a mandatory postcondition", () => {
+  it("leaves action-specific parameter requirements to PostgreSQL", () => {
     const result = validateGeneratedWorkflowTemplate(template({
       id: "transition",
       type: "action",
-      action: "observe_and_transition",
+      action: "fixture_action",
       timeoutMs: 10_000,
-      params: {
-        selectors: [{ text: "Continue" }],
-        postcondition: { action: "ui_tree_dump", operator: "contains_ci", expected: "Ready" },
-      },
+      params: { fixture: true },
     }));
     expect(result.ok, result.errors.join("\n")).toBe(true);
-  });
-
-  it("rejects observe_and_transition without a postcondition", () => {
-    const result = validateGeneratedWorkflowTemplate(template({
-      id: "transition",
-      type: "action",
-      action: "observe_and_transition",
-      params: { selectors: [{ text: "Continue" }] },
-    }));
-    expect(result.ok).toBe(false);
-    expect(result.errors.join(" ")).toContain("postcondition");
   });
 
   it("accepts a data-driven state machine and rejects recursive transitions", () => {

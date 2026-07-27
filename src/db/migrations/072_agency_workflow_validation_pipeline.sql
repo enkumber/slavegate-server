@@ -16,10 +16,13 @@ CREATE TABLE IF NOT EXISTS agency_workflow_validation_events (
   canary_readiness JSONB NOT NULL DEFAULT '{}'::jsonb,
   regression_readiness JSONB NOT NULL DEFAULT '{}'::jsonb,
   decision JSONB NOT NULL DEFAULT '{}'::jsonb,
-  actor TEXT NOT NULL DEFAULT 'dashboard',
-  source TEXT NOT NULL DEFAULT 'dashboard',
+  actor TEXT NOT NULL,
+  source TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE agency_workflow_validation_events
+  ALTER COLUMN actor DROP DEFAULT;
 
 CREATE INDEX IF NOT EXISTS idx_workflow_validation_events_created
   ON agency_workflow_validation_events (created_at DESC);

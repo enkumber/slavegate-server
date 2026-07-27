@@ -112,42 +112,7 @@ $$ LANGUAGE plpgsql IMMUTABLE;
 COMMENT ON FUNCTION merge_coords_keep_highest_confidence IS 'Merges coord JSONBs, keeping entry with highest confidence per key.';
 
 -- ═══════════════════════════════════════════════════════════════════════════
--- 5. SEED DATA — Instagram skill definition (starter)
--- ═══════════════════════════════════════════════════════════════════════════
-
--- NOTE: selectors are best-effort for ~v330. VLM will learn and update coords_cache with actual values.
-INSERT INTO skill_definitions (id, platform, app_version, selectors, navigation_map)
-VALUES (
-    'instagram',
-    'instagram',
-    '330.0.0',
-    '{
-        "nav.home": {"selector": "com.instagram.android:id/feed_tab", "hint": "Home feed tab"},
-        "nav.search": {"selector": "com.instagram.android:id/search_tab", "hint": "Search/Explore tab"},
-        "nav.reels": {"selector": "com.instagram.android:id/clips_tab", "hint": "Reels tab"},
-        "nav.profile": {"selector": "com.instagram.android:id/profile_tab", "hint": "Profile tab"},
-        "post.like": {"selector": "com.instagram.android:id/row_feed_button_like", "hint": "Like button heart"},
-        "post.comment": {"selector": "com.instagram.android:id/row_feed_button_comment", "hint": "Comment bubble"},
-        "post.share": {"selector": "com.instagram.android:id/row_feed_button_share", "hint": "Share/Send icon"},
-        "profile.follow": {"selector": "com.instagram.android:id/profile_header_follow_button", "hint": "Follow button on profile"},
-        "profile.message": {"selector": "com.instagram.android:id/profile_header_message_button", "hint": "Message button"},
-        "search.input": {"selector": "com.instagram.android:id/action_bar_search_edit_text", "hint": "Search text field"}
-    }'::jsonb,
-    '{
-        "home": {"indicators": ["feed_tab_selected", "story_tray"], "transitions": {"search": "nav.search", "profile": "nav.profile"}},
-        "search": {"indicators": ["search_tab_selected", "explore_grid"], "transitions": {"home": "nav.home"}},
-        "profile": {"indicators": ["profile_tab_selected", "followers_count"], "transitions": {"home": "nav.home"}},
-        "post_detail": {"indicators": ["like_button", "comment_input"], "transitions": {"back": "PRESS_BACK"}}
-    }'::jsonb
-)
-ON CONFLICT (id) DO UPDATE SET
-    app_version = EXCLUDED.app_version,
-    selectors = EXCLUDED.selectors,
-    navigation_map = EXCLUDED.navigation_map,
-    updated_at = NOW();
-
--- ═══════════════════════════════════════════════════════════════════════════
--- 6. TRIGGER — auto-update updated_at on execution_checkpoints
+-- 5. TRIGGER — auto-update updated_at on execution_checkpoints
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE OR REPLACE FUNCTION set_updated_at()

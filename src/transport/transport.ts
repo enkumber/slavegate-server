@@ -304,89 +304,6 @@ export async function sweepQueuedJobsForOnlineDevices(
   return { devices: deviceIds.length, attempted, sent };
 }
 
-export async function sendBatchToDeviceEnforced(
-  deviceId: string,
-  batchPayload: Record<string, unknown>,
-  timeoutMs: number,
-): Promise<any> {
-  return sendBatchThroughBoundary(deviceId, batchPayload, timeoutMs, {
-    boundary: "edge_batch",
-    actor: "transport.g3.batch",
-  });
-}
-
-export async function sendServerWorkflowBatchChildToDevice(
-  deviceId: string,
-  workflowRootExternalId: string,
-  batchPayload: Record<string, unknown>,
-  timeoutMs: number,
-): Promise<any> {
-  if (!workflowRootExternalId) throw new Error("Server workflow batch child requires canonical workflow root identity");
-  if (batchPayload.workflowId !== workflowRootExternalId) {
-    throw new Error("Server workflow BATCH payload workflowId does not match canonical workflow root identity");
-  }
-  return sendBatchThroughBoundary(deviceId, batchPayload, timeoutMs, {
-    boundary: "server_workflow_batch_child",
-    rootExternalId: workflowRootExternalId,
-    actor: "transport.g3.server_workflow_batch_child",
-  });
-}
-
-async function sendBatchThroughBoundary(
-  deviceId: string,
-  batchPayload: Record<string, unknown>,
-  timeoutMs: number,
-  options: {
-    boundary: "edge_batch" | "server_workflow_batch_child";
-    rootExternalId?: string;
-    actor: string;
-  },
-): Promise<any> {
-  const batchId = batchPayload.batchId;
-  if (typeof batchId !== "string" || !batchId) throw new Error("BATCH_START requires batchId");
-  if (!isDeviceExecutionEnforced()) {
-    const resultPromise = directWsServer.waitForBatchResult(batchId, timeoutMs, deviceId);
-    const sent = sendObserveOnlyBatchToDevice(deviceId, batchPayload);
-    void deviceExecutionArbiter.observeDispatch({ deviceId, rootKind: options.boundary === "edge_batch" ? "batch" : "server_workflow", externalId: options.rootExternalId ?? batchId, requestKey: options.rootExternalId ?? batchId, sent, actor: options.actor, metadata: { authorityMode: "observe_only" } });
-    if (!sent) {
-      directWsServer.rejectObserveOnlyBatchWaiter(batchId, deviceId, "batch_not_sent_offline");
-      throw new Error(`Batch ${batchId} was not sent: offline`);
-    }
-    return resultPromise;
-  }
-  let resultPromise: Promise<any> | undefined;
-  const dispatch = await deviceExecutionArbiter.runObservedEgress({
-    deviceId,
-    boundary: options.boundary,
-    rootExternalId: options.rootExternalId,
-    operationId: batchId,
-    wireType: "BATCH_START",
-    actor: options.actor,
-    metadata: { workflowId: batchPayload.workflowId ?? null },
-    registerWaiter: (handle) => {
-      resultPromise = directWsServer.registerBatchWaiterWithHandle(handle, timeoutMs);
-    },
-    wireDispatch: (handle) => directWsServer.sendBatchWithHandle(handle, batchPayload),
-  });
-  if (!dispatch.sent || !dispatch.handle || !resultPromise) {
-    if (dispatch.handle) directWsServer.rejectBatchWaiterWithHandle(dispatch.handle, dispatch.reason ?? "batch_not_sent");
-    if (
-      options.boundary === "edge_batch" &&
-      await isDeviceExecutionResultQueued(dispatch) &&
-      dispatch.handle
-    ) {
-      await cancelUnreplayableObservedAttempt(dispatch.handle, "queued_edge_batch_not_replayable");
-    }
-    throw new Error(`Batch ${batchId} was not sent: ${dispatch.reason ?? dispatch.decision}`);
-  }
-  return resultPromise;
-}
-
-function sendObserveOnlyBatchToDevice(deviceId: string, batchPayload: Record<string, unknown>): boolean {
-  assertObserveOnlyTransportBoundary("observe-only BATCH transport compatibility");
-  return directWsServer.sendBatch(deviceId, batchPayload);
-}
-
 export async function sendEdgeWorkflowToDeviceEnforced(
   deviceId: string,
   workflowId: string,
@@ -394,8 +311,10 @@ export async function sendEdgeWorkflowToDeviceEnforced(
   variables?: Record<string, unknown>,
   options: { actor?: string; observeSource?: string } = {},
 ): Promise<EdgeWorkflowSendResult> {
+  const { hydrateWorkflowNativePolicies } = await import("../modules/dispatcher/dispatcher.service");
+  const hydratedTemplate = await hydrateWorkflowNativePolicies(template);
   if (!isDeviceExecutionEnforced()) {
-    const sent = sendObserveOnlyWorkflowStartToDevice(deviceId, workflowId, template, variables);
+    const sent = sendObserveOnlyWorkflowStartToDevice(deviceId, workflowId, hydratedTemplate, variables);
     void deviceExecutionArbiter.observeDispatch({ deviceId, rootKind: "edge_workflow", externalId: workflowId, requestKey: workflowId, sent, actor: options.actor ?? "transport.observe_only.edge_workflow", metadata: { authorityMode: "observe_only" } });
     return { decision: sent ? "dispatched" : "offline", root: null, operation: undefined, handle: undefined, sent, queued: false };
   }
@@ -407,7 +326,7 @@ export async function sendEdgeWorkflowToDeviceEnforced(
     operationKind: "workflow",
     operationId: workflowId,
     boundary: "edge_workflow",
-    template: structuredClone(template),
+    template: structuredClone(hydratedTemplate),
     variables: variables === undefined ? undefined : structuredClone(variables),
   };
   const dispatch = await deviceExecutionArbiter.runObservedEgress({
@@ -417,11 +336,11 @@ export async function sendEdgeWorkflowToDeviceEnforced(
     wireType: "WORKFLOW_START",
     actor: options.actor ?? "transport.g3.edge_workflow",
     metadata: {
-      templateId: template.id ?? null,
+      templateId: hydratedTemplate.id ?? null,
       dispatchEnvelope: replayEnvelope,
       observeSource: options.observeSource ?? "transport.sendEdgeWorkflowToDeviceEnforced",
     },
-    wireDispatch: (handle) => directWsServer.sendWorkflowStartWithHandle(handle, template, variables),
+    wireDispatch: (handle) => directWsServer.sendWorkflowStartWithHandle(handle, hydratedTemplate, variables),
   });
   return {
     decision: dispatch.decision,

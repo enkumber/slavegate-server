@@ -8,7 +8,7 @@
 CREATE TABLE IF NOT EXISTS materials (
   id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id      UUID        REFERENCES accounts(id) ON DELETE CASCADE,
-  type            TEXT        NOT NULL CHECK (type IN ('photo', 'video', 'reel', 'story')),
+  type            TEXT        NOT NULL,
   url             TEXT        NOT NULL,
   thumbnail_url   TEXT,
   filename        TEXT,
@@ -31,7 +31,7 @@ ALTER TABLE posts
   ADD COLUMN IF NOT EXISTS material_id UUID REFERENCES materials(id) ON DELETE SET NULL;
 
 ALTER TABLE posts 
-  ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'photo' CHECK (type IN ('photo', 'video', 'reel', 'story'));
+  ADD COLUMN IF NOT EXISTS type TEXT;
 
 ALTER TABLE posts 
   ADD COLUMN IF NOT EXISTS caption TEXT;

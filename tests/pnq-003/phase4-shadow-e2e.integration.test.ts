@@ -71,13 +71,26 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
         'status'
       );
       INSERT INTO runtime_semantic_entries
-        (namespace, entry_key, status, lifecycle_key, payload)
+        (namespace, entry_key, status, lifecycle_key, priority, payload)
       VALUES (
         'phase4_job_policy',
         'screenshot_fixture',
         'enabled_fixture',
         'phase4_runtime_policy_fixture',
-        '{"jobActionPolicy":{"actionKey":"screenshot","allowed":true,"requiresRoot":false}}'::jsonb
+        100,
+        '{
+          "jobActionPolicy": {
+            "actionKey": "screenshot",
+            "allowed": true,
+            "requiresRoot": false,
+            "nativeOpcode": 0,
+            "verificationOpcode": 0,
+            "observationOnly": true,
+            "defaultParams": {},
+            "executionPolicy": {},
+            "parameterTransforms": []
+          }
+        }'::jsonb
       );
     `);
     await applySql("src/db/migrations/114_lifecycle_resource_policies.sql");

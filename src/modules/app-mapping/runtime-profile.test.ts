@@ -9,6 +9,22 @@ import {
   type AppRuntimeProfile,
 } from "./runtime-profile";
 
+const mappingEnginePolicy = {
+  captureStepType: "capture",
+  foregroundProbeActionKey: "get_foreground_app",
+  treeActionKey: "ui_tree_dump",
+  screenshotActionKey: "screenshot",
+  foregroundTimeoutMs: 1000,
+  treeTimeoutMs: 1000,
+  screenshotTimeoutMs: 1000,
+  defaultActionTimeoutMs: 1000,
+  captureAttempts: 1,
+  captureRetryDelayMs: 1,
+  screenshotQuality: 80,
+  maxDelayAfterMs: 1000,
+  appVersionFallback: "unknown",
+};
+
 function profile(): AppRuntimeProfile {
   return {
     appId: "com.example.app",
@@ -24,8 +40,16 @@ function profile(): AppRuntimeProfile {
       mode: "read_only_navigation",
       allowedActions: ["open_app", "intent_send"],
       allowedUriHosts: ["example.com"],
+      packageScopedActions: ["open_app", "intent_send"],
+      uriActions: {
+        intent_send: {
+          allowedSchemes: ["https:"],
+          allowedHosts: ["example.com"],
+          allowedParams: { action: ["android.intent.action.VIEW"] },
+        },
+      },
     },
-    metadata: {},
+    metadata: { mappingEnginePolicy },
   };
 }
 
@@ -40,14 +64,14 @@ describe("app runtime profiles", () => {
       mapping_recipe: profile().mappingRecipe,
       safety_policy: profile().safetyPolicy,
       default_device_id: null,
-      metadata: { source: "postgresql" },
+      metadata: { source: "postgresql", mappingEnginePolicy },
     });
 
     expect(loaded).toMatchObject({
       appId: "com.example.app",
       packageName: "com.example.app",
       profileVersion: 3,
-      metadata: { source: "postgresql" },
+      metadata: { source: "postgresql", mappingEnginePolicy },
     });
   });
 
@@ -135,6 +159,6 @@ describe("app runtime profiles", () => {
       action: "android.intent.action.SEND",
       uri: "https://example.com/detail",
       packageName: "com.example.app",
-    })).toThrow("only permits android.intent.action.VIEW");
+    })).toThrow("parameter 'action' is not allowed");
   });
 });

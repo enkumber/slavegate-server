@@ -5,16 +5,6 @@ import type {
   WorkflowTemplate,
 } from "./types";
 
-const EFFECTS = new Set<WorkflowInteractionEffect>([
-  "none",
-  "observation",
-  "navigation",
-  "ui_input",
-  "business_mutation",
-  "sensitive",
-  "destructive",
-]);
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -30,7 +20,7 @@ export function parseWorkflowGoalContract(value: unknown): WorkflowGoalContract 
     return null;
   }
   const allowedEffects = stringArray(value.allowedEffects);
-  if (allowedEffects.length === 0 || allowedEffects.some((effect) => !EFFECTS.has(effect as WorkflowInteractionEffect))) {
+  if (allowedEffects.length === 0) {
     return null;
   }
   const stages = value.stages.map((raw) => {
@@ -41,7 +31,6 @@ export function parseWorkflowGoalContract(value: unknown): WorkflowGoalContract 
     if (
       !id
       || allowedActions.length === 0
-      || stageEffects.some((effect) => !EFFECTS.has(effect as WorkflowInteractionEffect))
       || (
         raw.minOccurrences !== undefined
         && (
@@ -97,7 +86,7 @@ function collectActions(steps: WorkflowStep[]): IndexedAction[] {
     for (const step of items) {
       if (step.type === "action") {
         actions.push({ step, index: actions.length });
-        if (step.action === "run_state_machine" && isRecord(step.params?.transitions)) {
+        if (isRecord(step.params?.transitions)) {
           visit(Object.values(step.params.transitions)
             .filter(isRecord)
             .map((transition) => ({ ...transition, type: "action" } as Extract<WorkflowStep, { type: "action" }>)));
@@ -120,7 +109,7 @@ function producedVariables(action: IndexedAction["step"]): Set<string> {
   if (action.saveOutputAs) produced.add(action.saveOutputAs);
   const outputVariable = action.params?.outputVariable;
   if (typeof outputVariable === "string" && outputVariable) produced.add(outputVariable);
-  if (action.action === "classify_ui_tree" && isRecord(action.params?.outputs)) {
+  if (isRecord(action.params?.outputs)) {
     Object.keys(action.params.outputs).forEach((key) => produced.add(key));
   }
   return produced;

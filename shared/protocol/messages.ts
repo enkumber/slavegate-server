@@ -246,21 +246,19 @@ export interface TokenRefreshAckPayload {
 export interface JobDispatchPayload {
   jobId: string;
   type: JobType;
+  /**
+   * Stable native primitive ABI index selected by the active PostgreSQL
+   * jobActionPolicy. Product action keys never select Android code paths.
+   */
+  nativeOpcode: number;
+  /** PostgreSQL policy flag used to suppress mutating verification cascades. */
+  observationOnly?: boolean;
+  /** Numeric verification primitive selected by PostgreSQL. */
+  verificationOpcode: number;
   params: JobParams;
   timeoutMs?: number;
   /** True if job requires root — device can use for additional safety checks */
   requiresRoot?: boolean;
-  /**
-   * Verification strategy for this job.
-   * Device uses this to decide whether to take beforeScreenshot (L2 requires it).
-   * "full_cascade" / "vlm_required" not supported in Phase 2 — device returns
-   * verification: { verified: false, verifiedBy: "none" } for unsupported strategies.
-   */
-  verificationStrategy?: "local_only" | "local_with_screenshot" | "full_cascade" | "vlm_required";
-  /** L1 UI tree diff timeout (ms) — how long to wait for UI change before escalating */
-  l1TimeoutMs?: number;
-  /** L2 settle time (ms) — wait after action before taking afterScreenshot */
-  l2SettleMs?: number;
 }
 
 export interface OtaUpdatePayload {
@@ -305,52 +303,11 @@ export interface DeviceLifecycleTelemetry {
   batteryOptimizationExempt: boolean;
 }
 
-export type JobStatus =
-  | "pending"
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "timeout";
+/** Persisted lifecycle value supplied by PostgreSQL. */
+export type JobStatus = string;
 
-export type JobType =
-  | "tap"
-  | "swipe"
-  | "long_press"      // tap and hold for durationMs
-  | "type_text"
-  | "scroll"
-  | "screenshot"
-  | "screenshot_for_vlm"  // VLM-optimized screenshot (540x1200, JPEG 85%)
-  | "screen_record"
-  | "open_app"
-  | "intent_send"
-  | "open_app_fresh"
-  | "close_app"
-  | "ui_tree_dump"
-  | "press_key"       // navigation buttons: back, home, recents
-  | "screen_wake"     // wake screen (turn on display)
-  | "screen_off"      // turn off screen / lock
-  | "unlock"          // unlock device with PIN/pattern
-  | "get_screen_state"// check if screen is on/off/locked
-  | "get_clipboard"   // read clipboard text
-  | "set_clipboard"   // write text to clipboard
-  | "wait_for_idle"   // wait for UI animations to settle
-  | "file_push"       // download file from server to device
-  | "file_delete"     // delete file on device
-  // Root commands — whitelisted only, no generic shell
-  // pm_install REMOVED: APK install exclusively through ota_update
-  | "pm_uninstall"    // requires confirmRoot=true + dashboard confirmation
-  | "reboot"          // requires confirmRoot=true + dashboard confirmation
-  | "ota_update"      // signed APK — download, verify, install
-  // Skill system (cascade tap)
-  | "skill_tap"       // tap at normalized coords from skill
-  | "a11y_find_tap"   // find element via A11y and tap
-  | "ocr_find_tap"    // find text via ML Kit OCR and tap
-  | "cascade_tap"     // VLM-guided tap: screenshot → VLM finds coords → tap
-  // Screen detection cascade
-  | "ocr_full"       // full-screen ML Kit OCR — returns all blocks, fullText, bounds
-  // Workflow execution
-  | "workflow_execute"; // execute workflow JSON locally on device
+/** Product action key supplied by the PostgreSQL action catalog. */
+export type JobType = string;
 
 export type JobParams =
   | TapParams

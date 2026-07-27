@@ -5,9 +5,7 @@ import {
   dispatchQueuedJobsForDevice,
   isEdgeWorkflowReplayEnvelope,
   isJobReplayEnvelope,
-  sendBatchToDeviceEnforced,
   sendEdgeWorkflowToDeviceEnforced,
-  sendServerWorkflowBatchChildToDevice,
   sendDeviceExecutionJobToDevice,
   sweepQueuedJobsForOnlineDevices,
   type DeviceExecutionEdgeWorkflowReplayEnvelopeV1,
@@ -23,14 +21,19 @@ const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
 const lifecycleMocks = vi.hoisted(() => ({
   promoteReplayedEdgeWorkflowToRunning: vi.fn(),
 }));
+const dispatcherMocks = vi.hoisted(() => ({
+  hydrateWorkflowNativePolicies: vi.fn(async (template: Record<string, unknown>) => template),
+}));
 
 vi.mock("../modules/workflows/edge-workflow-lifecycle.service", () => lifecycleMocks);
+vi.mock("../modules/dispatcher/dispatcher.service", () => dispatcherMocks);
 
 afterEach(() => {
   setDeviceExecutionAuthorityForTest(null);
   setPnqV2RuntimeConfigForTest(null);
   vi.restoreAllMocks();
   lifecycleMocks.promoteReplayedEdgeWorkflowToRunning.mockReset();
+  dispatcherMocks.hydrateWorkflowNativePolicies.mockClear();
 });
 
 describe("PNQ-003 observe-only production transport", () => {
@@ -61,22 +64,6 @@ describe("PNQ-003 observe-only production transport", () => {
     internals.connections.delete(DEVICE_ID);
   });
 
-  it("cleans the observe-only BATCH waiter when the device is offline", async () => {
-    setDeviceExecutionAuthorityForTest("observe_only");
-    vi.spyOn(deviceExecutionArbiter, "observeDispatch").mockResolvedValue({ decision: "offline", root: null });
-    const wait = vi.spyOn(directWsServer, "waitForBatchResult").mockReturnValue(Promise.resolve({} as never));
-    const reject = vi.spyOn(directWsServer, "rejectObserveOnlyBatchWaiter");
-
-    await expect(sendBatchToDeviceEnforced(DEVICE_ID, {
-      type: "BATCH_START",
-      batchId: "offline-batch",
-      workflowId: "offline-workflow",
-      steps: [],
-    }, 60_000)).rejects.toThrow("not sent: offline");
-
-    expect(wait).toHaveBeenCalledWith("offline-batch", 60_000, DEVICE_ID);
-    expect(reject).toHaveBeenCalledWith("offline-batch", DEVICE_ID, "batch_not_sent_offline");
-  });
 });
 
 function envelope(): DeviceExecutionJobReplayEnvelopeV1 {
@@ -88,7 +75,14 @@ function envelope(): DeviceExecutionJobReplayEnvelopeV1 {
     operationKind: "job",
     operationId: "job-1",
     boundary: "standalone_job",
-    payload: { jobId: "job-1", type: "screenshot", params: {}, timeoutMs: 10_000 },
+    payload: {
+      jobId: "job-1",
+      type: "screenshot",
+      nativeOpcode: 0,
+      verificationOpcode: 0,
+      params: {},
+      timeoutMs: 10_000,
+    },
   };
 }
 
@@ -202,16 +196,7 @@ describe("PNQ job replay envelope", () => {
   });
 });
 
-describe("PNQ unreplayable observed-root disposition", () => {
-  const handle: DeviceExecutionHandle = {
-    rootId: "22222222-2222-4222-8222-222222222222",
-    deviceId: DEVICE_ID,
-    rootKind: "batch",
-    ownerGeneration: 0,
-    operationKind: "batch",
-    operationId: "batch-waiting",
-  };
-
+describe("PNQ queued edge-workflow disposition", () => {
   function mockWouldWait(waitingHandle: DeviceExecutionHandle) {
     vi.spyOn(deviceExecutionArbiter, "runObservedEgress").mockResolvedValue({
       decision: "would_wait",
@@ -229,28 +214,12 @@ describe("PNQ unreplayable observed-root disposition", () => {
     });
   }
 
-  it("cancels and audits a queued standalone batch before caller fallback", async () => {
-    const observeTerminal = mockWouldWait(handle);
-    const query = vi.fn().mockResolvedValue({ rows: [{ status: "cancelled" }] });
-    vi.spyOn(dbClient, "getDb").mockReturnValue({ query } as never);
-    await expect(sendBatchToDeviceEnforced(DEVICE_ID, {
-      type: "BATCH_START",
-      batchId: handle.operationId,
-      workflowId: "wf",
-      steps: [],
-    }, 1_000)).rejects.toThrow("device_slot_already_active");
-    expect(observeTerminal).toHaveBeenCalledWith(expect.objectContaining({
-      handle,
-      status: "cancelled",
-      reason: "queued_edge_batch_not_replayable",
-    }));
-    expect(String(query.mock.calls[0]?.[0])).toContain("target.administrative");
-  });
-
   it("keeps a queued edge workflow replayable instead of cancelling before fallback", async () => {
     const workflowHandle: DeviceExecutionHandle = {
-      ...handle,
+      rootId: "22222222-2222-4222-8222-222222222222",
+      deviceId: DEVICE_ID,
       rootKind: "edge_workflow",
+      ownerGeneration: 0,
       operationKind: "workflow",
       operationId: "workflow-waiting",
     };
@@ -331,70 +300,6 @@ describe("PNQ unreplayable observed-root disposition", () => {
     const pending = internals.pendingWorkflows.get(workflowHandle.operationId);
     if (pending) clearTimeout(pending.timer);
     internals.pendingWorkflows.delete(workflowHandle.operationId);
-    internals.connections.delete(DEVICE_ID);
-  });
-});
-
-describe("server-workflow BATCH transport to DirectWS serializer seam", () => {
-  it("rejects a payload workflowId that is not the canonical server_workflow root", async () => {
-    const runObservedEgress = vi.spyOn(deviceExecutionArbiter, "runObservedEgress");
-
-    await expect(sendServerWorkflowBatchChildToDevice(DEVICE_ID, "canonical-workflow-root", {
-      type: "BATCH_START",
-      batchId: "server-workflow-batch-child",
-      workflowId: "different-workflow",
-      steps: [],
-    }, 60_000)).rejects.toThrow(
-      "Server workflow BATCH payload workflowId does not match canonical workflow root identity",
-    );
-
-    expect(runObservedEgress).not.toHaveBeenCalled();
-  });
-
-  it("serializes a typed server_workflow batch child with its exact PNQ handle", async () => {
-    const handle: DeviceExecutionHandle = {
-      rootId: "22222222-2222-4222-8222-222222222223",
-      deviceId: DEVICE_ID,
-      rootKind: "server_workflow",
-      ownerGeneration: 4,
-      operationKind: "batch",
-      operationId: "server-workflow-batch-child",
-    };
-    const send = vi.fn();
-    const internals = directWsServer as unknown as {
-      connections: Map<string, { ws: { readyState: number; send: typeof send } }>;
-    };
-    internals.connections.set(DEVICE_ID, { ws: { readyState: 1, send } });
-    vi.spyOn(deviceExecutionArbiter, "runObservedEgress").mockImplementation(async (input) => {
-      await input.registerWaiter?.(handle);
-      const sent = await input.wireDispatch(handle);
-      return { decision: "dispatched", root: null, handle, sent };
-    });
-
-    const pending = sendServerWorkflowBatchChildToDevice(DEVICE_ID, "workflow-root", {
-      type: "BATCH_START",
-      batchId: handle.operationId,
-      workflowId: "workflow-root",
-      steps: [],
-    }, 60_000);
-    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
-
-    const frame = JSON.parse(String(send.mock.calls[0]![0]));
-    expect(frame).toMatchObject({
-      type: "BATCH_START",
-      batchId: handle.operationId,
-      pnqHandle: {
-        pnqRootId: handle.rootId,
-        pnqDeviceId: DEVICE_ID,
-        pnqRootKind: "server_workflow",
-        pnqOwnerGeneration: 4,
-        pnqOperationKind: "batch",
-        pnqOperationId: handle.operationId,
-      },
-    });
-
-    directWsServer.rejectBatchWaiterWithHandle(handle, "test complete");
-    await expect(pending).rejects.toThrow("test complete");
     internals.connections.delete(DEVICE_ID);
   });
 });

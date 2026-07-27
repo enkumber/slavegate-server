@@ -4,7 +4,7 @@
 CREATE TABLE IF NOT EXISTS api_tokens (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   token_hash  TEXT        NOT NULL UNIQUE,   -- SHA-256 of the raw token
-  purpose     TEXT        NOT NULL CHECK (purpose IN ('openclaw_agent', 'admin', 'monitoring')),
+  purpose     TEXT        NOT NULL,
   expires_at  TIMESTAMPTZ NOT NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   revoked_at  TIMESTAMPTZ                   -- NULL = active, set = revoked

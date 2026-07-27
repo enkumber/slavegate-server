@@ -175,7 +175,7 @@ CREATE TABLE IF NOT EXISTS device_execution_events (
   event_type     TEXT NOT NULL,
   previous_state TEXT,
   new_state      TEXT,
-  actor          TEXT NOT NULL DEFAULT 'server',
+  actor          TEXT NOT NULL,
   reason         TEXT,
   metadata       JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -188,10 +188,14 @@ ALTER TABLE device_execution_events
   ADD COLUMN IF NOT EXISTS event_type TEXT,
   ADD COLUMN IF NOT EXISTS previous_state TEXT,
   ADD COLUMN IF NOT EXISTS new_state TEXT,
-  ADD COLUMN IF NOT EXISTS actor TEXT NOT NULL DEFAULT 'server',
+  ADD COLUMN IF NOT EXISTS actor TEXT,
   ADD COLUMN IF NOT EXISTS reason TEXT,
   ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+ALTER TABLE device_execution_events
+  ALTER COLUMN actor DROP DEFAULT,
+  ALTER COLUMN actor SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_device_execution_events_root
   ON device_execution_events(root_id, created_at);

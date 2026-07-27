@@ -23,12 +23,14 @@ CREATE INDEX IF NOT EXISTS idx_clients_active ON clients(active);
 -- Adăugăm coloane noi la tabela accounts existentă
 
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS client_id UUID REFERENCES clients(id) ON DELETE SET NULL;
-ALTER TABLE accounts ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'farming' CHECK (type IN ('business', 'farming'));
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS type TEXT;
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS strategy JSONB DEFAULT '{}'::jsonb;
 -- strategy conține: phase, daily_limits, seeds, engagement_windows
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS metrics JSONB DEFAULT '{}'::jsonb;
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS flags JSONB DEFAULT '{}'::jsonb;
 -- flags conține: soft_blocked_until, rate_limited_until, paused, pause_reason, anomaly_detected
+
+ALTER TABLE accounts ALTER COLUMN simulated_timezone DROP DEFAULT;
 
 CREATE INDEX IF NOT EXISTS idx_accounts_client ON accounts(client_id);
 CREATE INDEX IF NOT EXISTS idx_accounts_type ON accounts(type);
@@ -40,7 +42,7 @@ CREATE TABLE IF NOT EXISTS materials (
   id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id       UUID        REFERENCES clients(id) ON DELETE CASCADE,
   account_id      UUID        REFERENCES accounts(id) ON DELETE SET NULL,
-  type            TEXT        NOT NULL CHECK (type IN ('image', 'video', 'text')),
+  type            TEXT        NOT NULL,
   url             TEXT        NOT NULL,
   description     TEXT,
   uploaded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -57,7 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_materials_used ON materials(used);
 CREATE TABLE IF NOT EXISTS content_briefs (
   id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id      UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  created_by      TEXT        NOT NULL DEFAULT 'marketer',
+  created_by      TEXT        NOT NULL,
   brief           JSONB       NOT NULL DEFAULT '{}'::jsonb,
   -- brief conține: type, tone, topics, hashtags_strategy
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -76,7 +78,7 @@ CREATE TABLE IF NOT EXISTS posts (
   status          TEXT        NOT NULL,
   content         JSONB       NOT NULL DEFAULT '{}'::jsonb,
   -- content conține: media_url, caption, hashtags, thumbnail_url
-  created_by      TEXT        NOT NULL DEFAULT 'siren',
+  created_by      TEXT        NOT NULL,
   brief_id        UUID        REFERENCES content_briefs(id) ON DELETE SET NULL,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   approved_at     TIMESTAMPTZ,
@@ -130,7 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_execution_logs_timestamp ON execution_logs(timest
 -- ═══════════════════════════════════════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS reports (
   id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  type            TEXT        NOT NULL CHECK (type IN ('daily_analytics', 'weekly', 'anomaly')),
+  type            TEXT        NOT NULL,
   period          TEXT        NOT NULL,
   data            JSONB       NOT NULL DEFAULT '{}'::jsonb,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -147,12 +149,12 @@ CREATE TABLE IF NOT EXISTS navigation_logs (
   device_id               UUID        NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   app                     TEXT        NOT NULL,
   element_name            TEXT        NOT NULL,
-  method_used             TEXT        NOT NULL CHECK (method_used IN ('coords', 'ui_tree', 'vision')),
+  method_used             TEXT        NOT NULL,
   method_attempted_first  TEXT,
   fallback_chain          JSONB       DEFAULT '[]'::jsonb,
   coords_used             JSONB,
   verified                BOOLEAN     NOT NULL DEFAULT FALSE,
-  verify_method           TEXT        CHECK (verify_method IN ('ui_tree', 'vision')),
+  verify_method           TEXT,
   timestamp               TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

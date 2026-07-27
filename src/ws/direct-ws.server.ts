@@ -256,22 +256,6 @@ interface PendingJob {
   legacyMode?: "generated_workflow";
 }
 
-interface PendingBatch {
-  promise: Promise<BatchResult>;
-  resolve: (result: BatchResult) => void;
-  reject:  (err: Error) => void;
-  timer:   ReturnType<typeof setTimeout>;
-  handle: DeviceExecutionHandle;
-}
-
-interface ObserveOnlyPendingBatch {
-  promise: Promise<BatchResult>;
-  resolve: (result: BatchResult) => void;
-  reject:  (err: Error) => void;
-  timer:   ReturnType<typeof setTimeout>;
-  deviceId?: string;
-}
-
 interface PendingWorkflow {
   handle: DeviceExecutionHandle;
   timer: ReturnType<typeof setTimeout>;
@@ -320,18 +304,6 @@ interface JobResult {
   success:  boolean;
   output:   unknown;
   error?:   string;
-}
-
-interface BatchResult {
-  batchId:         string;
-  workflowId:      string;
-  completed:       boolean;
-  partial:         boolean;
-  timedOut:        boolean;
-  results:         unknown[];
-  executedAt:       string;
-  totalDurationMs: number;
-  error?:          string;
 }
 
 interface WorkflowLifecycleTarget {
@@ -402,8 +374,6 @@ export class DirectWsServer {
   private wss:          WebSocketServer | null = null;
   private connections = new Map<string, ConnectedDevice>();   // deviceId → conn
   private pendingJobs = new Map<string, PendingJob>();        // jobId → awaiter
-  private pendingBatches = new Map<string, PendingBatch>();   // batchId → awaiter
-  private observeOnlyPendingBatches = new Map<string, ObserveOnlyPendingBatch>();
   private pendingWorkflows = new Map<string, PendingWorkflow>();
   // LLM_REQUEST is single-flight per device: concurrent requests are rejected
   // with a stable retryable LLM_RESULT so requestId ownership stays unambiguous.
@@ -545,24 +515,6 @@ export class DirectWsServer {
         pending.reject(new Error("Server shutting down"));
       }
     }
-    for (const [batchId, pending] of this.pendingBatches) {
-      confirmations.push(this.confirmAmbiguityBeforeCleanup({
-        deviceId: pending.handle.deviceId,
-        handle: pending.handle,
-        reason: "direct_ws_server_shutdown_before_batch_result",
-        actor: "direct_ws_close",
-      }, () => {
-        if (this.pendingBatches.get(batchId) !== pending) return;
-        clearTimeout(pending.timer);
-        this.pendingBatches.delete(batchId);
-        pending.reject(new Error("Server shutting down"));
-      }));
-    }
-    for (const [batchId, pending] of this.observeOnlyPendingBatches) {
-      clearTimeout(pending.timer);
-      this.observeOnlyPendingBatches.delete(batchId);
-      pending.reject(new Error("Server shutting down"));
-    }
     for (const [workflowId, pending] of this.pendingWorkflows) {
       confirmations.push(this.confirmAmbiguityBeforeCleanup({
         deviceId: pending.handle.deviceId,
@@ -605,6 +557,9 @@ export class DirectWsServer {
       type:    "JOB",
       jobId:   payload.jobId,
       jobType: payload.type,
+      nativeOpcode: payload.nativeOpcode,
+      observationOnly: payload.observationOnly === true,
+      verificationOpcode: payload.verificationOpcode,
       params:  payload.params,
       timeoutMs: payload.timeoutMs,
       requiresRoot: payload.requiresRoot,
@@ -664,6 +619,9 @@ export class DirectWsServer {
       type:    "JOB",
       jobId:   payload.jobId,
       jobType: payload.type,
+      nativeOpcode: payload.nativeOpcode,
+      observationOnly: payload.observationOnly === true,
+      verificationOpcode: payload.verificationOpcode,
       params:  payload.params,
       timeoutMs: payload.timeoutMs,
       requiresRoot: payload.requiresRoot,
@@ -843,42 +801,6 @@ export class DirectWsServer {
   }
 
   /**
-   * Send a BATCH_START message to a device.
-   * Returns true if sent, false if device not connected.
-   */
-  sendBatch(deviceId: string, batchPayload: Record<string, unknown>): boolean {
-    if (!isDeviceExecutionEnforced()) {
-      const conn = this.connections.get(deviceId);
-      if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
-      this._send(conn.ws, batchPayload);
-      return true;
-    }
-    console.error(`[device-execution] blocked raw BATCH egress: device=${deviceId.slice(0, 8)} batch=${String(batchPayload.batchId ?? "?").slice(0, 8)}`);
-    void deviceExecutionArbiter.recordRejectedEgress({
-      deviceId,
-      operationId: String(batchPayload.batchId ?? "missing"),
-      wireType: "BATCH_START",
-      actor: "direct_ws.raw_sender_guard",
-      reason: "raw_batch_sender_disabled_use_permit_path",
-    }).catch((err) => console.error("[device-execution] raw BATCH rejection audit failed:", (err as Error).message));
-    return false;
-  }
-
-  sendBatchWithHandle(handle: DeviceExecutionHandle, batchPayload: Record<string, unknown>): boolean {
-    if (
-      (handle.rootKind !== "batch" && handle.rootKind !== "server_workflow") ||
-      handle.operationKind !== "batch" ||
-      handle.operationId !== batchPayload.batchId
-    ) {
-      throw new Error("DirectWS BATCH handle does not match payload identity");
-    }
-    const conn = this.connections.get(handle.deviceId);
-    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
-    this._send(conn.ws, { ...batchPayload, pnqHandle: encodeDeviceExecutionHandle(handle) });
-    return true;
-  }
-
-  /**
    * Send WORKFLOW_START to a device for edge execution (ADR-001).
    * Device will execute the entire workflow locally.
    */
@@ -979,94 +901,6 @@ export class DirectWsServer {
    */
   getAgentVersion(deviceId: string): string {
     return this.connections.get(deviceId)?.agentVersion ?? "unknown";
-  }
-
-  /**
-   * Returns a Promise that resolves when BATCH_RESULT arrives for this batchId.
-   * Rejects after timeoutMs (default: 10 min — batches can be long).
-   */
-  waitForBatchResult(batchId: string, timeoutMs = 600_000, deviceId?: string): Promise<BatchResult> {
-    const existing = this.pendingBatches.get(batchId);
-    if (existing) return existing.promise;
-    const observeOnlyExisting = this.observeOnlyPendingBatches.get(batchId);
-    if (observeOnlyExisting) {
-      if (observeOnlyExisting.deviceId !== deviceId) {
-        throw new Error(`Observe-only batch waiter collision for ${batchId}`);
-      }
-      return observeOnlyExisting.promise;
-    }
-    if (isDeviceExecutionEnforced()) throw new Error(`Batch ${batchId} has no typed PNQ waiter`);
-
-    let resolve!: (result: BatchResult) => void;
-    let reject!: (error: Error) => void;
-    const promise = new Promise<BatchResult>((resolvePromise, rejectPromise) => {
-      resolve = resolvePromise;
-      reject = rejectPromise;
-    });
-    promise.catch(() => {});
-    const timer = setTimeout(() => {
-      const pending = this.observeOnlyPendingBatches.get(batchId);
-      if (!pending) return;
-      this.observeOnlyPendingBatches.delete(batchId);
-      pending.reject(new Error(`Batch ${batchId} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    timer.unref();
-    this.observeOnlyPendingBatches.set(batchId, { promise, resolve, reject, timer, deviceId });
-    return promise;
-  }
-
-  rejectObserveOnlyBatchWaiter(batchId: string, deviceId: string, reason: string): void {
-    const pending = this.observeOnlyPendingBatches.get(batchId);
-    if (!pending || pending.deviceId !== deviceId) return;
-    clearTimeout(pending.timer);
-    this.observeOnlyPendingBatches.delete(batchId);
-    pending.reject(new Error(reason));
-  }
-
-  registerBatchWaiterWithHandle(handle: DeviceExecutionHandle, timeoutMs = 600_000): Promise<BatchResult> {
-    const batchId = handle.operationId;
-    const existing = this.pendingBatches.get(batchId);
-    if (existing) {
-      if (!handlesEqual(existing.handle, handle)) throw new Error(`Batch waiter collision for ${batchId}`);
-      return existing.promise;
-    }
-    let resolve!: (result: BatchResult) => void;
-    let reject!: (error: Error) => void;
-    const promise = new Promise<BatchResult>((resolvePromise, rejectPromise) => {
-      resolve = resolvePromise;
-      reject = rejectPromise;
-    });
-    promise.catch(() => {});
-    const timer = setTimeout(() => {
-      void this.expirePendingBatch(handle, timeoutMs);
-    }, timeoutMs);
-    timer.unref();
-    this.pendingBatches.set(batchId, { promise, resolve, reject, timer, handle });
-    return promise;
-  }
-
-  rejectBatchWaiterWithHandle(handle: DeviceExecutionHandle, reason: string): void {
-    const pending = this.pendingBatches.get(handle.operationId);
-    if (!pending || !handlesEqual(pending.handle, handle)) return;
-    clearTimeout(pending.timer);
-    this.pendingBatches.delete(handle.operationId);
-    pending.reject(new Error(reason));
-  }
-
-  private async expirePendingBatch(handle: DeviceExecutionHandle, timeoutMs: number): Promise<void> {
-    const pending = this.pendingBatches.get(handle.operationId);
-    if (!pending || !handlesEqual(pending.handle, handle)) return;
-    await this.confirmAmbiguityBeforeCleanup({
-      deviceId: handle.deviceId,
-      handle,
-      reason: "batch_result_timeout",
-      actor: "direct_ws_batch_timeout",
-      metadata: { timeoutMs },
-    }, () => {
-      if (this.pendingBatches.get(handle.operationId) !== pending) return;
-      this.pendingBatches.delete(handle.operationId);
-      pending.reject(new Error(`Batch ${handle.operationId} timed out after ${timeoutMs}ms`));
-    });
   }
 
   isDeviceOnline(deviceId: string): boolean {
@@ -1207,7 +1041,6 @@ export class DirectWsServer {
         case "JOB_ACK":         await this._handleJobProgress(deviceConn, msg, "agent_job_received"); break;
         case "JOB_STARTED":     await this._handleJobProgress(deviceConn, msg, "agent_job_started"); break;
         case "JOB_RESULT":      await this._handleJobResult(deviceConn, msg);   break;
-        case "BATCH_RESULT":    await this._handleBatchResult(deviceConn, msg); break;
         case "HEARTBEAT":       await this._handleHeartbeat(deviceConn, msg); break;
         case "PING":            this._send(ws, { type: "PONG" });          break;
         case "PONG":            deviceConn.lastPongAt = Date.now();         break;
@@ -1263,9 +1096,8 @@ export class DirectWsServer {
     deviceId: string,
     closeCode: number,
     closeReason: string,
-  ): Promise<{ jobs: number; batches: number; workflows: number }> {
+  ): Promise<{ jobs: number; workflows: number }> {
     const jobs = [...this.pendingJobs.entries()].filter(([, pending]) => pending.deviceId === deviceId);
-    const batches = [...this.pendingBatches.entries()].filter(([, pending]) => pending.handle.deviceId === deviceId);
     const workflows = [...this.pendingWorkflows.entries()].filter(([, pending]) => pending.handle.deviceId === deviceId);
     const confirmations: Promise<boolean>[] = [];
 
@@ -1289,20 +1121,6 @@ export class DirectWsServer {
         pending.reject(new Error(`Device ${deviceId} disconnected`));
       }));
     }
-    for (const [batchId, pending] of batches) {
-      confirmations.push(this.confirmAmbiguityBeforeCleanup({
-        deviceId,
-        handle: pending.handle,
-        reason: "device_disconnected_before_batch_result",
-        actor: "direct_ws_disconnect",
-        metadata: { closeCode, closeReason },
-      }, () => {
-        if (this.pendingBatches.get(batchId) !== pending) return;
-        clearTimeout(pending.timer);
-        this.pendingBatches.delete(batchId);
-        pending.reject(new Error(`Device ${deviceId} disconnected during batch ${batchId}`));
-      }));
-    }
     for (const [workflowId, pending] of workflows) {
       confirmations.push(this.confirmAmbiguityBeforeCleanup({
         deviceId,
@@ -1317,7 +1135,7 @@ export class DirectWsServer {
       }));
     }
     await Promise.all(confirmations);
-    return { jobs: jobs.length, batches: batches.length, workflows: workflows.length };
+    return { jobs: jobs.length, workflows: workflows.length };
   }
 
   // ─── Auth handler ─────────────────────────────────────────────────────────
@@ -1750,114 +1568,6 @@ export class DirectWsServer {
         .then(({ dispatchQueuedJobsForDevice }) => dispatchQueuedJobsForDevice(conn.deviceId, "direct_ws.job_result_queue_pump"))
         .catch(err => console.error("[device-execution] direct-ws queue pump error:", (err as Error).message));
     }
-  }
-
-  // ─── Batch result handler ────────────────────────────────────────────────
-
-  private async _handleBatchResult(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {
-    const batchId = msg.batchId as string;
-    if (!batchId) {
-      console.warn("[direct-ws] BATCH_RESULT missing batchId — ignoring");
-      return;
-    }
-
-    const completed = msg.completed === true;
-    const partial = msg.partial === true;
-    const timedOut = msg.timedOut === true;
-    const results = (msg.results as unknown[]) ?? [];
-    const totalDurationMs = (msg.totalDurationMs as number) ?? 0;
-
-    console.log(`[direct-ws] BATCH_RESULT received: batchId=${batchId.slice(0,8)} completed=${completed} steps=${results.length} totalMs=${totalDurationMs} device=${conn.deviceId.slice(0,8)}`);
-
-    const pending = this.pendingBatches.get(batchId);
-    const handleResolution = pending ? resolveDirectWsResultHandle(pending.handle, msg) : null;
-    const reportedHandle = handleResolution?.reportedHandle ?? pending?.handle ?? null;
-    if (!isDeviceExecutionEnforced()) {
-      const observeOnlyPending = this.observeOnlyPendingBatches.get(batchId);
-      if (observeOnlyPending?.deviceId && observeOnlyPending.deviceId !== conn.deviceId) {
-        await deviceExecutionArbiter.recordRejectedEgress({
-          deviceId: conn.deviceId,
-          operationId: batchId,
-          wireType: "BATCH_RESULT",
-          actor: "direct_ws.observe_only",
-          reason: "batch_result_device_mismatch",
-          metadata: { expectedDeviceId: observeOnlyPending.deviceId },
-        });
-        this._send(conn.ws, { type: "ACK", ref: batchId });
-        return;
-      }
-      await deviceExecutionArbiter.observeTerminal({
-        deviceId: conn.deviceId,
-        rootKind: "batch",
-        externalId: batchId,
-        terminalSelector: {
-          targetTerminal: true,
-          targetRetryable: !completed,
-          targetAdministrative: false,
-        },
-        actor: "direct_ws.observe_only",
-        reason: msg.error as string | undefined,
-        metadata: { authorityMode: "observe_only", totalDurationMs, resultCount: results.length },
-      });
-      if (observeOnlyPending) {
-        clearTimeout(observeOnlyPending.timer);
-        this.observeOnlyPendingBatches.delete(batchId);
-        observeOnlyPending.resolve({
-          batchId,
-          workflowId: msg.workflowId as string ?? "",
-          completed,
-          partial,
-          timedOut,
-          results,
-          executedAt: msg.executedAt as string ?? new Date().toISOString(),
-          totalDurationMs,
-          error: msg.error as string | undefined,
-        });
-      }
-      this._send(conn.ws, { type: "ACK", ref: batchId });
-      return;
-    }
-    if (!pending || !handleResolution?.accepted || !reportedHandle || reportedHandle.deviceId !== conn.deviceId) {
-      await deviceExecutionArbiter.recordRejectedEgress({
-        deviceId: conn.deviceId,
-        operationId: batchId,
-        wireType: "BATCH_RESULT",
-        actor: "direct_ws",
-        reason: !pending ? "batch_result_without_waiter" : handleResolution?.reason ?? "batch_result_handle_mismatch",
-        metadata: { reportedHandle: msg.pnqHandle ?? null, handleCompatibility: handleResolution?.compatibility ?? null },
-      });
-      return;
-    }
-    const terminal = await deviceExecutionArbiter.observeTerminal({
-      deviceId: conn.deviceId,
-      handle: reportedHandle,
-      terminalSelector: {
-        targetTerminal: true,
-        targetRetryable: !completed,
-        targetAdministrative: false,
-      },
-      actor: "direct_ws",
-      reason: msg.error as string | undefined,
-      metadata: { totalDurationMs, resultCount: results.length, handleCompatibility: handleResolution.compatibility },
-    });
-    if (!(await isDeviceExecutionResultTerminal(terminal))) return;
-
-    clearTimeout(pending.timer);
-    this.pendingBatches.delete(batchId);
-    pending.resolve({
-      batchId,
-      workflowId: msg.workflowId as string ?? "",
-      completed,
-      partial,
-      timedOut,
-      results,
-      executedAt: msg.executedAt as string ?? new Date().toISOString(),
-      totalDurationMs,
-      error: msg.error as string | undefined,
-    });
-
-    // ACK
-    this._send(conn.ws, { type: "ACK", ref: batchId });
   }
 
   private async _handleHeartbeat(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {

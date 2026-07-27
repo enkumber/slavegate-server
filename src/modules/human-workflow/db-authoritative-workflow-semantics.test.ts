@@ -59,6 +59,14 @@ describe("DB-authoritative workflow semantics", () => {
     ]) {
       expect(sourceFiles(retiredPath, [".ts", ".json", ".skill", ".md"]), retiredPath).toHaveLength(0);
     }
+    expect(
+      sourceFiles(path.join(serverRoot, "modules", "workflows"), [".json", ".yaml", ".yml"]),
+      "workflow definitions belong in PostgreSQL, never in the release filesystem",
+    ).toHaveLength(0);
+    expect(
+      sourceFiles(serverRoot, [".backup"]),
+      "tracked production backups can bypass semantic audits",
+    ).toHaveLength(0);
   });
 
   it("does not keep product catalogs or lexical intent policy in production code", () => {

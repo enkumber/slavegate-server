@@ -235,10 +235,9 @@ function assertHumanWorkflowOutputContract(template: WorkflowTemplate): void {
 
 function inferGeneratedWorkflowAppId(template: WorkflowTemplate): string | null {
   for (const step of template.steps) {
-    if (step.type === "action" && step.action === "open_app") {
-      const packageName = step.params?.packageName;
-      if (typeof packageName === "string" && packageName.trim().length > 0) return packageName;
-    }
+    if (step.type !== "action") continue;
+    const packageName = step.params?.packageName;
+    if (typeof packageName === "string" && packageName.trim().length > 0) return packageName;
   }
   return null;
 }

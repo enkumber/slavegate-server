@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   output       JSONB,
   error        TEXT,
   duration_ms  INTEGER,
-  timeout_ms   INTEGER     NOT NULL DEFAULT 30000,
+  timeout_ms   INTEGER     NOT NULL,
   requires_confirmation BOOLEAN NOT NULL DEFAULT FALSE,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   started_at   TIMESTAMPTZ,
@@ -217,7 +217,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   device_id             UUID        REFERENCES devices(id) ON DELETE SET NULL,
   -- No proxy_config — WiFi with native IP per physical location (v3)
   status                TEXT        NOT NULL,
-  simulated_timezone    TEXT        NOT NULL DEFAULT 'Europe/Bucharest',
+  simulated_timezone    TEXT        NOT NULL,
   session_count         INT         NOT NULL DEFAULT 0,
   total_actions         INT         NOT NULL DEFAULT 0,
   last_active_at        TIMESTAMPTZ,
@@ -273,27 +273,24 @@ CREATE INDEX IF NOT EXISTS idx_vlm_usage_device ON vlm_usage_log(device_id, crea
 -- ─── Vision Config (server-side runtime config for VLM provider — Phase 3) ───
 -- Single row: id='default'. Updated via dashboard or API.
 CREATE TABLE IF NOT EXISTS vision_config (
-  id                TEXT        PRIMARY KEY DEFAULT 'default',
-  provider          TEXT        NOT NULL DEFAULT 'google',
-  model             TEXT        NOT NULL DEFAULT 'gemini-2.0-flash',
-  endpoint          TEXT        NOT NULL DEFAULT 'https://generativelanguage.googleapis.com/v1beta',
-  api_key_ref       TEXT        NOT NULL DEFAULT 'vault:vision/google_api_key',
-  max_tokens        INT         NOT NULL DEFAULT 512,
-  temperature       REAL        NOT NULL DEFAULT 0.1,
-  timeout_ms        INT         NOT NULL DEFAULT 10000,
+  id                TEXT        PRIMARY KEY,
+  provider          TEXT        NOT NULL,
+  model             TEXT        NOT NULL,
+  endpoint          TEXT        NOT NULL,
+  api_key_ref       TEXT        NOT NULL,
+  max_tokens        INT         NOT NULL,
+  temperature       REAL        NOT NULL,
+  timeout_ms        INT         NOT NULL,
   fallback_provider TEXT,
   fallback_endpoint TEXT,
   fallback_model    TEXT,
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Seed default vision config (upsert — safe to run multiple times)
-INSERT INTO vision_config (id) VALUES ('default') ON CONFLICT (id) DO NOTHING;
-
 -- ─── Model Configs (server-side LLM/VLM model and credential config) ─────────
 -- Secrets are intentionally stored server-side only and redacted by API handlers.
 CREATE TABLE IF NOT EXISTS model_configs (
-  role                TEXT PRIMARY KEY CHECK (role IN ('decision_llm', 'vision_vlm')),
+  role                TEXT PRIMARY KEY,
   provider            TEXT NOT NULL,
   endpoint            TEXT,
   model               TEXT NOT NULL,
@@ -322,12 +319,6 @@ CREATE TRIGGER trg_model_configs_updated_at
 BEFORE UPDATE ON model_configs
 FOR EACH ROW EXECUTE FUNCTION set_model_configs_updated_at();
 
-INSERT INTO model_configs (role, provider, endpoint, model, enabled)
-VALUES
-  ('decision_llm', 'openai_compatible', NULL, 'configure-me', FALSE),
-  ('vision_vlm', 'openai_compatible', NULL, 'configure-me', FALSE)
-ON CONFLICT (role) DO NOTHING;
-
 -- ─── Cleanup job placeholder ──────────────────────────────────────────────────
 -- SELECT delete_expired_registration_codes() → DELETE WHERE expires_at < NOW() AND NOT used
 -- SELECT delete_expired_revoked_tokens()    → DELETE WHERE expires_at < NOW()
@@ -343,10 +334,10 @@ CREATE TABLE IF NOT EXISTS coordinate_cache (
   app_version       TEXT        NOT NULL,
   resolution        TEXT        NOT NULL,
   density           REAL,
-  device_class      TEXT        NOT NULL DEFAULT 'phone',
-  orientation       TEXT        NOT NULL DEFAULT 'portrait',
-  font_scale_bucket TEXT        NOT NULL DEFAULT 'normal',
-  screen_type_key   TEXT        NOT NULL DEFAULT 'unknown',
+  device_class      TEXT        NOT NULL,
+  orientation       TEXT        NOT NULL,
+  font_scale_bucket TEXT        NOT NULL,
+  screen_type_key   TEXT        NOT NULL,
   element_name      TEXT        NOT NULL,
   x                 REAL        NOT NULL,
   y                 REAL        NOT NULL,
@@ -355,7 +346,7 @@ CREATE TABLE IF NOT EXISTS coordinate_cache (
   success_count     INT         NOT NULL DEFAULT 1,
   fail_count        INT         NOT NULL DEFAULT 0,
   confidence        REAL        NOT NULL DEFAULT 1.0,
-  learn_method      TEXT        NOT NULL DEFAULT 'ui_tree',
+  learn_method      TEXT        NOT NULL,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_used_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_success_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -363,7 +354,7 @@ CREATE TABLE IF NOT EXISTS coordinate_cache (
 );
 
 CREATE INDEX IF NOT EXISTS idx_coord_lookup     ON coordinate_cache(app, app_version, resolution, screen_type_key, element_name);
-CREATE INDEX IF NOT EXISTS idx_coord_confidence ON coordinate_cache(confidence) WHERE confidence >= 0.7;
+CREATE INDEX IF NOT EXISTS idx_coord_confidence ON coordinate_cache(confidence);
 CREATE INDEX IF NOT EXISTS idx_coord_last_used  ON coordinate_cache(last_used_at);
 
 CREATE TABLE IF NOT EXISTS navigation_logs (
@@ -425,7 +416,7 @@ CREATE INDEX IF NOT EXISTS idx_wf_screen_verify_created  ON workflow_screen_veri
 CREATE TABLE IF NOT EXISTS api_tokens (
   id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   token_hash  TEXT        NOT NULL UNIQUE,  -- SHA256(raw_token)
-  purpose     TEXT        NOT NULL CHECK (purpose IN ('openclaw_agent', 'admin', 'monitoring')),
+  purpose     TEXT        NOT NULL,
   expires_at  TIMESTAMPTZ NOT NULL,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   revoked_at  TIMESTAMPTZ
@@ -441,6 +432,3 @@ CREATE TABLE IF NOT EXISTS system_config (
   value      JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
--- Seed: kill switch starts inactive
-INSERT INTO system_config (key, value) VALUES ('kill_switch_active', 'false')
-  ON CONFLICT (key) DO NOTHING;

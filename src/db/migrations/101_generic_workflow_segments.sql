@@ -138,7 +138,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_segment_coverage_scope
 
 CREATE TABLE IF NOT EXISTS workflow_control_plane_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  entity_type TEXT NOT NULL CHECK (entity_type IN ('segment', 'composition')),
+  entity_type TEXT NOT NULL,
   entity_key TEXT NOT NULL,
   entity_version TEXT NOT NULL,
   action TEXT NOT NULL,

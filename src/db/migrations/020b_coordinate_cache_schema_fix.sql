@@ -6,7 +6,7 @@
 ALTER TABLE coordinate_cache
   ADD COLUMN IF NOT EXISTS last_used_at  TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ DEFAULT NOW(),
-  ADD COLUMN IF NOT EXISTS screen_type_key TEXT NOT NULL DEFAULT 'unknown';
+  ADD COLUMN IF NOT EXISTS screen_type_key TEXT;
 
 -- Sync legacy columns only when upgrading a schema that actually has them.
 -- Fresh installations already use the canonical *_at column names.

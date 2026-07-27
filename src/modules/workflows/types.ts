@@ -8,17 +8,8 @@
 
 // ─── Verification strategies ──────────────────────────────────────────────────
 
-export type VerificationStrategy =
-  | "local_only"              // L1 (UI tree diff) only
-  | "local_with_screenshot"   // L1 + L2 (pixel diff)
-  | "full_cascade"            // L1 + L2 + L3 (VLM) — Phase 3
-  | "vlm_required";           // L3 direct — Phase 3
-
-// Phase 2: full_cascade and vlm_required return VERIFICATION_NOT_AVAILABLE error
-export const PHASE2_UNSUPPORTED_STRATEGIES: VerificationStrategy[] = [
-  "full_cascade",
-  "vlm_required",
-];
+/** Verification policy key supplied by PostgreSQL. */
+export type VerificationStrategy = string;
 
 // ─── Step types ───────────────────────────────────────────────────────────────
 
@@ -36,6 +27,10 @@ export interface ActionStep {
   type:      "action";
   id?:       string;   // Optional step ID for checkpoint reference
   action:    string;   // Job type: "tap", "scroll", "screenshot", etc.
+  /** Native engine slot selected by the PostgreSQL action policy. */
+  nativeOpcode?: number;
+  /** PostgreSQL policy flag controlling mutation verification. */
+  observationOnly?: boolean;
   /** Target element identifier — resolved by platform parser or A11y service */
   target?:   string;
   /** Coordinates — used if target is not set (raw tap) */
@@ -52,8 +47,8 @@ export interface ActionStep {
   delayAfterMs?: number;
   /** Persist the primitive output in workflow variables under this key. */
   saveOutputAs?: string;
-  /** Data-driven failure behavior after retries are exhausted. */
-  failureMode?: "abort" | "continue" | "run_branch" | "run_branch_then_retry";
+  /** Append-only engine opcode for behavior after retries are exhausted. */
+  failureOpcode?: number;
   /** Recovery branch shipped with the workflow. */
   onFailureSteps?: WorkflowStep[];
   /** Timeout for this step in ms (overrides workflow default) */
@@ -74,10 +69,7 @@ export interface ActionStep {
    */
   screenConfidenceThreshold?: number;
   
-  /**
-   * Retry config for screen mismatch.
-   * Default: { maxRetries: 2, delayMs: 500, action: 'retry_step' }
-   */
+  /** Retry config for screen mismatch, authored with the workflow policy. */
   screenMismatchPolicy?: ScreenMismatchPolicy;
   
   /**
@@ -98,7 +90,7 @@ export interface ScreenMismatchPolicy {
   /** Delay before retry in ms */
   delayMs: number;
   /** What to do on mismatch */
-  action: 'retry_step' | 'abort' | 'continue_with_warning';
+  action: string;
 }
 
 // ─── Wait steps ───────────────────────────────────────────────────────────────
@@ -106,7 +98,8 @@ export interface ScreenMismatchPolicy {
 export interface FixedDurationSpec {
   min:          number;
   max:          number;
-  distribution: "uniform" | "lognormal" | "normal";
+  distribution: string;
+  distributionOpcode?: number;
   mean?:        number;  // For lognormal/normal
 }
 
@@ -127,9 +120,12 @@ export interface WaitStep {
 
 export interface WaitUntilSpec {
   action: string;
+  nativeOpcode?: number;
+  observationOnly?: boolean;
   params?: Record<string, unknown>;
   outputPath?: string;
-  operator: "truthy" | "falsy" | "equals" | "not_equals" | "contains" | "contains_ci" | "not_contains" | "not_contains_ci" | "exists" | "missing";
+  operator: string;
+  operatorOpcode?: number;
   expected?: unknown;
   pollIntervalMs?: number;
   timeoutMs: number;
@@ -141,6 +137,7 @@ export interface ConditionStep {
   type:        "condition";
   id?:         string;
   check:       string;
+  checkOpcode?: number;
   /** Generic expression evaluated against workflow variables on the device. */
   expression?: string;
   probability?: number;  // For random_probability: 0.0-1.0
@@ -153,7 +150,8 @@ export interface ConditionStep {
 export interface LoopCountSpec {
   min:          number;
   max:          number;
-  distribution: "uniform" | "normal";
+  distribution: string;
+  distributionOpcode?: number;
 }
 
 export interface LoopStep {
@@ -162,7 +160,7 @@ export interface LoopStep {
   count:    LoopCountSpec;
   steps:    WorkflowStep[];
   /** Break condition — exit early if met */
-  breakOn?: "session_time_exceeded" | "engagement_limit_reached";
+  breakOn?: string;
   /** Generic expression evaluated before each iteration. */
   breakWhen?: string;
 }
@@ -237,6 +235,17 @@ export interface WorkflowRecoveryPolicy {
   requireStateVerification?: boolean;
   /** Persist failure/recovery examples for future playbooks. */
   learnFromFailure?: boolean;
+  /** Planner instruction and opaque decision keys authored in PostgreSQL. */
+  plannerInstruction?: string;
+  executeDecisionKey?: string;
+  retryDecisionKey?: string;
+  abortDecisionKey?: string;
+  /** Observation primitive and planner runtime settings authored in PostgreSQL. */
+  probeActionKey?: string;
+  probeTimeoutMs?: number;
+  plannerSystem?: string;
+  plannerMaxTokens?: number;
+  plannerTimeoutMs?: number;
 }
 
 export interface WorkflowOutputSchema {
@@ -248,16 +257,7 @@ export interface WorkflowOutputSchemaProperty {
   type: "boolean" | "string" | "number" | "object" | "array" | "null";
 }
 
-export type WorkflowPostconditionOperator =
-  | "equals"
-  | "not_equals"
-  | "truthy"
-  | "falsy"
-  | "exists"
-  | "missing"
-  | "contains"
-  | "matches_regex"
-  | "uri_equivalent";
+export type WorkflowPostconditionOperator = string;
 
 export interface WorkflowPostconditionValue {
   path?: string;
@@ -267,6 +267,7 @@ export interface WorkflowPostconditionValue {
 export interface WorkflowPostconditionPredicate {
   left: WorkflowPostconditionValue;
   operator: WorkflowPostconditionOperator;
+  operatorOpcode?: number;
   right?: WorkflowPostconditionValue;
   options?: {
     acceptedRedirects?: string[];
@@ -280,14 +281,7 @@ export interface WorkflowPostconditionContract {
   all: WorkflowPostconditionPredicate[];
 }
 
-export type WorkflowInteractionEffect =
-  | "none"
-  | "observation"
-  | "navigation"
-  | "ui_input"
-  | "business_mutation"
-  | "sensitive"
-  | "destructive";
+export type WorkflowInteractionEffect = string;
 
 export interface WorkflowGoalContractStage {
   id: string;

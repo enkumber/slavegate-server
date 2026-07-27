@@ -1,20 +1,18 @@
 CREATE TABLE IF NOT EXISTS phone_network_incidents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   incident_key TEXT NOT NULL UNIQUE,
-  source_type TEXT NOT NULL CHECK (source_type IN ('task', 'workflow', 'audit')),
+  source_type TEXT NOT NULL,
   source_id TEXT NOT NULL,
   task_id UUID NULL REFERENCES tasks(id) ON DELETE SET NULL,
   workflow_id TEXT NULL,
   device_id UUID NULL REFERENCES devices(id) ON DELETE SET NULL,
-  category TEXT NOT NULL DEFAULT 'execution'
-    CHECK (category IN ('execution', 'security', 'integrity', 'availability', 'account', 'unknown')),
-  severity TEXT NOT NULL DEFAULT 'medium'
-    CHECK (severity IN ('low', 'medium', 'high', 'critical')),
+  category TEXT NOT NULL,
+  severity TEXT NOT NULL,
   status TEXT NOT NULL,
-  assigned_agent TEXT NOT NULL DEFAULT 'kraken',
+  assigned_agent TEXT NOT NULL,
   error_code TEXT NULL,
   summary TEXT NOT NULL,
-  recovery_exhausted BOOLEAN NOT NULL DEFAULT TRUE,
+  recovery_exhausted BOOLEAN NOT NULL,
   recovery_attempts INT NOT NULL DEFAULT 0,
   telemetry JSONB NOT NULL DEFAULT '{}'::jsonb,
   occurrence_count INT NOT NULL DEFAULT 1,
@@ -38,8 +36,8 @@ CREATE TABLE IF NOT EXISTS phone_network_incident_events (
 CREATE TABLE IF NOT EXISTS phone_network_audit_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   audit_date DATE NOT NULL,
-  timezone TEXT NOT NULL DEFAULT 'Europe/Bucharest',
-  actor TEXT NOT NULL DEFAULT 'kraken',
+  timezone TEXT NOT NULL,
+  actor TEXT NOT NULL,
   status TEXT NOT NULL,
   window_start TIMESTAMPTZ NOT NULL,
   window_end TIMESTAMPTZ NOT NULL,
@@ -56,7 +54,7 @@ CREATE TABLE IF NOT EXISTS phone_network_audit_findings (
   audit_run_id UUID NOT NULL REFERENCES phone_network_audit_runs(id) ON DELETE CASCADE,
   finding_key TEXT NOT NULL,
   kind TEXT NOT NULL,
-  severity TEXT NOT NULL CHECK (severity IN ('info', 'low', 'medium', 'high', 'critical')),
+  severity TEXT NOT NULL,
   subject_type TEXT NOT NULL,
   subject_id TEXT NULL,
   summary TEXT NOT NULL,
@@ -76,3 +74,11 @@ CREATE INDEX IF NOT EXISTS idx_phone_network_incident_events_incident
   ON phone_network_incident_events(incident_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_phone_network_audit_findings_run
   ON phone_network_audit_findings(audit_run_id, severity, created_at DESC);
+
+ALTER TABLE phone_network_incidents
+  ALTER COLUMN assigned_agent DROP DEFAULT,
+  ALTER COLUMN recovery_exhausted DROP DEFAULT;
+
+ALTER TABLE phone_network_audit_runs
+  ALTER COLUMN timezone DROP DEFAULT,
+  ALTER COLUMN actor DROP DEFAULT;

@@ -31,11 +31,13 @@ const postconditionContract = {
     {
       left: { path: "outputs.navigationResult.launched" },
       operator: "equals" as const,
+      operatorOpcode: 2,
       right: { value: true },
     },
     {
       left: { path: "outputs.observedDestination" },
       operator: "uri_equivalent" as const,
+      operatorOpcode: 11,
       right: { path: "inputs.destination" },
     },
   ],

@@ -80,8 +80,6 @@ export const scalabilityConfig = {
   // ── Workflow Executor ──────────────────────────────────────────────────
   /** Default timeout for JOB_RESULT from device (ms) */
   jobResultTimeout: 300_000, // 5 min
-  /** Default timeout for BATCH_RESULT from device (ms) */
-  batchResultTimeout: 600_000, // 10 min
   /** Timeout for queue.add() — prevents blocking HTTP handler (ms) */
   enqueueTimeout: 5_000,
   /** Timeout for DB reads during cancel checks (ms) */

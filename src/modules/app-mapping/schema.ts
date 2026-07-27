@@ -43,7 +43,7 @@ export interface PageDef {
 }
 
 export interface PageDetection {
-  method: "ui_tree_signature";
+  method: string;
   /** Anchor nodes used for matching (resourceId:xxx, text:yyy, etc.) */
   anchors: string[];
   /** Additional non-mandatory anchors used to improve matching confidence. */
@@ -56,7 +56,7 @@ export interface PageDetection {
 
 export interface ElementDef {
   /** Semantic element type */
-  type: "tab" | "button" | "input" | "toggle" | "fab" | "menu_item" | "icon" | "unknown";
+  type: string;
   /** Normalized bounds (0.0 - 1.0) */
   bounds: { x: number; y: number; w: number; h: number };
   /** Android resource ID (if any) */
@@ -66,13 +66,13 @@ export interface ElementDef {
   /** Content description (accessibility) */
   contentDescription: string;
   /** Selector fields present on the source UI node, for compiler/binding provenance. */
-  selectorProvenance?: Array<"resourceId" | "text" | "contentDescription" | "semanticId">;
+  selectorProvenance?: string[];
   /** Stable semantic-ish ID derived from selector metadata and page context. */
   semanticId?: string;
   /** Whether the element is clickable */
   clickable: boolean;
   /** Target page ID after tapping this element, or "self" if stays on same page, or null if unknown */
-  leadsTo: string | null | "self";
+  leadsTo: string | null;
 }
 
 // ─── Recorder State ──────────────────────────────────────────────────────────
