@@ -413,34 +413,38 @@ export class SegmentBuildJobService {
         [job.deviceId],
       ),
       db.query(
-        `SELECT capability_key, platform, description, aliases, required_terms,
-                forbidden_terms, safety_class, portability_scope, status, metadata
-         FROM workflow_capabilities
+        `SELECT capability.capability_key, capability.platform, capability.description,
+                capability.aliases, capability.required_terms, capability.forbidden_terms,
+                capability.safety_class, capability.portability_scope,
+                capability.status, capability.metadata
+         FROM workflow_capabilities capability
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass('workflow_capabilities')
-          AND binding.lifecycle_key = workflow_capabilities.lifecycle_key
+          AND binding.lifecycle_key = capability.lifecycle_key
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = workflow_capabilities.lifecycle_key
-          AND definition.status = workflow_capabilities.status
+           ON definition.lifecycle_key = capability.lifecycle_key
+          AND definition.status = capability.status
          WHERE definition.dispatchable
-           AND (LOWER(platform) = LOWER($1) OR platform = '*')
-         ORDER BY updated_at DESC
+           AND (LOWER(capability.platform) = LOWER($1) OR capability.platform = '*')
+         ORDER BY capability.updated_at DESC
          LIMIT 100`,
         [job.platform],
       ),
       db.query(
-        `SELECT segment_key, version, platform, lifecycle_status, template,
-                input_schema, output_schema, postcondition_contract, compatibility
-         FROM workflow_segment_versions
+        `SELECT segment.segment_key, segment.version, segment.platform,
+                segment.lifecycle_status, segment.template, segment.input_schema,
+                segment.output_schema, segment.postcondition_contract,
+                segment.compatibility
+         FROM workflow_segment_versions segment
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass('workflow_segment_versions')
-          AND binding.lifecycle_key = workflow_segment_versions.lifecycle_key
+          AND binding.lifecycle_key = segment.lifecycle_key
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = workflow_segment_versions.lifecycle_key
-          AND definition.status = workflow_segment_versions.lifecycle_status
+           ON definition.lifecycle_key = segment.lifecycle_key
+          AND definition.status = segment.lifecycle_status
          WHERE definition.dispatchable
-           AND (LOWER(platform) = LOWER($1) OR platform = '*')
-         ORDER BY segment_key, updated_at DESC
+           AND (LOWER(segment.platform) = LOWER($1) OR segment.platform = '*')
+         ORDER BY segment.segment_key, segment.updated_at DESC
          LIMIT 200`,
         [job.platform],
       ),
@@ -477,17 +481,18 @@ export class SegmentBuildJobService {
         [job.platform],
       ),
       db.query(
-        `SELECT namespace, entry_key, platform, priority, payload
-         FROM runtime_semantic_entries
+        `SELECT semantic.namespace, semantic.entry_key, semantic.platform,
+                semantic.priority, semantic.payload
+         FROM runtime_semantic_entries semantic
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass('runtime_semantic_entries')
-          AND binding.lifecycle_key = runtime_semantic_entries.lifecycle_key
+          AND binding.lifecycle_key = semantic.lifecycle_key
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = runtime_semantic_entries.lifecycle_key
-          AND definition.status = runtime_semantic_entries.status
+           ON definition.lifecycle_key = semantic.lifecycle_key
+          AND definition.status = semantic.status
          WHERE definition.dispatchable
-           AND (LOWER(platform) = LOWER($1) OR platform = '*')
-         ORDER BY namespace, priority DESC, entry_key
+           AND (LOWER(semantic.platform) = LOWER($1) OR semantic.platform = '*')
+         ORDER BY semantic.namespace, semantic.priority DESC, semantic.entry_key
          LIMIT 300`,
         [job.platform],
       ),

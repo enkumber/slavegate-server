@@ -459,4 +459,25 @@ describe("SegmentBuildJobService dispatch", () => {
     expect(state.queries.some((query) => query.includes("friendly_name AS name"))).toBe(true);
     expect(state.queries.some((query) => /\bSELECT id, name, model\b/.test(query))).toBe(false);
   });
+
+  it("qualifies lifecycle-backed context columns across every joined resource", async () => {
+    await new SegmentBuildJobService().context(buildJob().id);
+
+    const capabilityQuery = state.queries.find((query) =>
+      query.includes("FROM workflow_capabilities capability")
+    );
+    const segmentQuery = state.queries.find((query) =>
+      query.includes("FROM workflow_segment_versions segment")
+    );
+    const semanticQuery = state.queries.find((query) =>
+      query.includes("FROM runtime_semantic_entries semantic")
+    );
+
+    expect(capabilityQuery).toContain("capability.status, capability.metadata");
+    expect(capabilityQuery).toContain("ORDER BY capability.updated_at DESC");
+    expect(segmentQuery).toContain("ORDER BY segment.segment_key, segment.updated_at DESC");
+    expect(semanticQuery).toContain(
+      "ORDER BY semantic.namespace, semantic.priority DESC, semantic.entry_key"
+    );
+  });
 });
