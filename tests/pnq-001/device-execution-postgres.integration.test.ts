@@ -645,6 +645,57 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
       .resolves.not.toBeNull();
   });
 
+  it("releases an edge workflow root after restart when the workflow row is terminal", async () => {
+    const workflowId = "00000000-0000-4000-8000-00000000d005";
+    const successorId = "00000000-0000-4000-8000-00000000d006";
+    await insertDevice(pool, DEVICE_A, "pnq-terminal-edge-restart-a");
+    await insertWorkflow(pool, workflowId, DEVICE_A, "running");
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "edge_workflow",
+      externalId: workflowId,
+      requestKey: workflowId,
+    });
+    const permit = await arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: "edge-worker" });
+    expect(permit).not.toBeNull();
+    await arbiter.observeDispatch({
+      deviceId: DEVICE_A,
+      rootKind: "edge_workflow",
+      externalId: workflowId,
+      handle: {
+        rootId: permit!.rootId,
+        deviceId: DEVICE_A,
+        rootKind: "edge_workflow",
+        ownerGeneration: permit!.ownerGeneration,
+        operationKind: "workflow",
+        operationId: workflowId,
+      },
+      sent: true,
+      actor: "edge-transport",
+    });
+    await pool.query(
+      "UPDATE workflows SET status = 'failed', completed_at = NOW(), error = 'edge ack timeout' WHERE id = $1",
+      [workflowId],
+    );
+
+    await expect(arbiter.reconcileInFlightAtStartup()).resolves.toEqual({
+      reconciledRoots: 1,
+      activeAmbiguousRoots: 1,
+    });
+    expect(await stateForExternalId(pool, workflowId)).toBe("reconciling");
+    await expect(arbiter.reconcileTerminalWorkflowRoots()).resolves.toEqual({ reconciledRoots: 1 });
+    expect(await stateForExternalId(pool, workflowId)).toBe("failed");
+
+    await arbiter.observeAdmission({
+      deviceId: DEVICE_A,
+      rootKind: "edge_workflow",
+      externalId: successorId,
+      requestKey: successorId,
+    });
+    await expect(arbiter.claimNextRoot({ deviceId: DEVICE_A, actor: "post-restart-edge-worker" }))
+      .resolves.not.toBeNull();
+  });
+
   it("keeps stale workflow roots blocked when terminal ownership evidence is incomplete or active", async () => {
     const cases = [
       { suffix: "11", workflowStatus: "running", completed: false, mutate: "none" },

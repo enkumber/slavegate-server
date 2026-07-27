@@ -3,6 +3,10 @@ import { workflowService } from "./workflow.service";
 import type { WorkflowStep, WorkflowTemplate } from "./types";
 import { getResourceLifecycleExecutionStatusContract } from "../lifecycle/lifecycle.service";
 import { getWorkflowInterpreterPolicy } from "../dispatcher/dispatcher.service";
+import {
+  deviceExecutionArbiter,
+  isDeviceExecutionResultTerminal,
+} from "../device-execution";
 
 let progressSweepTimer: NodeJS.Timeout | null = null;
 
@@ -76,6 +80,54 @@ export function edgeProgressStaleAfterMs(
   );
 }
 
+async function releaseTimedOutEdgeWorkflowOwnership(input: {
+  workflowId: string;
+  deviceId: string;
+  reason: string;
+  metadata: Record<string, unknown>;
+}): Promise<boolean> {
+  const terminal = await deviceExecutionArbiter.observeTerminal({
+    deviceId: input.deviceId,
+    rootKind: "edge_workflow",
+    externalId: input.workflowId,
+    terminalSelector: {
+      targetTerminal: true,
+      targetRetryable: true,
+      targetAdministrative: false,
+      transitionAutomatic: true,
+      transitionMarkCompleted: true,
+    },
+    actor: "edge_workflow_watchdog",
+    reason: input.reason,
+    metadata: input.metadata,
+  });
+  if (isDeviceExecutionResultTerminal(terminal)) return true;
+
+  // After a server restart PNQ deliberately moves in-flight roots to its
+  // manual reconciliation state before this watchdog runs. The workflow CAS
+  // above is now exact terminal evidence, so reconcile the matching root and
+  // operation through the same database-authoritative repair used at startup.
+  const reconciled = await deviceExecutionArbiter.reconcileTerminalWorkflowRoots({
+    actor: "edge_workflow_watchdog",
+    reason: input.reason,
+    metadata: input.metadata,
+  });
+  return reconciled.reconciledRoots > 0;
+}
+
+async function sendTimedOutEdgeWorkflowCancellation(
+  deviceId: string,
+  workflowId: string,
+): Promise<boolean> {
+  // Load lazily: transport imports this lifecycle module for replay handling.
+  // A static import here would create a circular module initialization path.
+  const { sendWorkflowCancellationControl } = await import("../../transport/transport");
+  return sendWorkflowCancellationControl(deviceId, workflowId).catch((err) => {
+    console.error(`[edge-watchdog] Cancel send failed for ${workflowId}: ${(err as Error).message}`);
+    return false;
+  });
+}
+
 export async function sweepStaleEdgeWorkflows(nowMs = Date.now()): Promise<{ checked: number; failed: number }> {
   const running = await workflowService.listActive(1, 500);
   const lifecycleStatusContract = await getResourceLifecycleExecutionStatusContract("workflows");
@@ -84,14 +136,56 @@ export async function sweepStaleEdgeWorkflows(nowMs = Date.now()): Promise<{ che
   let failed = 0;
 
   for (const workflow of running.items) {
-    if (!workflow.deviceId || !edgeCheckpointAcknowledged(workflow.checkpoint)) continue;
+    if (!workflow.deviceId) continue;
     const checkpointAt = checkpointTimestamp(workflow.checkpoint);
     if (!checkpointAt) continue;
     checked += 1;
+    const ageMs = nowMs - Date.parse(checkpointAt);
+
+    if (!edgeCheckpointAcknowledged(workflow.checkpoint)) {
+      if (workflow.currentStep !== 0 || ageMs <= watchdogPolicy.ackTimeoutMs) continue;
+      const error = `Edge workflow did not acknowledge WORKFLOW_START within ${watchdogPolicy.ackTimeoutMs}ms`;
+      const terminalized = await workflowService.markFailedIfEdgeStartUnacknowledged(
+        workflow.id,
+        error,
+      );
+      if (!terminalized) continue;
+
+      failed += 1;
+      const ownershipReleased = await releaseTimedOutEdgeWorkflowOwnership({
+        workflowId: workflow.id,
+        deviceId: workflow.deviceId,
+        reason: "edge_ack_timeout_recovered",
+        metadata: { checkpointAt, ageMs, timeoutMs: watchdogPolicy.ackTimeoutMs },
+      });
+      const cancelSent = await sendTimedOutEdgeWorkflowCancellation(workflow.deviceId, workflow.id);
+      workflowEvents.publish({
+        source: "workflow_executor",
+        event: "failed",
+        workflowId: workflow.id,
+        deviceId: workflow.deviceId,
+        mode: "edge",
+        status: lifecycleStatusContract.failed,
+        currentStep: workflow.currentStep,
+        error,
+        details: {
+          reason: "edge_ack_timeout_recovered",
+          checkpointAt,
+          ageMs,
+          timeoutMs: watchdogPolicy.ackTimeoutMs,
+          ownershipReleased,
+          cancelSent,
+        },
+      });
+      console.warn(
+        `[edge-watchdog] Recovered unacknowledged workflow ${workflow.id}; ` +
+        `ownershipReleased=${ownershipReleased} cancelSent=${cancelSent}`,
+      );
+      continue;
+    }
 
     const template = workflow.templateId ? await workflowService.getTemplate(workflow.templateId) : null;
     const staleAfterMs = edgeProgressStaleAfterMs(template, workflow.currentStep, watchdogPolicy);
-    const ageMs = nowMs - Date.parse(checkpointAt);
     if (ageMs <= staleAfterMs) continue;
 
     const error = `Edge workflow made no progress for ${ageMs}ms (deadline ${staleAfterMs}ms)`;
@@ -103,17 +197,13 @@ export async function sweepStaleEdgeWorkflows(nowMs = Date.now()): Promise<{ che
     if (!terminalized) continue;
 
     failed += 1;
-    // Cancellation is a control-plane message and may bypass the work queue.
-    // The DB CAS above releases scheduling immediately; the wire cancel clears
-    // the matching local engine run without restarting the phone.
-    // Load lazily: transport imports this lifecycle module for replay handling.
-    // A static import here would create a circular module initialization path.
-    const { sendWorkflowCancellationControl } = await import("../../transport/transport");
-    const cancelSent = await sendWorkflowCancellationControl(workflow.deviceId, workflow.id)
-      .catch((err) => {
-        console.error(`[edge-watchdog] Cancel send failed for ${workflow.id}: ${(err as Error).message}`);
-        return false;
-      });
+    const ownershipReleased = await releaseTimedOutEdgeWorkflowOwnership({
+      workflowId: workflow.id,
+      deviceId: workflow.deviceId,
+      reason: "edge_progress_timeout",
+      metadata: { checkpointAt, ageMs, staleAfterMs },
+    });
+    const cancelSent = await sendTimedOutEdgeWorkflowCancellation(workflow.deviceId, workflow.id);
     workflowEvents.publish({
       source: "workflow_executor",
       event: "failed",
@@ -123,9 +213,19 @@ export async function sweepStaleEdgeWorkflows(nowMs = Date.now()): Promise<{ che
       status: lifecycleStatusContract.failed,
       currentStep: workflow.currentStep,
       error,
-      details: { reason: "edge_progress_timeout", checkpointAt, ageMs, staleAfterMs, cancelSent },
+      details: {
+        reason: "edge_progress_timeout",
+        checkpointAt,
+        ageMs,
+        staleAfterMs,
+        ownershipReleased,
+        cancelSent,
+      },
     });
-    console.warn(`[edge-watchdog] Failed stale workflow ${workflow.id} at step ${workflow.currentStep}; cancelSent=${cancelSent}`);
+    console.warn(
+      `[edge-watchdog] Failed stale workflow ${workflow.id} at step ${workflow.currentStep}; ` +
+      `ownershipReleased=${ownershipReleased} cancelSent=${cancelSent}`,
+    );
   }
 
   return { checked, failed };
@@ -140,9 +240,7 @@ export async function startEdgeWorkflowProgressWatchdog(): Promise<NodeJS.Timeou
     );
   }, policy.progressSweepMs);
   progressSweepTimer.unref?.();
-  void sweepStaleEdgeWorkflows().catch((err) =>
-    console.error(`[edge-watchdog] Startup progress sweep failed: ${(err as Error).message}`),
-  );
+  await sweepStaleEdgeWorkflows();
   return progressSweepTimer;
 }
 
@@ -164,6 +262,13 @@ export async function scheduleEdgeWorkflowAckWatchdog(
         `${timeoutError} within ${policy.ackTimeoutMs}ms`,
       );
       if (!failed) return;
+      const ownershipReleased = await releaseTimedOutEdgeWorkflowOwnership({
+        workflowId,
+        deviceId,
+        reason: "edge_ack_timeout",
+        metadata: { timeoutMs: policy.ackTimeoutMs },
+      });
+      const cancelSent = await sendTimedOutEdgeWorkflowCancellation(deviceId, workflowId);
       workflowEvents.publish({
         source: "workflow_executor",
         event: "failed",
@@ -176,9 +281,14 @@ export async function scheduleEdgeWorkflowAckWatchdog(
         details: {
           reason: "edge_ack_timeout",
           timeoutMs: policy.ackTimeoutMs,
+          ownershipReleased,
+          cancelSent,
         },
       });
-      console.warn(`[${logPrefix}] Edge workflow ${workflowId} on ${deviceId.slice(0, 8)} did not acknowledge start within ${policy.ackTimeoutMs}ms`);
+      console.warn(
+        `[${logPrefix}] Edge workflow ${workflowId} on ${deviceId.slice(0, 8)} did not acknowledge ` +
+        `start within ${policy.ackTimeoutMs}ms; ownershipReleased=${ownershipReleased} cancelSent=${cancelSent}`,
+      );
     } catch (err) {
       console.error(`[${logPrefix}] Edge workflow ack watchdog failed for ${workflowId}: ${(err as Error).message}`);
     }

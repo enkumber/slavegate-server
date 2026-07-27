@@ -113,12 +113,12 @@ async function bootstrap(): Promise<void> {
   );
 
   const terminalWorkflowReconciliation = isDeviceExecutionEnforced()
-    ? await deviceExecutionArbiter.reconcileTerminalServerWorkflowRoots()
+    ? await deviceExecutionArbiter.reconcileTerminalWorkflowRoots()
     : { reconciledRoots: 0 };
   if (terminalWorkflowReconciliation.reconciledRoots > 0) {
     console.warn(
       `[device-execution] reconciled ${terminalWorkflowReconciliation.reconciledRoots} ` +
-      "blocked server workflow root(s) with complete terminal database evidence",
+      "blocked workflow root(s) with complete terminal database evidence",
     );
   }
   const undispatchedWorkflowReconciliation = isDeviceExecutionEnforced()

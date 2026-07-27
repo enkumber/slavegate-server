@@ -43,6 +43,36 @@ describe("operational runtime contract", () => {
     await expect(assertOperationalRuntimeContract(template("press_key"))).rejects.toThrow("disabled");
   });
 
+  it("does not misclassify opaque action parameters as workflow primitives", async () => {
+    const workflow = template();
+    workflow.steps = [{
+      type: "action",
+      id: "open-url",
+      action: "tap",
+      params: {
+        action: "android.intent.action.VIEW",
+        nested: { action: "opaque-application-value" },
+      },
+    }];
+
+    await expect(assertOperationalRuntimeContract(workflow)).resolves.toBeUndefined();
+  });
+
+  it("validates typed primitive slots in nested workflow branches", async () => {
+    const workflow = template();
+    workflow.steps = [{
+      type: "condition",
+      check: "has_target",
+      if_true: [{
+        type: "loop",
+        count: { min: 1, max: 1, distribution: "fixed" },
+        steps: [{ type: "action", action: "press_key" }],
+      }],
+    }];
+
+    await expect(assertOperationalRuntimeContract(workflow)).rejects.toThrow("press_key");
+  });
+
   it("fails closed for legacy workflows without the v2 contract", async () => {
     const legacy = { ...template(), runtimeContract: undefined };
     await expect(assertOperationalRuntimeContract(legacy)).rejects.toMatchObject({

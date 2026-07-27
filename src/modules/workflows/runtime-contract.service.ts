@@ -9,16 +9,19 @@ interface RuntimeContractRecord {
   active: boolean;
 }
 
-function collectActions(value: unknown, output: string[] = []): string[] {
-  if (Array.isArray(value)) {
-    for (const item of value) collectActions(item, output);
-    return output;
-  }
-  if (!value || typeof value !== "object") return output;
-
-  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-    if (key === "action" && typeof nested === "string") output.push(nested);
-    else collectActions(nested, output);
+function collectActions(steps: WorkflowStep[], output: string[] = []): string[] {
+  for (const step of steps) {
+    if (step.type === "action") {
+      output.push(step.action);
+      if (step.onFailureSteps) collectActions(step.onFailureSteps, output);
+    } else if (step.type === "wait" && step.until) {
+      output.push(step.until.action);
+    } else if (step.type === "condition") {
+      collectActions(step.if_true, output);
+      if (step.if_false) collectActions(step.if_false, output);
+    } else if (step.type === "loop") {
+      collectActions(step.steps, output);
+    }
   }
   return output;
 }

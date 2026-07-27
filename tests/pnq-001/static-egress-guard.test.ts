@@ -645,7 +645,7 @@ describe("PNQ-001 production egress inventory guard", () => {
   it("classifies pre-restart in-flight roots before terminal evidence cleanup", () => {
     const source = fs.readFileSync(path.join(repoRoot, "src/index.ts"), "utf8");
     const classifyAt = source.indexOf("reconcileInFlightAtStartup()");
-    const terminalCleanupAt = source.indexOf("reconcileTerminalServerWorkflowRoots()");
+    const terminalCleanupAt = source.indexOf("reconcileTerminalWorkflowRoots()");
     const undispatchedCleanupAt = source.indexOf("reconcileUndispatchedTimedOutServerWorkflows()");
 
     expect(classifyAt).toBeGreaterThan(-1);

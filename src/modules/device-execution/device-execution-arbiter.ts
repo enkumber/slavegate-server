@@ -3196,12 +3196,12 @@ export class DeviceExecutionArbiter {
   }
 
   /**
-   * Terminalize blocked/reconciling server-workflow roots only when the
-   * persisted workflow is already terminal and every ownership/work item is
-   * unambiguous. This is deliberately separate from finishServerWorkflowRoot:
-   * the generic finish path must keep ambiguous roots fail-closed.
+   * Terminalize blocked/reconciling workflow roots only when the persisted
+   * workflow is already terminal and every ownership/work item is unambiguous.
+   * This is deliberately separate from normal result admission: ambiguous
+   * roots remain fail-closed until exact database evidence exists.
    */
-  async reconcileTerminalServerWorkflowRoots(input: {
+  async reconcileTerminalWorkflowRoots(input: {
     actor?: string;
     reason?: string;
     metadata?: Record<string, unknown>;
@@ -3226,7 +3226,7 @@ export class DeviceExecutionArbiter {
 	         JOIN lifecycle_state_definitions workflow_state
 	           ON workflow_state.lifecycle_key = workflows.lifecycle_key
 	          AND workflow_state.status = workflows.status
-	         WHERE roots.root_kind = 'server_workflow'
+         WHERE roots.root_kind IN ('server_workflow', 'edge_workflow')
 	           AND lifecycle_state_matches(
                  'device_execution_roots'::regclass,
                  roots.state,
@@ -3260,11 +3260,11 @@ export class DeviceExecutionArbiter {
           JOIN device_execution_operations root_operation
             ON root_operation.root_id = roots.id
            AND root_operation.device_id = roots.device_id
-           AND root_operation.root_kind = 'server_workflow'
+           AND root_operation.root_kind = roots.root_kind
            AND root_operation.operation_kind = 'workflow'
            AND root_operation.operation_id = roots.external_id
            AND root_operation.owner_generation = roots.owner_generation
-          WHERE roots.root_kind = 'server_workflow'
+          WHERE roots.root_kind IN ('server_workflow', 'edge_workflow')
             AND lifecycle_state_matches(
                   'device_execution_roots'::regclass,
                   roots.state,
@@ -3380,6 +3380,14 @@ export class DeviceExecutionArbiter {
 
       return { reconciledRoots: reconciled.rowCount ?? reconciled.rows.length };
     });
+  }
+
+  async reconcileTerminalServerWorkflowRoots(input: {
+    actor?: string;
+    reason?: string;
+    metadata?: Record<string, unknown>;
+  } = {}): Promise<{ reconciledRoots: number }> {
+    return this.reconcileTerminalWorkflowRoots(input);
   }
 
   async reconcileInFlightAtStartup(input: {

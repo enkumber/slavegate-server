@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   publish: vi.fn(),
   getWorkflowInterpreterPolicy: vi.fn(),
+  observeTerminal: vi.fn(),
+  reconcileTerminalWorkflowRoots: vi.fn(),
 }));
 
 vi.mock("./workflow.service", () => ({
@@ -45,6 +47,15 @@ vi.mock("../dispatcher/dispatcher.service", () => ({
   getWorkflowInterpreterPolicy: mocks.getWorkflowInterpreterPolicy,
 }));
 
+vi.mock("../device-execution", () => ({
+  deviceExecutionArbiter: {
+    observeTerminal: mocks.observeTerminal,
+    reconcileTerminalWorkflowRoots: mocks.reconcileTerminalWorkflowRoots,
+  },
+  isDeviceExecutionResultTerminal: (result: { transitionApplied?: boolean }) =>
+    result.transitionApplied === true,
+}));
+
 const WORKFLOW_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_ID = "22222222-2222-4222-8222-222222222222";
 
@@ -60,6 +71,8 @@ describe("replayed edge workflow lifecycle", () => {
     mocks.listActive.mockResolvedValue({ items: [], total: 0 });
     mocks.getTemplate.mockResolvedValue(null);
     mocks.sendWorkflowCancellationControl.mockResolvedValue(true);
+    mocks.observeTerminal.mockResolvedValue({ decision: "terminal", transitionApplied: true });
+    mocks.reconcileTerminalWorkflowRoots.mockResolvedValue({ reconciledRoots: 0 });
     mocks.getWorkflowInterpreterPolicy.mockResolvedValue({
       enginePolicy: {
         ackTimeoutMs: 5,
@@ -125,6 +138,76 @@ describe("replayed edge workflow lifecycle", () => {
     expect(mocks.sendWorkflowCancellationControl).not.toHaveBeenCalled();
   });
 
+  it("recovers an unacknowledged workflow left running across a server restart", async () => {
+    const checkpointAt = "2026-07-22T12:00:00.000Z";
+    mocks.listActive.mockResolvedValue({
+      items: [{
+        id: WORKFLOW_ID,
+        deviceId: DEVICE_ID,
+        templateId: "template-1",
+        status: "running",
+        currentStep: 0,
+        checkpoint: { checkpointAt, stepIndex: 0, variables: {} },
+      }],
+      total: 1,
+    });
+    mocks.observeTerminal.mockResolvedValue({
+      decision: "rejected",
+      transitionApplied: false,
+      reason: "unconfigured_terminal_state",
+    });
+    mocks.reconcileTerminalWorkflowRoots.mockResolvedValue({ reconciledRoots: 1 });
+    const { sweepStaleEdgeWorkflows } = await import("./edge-workflow-lifecycle.service");
+
+    await expect(sweepStaleEdgeWorkflows(Date.parse(checkpointAt) + 6)).resolves.toEqual({
+      checked: 1,
+      failed: 1,
+    });
+
+    expect(mocks.markFailedIfEdgeStartUnacknowledged).toHaveBeenCalledWith(
+      WORKFLOW_ID,
+      expect.stringContaining("did not acknowledge WORKFLOW_START"),
+    );
+    expect(mocks.reconcileTerminalWorkflowRoots).toHaveBeenCalledWith(expect.objectContaining({
+      reason: "edge_ack_timeout_recovered",
+    }));
+    expect(mocks.sendWorkflowCancellationControl).toHaveBeenCalledWith(DEVICE_ID, WORKFLOW_ID);
+    expect(mocks.publish).toHaveBeenCalledWith(expect.objectContaining({
+      event: "failed",
+      workflowId: WORKFLOW_ID,
+      details: expect.objectContaining({
+        reason: "edge_ack_timeout_recovered",
+        ownershipReleased: true,
+        cancelSent: true,
+      }),
+    }));
+  });
+
+  it("leaves a fresh unacknowledged workflow available for its live ACK timer", async () => {
+    const checkpointAt = "2026-07-22T12:00:00.000Z";
+    mocks.listActive.mockResolvedValue({
+      items: [{
+        id: WORKFLOW_ID,
+        deviceId: DEVICE_ID,
+        templateId: "template-1",
+        status: "running",
+        currentStep: 0,
+        checkpoint: { checkpointAt, stepIndex: 0, variables: {} },
+      }],
+      total: 1,
+    });
+    const { sweepStaleEdgeWorkflows } = await import("./edge-workflow-lifecycle.service");
+
+    await expect(sweepStaleEdgeWorkflows(Date.parse(checkpointAt) + 4)).resolves.toEqual({
+      checked: 1,
+      failed: 0,
+    });
+
+    expect(mocks.markFailedIfEdgeStartUnacknowledged).not.toHaveBeenCalled();
+    expect(mocks.observeTerminal).not.toHaveBeenCalled();
+    expect(mocks.sendWorkflowCancellationControl).not.toHaveBeenCalled();
+  });
+
   afterEach(() => {
     delete process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS;
     vi.useRealTimers();
@@ -166,6 +249,12 @@ describe("replayed edge workflow lifecycle", () => {
       WORKFLOW_ID,
       expect.stringContaining("did not acknowledge WORKFLOW_START"),
     );
+    expect(mocks.observeTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      deviceId: DEVICE_ID,
+      rootKind: "edge_workflow",
+      externalId: WORKFLOW_ID,
+    }));
+    expect(mocks.sendWorkflowCancellationControl).toHaveBeenCalledWith(DEVICE_ID, WORKFLOW_ID);
   });
 
   it("does not fail a replay after an edge checkpoint acknowledges the wire send", async () => {
