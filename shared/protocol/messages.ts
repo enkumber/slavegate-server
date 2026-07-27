@@ -255,8 +255,18 @@ export interface JobDispatchPayload {
   observationOnly?: boolean;
   /** Numeric verification primitive selected by PostgreSQL. */
   verificationOpcode: number;
+  /** Lifecycle status labels resolved from PostgreSQL for this job resource. */
+  resultStatuses: {
+    active: string;
+    succeeded: string;
+    failed: string;
+  };
+  /** Verification cascade timing resolved from PostgreSQL runtime policy. */
+  l1TimeoutMs: number;
+  l2SettleMs: number;
+  verificationStrategy: string;
   params: JobParams;
-  timeoutMs?: number;
+  timeoutMs: number;
   /** True if job requires root — device can use for additional safety checks */
   requiresRoot?: boolean;
 }

@@ -150,7 +150,16 @@ export class WebSocketGateway {
       type: "JOB",
       jobId: payload.jobId,
       jobType: payload.type,
+      nativeOpcode: payload.nativeOpcode,
+      observationOnly: payload.observationOnly === true,
+      verificationOpcode: payload.verificationOpcode,
+      resultStatuses: payload.resultStatuses,
+      verificationStrategy: payload.verificationStrategy,
+      l1TimeoutMs: payload.l1TimeoutMs,
+      l2SettleMs: payload.l2SettleMs,
       params: payload.params,
+      timeoutMs: payload.timeoutMs,
+      requiresRoot: payload.requiresRoot,
     });
     console.log(`[ws-gateway] sendJob: device=${deviceId.slice(0,8)} jobId=${payload.jobId?.slice(0,8)} type=${payload.type}`);
     return true;

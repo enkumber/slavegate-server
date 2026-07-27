@@ -190,6 +190,10 @@ describe("workflow BullMQ retry semantics", () => {
         nativeOpcode: 0,
         observationOnly: false,
         verificationOpcode: 0,
+        resultStatuses: { active: "running", succeeded: "completed", failed: "failed" },
+        verificationStrategy: "local_only",
+        l1TimeoutMs: 1,
+        l2SettleMs: 1,
         executionPolicy: {},
         params: input.params,
       }));

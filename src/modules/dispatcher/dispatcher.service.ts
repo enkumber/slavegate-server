@@ -167,6 +167,7 @@ export async function getWorkflowInterpreterPolicy(): Promise<Record<string, unk
 export async function hydrateWorkflowNativePolicies<T extends Record<string, unknown>>(template: T): Promise<T> {
   const definitions = await listJobActionPolicyDefinitions();
   const executionStates = await getResourceLifecycleExecutionStatusContract("workflows");
+  const jobExecutionStates = await getResourceLifecycleExecutionStatusContract("jobs");
   const interpreterPolicy = await getWorkflowInterpreterPolicy();
   const runtimeDefaults = interpreterPolicy.runtimeDefaults;
   if (!runtimeDefaults || typeof runtimeDefaults !== "object" || Array.isArray(runtimeDefaults)) {
@@ -226,6 +227,23 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
     const policy = policies.get(actionKey);
     if (!policy) throw new Error(`PostgreSQL job action policy is missing for edge action '${actionKey}'`);
     if (!policy.allowed) throw new Error(`PostgreSQL job action policy blocks edge action '${actionKey}'`);
+    const executionPolicy = policy.executionPolicy ?? {};
+    const executionString = (key: string): string => {
+      const value = typeof source[key] === "string" && String(source[key]).trim()
+        ? source[key]
+        : executionPolicy[key];
+      if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`PostgreSQL job action execution policy is missing '${key}' for edge action '${actionKey}'`);
+      }
+      return value.trim();
+    };
+    const executionNumber = (key: string): number => {
+      const value = typeof source[key] === "number" ? source[key] : executionPolicy[key];
+      if (!Number.isSafeInteger(value) || Number(value) < 0) {
+        throw new Error(`PostgreSQL job action execution policy is missing '${key}' for edge action '${actionKey}'`);
+      }
+      return Number(value);
+    };
     const failureMode = typeof source.failureMode === "string" ? source.failureMode.trim() : "";
     const verificationMode = typeof source.verification === "string" && source.verification.trim()
       ? source.verification.trim()
@@ -262,6 +280,9 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
       nativeOpcode: policy.nativeOpcode,
       observationOnly: policy.observationOnly,
       verificationOpcode: opcodeFrom("verificationOpcodes", verificationMode),
+      verificationStrategy: executionString("verificationStrategy"),
+      l1TimeoutMs: executionNumber("l1TimeoutMs"),
+      l2SettleMs: executionNumber("l2SettleMs"),
       ...(source.type === "action"
         && source.failureOpcode === undefined
         ? {
@@ -305,6 +326,7 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
       plannerTimeoutMs: sourceRecovery.plannerTimeoutMs ?? runtimeDefault("recoveryPlannerTimeoutMs"),
     },
     executionStates,
+    jobExecutionStates,
     enginePolicy: interpreterPolicy.enginePolicy,
   };
 }
@@ -487,6 +509,10 @@ export class DispatcherService {
     nativeOpcode: number;
     observationOnly: boolean;
     verificationOpcode: number;
+    resultStatuses: { active: string; succeeded: string; failed: string };
+    verificationStrategy: string;
+    l1TimeoutMs: number;
+    l2SettleMs: number;
     executionPolicy: Record<string, unknown>;
     params: JobParams;
   }> {
@@ -500,6 +526,10 @@ export class DispatcherService {
     nativeOpcode: number;
     observationOnly: boolean;
     verificationOpcode: number;
+    resultStatuses: { active: string; succeeded: string; failed: string };
+    verificationStrategy: string;
+    l1TimeoutMs: number;
+    l2SettleMs: number;
     executionPolicy: Record<string, unknown>;
     params: JobParams;
   }> {
@@ -516,6 +546,10 @@ export class DispatcherService {
     nativeOpcode: number;
     observationOnly: boolean;
     verificationOpcode: number;
+    resultStatuses: { active: string; succeeded: string; failed: string };
+    verificationStrategy: string;
+    l1TimeoutMs: number;
+    l2SettleMs: number;
     executionPolicy: Record<string, unknown>;
     params: JobParams;
   }> {
@@ -544,6 +578,21 @@ export class DispatcherService {
       },
       actionPolicy.parameterTransforms,
     ) as JobParams;
+    const executionPolicy = actionPolicy.executionPolicy;
+    const requiredNumberPolicy = (key: string): number => {
+      const value = executionPolicy[key];
+      if (!Number.isFinite(value) || Number(value) < 0) {
+        throw new Error(`PostgreSQL job execution policy is missing numeric '${key}'`);
+      }
+      return Number(value);
+    };
+    const verificationStrategy = typeof req.verificationStrategy === "string" && req.verificationStrategy.trim()
+      ? req.verificationStrategy.trim()
+      : typeof executionPolicy.verificationStrategy === "string" && executionPolicy.verificationStrategy.trim()
+        ? executionPolicy.verificationStrategy.trim()
+        : (() => { throw new Error("PostgreSQL job execution policy is missing verificationStrategy"); })();
+    const l1TimeoutMs = req.l1TimeoutMs ?? requiredNumberPolicy("l1TimeoutMs");
+    const l2SettleMs = req.l2SettleMs ?? requiredNumberPolicy("l2SettleMs");
 
     // 3. Calculate timeout from the PostgreSQL action policy. The engine does
     // not branch on action names; policy may size a timeout from any string or
@@ -561,6 +610,7 @@ export class DispatcherService {
     }
     
     const timeoutMs = skipMaxClamp ? calculatedTimeout : Math.min(calculatedTimeout, MAX_TIMEOUT_MS);
+    const resultStatuses = await getResourceLifecycleExecutionStatusContract("jobs");
 
     // 4. Persist job to DB
     const db = getDb();
@@ -741,7 +791,15 @@ export class DispatcherService {
       nativeOpcode: actionPolicy.nativeOpcode,
       observationOnly: actionPolicy.observationOnly,
       verificationOpcode: actionPolicy.verificationOpcode,
-      executionPolicy: actionPolicy.executionPolicy,
+      resultStatuses: {
+        active: resultStatuses.active,
+        succeeded: resultStatuses.succeeded,
+        failed: resultStatuses.failed,
+      },
+      verificationStrategy,
+      l1TimeoutMs,
+      l2SettleMs,
+      executionPolicy,
       params: resolvedParams,
     };
   }

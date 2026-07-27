@@ -9,6 +9,7 @@ await client.connect();
 
 const workflowLifecycle = "gate_workflow_lifecycle";
 const semanticLifecycle = "gate_semantic_lifecycle";
+const jobLifecycle = "gate_job_lifecycle";
 const templateId = "gate_db_only_workflow";
 
 const state = async (lifecycleKey, status, flags = {}) => {
@@ -39,7 +40,11 @@ const actionPolicy = (actionKey, nativeOpcode) => ({
     verificationOpcode: 0,
     observationOnly: false,
     defaultParams: {},
-    executionPolicy: {},
+    executionPolicy: {
+      verificationStrategy: "gate_verify",
+      l1TimeoutMs: 1,
+      l2SettleMs: 1,
+    },
     parameterTransforms: [],
   },
 });
@@ -116,6 +121,11 @@ try {
   await state(workflowLifecycle, "gate_cancel", { terminal: true, administrative: true, sortOrder: 5 });
   await state(semanticLifecycle, "gate_available", { initial: true, dispatchable: true });
   await state(semanticLifecycle, "gate_retired", { terminal: true, administrative: true, sortOrder: 2 });
+  await state(jobLifecycle, "gate_job_waiting", { initial: true, dispatchable: true, sortOrder: 1 });
+  await state(jobLifecycle, "gate_job_running", { sortOrder: 2 });
+  await state(jobLifecycle, "gate_job_done", { terminal: true, sortOrder: 3 });
+  await state(jobLifecycle, "gate_job_error", { terminal: true, retryable: true, sortOrder: 4 });
+  await state(jobLifecycle, "gate_job_cancelled", { terminal: true, administrative: true, sortOrder: 5 });
   await client.query(
     `INSERT INTO lifecycle_transitions (
        lifecycle_key, action_key, from_status, to_status, mark_started
@@ -123,10 +133,28 @@ try {
     [workflowLifecycle, "gate_begin", "gate_pending", "gate_running"],
   );
   await client.query(
+    `INSERT INTO lifecycle_transitions (
+       lifecycle_key, action_key, from_status, to_status, mark_started, mark_completed
+     ) VALUES
+       ($1,'gate_job_dispatch',$2,$3,TRUE,FALSE),
+       ($1,'gate_job_complete',$3,$4,FALSE,TRUE),
+       ($1,'gate_job_fail',$3,$5,FALSE,TRUE),
+       ($1,'gate_job_cancel',$3,$6,FALSE,TRUE)`,
+    [
+      jobLifecycle,
+      "gate_job_waiting",
+      "gate_job_running",
+      "gate_job_done",
+      "gate_job_error",
+      "gate_job_cancelled",
+    ],
+  );
+  await client.query(
     `INSERT INTO lifecycle_resource_bindings(resource_table, lifecycle_key, state_column)
      VALUES ('workflows'::regclass, $1, 'status'),
-            ('runtime_semantic_entries'::regclass, $2, 'status')`,
-    [workflowLifecycle, semanticLifecycle],
+            ('runtime_semantic_entries'::regclass, $2, 'status'),
+            ('jobs'::regclass, $3, 'status')`,
+    [workflowLifecycle, semanticLifecycle, jobLifecycle],
   );
   await client.query(
     `INSERT INTO runtime_semantic_entries(

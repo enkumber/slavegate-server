@@ -1180,6 +1180,10 @@ router.post("/jobs", async (req, res) => {
       nativeOpcode,
       observationOnly,
       verificationOpcode,
+      resultStatuses,
+      verificationStrategy,
+      l1TimeoutMs,
+      l2SettleMs,
       params,
     } = await dispatcherService.dispatch(body);
     const sendResult = await sendStandaloneJobToDevice(body.deviceId, {
@@ -1188,6 +1192,10 @@ router.post("/jobs", async (req, res) => {
       nativeOpcode,
       observationOnly,
       verificationOpcode,
+      resultStatuses,
+      verificationStrategy,
+      l1TimeoutMs,
+      l2SettleMs,
       params,
       timeoutMs,
       requiresRoot: body.confirmRoot,

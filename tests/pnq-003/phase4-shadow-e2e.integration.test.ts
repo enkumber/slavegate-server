@@ -87,7 +87,11 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
             "verificationOpcode": 0,
             "observationOnly": true,
             "defaultParams": {},
-            "executionPolicy": {},
+            "executionPolicy": {
+              "verificationStrategy": "local_only",
+              "l1TimeoutMs": 1,
+              "l2SettleMs": 1
+            },
             "parameterTransforms": []
           }
         }'::jsonb
@@ -171,7 +175,8 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
         ('phase4_job_fixture', 'fixture_waiting', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 10),
         ('phase4_job_fixture', 'fixture_active', FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, 20),
         ('phase4_job_fixture', 'completed', FALSE, TRUE, FALSE, FALSE, FALSE, FALSE, 30),
-        ('phase4_job_fixture', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40);
+        ('phase4_job_fixture', 'failed', FALSE, TRUE, TRUE, FALSE, FALSE, FALSE, 40),
+        ('phase4_job_fixture', 'cancelled', FALSE, TRUE, FALSE, TRUE, FALSE, TRUE, 50);
       INSERT INTO lifecycle_transitions
         (lifecycle_key, action_key, from_status, to_status, external_allowed,
          mark_started, mark_completed)
@@ -180,7 +185,9 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
         ('phase4_job_fixture', 'fixture_complete_waiting', 'fixture_waiting', 'completed', TRUE, FALSE, TRUE),
         ('phase4_job_fixture', 'fixture_fail_waiting', 'fixture_waiting', 'failed', TRUE, FALSE, TRUE),
         ('phase4_job_fixture', 'fixture_complete', 'fixture_active', 'completed', TRUE, FALSE, TRUE),
-        ('phase4_job_fixture', 'fixture_fail', 'fixture_active', 'failed', TRUE, FALSE, TRUE);
+        ('phase4_job_fixture', 'fixture_fail', 'fixture_active', 'failed', TRUE, FALSE, TRUE),
+        ('phase4_job_fixture', 'fixture_cancel_waiting', 'fixture_waiting', 'cancelled', FALSE, FALSE, TRUE),
+        ('phase4_job_fixture', 'fixture_cancel', 'fixture_active', 'cancelled', FALSE, FALSE, TRUE);
       SELECT configure_lifecycle_resource_binding('jobs', 'phase4_job_fixture');
     `);
     await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS agent_version TEXT`);
@@ -413,7 +420,14 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
 
     expect(sends.get(DEVICE_A)).toHaveLength(1);
     await waitForShadowJob(jobId, "RUNNING");
-    await pool.query("SELECT pnq_bump_connection_epoch($1, $2)", [DEVICE_A, 0]);
+    const epoch = await pool.query<{ connection_epoch: string }>(
+      "SELECT connection_epoch FROM pnq_nodes WHERE node_key = $1",
+      [DEVICE_A],
+    );
+    await pool.query("SELECT pnq_bump_connection_epoch($1, $2)", [
+      DEVICE_A,
+      Number(epoch.rows[0]?.connection_epoch ?? 0),
+    ]);
 
     await deliverJobResult(DEVICE_A, jobId, { stale: true });
     await waitForLegacyJob(jobId, "completed");
@@ -427,12 +441,18 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
     );
     expect(shadow.rows).toEqual([{ status: "RUNNING" }]);
 
+    await waitFor(async () => {
+      const audit = await pool.query(
+        "SELECT 1 FROM pnq_resolution_audit WHERE event_type = 'stale_result' LIMIT 1",
+      );
+      return audit.rowCount > 0;
+    });
     const audit = await pool.query<{ decision: string; evidence: Record<string, unknown> }>(
       `SELECT decision, evidence
-       FROM pnq_resolution_audit
-       WHERE event_type = 'stale_result'
-       ORDER BY created_at DESC
-       LIMIT 1`,
+         FROM pnq_resolution_audit
+        WHERE event_type = 'stale_result'
+        ORDER BY created_at DESC
+        LIMIT 1`,
     );
     expect(audit.rows[0]).toMatchObject({
       decision: "rejected",

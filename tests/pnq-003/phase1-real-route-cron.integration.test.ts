@@ -204,7 +204,11 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
               "verificationOpcode": 0,
               "observationOnly": false,
               "defaultParams": {},
-              "executionPolicy": {},
+              "executionPolicy": {
+                "verificationStrategy": "local_only",
+                "l1TimeoutMs": 1,
+                "l2SettleMs": 1
+              },
               "parameterTransforms": []
             }
           }'::jsonb

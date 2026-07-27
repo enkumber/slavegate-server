@@ -320,6 +320,10 @@ async function dispatchGeneratedWorkflowProbe(
       nativeOpcode,
       observationOnly,
       verificationOpcode,
+      resultStatuses,
+      verificationStrategy,
+      l1TimeoutMs,
+      l2SettleMs,
       params,
     } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
       deviceId,
@@ -335,7 +339,19 @@ async function dispatchGeneratedWorkflowProbe(
     try {
       dispatch = await sendLegacyGeneratedWorkflowJobToDevice(
         deviceId,
-        { jobId, type, nativeOpcode, observationOnly, verificationOpcode, params, timeoutMs },
+        {
+          jobId,
+          type,
+          nativeOpcode,
+          observationOnly,
+          verificationOpcode,
+          resultStatuses,
+          verificationStrategy,
+          l1TimeoutMs,
+          l2SettleMs,
+          params,
+          timeoutMs,
+        },
         { resultTimeoutMs },
       );
     } catch (err) {
@@ -1076,6 +1092,10 @@ async function executeActionStep(
     nativeOpcode,
     observationOnly,
     verificationOpcode,
+    resultStatuses,
+    verificationStrategy,
+    l1TimeoutMs,
+    l2SettleMs,
     executionPolicy,
     params: dispatchedParams,
   } = await dispatcherService.dispatchLegacyGeneratedWorkflow({
@@ -1122,6 +1142,10 @@ async function executeActionStep(
       nativeOpcode,
       observationOnly,
       verificationOpcode,
+      resultStatuses,
+      verificationStrategy,
+      l1TimeoutMs,
+      l2SettleMs,
       params:   finalParams as import("../../../shared/protocol/messages").JobParams,
       timeoutMs: dispatchedTimeoutMs,
       requiresRoot,

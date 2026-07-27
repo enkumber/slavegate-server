@@ -135,6 +135,10 @@ async function dispatchAndAwait(deviceId: string, type: string, params: Record<s
     nativeOpcode: job.nativeOpcode,
     observationOnly: job.observationOnly,
     verificationOpcode: job.verificationOpcode,
+    resultStatuses: job.resultStatuses,
+    verificationStrategy: job.verificationStrategy,
+    l1TimeoutMs: job.l1TimeoutMs,
+    l2SettleMs: job.l2SettleMs,
     params: job.params,
     timeoutMs,
   });

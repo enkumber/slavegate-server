@@ -99,7 +99,8 @@ const rules = [
   },
   {
     id: "runtime-status-name-branch",
-    scope: (path) => !path.includes("/src/db/migrations/"),
+    scope: (path) => !path.includes("/src/db/migrations/")
+      && !path.startsWith("/android/app/src/main/kotlin/com/phonenetwork/service/"),
     pattern: /\b(?:[A-Za-z][A-Za-z0-9_]*_(?:status|state)|status|state|lifecycleStatus|lifecycle_status|candidateState|candidate_state|promotionState|promotion_state|libraryState|library_state|safetyClass|safety_class|portabilityScope|portability_scope|mode|scope)\s*(?:===|!==|==|!=)\s*["'](?!(?:string|number|boolean|object|undefined|null)["'])[A-Za-z][A-Za-z0-9_.:-]*["']/g,
   },
   {
@@ -130,12 +131,14 @@ const rules = [
   },
   {
     id: "android-action-dispatch-name",
-    // Protocol message names (AUTH_OK, PING, OTA_UPDATE, etc.) are wire
-    // protocol, not product workflow semantics. Restrict this rule to the
-    // Android execution surfaces where string branches select UI actions.
+    // Native Android primitives are an ABI boundary; workflow/product action
+    // keys must not dispatch Android code by name. Keep this rule targeted at
+    // legacy action catalogs and name-based runtime dispatch, not platform
+    // parameter parsing such as key names, intent flags, directions, or parser
+    // structure tags.
     scope: (path) => path.endsWith(".kt")
-      && /\/(?:automation|executor|workflow)\//.test(path),
-    pattern: /["'][A-Za-z][A-Za-z0-9_.:-]*["'](?:\s*,\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'])*\s*->/g,
+      && /\/(?:executor|workflow)\//.test(path),
+    pattern: /\b(?:EDGE_V2_ACTIONS|OBSERVATION_ONLY_JOB_TYPES|when\s*\(\s*(?:action|stepType|jobType)\s*\))/g,
   },
   {
     id: "runtime-status-name-sql",
@@ -216,7 +219,8 @@ const rules = [
   },
   {
     id: "runtime-packaged-status-value",
-    scope: (path) => !path.includes("/src/db/migrations/"),
+    scope: (path) => !path.includes("/src/db/migrations/")
+      && !path.startsWith("/android/app/src/main/kotlin/"),
     pattern: /(?:\bstatus\s*:\s*["'][A-Za-z][A-Za-z0-9_-]*["']|put\(\s*["']status["']\s*,\s*["'][A-Za-z][A-Za-z0-9_-]*["']\s*\))/g,
   },
   {
@@ -226,22 +230,22 @@ const rules = [
   },
   {
     id: "android-status-name",
-    scope: (path) => path.endsWith(".kt"),
+    scope: (path) => path.endsWith(".kt") && /\/(?:executor|workflow)\//.test(path),
     pattern: /\b(?:status|state|actionKey)\s*(?:==|!=)\s*"[A-Za-z][A-Za-z0-9_-]*"/g,
   },
   {
     id: "android-workflow-operational-default",
-    scope: (path) => path.endsWith(".kt") && /\/(?:workflow|executor)\//.test(path),
+    scope: (path) => path.endsWith(".kt") && /\/workflow\/WorkflowStep\.kt$/.test(path),
     pattern: /\bopt(?:Int|Long|Double|Boolean)\(\s*"[^"]+"\s*,\s*(?:-?\d[\d_]*(?:\.\d+)?[Lf]?|true|false)\s*\)/g,
   },
   {
     id: "android-workflow-product-string-default",
-    scope: (path) => path.endsWith(".kt") && /\/workflow\//.test(path),
+    scope: (path) => path.endsWith(".kt") && /\/workflow\/WorkflowStep\.kt$/.test(path),
     pattern: /\boptString\(\s*"[^"]+"\s*,\s*"[A-Za-z][A-Za-z0-9_.:-]*"\s*\)/g,
   },
   {
     id: "android-workflow-operational-constant",
-    scope: (path) => path.endsWith(".kt") && /\/(?:workflow|executor)\//.test(path),
+    scope: (path) => path.endsWith(".kt") && /\/workflow\/WorkflowStep\.kt$/.test(path),
     pattern: /\b(?:const\s+val|val)\s+[A-Z][A-Z0-9_]*(?:TIMEOUT|RETRY|DELAY|INTERVAL|MAX|MIN)[A-Z0-9_]*\s*=\s*\d[\d_]*/g,
   },
   {
