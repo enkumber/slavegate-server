@@ -80,9 +80,9 @@ async function transitionVersion(
          FROM ${table} resource
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass($4)
-          AND binding.lifecycle_key = resource.lifecycle_key
+          AND binding.state_column = 'lifecycle_status'::name
          JOIN lifecycle_transitions transition
-           ON transition.lifecycle_key = resource.lifecycle_key
+           ON transition.lifecycle_key = binding.lifecycle_key
           AND transition.from_status = resource.lifecycle_status
          JOIN lifecycle_state_definitions target
            ON target.lifecycle_key = transition.lifecycle_key
@@ -462,9 +462,9 @@ export class WorkflowSegmentControlPlaneService {
          FROM ${table} resource
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass($3)
-          AND binding.lifecycle_key = resource.lifecycle_key
+          AND binding.state_column = 'lifecycle_status'::name
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = resource.lifecycle_key
+           ON definition.lifecycle_key = binding.lifecycle_key
           AND definition.status = resource.lifecycle_status
         WHERE resource.${keyColumn} = $1
           AND resource.version = $2
@@ -568,9 +568,9 @@ export class WorkflowSegmentControlPlaneService {
            FROM ${table} resource
            JOIN lifecycle_resource_bindings binding
              ON binding.resource_table = to_regclass($3)
-            AND binding.lifecycle_key = resource.lifecycle_key
+            AND binding.state_column = 'lifecycle_status'::name
            JOIN lifecycle_state_definitions definition
-             ON definition.lifecycle_key = resource.lifecycle_key
+             ON definition.lifecycle_key = binding.lifecycle_key
             AND definition.status = resource.lifecycle_status
           WHERE resource.${keyColumn} = $1
             AND resource.version = $2
@@ -590,8 +590,11 @@ export class WorkflowSegmentControlPlaneService {
       const siblings = await client.query(
         `SELECT resource.${keyColumn} AS entity_key, resource.version
            FROM ${table} resource
+           JOIN lifecycle_resource_bindings binding
+             ON binding.resource_table = to_regclass($5)
+            AND binding.state_column = 'lifecycle_status'::name
            JOIN lifecycle_state_definitions definition
-             ON definition.lifecycle_key = resource.lifecycle_key
+             ON definition.lifecycle_key = binding.lifecycle_key
             AND definition.status = resource.lifecycle_status
           WHERE resource.${siblingColumn} = $1
             AND resource.platform = $2
@@ -599,7 +602,7 @@ export class WorkflowSegmentControlPlaneService {
             AND NOT definition.retryable
             AND NOT definition.administrative
             AND NOT (resource.${keyColumn} = $3 AND resource.version = $4)`,
-        [siblingValue, target.rows[0].platform, key, version],
+        [siblingValue, target.rows[0].platform, key, version, table],
       );
       for (const sibling of siblings.rows) {
         await transitionVersion(
@@ -656,9 +659,9 @@ export class WorkflowSegmentControlPlaneService {
            FROM ${table} resource
            JOIN lifecycle_resource_bindings binding
              ON binding.resource_table = to_regclass($3)
-            AND binding.lifecycle_key = resource.lifecycle_key
+            AND binding.state_column = 'lifecycle_status'::name
            JOIN lifecycle_state_definitions definition
-             ON definition.lifecycle_key = resource.lifecycle_key
+             ON definition.lifecycle_key = binding.lifecycle_key
             AND definition.status = resource.lifecycle_status
           WHERE resource.${keyColumn} = $1
             AND resource.version = $2
@@ -681,8 +684,11 @@ export class WorkflowSegmentControlPlaneService {
       const siblings = await client.query(
         `SELECT resource.${keyColumn} AS entity_key, resource.version
            FROM ${table} resource
+           JOIN lifecycle_resource_bindings binding
+             ON binding.resource_table = to_regclass($5)
+            AND binding.state_column = 'lifecycle_status'::name
            JOIN lifecycle_state_definitions definition
-             ON definition.lifecycle_key = resource.lifecycle_key
+             ON definition.lifecycle_key = binding.lifecycle_key
             AND definition.status = resource.lifecycle_status
           WHERE resource.${siblingColumn} = $1
             AND resource.platform = $2
@@ -690,7 +696,7 @@ export class WorkflowSegmentControlPlaneService {
             AND NOT definition.retryable
             AND NOT definition.administrative
             AND NOT (resource.${keyColumn} = $3 AND resource.version = $4)`,
-        [siblingValue, rollbackTarget.rows[0].platform, key, toVersion],
+        [siblingValue, rollbackTarget.rows[0].platform, key, toVersion, table],
       );
       for (const sibling of siblings.rows) {
         await transitionVersion(

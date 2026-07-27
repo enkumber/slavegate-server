@@ -1,7 +1,26 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { WorkflowSegmentControlPlaneService } from "./control-plane.service";
 
 describe("workflow segment control plane", () => {
+  it("resolves version lifecycles exclusively through the configured resource binding", () => {
+    const controlPlaneSource = readFileSync(
+      join(__dirname, "control-plane.service.ts"),
+      "utf8",
+    );
+    const segmentBuilderSource = readFileSync(
+      join(__dirname, "../segment-builder/segment-build-job.service.ts"),
+      "utf8",
+    );
+
+    expect(controlPlaneSource).not.toContain("resource.lifecycle_key");
+    expect(segmentBuilderSource).not.toContain("resource.lifecycle_key");
+    expect(controlPlaneSource).toContain("transition.lifecycle_key = binding.lifecycle_key");
+    expect(controlPlaneSource).toContain("definition.lifecycle_key = binding.lifecycle_key");
+    expect(segmentBuilderSource).toContain("definition.lifecycle_key = binding.lifecycle_key");
+  });
+
   it("rejects canary evidence that does not prove the runtime postcondition", async () => {
     const service = new WorkflowSegmentControlPlaneService();
     await expect(service.recordCanary(

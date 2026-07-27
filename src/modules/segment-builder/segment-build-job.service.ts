@@ -176,9 +176,9 @@ async function resourceVersionIsSuccessful(
        FROM ${table} resource
        JOIN lifecycle_resource_bindings binding
          ON binding.resource_table = to_regclass($3)
-        AND binding.lifecycle_key = resource.lifecycle_key
+        AND binding.state_column = 'lifecycle_status'::name
        JOIN lifecycle_state_definitions definition
-         ON definition.lifecycle_key = resource.lifecycle_key
+         ON definition.lifecycle_key = binding.lifecycle_key
         AND definition.status = resource.lifecycle_status
       WHERE resource.${keyColumn} = $1
         AND resource.version = $2`,
