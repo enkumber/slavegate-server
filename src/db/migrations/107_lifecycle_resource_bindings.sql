@@ -134,6 +134,7 @@ AS $$
 DECLARE
   trigger_name TEXT;
   constraint_name TEXT;
+  target_has_lifecycle_key BOOLEAN;
 BEGIN
   IF NULLIF(BTRIM(target_lifecycle_key), '') IS NULL THEN
     RAISE EXCEPTION 'lifecycle key is required';
@@ -181,8 +182,17 @@ BEGIN
     target_table
   );
 
+  SELECT EXISTS (
+    SELECT 1
+      FROM pg_attribute
+     WHERE attrelid = target_table
+       AND attname = 'lifecycle_key'
+       AND attnum > 0
+       AND NOT attisdropped
+  ) INTO target_has_lifecycle_key;
+
   constraint_name := format('lifecycle_status_fkey_%s', target_table::oid);
-  IF NOT EXISTS (
+  IF target_has_lifecycle_key AND NOT EXISTS (
     SELECT 1
       FROM pg_constraint
      WHERE conrelid = target_table

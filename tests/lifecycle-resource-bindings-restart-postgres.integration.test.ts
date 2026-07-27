@@ -41,6 +41,10 @@ describe("lifecycle binding migrations across repeated server starts", () => {
         lifecycle_key TEXT,
         status TEXT
       );
+      CREATE TABLE restart_resources_without_lifecycle_key (
+        id UUID PRIMARY KEY,
+        status TEXT
+      );
       INSERT INTO lifecycle_state_definitions(
         lifecycle_key,
         status,
@@ -89,6 +93,14 @@ describe("lifecycle binding migrations across repeated server starts", () => {
       await pool.query(migration(file));
     }
 
+    await pool.query(`
+      SELECT configure_lifecycle_resource_binding(
+        'restart_resources_without_lifecycle_key'::regclass,
+        'restart_test',
+        'status'
+      )
+    `);
+
     for (let startup = 0; startup < 2; startup += 1) {
       await pool.query(migration("107_lifecycle_resource_bindings.sql"));
       for (const file of startupMigrations) {
@@ -113,10 +125,26 @@ describe("lifecycle binding migrations across repeated server starts", () => {
     }>(`
       SELECT lifecycle_key, state_column::TEXT
         FROM lifecycle_resource_bindings
-       WHERE resource_table = 'restart_resources'::regclass
+       WHERE resource_table IN (
+         'restart_resources'::regclass,
+         'restart_resources_without_lifecycle_key'::regclass
+       )
+       ORDER BY resource_table::TEXT
     `);
     expect(bindings.rows).toEqual([
       { lifecycle_key: "restart_test", state_column: "status" },
+      { lifecycle_key: "restart_test", state_column: "status" },
     ]);
+
+    await pool.query(`
+      INSERT INTO restart_resources_without_lifecycle_key(id)
+      VALUES ('00000000-0000-4000-8000-000000000002')
+    `);
+    const inserted = await pool.query<{ status: string }>(`
+      SELECT status
+        FROM restart_resources_without_lifecycle_key
+       WHERE id = '00000000-0000-4000-8000-000000000002'
+    `);
+    expect(inserted.rows).toEqual([{ status: "initial_state" }]);
   });
 });
