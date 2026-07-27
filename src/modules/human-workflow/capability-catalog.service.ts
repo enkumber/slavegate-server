@@ -244,9 +244,9 @@ export class CapabilityCatalogService {
           AND binding_state.status = binding.status
          JOIN lifecycle_resource_bindings cache_lifecycle
            ON cache_lifecycle.resource_table = to_regclass('generated_workflow_plan_cache')
-          AND cache_lifecycle.lifecycle_key = cache.lifecycle_key
+          AND cache_lifecycle.state_column = 'artifact_state'::name
          JOIN lifecycle_state_definitions cache_state
-           ON cache_state.lifecycle_key = cache.lifecycle_key
+           ON cache_state.lifecycle_key = cache_lifecycle.lifecycle_key
           AND cache_state.status = cache.artifact_state
          WHERE binding.capability_key = ANY($1::text[])
            AND binding_state.dispatchable
@@ -320,9 +320,9 @@ export class CapabilityCatalogService {
          FROM generated_workflow_plan_cache
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass('generated_workflow_plan_cache')
-          AND binding.lifecycle_key = generated_workflow_plan_cache.lifecycle_key
+          AND binding.state_column = 'artifact_state'::name
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = generated_workflow_plan_cache.lifecycle_key
+           ON definition.lifecycle_key = binding.lifecycle_key
           AND definition.status = generated_workflow_plan_cache.artifact_state
          WHERE (definition.retryable OR definition.administrative)
            AND LOWER(platform) = LOWER($1)

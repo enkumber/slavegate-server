@@ -156,10 +156,20 @@ describe("retrieval-before-LLM compiler context", () => {
     const transitionQuery = query.mock.calls
       .map(([sql]) => sql)
       .find((sql) => sql.includes("FROM ui_graph_transitions"));
+    const artifactQuery = query.mock.calls
+      .map(([sql]) => sql)
+      .find((sql) => sql.includes("FROM workflow_capability_artifacts"));
+    const failureQuery = query.mock.calls
+      .map(([sql]) => sql)
+      .find((sql) => sql.includes("definition.retryable OR definition.administrative"));
 
     expect(selectorQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
     expect(selectorQuery).not.toContain("selector.lifecycle_key");
     expect(transitionQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
     expect(transitionQuery).not.toContain("ui_graph_transitions.lifecycle_key");
+    expect(artifactQuery).toContain("cache_state.lifecycle_key = cache_lifecycle.lifecycle_key");
+    expect(artifactQuery).not.toContain("cache.lifecycle_key");
+    expect(failureQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
+    expect(failureQuery).not.toContain("generated_workflow_plan_cache.lifecycle_key");
   });
 });
