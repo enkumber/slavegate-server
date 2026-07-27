@@ -475,9 +475,20 @@ describe("SegmentBuildJobService dispatch", () => {
 
     expect(capabilityQuery).toContain("capability.status, capability.metadata");
     expect(capabilityQuery).toContain("ORDER BY capability.updated_at DESC");
+    expect(capabilityQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
+    expect(capabilityQuery).not.toContain("capability.lifecycle_key");
     expect(segmentQuery).toContain("ORDER BY segment.segment_key, segment.updated_at DESC");
+    expect(segmentQuery).toContain("binding.state_column = 'lifecycle_status'::name");
+    expect(segmentQuery).not.toContain("segment.lifecycle_key");
     expect(semanticQuery).toContain(
       "ORDER BY semantic.namespace, semantic.priority DESC, semantic.entry_key"
     );
+    expect(semanticQuery).not.toContain("semantic.lifecycle_key");
+
+    const compositionQuery = state.queries.find((query) =>
+      query.includes("FROM workflow_compositions c")
+    );
+    expect(compositionQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
+    expect(compositionQuery).not.toContain("c.lifecycle_key");
   });
 });

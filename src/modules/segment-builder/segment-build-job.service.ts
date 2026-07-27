@@ -420,9 +420,9 @@ export class SegmentBuildJobService {
          FROM workflow_capabilities capability
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass('workflow_capabilities')
-          AND binding.lifecycle_key = capability.lifecycle_key
+          AND binding.state_column = 'status'::name
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = capability.lifecycle_key
+           ON definition.lifecycle_key = binding.lifecycle_key
           AND definition.status = capability.status
          WHERE definition.dispatchable
            AND (LOWER(capability.platform) = LOWER($1) OR capability.platform = '*')
@@ -438,9 +438,9 @@ export class SegmentBuildJobService {
          FROM workflow_segment_versions segment
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass('workflow_segment_versions')
-          AND binding.lifecycle_key = segment.lifecycle_key
+          AND binding.state_column = 'lifecycle_status'::name
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = segment.lifecycle_key
+           ON definition.lifecycle_key = binding.lifecycle_key
           AND definition.status = segment.lifecycle_status
          WHERE definition.dispatchable
            AND (LOWER(segment.platform) = LOWER($1) OR segment.platform = '*')
@@ -469,9 +469,9 @@ export class SegmentBuildJobService {
           AND n.composition_version = c.version
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass('workflow_compositions')
-          AND binding.lifecycle_key = c.lifecycle_key
+          AND binding.state_column = 'lifecycle_status'::name
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = c.lifecycle_key
+           ON definition.lifecycle_key = binding.lifecycle_key
           AND definition.status = c.lifecycle_status
          WHERE definition.dispatchable
            AND (LOWER(c.platform) = LOWER($1) OR c.platform = '*')
@@ -486,9 +486,9 @@ export class SegmentBuildJobService {
          FROM runtime_semantic_entries semantic
          JOIN lifecycle_resource_bindings binding
            ON binding.resource_table = to_regclass('runtime_semantic_entries')
-          AND binding.lifecycle_key = semantic.lifecycle_key
+          AND binding.state_column = 'status'::name
          JOIN lifecycle_state_definitions definition
-           ON definition.lifecycle_key = semantic.lifecycle_key
+           ON definition.lifecycle_key = binding.lifecycle_key
           AND definition.status = semantic.status
          WHERE definition.dispatchable
            AND (LOWER(semantic.platform) = LOWER($1) OR semantic.platform = '*')
