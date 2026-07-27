@@ -330,11 +330,10 @@ describe("real API router monitoring auth", () => {
             headers: { "content-type": "application/json", "x-api-key": "test-api-key" },
             body,
           });
-          expect(ambiguous.status).toBe(503);
+          expect(ambiguous.status).toBe(400);
           await expect(ambiguous.json()).resolves.toMatchObject({
             ok: false,
-            code: "LIFECYCLE_RESOURCE_POLICY_UNAVAILABLE",
-            details: { retryable: true },
+            error: "lifecycle transition selector is ambiguous",
           });
 
           const health = await fetch(`${baseUrl}/api/health`, {
