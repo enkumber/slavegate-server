@@ -326,7 +326,7 @@ export class CapabilityCatalogService {
           AND definition.status = generated_workflow_plan_cache.artifact_state
          WHERE (definition.retryable OR definition.administrative)
            AND LOWER(platform) = LOWER($1)
-         ORDER BY updated_at DESC
+         ORDER BY generated_workflow_plan_cache.updated_at DESC
          LIMIT $2`,
         [platform, policy.maxFailedArtifactRows],
       ),

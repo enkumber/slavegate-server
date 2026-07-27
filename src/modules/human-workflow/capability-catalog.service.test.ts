@@ -171,5 +171,6 @@ describe("retrieval-before-LLM compiler context", () => {
     expect(artifactQuery).not.toContain("cache.lifecycle_key");
     expect(failureQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
     expect(failureQuery).not.toContain("generated_workflow_plan_cache.lifecycle_key");
+    expect(failureQuery).toContain("ORDER BY generated_workflow_plan_cache.updated_at DESC");
   });
 });
