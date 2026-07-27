@@ -351,7 +351,7 @@ CREATE OR REPLACE FUNCTION pnq_start_execution(
   p_expected_job_version BIGINT,
   p_expected_dispatch_generation BIGINT,
   p_execution_id UUID,
-  p_actor TEXT
+  p_actor TEXT DEFAULT NULL
 ) RETURNS pnq_jobs AS $$
 DECLARE
   v_job pnq_jobs;
@@ -446,7 +446,7 @@ CREATE OR REPLACE FUNCTION pnq_claim_next_job(
   p_node_id UUID,
   p_connection_epoch BIGINT,
   p_execution_id UUID,
-  p_actor TEXT
+  p_actor TEXT DEFAULT NULL
 ) RETURNS pnq_jobs AS $$
 DECLARE
   v_job pnq_jobs;
@@ -540,8 +540,8 @@ CREATE OR REPLACE FUNCTION pnq_record_result(
   p_connection_epoch BIGINT,
   p_dispatch_generation BIGINT,
   p_success BOOLEAN,
-  p_result_payload JSONB,
-  p_actor TEXT
+  p_result_payload JSONB DEFAULT '{}'::jsonb,
+  p_actor TEXT DEFAULT NULL
 ) RETURNS pnq_jobs AS $$
 DECLARE
   v_current pnq_jobs;
@@ -660,8 +660,8 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION pnq_mark_stuck(
   p_job_id UUID,
   p_reason TEXT,
-  p_evidence JSONB,
-  p_actor TEXT
+  p_evidence JSONB DEFAULT '{}'::jsonb,
+  p_actor TEXT DEFAULT NULL
 ) RETURNS pnq_jobs AS $$
 DECLARE
   v_current pnq_jobs;
