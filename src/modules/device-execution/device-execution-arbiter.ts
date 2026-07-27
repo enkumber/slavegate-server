@@ -273,6 +273,9 @@ async function getDeviceExecutionRootKindPolicy(
     throw new Error("device execution root-kind policy is not configured");
   }
   const configured = (rootKinds as Record<string, unknown>)[rootKind];
+  if (Array.isArray(configured)) {
+    throw new Error(`device execution root-kind policy is ambiguous: ${rootKind}`);
+  }
   if (!configured || typeof configured !== "object" || Array.isArray(configured)) {
     throw new Error(`device execution root kind is not configured: ${rootKind}`);
   }

@@ -185,6 +185,7 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
   });
 
   beforeEach(async () => {
+    setDeviceExecutionAuthorityForTest("observe_only");
     setPnqV2RuntimeConfigForTest({ enabled: true, sweepIntervalMs: 30_000 });
     // This suite validates the Queue v2 shadow lifecycle, not the workflow
     // executor's CommonJS cycle. Production keeps the original synchronous
@@ -214,7 +215,7 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
   afterAll(async () => {
     setDeviceExecutionAuthorityForTest(null);
     delete process.env.API_KEY;
-    await close(appServer);
+    if (appServer) await close(appServer);
     const dbClient = await import("../../src/db/client");
     await dbClient.closeDb();
     if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
@@ -263,6 +264,118 @@ describePostgres("PNQ-003 Phase 4 local real-route shadow E2E", () => {
       terminal_reason: "result_succeeded",
     }]);
     expect(lifecycle.rows[0]!.attempt_execution_id).toMatch(/[0-9a-f-]{36}/);
+  });
+
+  it("keeps standalone job admission fail-closed until the generic lifecycle policy API configures the bound resource", async () => {
+    setDeviceExecutionAuthorityForTest("enforced");
+    const sends = await connectDevices([DEVICE_A]);
+    await pool.query(
+      `DELETE FROM lifecycle_resource_policies
+        WHERE resource_table = 'device_execution_roots'::regclass
+          AND state_column = 'state'::name`,
+    );
+
+    const absent = await postJob(DEVICE_A, { phase: "policy-absent" });
+    expect(absent.status).toBe(503);
+    expect(absent.body).toMatchObject({
+      ok: false,
+      code: "LIFECYCLE_RESOURCE_POLICY_UNAVAILABLE",
+      details: { retryable: true },
+    });
+    expect(absent.body.error).toContain("operational policy is not configured");
+    expect(sends.get(DEVICE_A)).toHaveLength(0);
+    const healthAfterAbsentAdmission = await requestJson(appServer, "GET", "/api/health");
+    expect(healthAfterAbsentAdmission.status).toBe(200);
+    expect(healthAfterAbsentAdmission.body).toMatchObject({
+      ok: true,
+      data: { health: "healthy" },
+    });
+
+    const configured = await requestJson(
+      appServer,
+      "PUT",
+      "/api/lifecycle-resource-policies/device_execution_roots/state",
+      { policy: TEST_DEVICE_EXECUTION_RESOURCE_POLICY, updatedBy: "phase4-test-api" },
+    );
+    expect(configured.status, JSON.stringify(configured.body)).toBe(200);
+    expect(configured.body.data).toMatchObject({
+      resourceTable: expect.stringContaining("device_execution_roots"),
+      stateColumn: "state",
+      policy: TEST_DEVICE_EXECUTION_RESOURCE_POLICY,
+    });
+
+    const readback = await requestJson(
+      appServer,
+      "GET",
+      "/api/lifecycle-resource-policies/device_execution_roots/state",
+    );
+    expect(readback.status).toBe(200);
+    expect(readback.body.data.policy).toMatchObject(TEST_DEVICE_EXECUTION_RESOURCE_POLICY);
+
+    const admitted = await postJob(DEVICE_A, { phase: "policy-configured" });
+    expect(admitted.status, JSON.stringify(admitted.body)).toBe(202);
+    expect(sends.get(DEVICE_A)).toHaveLength(1);
+
+    const disabled = await requestJson(
+      appServer,
+      "PUT",
+      "/api/lifecycle-resource-policies/device_execution_roots/state",
+      { disabled: true, updatedBy: "phase4-test-api" },
+    );
+    expect(disabled.status).toBe(200);
+    expect(disabled.body.data.policy).toEqual({ enabled: false });
+
+    const disabledAdmission = await postJob(DEVICE_A, { phase: "policy-disabled" });
+    expect(disabledAdmission.status).toBe(503);
+    expect(disabledAdmission.body.error).toContain("operational policy is disabled");
+
+    const rootKinds = TEST_DEVICE_EXECUTION_RESOURCE_POLICY.rootKinds as Record<string, unknown>;
+    const configuredRootKind = Object.keys(rootKinds)[0]!;
+    const ambiguousPolicy = {
+      ...TEST_DEVICE_EXECUTION_RESOURCE_POLICY,
+      rootKinds: {
+        ...rootKinds,
+        [configuredRootKind]: [rootKinds[configuredRootKind], rootKinds[configuredRootKind]],
+      },
+    };
+    const ambiguous = await requestJson(
+      appServer,
+      "PUT",
+      "/api/lifecycle-resource-policies/device_execution_roots/state",
+      { policy: ambiguousPolicy, updatedBy: "phase4-test-api" },
+    );
+    expect(ambiguous.status, JSON.stringify(ambiguous.body)).toBe(200);
+    const ambiguousAdmission = await postJob(DEVICE_A, { phase: "policy-ambiguous" });
+    expect(ambiguousAdmission.status).toBe(503);
+    expect(ambiguousAdmission.body).toMatchObject({
+      ok: false,
+      code: "LIFECYCLE_RESOURCE_POLICY_UNAVAILABLE",
+      details: { retryable: true },
+    });
+    expect(ambiguousAdmission.body.error).toContain("root-kind policy is ambiguous");
+    const healthAfterAmbiguousAdmission = await requestJson(appServer, "GET", "/api/health");
+    expect(healthAfterAmbiguousAdmission.status).toBe(200);
+    expect(healthAfterAmbiguousAdmission.body).toMatchObject({
+      ok: true,
+      data: { health: "healthy" },
+    });
+
+    const deleted = await requestJson(
+      appServer,
+      "DELETE",
+      "/api/lifecycle-resource-policies/device_execution_roots/state",
+    );
+    expect(deleted.status).toBe(200);
+    const deletedAdmission = await postJob(DEVICE_A, { phase: "policy-deleted" });
+    expect(deletedAdmission.status).toBe(503);
+    expect(deletedAdmission.body.error).toContain("operational policy is not configured");
+
+    await requestJson(
+      appServer,
+      "PUT",
+      "/api/lifecycle-resource-policies/device_execution_roots/state",
+      { policy: TEST_DEVICE_EXECUTION_RESOURCE_POLICY, updatedBy: "phase4-test-restore" },
+    );
   });
 
   it("keeps HTTP and legacy result handling prompt when shadow DB work is pending or rejected", async () => {
@@ -522,15 +635,24 @@ async function close(server: http.Server): Promise<void> {
 }
 
 async function postJson(server: http.Server, pathName: string, body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+  return requestJson(server, "POST", pathName, body);
+}
+
+async function requestJson(
+  server: http.Server,
+  method: string,
+  pathName: string,
+  body?: Record<string, unknown>,
+): Promise<{ status: number; body: any }> {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("test server has no TCP address");
   const response = await fetch(`http://127.0.0.1:${address.port}${pathName}`, {
-    method: "POST",
+    method,
     headers: {
       "content-type": "application/json",
       "x-api-key": process.env.API_KEY!,
     },
-    body: JSON.stringify(body),
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { status: response.status, body: await response.json() };
 }

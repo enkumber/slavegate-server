@@ -5,7 +5,12 @@ import { signJwt } from "./auth.middleware";
 
 const mocks = vi.hoisted(() => ({
   db: {
+    connect: vi.fn(),
     query: vi.fn(),
+  },
+  client: {
+    query: vi.fn(),
+    release: vi.fn(),
   },
 }));
 
@@ -36,13 +41,26 @@ async function app() {
 }
 
 async function getJson(path: string, headers: Record<string, string>): Promise<{ status: number; body: any }> {
+  return requestJson("GET", path, headers);
+}
+
+async function requestJson(
+  method: string,
+  path: string,
+  headers: Record<string, string>,
+  requestBody?: unknown,
+): Promise<{ status: number; body: any }> {
   const server = await app();
   return new Promise((resolve, reject) => {
     const listener = server.listen(0, async () => {
       try {
         const address = listener.address();
         if (!address || typeof address === "string") throw new Error("no address");
-        const response = await fetch(`http://127.0.0.1:${address.port}${path}`, { headers });
+        const response = await fetch(`http://127.0.0.1:${address.port}${path}`, {
+          method,
+          headers: requestBody === undefined ? headers : { ...headers, "content-type": "application/json" },
+          body: requestBody === undefined ? undefined : JSON.stringify(requestBody),
+        });
         const body = await response.json();
         listener.close(() => resolve({ status: response.status, body }));
       } catch (err) {
@@ -71,6 +89,10 @@ describe("real API router monitoring auth", () => {
     process.env.API_KEY = "test-api-key";
     process.env.JWT_SECRET = "test-jwt-secret";
     mocks.db.query.mockReset();
+    mocks.db.connect.mockReset();
+    mocks.client.query.mockReset();
+    mocks.client.release.mockReset();
+    mocks.db.connect.mockResolvedValue(mocks.client);
   });
 
   it("allows openclaw_agent tokens on GET /api/debug/connections", async () => {
@@ -152,5 +174,98 @@ describe("real API router monitoring auth", () => {
     expect(response.body.data).toEqual([
       expect.objectContaining({ event_type: "direct_ws_frame_sent" }),
     ]);
+  });
+
+  it("requires admin auth for generic lifecycle resource policy GET, PUT, and DELETE", async () => {
+    await expect(requestJson(
+      "GET",
+      "/api/lifecycle-resource-policies",
+      {},
+    )).resolves.toMatchObject({ status: 401 });
+
+    await expect(requestJson(
+      "PUT",
+      "/api/lifecycle-resource-policies/operator_resources/state",
+      { authorization: "Bearer agent-token" },
+      { policy: { arbitrary: true } },
+    )).resolves.toMatchObject({ status: 401 });
+
+    mockOpenClawTokenLookup("agent-token");
+    await expect(requestJson(
+      "DELETE",
+      "/api/lifecycle-resource-policies/operator_resources/state",
+      { authorization: "Bearer agent-token" },
+    )).resolves.toMatchObject({ status: 401 });
+  });
+
+  it("validates lifecycle resource policy payloads with clear structural errors", async () => {
+    const response = await requestJson(
+      "PUT",
+      "/api/lifecycle-resource-policies/operator_resources/state",
+      { "x-api-key": "test-api-key" },
+      { policy: { enabled: "yes" } },
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toContain("policy.enabled must be a boolean");
+    expect(mocks.client.query).not.toHaveBeenCalled();
+  });
+
+  it("upserts, reads back, disables, and deletes a generic bound lifecycle policy", async () => {
+    const row = {
+      resource_table: "public.operator_resources",
+      state_column: "state",
+      policy: { arbitrary: { nested: true } },
+      version: "1",
+      updated_by: "operator",
+      updated_at: new Date("2026-07-27T00:00:00.000Z"),
+    };
+    mocks.client.query
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [row] })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({
+        rows: [{ ...row, policy: { enabled: false }, version: "2" }],
+      })
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rowCount: 1, rows: [row] })
+      .mockResolvedValueOnce({});
+    mocks.db.query.mockResolvedValueOnce({ rows: [row] });
+
+    const upserted = await requestJson(
+      "PUT",
+      "/api/lifecycle-resource-policies/operator_resources/state",
+      { "x-api-key": "test-api-key" },
+      { policy: { arbitrary: { nested: true } }, updatedBy: "operator" },
+    );
+    expect(upserted.status).toBe(200);
+    expect(upserted.body.data).toMatchObject({ policy: { arbitrary: { nested: true } } });
+
+    const readback = await requestJson(
+      "GET",
+      "/api/lifecycle-resource-policies/operator_resources/state",
+      { "x-api-key": "test-api-key" },
+    );
+    expect(readback.status).toBe(200);
+    expect(readback.body.data).toMatchObject({ resourceTable: "public.operator_resources", stateColumn: "state" });
+
+    const disabled = await requestJson(
+      "PUT",
+      "/api/lifecycle-resource-policies/operator_resources/state",
+      { "x-api-key": "test-api-key" },
+      { disabled: true, updatedBy: "operator" },
+    );
+    expect(disabled.status).toBe(200);
+    expect(disabled.body.data.policy).toEqual({ enabled: false });
+
+    const deleted = await requestJson(
+      "DELETE",
+      "/api/lifecycle-resource-policies/operator_resources/state",
+      { "x-api-key": "test-api-key" },
+    );
+    expect(deleted.status).toBe(200);
+    expect(deleted.body).toMatchObject({ ok: true, deleted: true });
   });
 });

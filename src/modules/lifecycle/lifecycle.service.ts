@@ -92,6 +92,31 @@ export interface LifecycleExecutionStatusContract {
   cancelled: string;
 }
 
+export interface ResourceLifecyclePolicyRecord {
+  resourceTable: string;
+  stateColumn: string;
+  policy: Record<string, unknown>;
+  version: number;
+  updatedBy: string | null;
+  updatedAt: Date;
+}
+
+export interface ResourceLifecyclePolicyUpsert {
+  resourceTable: string;
+  stateColumn: string;
+  policy: Record<string, unknown>;
+  updatedBy?: string | null;
+}
+
+export interface ResourceLifecyclePolicyReadinessRecord {
+  resourceTable: string;
+  stateColumn: string;
+  lifecycleKey: string;
+  ready: boolean;
+  issue: "policy_disabled" | "policy_missing" | null;
+  policyVersion: number | null;
+}
+
 export type LifecycleStateSelector = Partial<
   Pick<
     LifecycleStateDefinition,
@@ -178,7 +203,173 @@ export async function getResourceLifecyclePolicy(
   if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
     throw new Error("resource lifecycle operational policy is not configured");
   }
+  if ((policy as Record<string, unknown>).enabled === false || (policy as Record<string, unknown>).disabled === true) {
+    throw new Error("resource lifecycle operational policy is disabled");
+  }
   return policy as Record<string, unknown>;
+}
+
+export async function listResourceLifecyclePolicies(filters: {
+  resourceTable?: string;
+  stateColumn?: string;
+} = {}, db: LifecycleQueryable = getDb()): Promise<ResourceLifecyclePolicyRecord[]> {
+  const resourceTable = filters.resourceTable === undefined
+    ? null
+    : normalizeResourceIdentity(filters.resourceTable, "resourceTable");
+  const stateColumn = filters.stateColumn === undefined
+    ? null
+    : normalizeResourceIdentity(filters.stateColumn, "stateColumn");
+  const result = await db.query(
+    `SELECT policy.resource_table::text AS resource_table,
+            policy.state_column::text AS state_column,
+            policy.policy,
+            policy.version,
+            policy.updated_by,
+            policy.updated_at
+       FROM lifecycle_resource_policies policy
+      WHERE ($1::text IS NULL OR policy.resource_table = to_regclass($1))
+        AND ($2::text IS NULL OR policy.state_column = $2::name)
+      ORDER BY policy.resource_table::text, policy.state_column::text`,
+    [resourceTable, stateColumn],
+  );
+  return result.rows.map(rowToResourceLifecyclePolicy);
+}
+
+export async function getResourceLifecyclePolicyRecord(
+  resourceTableValue: string,
+  stateColumnValue: string,
+  db: LifecycleQueryable = getDb(),
+): Promise<ResourceLifecyclePolicyRecord | null> {
+  const resourceTable = normalizeResourceIdentity(resourceTableValue, "resourceTable");
+  const stateColumn = normalizeResourceIdentity(stateColumnValue, "stateColumn");
+  const result = await db.query(
+    `SELECT policy.resource_table::text AS resource_table,
+            policy.state_column::text AS state_column,
+            policy.policy,
+            policy.version,
+            policy.updated_by,
+            policy.updated_at
+       FROM lifecycle_resource_policies policy
+      WHERE policy.resource_table = to_regclass($1)
+        AND policy.state_column = $2::name`,
+    [resourceTable, stateColumn],
+  );
+  return result.rows[0] ? rowToResourceLifecyclePolicy(result.rows[0]) : null;
+}
+
+export async function upsertResourceLifecyclePolicy(
+  input: ResourceLifecyclePolicyUpsert,
+  db: Pool = getDb(),
+): Promise<ResourceLifecyclePolicyRecord> {
+  const resourceTable = normalizeResourceIdentity(input.resourceTable, "resourceTable");
+  const stateColumn = normalizeResourceIdentity(input.stateColumn, "stateColumn");
+  const policy = normalizeResourceLifecyclePolicy(input.policy);
+  const updatedBy = typeof input.updatedBy === "string" && input.updatedBy.trim()
+    ? input.updatedBy.trim()
+    : null;
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `INSERT INTO lifecycle_resource_policies
+         (resource_table, state_column, policy, updated_by)
+       SELECT binding.resource_table, binding.state_column, $3::jsonb, $4
+         FROM lifecycle_resource_bindings binding
+        WHERE binding.resource_table = to_regclass($1)
+          AND binding.state_column = $2::name
+       ON CONFLICT (resource_table, state_column) DO UPDATE
+         SET policy = EXCLUDED.policy,
+             version = lifecycle_resource_policies.version + 1,
+             updated_by = EXCLUDED.updated_by,
+             updated_at = NOW()
+       RETURNING resource_table::text, state_column::text, policy, version, updated_by, updated_at`,
+      [resourceTable, stateColumn, JSON.stringify(policy), updatedBy],
+    );
+    if (!result.rows[0]) {
+      throw new Error("resource lifecycle binding does not exist in PostgreSQL");
+    }
+    const record = rowToResourceLifecyclePolicy(result.rows[0]);
+    await client.query("COMMIT");
+    return record;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function disableResourceLifecyclePolicy(
+  resourceTableValue: string,
+  stateColumnValue: string,
+  updatedByValue?: string | null,
+  db: Pool = getDb(),
+): Promise<ResourceLifecyclePolicyRecord> {
+  return upsertResourceLifecyclePolicy({
+    resourceTable: resourceTableValue,
+    stateColumn: stateColumnValue,
+    policy: { enabled: false },
+    updatedBy: updatedByValue,
+  }, db);
+}
+
+export async function deleteResourceLifecyclePolicy(
+  resourceTableValue: string,
+  stateColumnValue: string,
+  db: Pool = getDb(),
+): Promise<boolean> {
+  const resourceTable = normalizeResourceIdentity(resourceTableValue, "resourceTable");
+  const stateColumn = normalizeResourceIdentity(stateColumnValue, "stateColumn");
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      `DELETE FROM lifecycle_resource_policies
+        WHERE resource_table = to_regclass($1)
+          AND state_column = $2::name
+        RETURNING resource_table`,
+      [resourceTable, stateColumn],
+    );
+    await client.query("COMMIT");
+    return result.rowCount === 1;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function listResourceLifecyclePolicyReadiness(
+  db: LifecycleQueryable = getDb(),
+): Promise<ResourceLifecyclePolicyReadinessRecord[]> {
+  const result = await db.query(
+    `SELECT binding.resource_table::text AS resource_table,
+            binding.state_column::text AS state_column,
+            binding.lifecycle_key,
+            policy.version,
+            (policy.resource_table IS NOT NULL) AS policy_present,
+            (policy.resource_table IS NOT NULL
+              AND COALESCE((policy.policy->>'enabled')::boolean, true)
+              AND NOT COALESCE((policy.policy->>'disabled')::boolean, false)) AS policy_enabled
+       FROM lifecycle_resource_bindings binding
+       LEFT JOIN lifecycle_resource_policies policy
+         ON policy.resource_table = binding.resource_table
+        AND policy.state_column = binding.state_column
+      ORDER BY binding.resource_table::text, binding.state_column::text`,
+  );
+  return result.rows.map((row) => ({
+    resourceTable: String(row.resource_table),
+    stateColumn: String(row.state_column),
+    lifecycleKey: String(row.lifecycle_key),
+    ready: row.policy_present === true && row.policy_enabled === true,
+    issue: row.policy_present !== true
+      ? "policy_missing"
+      : row.policy_enabled !== true
+        ? "policy_disabled"
+        : null,
+    policyVersion: row.version === null || row.version === undefined ? null : Number(row.version),
+  }));
 }
 
 export async function listResourceLifecycleStates(
@@ -424,6 +615,64 @@ function rowToTransition(row: Record<string, unknown>): LifecycleTransition {
       ? row.metadata as Record<string, unknown>
       : {},
   };
+}
+
+function rowToResourceLifecyclePolicy(row: Record<string, unknown>): ResourceLifecyclePolicyRecord {
+  return {
+    resourceTable: String(row.resource_table),
+    stateColumn: String(row.state_column),
+    policy: row.policy && typeof row.policy === "object" && !Array.isArray(row.policy)
+      ? row.policy as Record<string, unknown>
+      : {},
+    version: Number(row.version),
+    updatedBy: typeof row.updated_by === "string" ? row.updated_by : null,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at : new Date(String(row.updated_at)),
+  };
+}
+
+function normalizeResourceIdentity(value: string, field: string): string {
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 200 || !/^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/.test(normalized)) {
+    throw new Error(`${field} must be a non-empty PostgreSQL identifier or schema-qualified identifier`);
+  }
+  return normalized;
+}
+
+function normalizeResourceLifecyclePolicy(value: Record<string, unknown>): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("policy must be an object");
+  }
+  assertJsonCompatiblePolicy(value, "policy");
+  if ("enabled" in value && typeof value.enabled !== "boolean") {
+    throw new Error("policy.enabled must be a boolean when provided");
+  }
+  if ("disabled" in value && typeof value.disabled !== "boolean") {
+    throw new Error("policy.disabled must be a boolean when provided");
+  }
+  return value;
+}
+
+function assertJsonCompatiblePolicy(value: unknown, path: string): void {
+  if (value === null) return;
+  if (typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error(`${path} must be JSON-compatible`);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      assertJsonCompatiblePolicy(item, `${path}[${index}]`);
+    }
+    return;
+  }
+  if (typeof value === "object") {
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (!key.trim()) throw new Error(`${path} contains an empty object key`);
+      assertJsonCompatiblePolicy(item, `${path}.${key}`);
+    }
+    return;
+  }
+  throw new Error(`${path} must be JSON-compatible`);
 }
 
 export async function listLifecycleStates(

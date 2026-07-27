@@ -19,9 +19,15 @@ import {
 } from "../modules/dispatcher/job-lifecycle.service";
 import {
   configureResourceLifecycleBinding,
+  deleteResourceLifecyclePolicy,
+  disableResourceLifecyclePolicy,
+  getResourceLifecyclePolicyRecord,
   listLifecycleStates,
+  listResourceLifecyclePolicies,
+  listResourceLifecyclePolicyReadiness,
   listLifecycleTransitions,
   upsertLifecycleState,
+  upsertResourceLifecyclePolicy,
   upsertLifecycleTransition,
   updateLifecycleStalePolicy,
 } from "../modules/lifecycle/lifecycle.service";
@@ -908,6 +914,77 @@ router.delete("/runtime-semantics/:namespace/:entryKey", requireAdminAuth, async
   }
 });
 
+router.get("/lifecycle-resource-policies", requireAdminAuth, async (req, res) => {
+  try {
+    const resourceTable = typeof req.query.resourceTable === "string" ? req.query.resourceTable : undefined;
+    const stateColumn = typeof req.query.stateColumn === "string" ? req.query.stateColumn : undefined;
+    res.json({ ok: true, data: await listResourceLifecyclePolicies({ resourceTable, stateColumn }) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.get("/lifecycle-resource-policies-readiness", requireAdminAuth, async (_req, res) => {
+  try {
+    const resources = await listResourceLifecyclePolicyReadiness();
+    const ready = resources.every((resource) => resource.ready);
+    res.status(ready ? 200 : 503).json({
+      ok: ready,
+      data: { ready, resources },
+      ...(ready ? {} : {
+        error: {
+          code: "LIFECYCLE_RESOURCE_POLICY_NOT_READY",
+          message: "One or more bound lifecycle resources do not have an enabled operational policy",
+        },
+      }),
+    });
+  } catch (err) {
+    res.status(503).json({
+      ok: false,
+      error: {
+        code: "LIFECYCLE_RESOURCE_POLICY_READINESS_FAILED",
+        message: (err as Error).message,
+      },
+    });
+  }
+});
+
+router.get("/lifecycle-resource-policies/:resourceTable/:stateColumn", requireAdminAuth, async (req, res) => {
+  try {
+    const record = await getResourceLifecyclePolicyRecord(req.params.resourceTable, req.params.stateColumn);
+    if (!record) return res.status(404).json({ ok: false, error: "Resource lifecycle policy not found" });
+    res.json({ ok: true, data: record });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.put("/lifecycle-resource-policies/:resourceTable/:stateColumn", requireAdminAuth, async (req, res) => {
+  try {
+    const updatedBy = typeof req.body?.updatedBy === "string" ? req.body.updatedBy : null;
+    const record = req.body?.disabled === true
+      ? await disableResourceLifecyclePolicy(req.params.resourceTable, req.params.stateColumn, updatedBy)
+      : await upsertResourceLifecyclePolicy({
+          resourceTable: req.params.resourceTable,
+          stateColumn: req.params.stateColumn,
+          policy: req.body?.policy,
+          updatedBy,
+        });
+    res.json({ ok: true, data: record });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.delete("/lifecycle-resource-policies/:resourceTable/:stateColumn", requireAdminAuth, async (req, res) => {
+  try {
+    const deleted = await deleteResourceLifecyclePolicy(req.params.resourceTable, req.params.stateColumn);
+    res.status(deleted ? 200 : 404).json({ ok: deleted, deleted });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
 router.get("/lifecycle/:lifecycleKey", requireAdminAuth, async (req, res) => {
   const [states, transitions] = await Promise.all([
     listLifecycleStates(req.params.lifecycleKey),
@@ -1135,7 +1212,19 @@ router.post("/jobs", async (req, res) => {
     const job = await dispatcherService.getJob(jobId);
     res.status(202).json({ ok: true, data: { jobId, status: job?.status } });
   } catch (err) {
-    res.status(400).json({ ok: false, error: (err as Error).message });
+    const message = (err as Error).message;
+    const lifecyclePolicyUnavailable = message.includes("lifecycle operational policy")
+      || message.includes("root-kind policy is not configured")
+      || message.includes("root-kind policy is ambiguous")
+      || message.includes("lifecycle transition selector is ambiguous");
+    res.status(lifecyclePolicyUnavailable ? 503 : 400).json({
+      ok: false,
+      error: message,
+      ...(lifecyclePolicyUnavailable ? {
+        code: "LIFECYCLE_RESOURCE_POLICY_UNAVAILABLE",
+        details: { retryable: true },
+      } : {}),
+    });
   }
 });
 
