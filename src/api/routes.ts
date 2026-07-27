@@ -24,8 +24,8 @@ import {
   getResourceLifecyclePolicyRecord,
   listLifecycleStates,
   listResourceLifecyclePolicies,
-  listResourceLifecyclePolicyReadiness,
   listLifecycleTransitions,
+  ResourceLifecyclePolicyUnavailableError,
   upsertLifecycleState,
   upsertResourceLifecyclePolicy,
   upsertLifecycleTransition,
@@ -924,31 +924,6 @@ router.get("/lifecycle-resource-policies", requireAdminAuth, async (req, res) =>
   }
 });
 
-router.get("/lifecycle-resource-policies-readiness", requireAdminAuth, async (_req, res) => {
-  try {
-    const resources = await listResourceLifecyclePolicyReadiness();
-    const ready = resources.every((resource) => resource.ready);
-    res.status(ready ? 200 : 503).json({
-      ok: ready,
-      data: { ready, resources },
-      ...(ready ? {} : {
-        error: {
-          code: "LIFECYCLE_RESOURCE_POLICY_NOT_READY",
-          message: "One or more bound lifecycle resources do not have an enabled operational policy",
-        },
-      }),
-    });
-  } catch (err) {
-    res.status(503).json({
-      ok: false,
-      error: {
-        code: "LIFECYCLE_RESOURCE_POLICY_READINESS_FAILED",
-        message: (err as Error).message,
-      },
-    });
-  }
-});
-
 router.get("/lifecycle-resource-policies/:resourceTable/:stateColumn", requireAdminAuth, async (req, res) => {
   try {
     const record = await getResourceLifecyclePolicyRecord(req.params.resourceTable, req.params.stateColumn);
@@ -1213,10 +1188,9 @@ router.post("/jobs", async (req, res) => {
     res.status(202).json({ ok: true, data: { jobId, status: job?.status } });
   } catch (err) {
     const message = (err as Error).message;
-    const lifecyclePolicyUnavailable = message.includes("lifecycle operational policy")
-      || message.includes("root-kind policy is not configured")
-      || message.includes("root-kind policy is ambiguous")
-      || message.includes("lifecycle transition selector is ambiguous");
+    const lifecyclePolicyUnavailable = err instanceof ResourceLifecyclePolicyUnavailableError
+      || message.includes("lifecycle transition selector is ambiguous")
+      || message.includes("root-kind policy is ambiguous");
     res.status(lifecyclePolicyUnavailable ? 503 : 400).json({
       ok: false,
       error: message,

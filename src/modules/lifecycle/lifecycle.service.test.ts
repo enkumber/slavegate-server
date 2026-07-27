@@ -5,7 +5,6 @@ import {
   getResourceLifecycleExecutionStatusContract,
   getResourceLifecyclePolicy,
   listResourceLifecyclePolicies,
-  listResourceLifecyclePolicyReadiness,
   getResourceLifecycleTransition,
   updateLifecycleStalePolicy,
   upsertResourceLifecyclePolicy,
@@ -324,47 +323,4 @@ describe("resource lifecycle policy control plane service", () => {
     await expect(deleteResourceLifecyclePolicy("operator_resources", "state", deletePool as never)).resolves.toBe(true);
   });
 
-  it("discovers readiness generically from persisted bindings and policies", async () => {
-    const query = vi.fn().mockResolvedValue({
-      rows: [
-        {
-          resource_table: "public.operator_resources",
-          state_column: "state",
-          lifecycle_key: "operator_lifecycle",
-          version: null,
-          policy_present: false,
-          policy_enabled: false,
-        },
-        {
-          resource_table: "public.audit_resources",
-          state_column: "phase",
-          lifecycle_key: "audit_lifecycle",
-          version: "3",
-          policy_present: true,
-          policy_enabled: true,
-        },
-      ],
-    });
-
-    await expect(listResourceLifecyclePolicyReadiness({ query } as never)).resolves.toEqual([
-      {
-        resourceTable: "public.operator_resources",
-        stateColumn: "state",
-        lifecycleKey: "operator_lifecycle",
-        ready: false,
-        issue: "policy_missing",
-        policyVersion: null,
-      },
-      {
-        resourceTable: "public.audit_resources",
-        stateColumn: "phase",
-        lifecycleKey: "audit_lifecycle",
-        ready: true,
-        issue: null,
-        policyVersion: 3,
-      },
-    ]);
-    expect(query.mock.calls[0][0]).toContain("FROM lifecycle_resource_bindings");
-    expect(query.mock.calls[0][0]).toContain("LEFT JOIN lifecycle_resource_policies");
-  });
 });

@@ -4,6 +4,7 @@ import { transitionWorkflow } from "../workflows/workflow-lifecycle.service";
 import {
   getResourceLifecyclePolicy,
   getResourceLifecycleState,
+  ResourceLifecyclePolicyUnavailableError,
   selectResourceLifecycleTransition,
   type LifecycleTransitionSelector,
 } from "../lifecycle/lifecycle.service";
@@ -270,18 +271,26 @@ async function getDeviceExecutionRootKindPolicy(
   const policy = await getResourceLifecyclePolicy("device_execution_roots", "state", db);
   const rootKinds = policy.rootKinds;
   if (!rootKinds || typeof rootKinds !== "object" || Array.isArray(rootKinds)) {
-    throw new Error("device execution root-kind policy is not configured");
+    throw new ResourceLifecyclePolicyUnavailableError(
+      "device execution root-kind policy is not configured",
+    );
   }
   const configured = (rootKinds as Record<string, unknown>)[rootKind];
   if (Array.isArray(configured)) {
-    throw new Error(`device execution root-kind policy is ambiguous: ${rootKind}`);
+    throw new ResourceLifecyclePolicyUnavailableError(
+      `device execution root-kind policy is ambiguous: ${rootKind}`,
+    );
   }
   if (!configured || typeof configured !== "object" || Array.isArray(configured)) {
-    throw new Error(`device execution root kind is not configured: ${rootKind}`);
+    throw new ResourceLifecyclePolicyUnavailableError(
+      `device execution root kind is not configured: ${rootKind}`,
+    );
   }
   const value = configured as Record<string, unknown>;
   if (typeof value.operationKind !== "string" || !(typeof value.wireType === "string" || value.wireType === null)) {
-    throw new Error(`device execution root-kind policy is invalid: ${rootKind}`);
+    throw new ResourceLifecyclePolicyUnavailableError(
+      `device execution root-kind policy is invalid: ${rootKind}`,
+    );
   }
   return { operationKind: value.operationKind, wireType: value.wireType };
 }

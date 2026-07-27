@@ -108,13 +108,11 @@ export interface ResourceLifecyclePolicyUpsert {
   updatedBy?: string | null;
 }
 
-export interface ResourceLifecyclePolicyReadinessRecord {
-  resourceTable: string;
-  stateColumn: string;
-  lifecycleKey: string;
-  ready: boolean;
-  issue: "policy_disabled" | "policy_missing" | null;
-  policyVersion: number | null;
+export class ResourceLifecyclePolicyUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResourceLifecyclePolicyUnavailableError";
+  }
 }
 
 export type LifecycleStateSelector = Partial<
@@ -201,10 +199,14 @@ export async function getResourceLifecyclePolicy(
   );
   const policy = result.rows[0]?.policy;
   if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
-    throw new Error("resource lifecycle operational policy is not configured");
+    throw new ResourceLifecyclePolicyUnavailableError(
+      "resource lifecycle operational policy is not configured",
+    );
   }
   if ((policy as Record<string, unknown>).enabled === false || (policy as Record<string, unknown>).disabled === true) {
-    throw new Error("resource lifecycle operational policy is disabled");
+    throw new ResourceLifecyclePolicyUnavailableError(
+      "resource lifecycle operational policy is disabled",
+    );
   }
   return policy as Record<string, unknown>;
 }
@@ -338,38 +340,6 @@ export async function deleteResourceLifecyclePolicy(
   } finally {
     client.release();
   }
-}
-
-export async function listResourceLifecyclePolicyReadiness(
-  db: LifecycleQueryable = getDb(),
-): Promise<ResourceLifecyclePolicyReadinessRecord[]> {
-  const result = await db.query(
-    `SELECT binding.resource_table::text AS resource_table,
-            binding.state_column::text AS state_column,
-            binding.lifecycle_key,
-            policy.version,
-            (policy.resource_table IS NOT NULL) AS policy_present,
-            (policy.resource_table IS NOT NULL
-              AND COALESCE((policy.policy->>'enabled')::boolean, true)
-              AND NOT COALESCE((policy.policy->>'disabled')::boolean, false)) AS policy_enabled
-       FROM lifecycle_resource_bindings binding
-       LEFT JOIN lifecycle_resource_policies policy
-         ON policy.resource_table = binding.resource_table
-        AND policy.state_column = binding.state_column
-      ORDER BY binding.resource_table::text, binding.state_column::text`,
-  );
-  return result.rows.map((row) => ({
-    resourceTable: String(row.resource_table),
-    stateColumn: String(row.state_column),
-    lifecycleKey: String(row.lifecycle_key),
-    ready: row.policy_present === true && row.policy_enabled === true,
-    issue: row.policy_present !== true
-      ? "policy_missing"
-      : row.policy_enabled !== true
-        ? "policy_disabled"
-        : null,
-    policyVersion: row.version === null || row.version === undefined ? null : Number(row.version),
-  }));
 }
 
 export async function listResourceLifecycleStates(

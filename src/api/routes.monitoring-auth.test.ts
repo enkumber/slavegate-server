@@ -2,6 +2,7 @@ import crypto from "crypto";
 import express from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { signJwt } from "./auth.middleware";
+import { ResourceLifecyclePolicyUnavailableError } from "../modules/lifecycle/lifecycle.service";
 
 const mocks = vi.hoisted(() => ({
   db: {
@@ -12,11 +13,28 @@ const mocks = vi.hoisted(() => ({
     query: vi.fn(),
     release: vi.fn(),
   },
+  dispatcherService: {
+    dispatch: vi.fn(),
+    getJob: vi.fn(),
+  },
+  transport: {
+    isDeviceOnline: vi.fn(),
+    sendStandaloneJobToDevice: vi.fn(),
+  },
 }));
 
 vi.mock("../db/client", () => ({
   getDb: vi.fn(() => mocks.db),
   getPoolStats: vi.fn(() => ({ totalCount: 1, idleCount: 1, waitingCount: 0, maxCount: 50 })),
+}));
+
+vi.mock("../modules/dispatcher/dispatcher.service", () => ({
+  dispatcherService: mocks.dispatcherService,
+}));
+
+vi.mock("../transport/transport", () => ({
+  isDeviceOnline: mocks.transport.isDeviceOnline,
+  sendStandaloneJobToDevice: mocks.transport.sendStandaloneJobToDevice,
 }));
 
 vi.mock("../ws/direct-ws.server", () => ({
@@ -93,6 +111,16 @@ describe("real API router monitoring auth", () => {
     mocks.client.query.mockReset();
     mocks.client.release.mockReset();
     mocks.db.connect.mockResolvedValue(mocks.client);
+    mocks.dispatcherService.dispatch.mockReset();
+    mocks.dispatcherService.getJob.mockReset();
+    mocks.transport.isDeviceOnline.mockReset();
+    mocks.transport.sendStandaloneJobToDevice.mockReset();
+    mocks.dispatcherService.getJob.mockImplementation(async (id: string) => {
+      const result = await mocks.db.query("SELECT * FROM jobs WHERE id = $1", [id]);
+      return result.rows[0] ?? null;
+    });
+    mocks.transport.isDeviceOnline.mockReturnValue(true);
+    mocks.transport.sendStandaloneJobToDevice.mockResolvedValue({ sent: true, queued: false, decision: "dispatched" });
   });
 
   it("allows openclaw_agent tokens on GET /api/debug/connections", async () => {
@@ -267,5 +295,62 @@ describe("real API router monitoring auth", () => {
     );
     expect(deleted.status).toBe(200);
     expect(deleted.body).toMatchObject({ ok: true, deleted: true });
+  });
+
+  it("contains lifecycle admission policy failures and keeps health responsive in the same process", async () => {
+    mocks.dispatcherService.dispatch
+      .mockRejectedValueOnce(new ResourceLifecyclePolicyUnavailableError(
+        "resource lifecycle operational policy is not configured",
+      ))
+      .mockRejectedValueOnce(new Error("lifecycle transition selector is ambiguous"));
+
+    const server = await app();
+    await new Promise<void>((resolve, reject) => {
+      const listener = server.listen(0, async () => {
+        try {
+          const address = listener.address();
+          if (!address || typeof address === "string") throw new Error("no address");
+          const baseUrl = `http://127.0.0.1:${address.port}`;
+          const body = JSON.stringify({ deviceId: "device-a", type: "screenshot", params: {} });
+
+          const missing = await fetch(`${baseUrl}/api/jobs`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-api-key": "test-api-key" },
+            body,
+          });
+          expect(missing.status).toBe(503);
+          await expect(missing.json()).resolves.toMatchObject({
+            ok: false,
+            code: "LIFECYCLE_RESOURCE_POLICY_UNAVAILABLE",
+            details: { retryable: true },
+          });
+
+          const ambiguous = await fetch(`${baseUrl}/api/jobs`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-api-key": "test-api-key" },
+            body,
+          });
+          expect(ambiguous.status).toBe(503);
+          await expect(ambiguous.json()).resolves.toMatchObject({
+            ok: false,
+            code: "LIFECYCLE_RESOURCE_POLICY_UNAVAILABLE",
+            details: { retryable: true },
+          });
+
+          const health = await fetch(`${baseUrl}/api/health`, {
+            headers: { "x-api-key": "test-api-key" },
+          });
+          expect(health.status).toBe(200);
+          await expect(health.json()).resolves.toMatchObject({
+            ok: true,
+            data: { health: "healthy" },
+          });
+          listener.close(() => resolve());
+        } catch (err) {
+          listener.close(() => reject(err));
+        }
+      });
+    });
+    expect(mocks.transport.sendStandaloneJobToDevice).not.toHaveBeenCalled();
   });
 });
