@@ -126,6 +126,11 @@ import {
   upsertRuntimeSemanticEntry,
 } from "../modules/runtime-semantics/runtime-semantics.service";
 import {
+  deleteResourceRuntimePolicy,
+  listResourceRuntimePolicies,
+  upsertResourceRuntimePolicy,
+} from "../modules/runtime-policy/resource-runtime-policy.service";
+import {
   describeWorkflowQueueRuntimePolicy,
   initializeWorkflowQueueRuntimePolicy,
 } from "../modules/workflows/workflow-runtime-config";
@@ -915,6 +920,41 @@ router.delete("/runtime-semantics/:namespace/:entryKey", requireAdminAuth, async
       workflowQueue: describeWorkflowQueueRuntimePolicy(),
       connectionRecovery: describeConnectionRecoveryPolicies(),
     });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.get("/resource-runtime-policies", requireAdminAuth, async (req, res) => {
+  try {
+    const resourceTable = typeof req.query.resourceTable === "string"
+      ? req.query.resourceTable
+      : undefined;
+    res.json({ ok: true, data: await listResourceRuntimePolicies(resourceTable) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.put("/resource-runtime-policies/:resourceTable", requireAdminAuth, async (req, res) => {
+  try {
+    const updatedBy = typeof req.body?.updatedBy === "string" ? req.body.updatedBy : null;
+    const policy = req.body?.disabled === true ? { enabled: false } : req.body?.policy;
+    const record = await upsertResourceRuntimePolicy({
+      resourceTable: req.params.resourceTable,
+      policy,
+      updatedBy,
+    });
+    res.json({ ok: true, data: record });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: (err as Error).message });
+  }
+});
+
+router.delete("/resource-runtime-policies/:resourceTable", requireAdminAuth, async (req, res) => {
+  try {
+    const deleted = await deleteResourceRuntimePolicy(req.params.resourceTable);
+    res.status(deleted ? 200 : 404).json({ ok: deleted, deleted });
   } catch (err) {
     res.status(400).json({ ok: false, error: (err as Error).message });
   }

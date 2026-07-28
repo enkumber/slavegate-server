@@ -1,6 +1,6 @@
 import type { UiTreeNode } from "../app-mapping/schema";
 import { planGraphRoute, type GraphPlanningPolicy } from "./graph-planner";
-import { resolveUiState } from "./state-resolver";
+import { resolveUiState, type StateResolutionPolicy } from "./state-resolver";
 import type { GraphRoute, StateResolution, UiGraphContext, UiStateDefinition, UiTransitionDefinition } from "./types";
 
 export interface GraphRuntimeBudget {
@@ -39,13 +39,14 @@ export class GraphRuntimeEngine {
     private readonly transitions: UiTransitionDefinition[],
     private readonly context: UiGraphContext,
     private readonly policy: GraphPlanningPolicy,
+    private readonly stateResolutionPolicy: StateResolutionPolicy,
     private readonly dependencies: GraphRuntimeDependencies,
     private readonly budget: GraphRuntimeBudget,
   ) {}
 
   async planCurrentRoute(targetStateId: string): Promise<{ resolution: StateResolution; route: GraphRoute }> {
     const tree = await this.dependencies.captureUiTree();
-    const resolution = resolveUiState(tree, this.states, this.context);
+    const resolution = resolveUiState(tree, this.states, this.context, this.stateResolutionPolicy);
     if (!resolution.stateId) {
       return { resolution, route: { found: false, transitions: [], totalCost: Infinity, reason: "Current state is unknown" } };
     }
@@ -79,7 +80,7 @@ export class GraphRuntimeEngine {
       if (checkpoint.replans > this.budget.maxReplans) return this.failure("Graph runtime replan budget exceeded", checkpoint, lastResolution, true);
 
       const tree = await this.dependencies.captureUiTree();
-      lastResolution = resolveUiState(tree, this.states, this.context);
+      lastResolution = resolveUiState(tree, this.states, this.context, this.stateResolutionPolicy);
       checkpoint.currentStateId = lastResolution.stateId;
       checkpoint.updatedAt = new Date().toISOString();
       await this.dependencies.saveCheckpoint(checkpoint);

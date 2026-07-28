@@ -1,17 +1,16 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
+import crypto from "crypto";
 import {
-  SEGMENT_BUILDER_AGENT_ID,
+  segmentBuilderAgentToken,
   segmentBuildJobService,
 } from "./segment-build-job.service";
 import { authenticateRequest } from "../../api/auth.middleware";
 import { humanWorkflowCompilerService } from "../human-workflow/human-workflow-compiler.service";
 import { queueHumanAgencyWorkflowRun } from "../../api/routes";
+import { segmentBuilderRuntimePolicy } from "./runtime-policy";
 
 const router = Router();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const DISPATCHER_ID = "openclaw-segment-builder";
-const DISPATCHER_PORT = "18788";
-const DISPATCHER_PATH = "/hooks/phone-network-segment";
 
 function asyncRoute(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
@@ -26,9 +25,10 @@ function normalizedAddress(value: string | undefined): string {
   return value.startsWith("::ffff:") ? value.slice(7) : value;
 }
 
-function requestedAgentId(req: Request, res: Response): string | null {
+async function requestedAgentId(req: Request, res: Response): Promise<string | null> {
+  const policy = await segmentBuilderRuntimePolicy();
   const value = req.body?.agentId;
-  if (value !== undefined && value !== SEGMENT_BUILDER_AGENT_ID) {
+  if (value !== undefined && value !== policy.agentId) {
     res.status(403).json({
       ok: false,
       code: "SEGMENT_BUILDER_AGENT_FORBIDDEN",
@@ -36,21 +36,50 @@ function requestedAgentId(req: Request, res: Response): string | null {
     });
     return null;
   }
-  return SEGMENT_BUILDER_AGENT_ID;
+  return policy.agentId;
 }
 
 async function requireSegmentBuilder(req: Request, res: Response, next: NextFunction): Promise<void> {
+  let policy;
+  try {
+    policy = await segmentBuilderRuntimePolicy();
+  } catch {
+    res.status(503).json({
+      ok: false,
+      code: "SEGMENT_BUILDER_POLICY_UNAVAILABLE",
+      error: "Segment Builder runtime policy is unavailable",
+    });
+    return;
+  }
   try {
     const principal = await authenticateRequest(req);
-    if (principal?.kind !== "api_token" || principal.purpose !== "openclaw_agent") {
-      res.status(401).json({ ok: false, code: "SEGMENT_BUILDER_UNAUTHORIZED", error: "Unauthorized" });
-      return;
+    if (principal?.kind !== "api_token" || principal.purpose !== policy.apiTokenPurpose) {
+      throw new Error("configured token purpose does not match");
     }
     (req as any).authPrincipal = principal;
     next();
-  } catch {
-    res.status(401).json({ ok: false, code: "SEGMENT_BUILDER_UNAUTHORIZED", error: "Unauthorized" });
+    return;
+  } catch {}
+
+  const authorization = req.header("authorization") ?? "";
+  const presented = authorization.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length).trim()
+    : "";
+  const expected = await segmentBuilderAgentToken();
+  const presentedBytes = Buffer.from(presented);
+  const expectedBytes = Buffer.from(expected);
+  if (
+    presentedBytes.length === expectedBytes.length
+    && crypto.timingSafeEqual(presentedBytes, expectedBytes)
+  ) {
+    (req as any).authPrincipal = {
+      kind: "api_token",
+      purpose: policy.apiTokenPurpose,
+    };
+    next();
+    return;
   }
+  res.status(401).json({ ok: false, code: "SEGMENT_BUILDER_UNAUTHORIZED", error: "Unauthorized" });
 }
 
 router.use((req, res, next) => {
@@ -58,6 +87,7 @@ router.use((req, res, next) => {
 });
 
 router.post("/dispatcher/register", asyncRoute(async (req, res) => {
+  const policy = await segmentBuilderRuntimePolicy();
   const raw = typeof req.body?.callbackUrl === "string" ? req.body.callbackUrl.trim() : "";
   let callback: URL;
   try {
@@ -69,23 +99,23 @@ router.post("/dispatcher/register", asyncRoute(async (req, res) => {
   const remoteAddress = normalizedAddress(req.socket.remoteAddress);
   const callbackHost = normalizedAddress(callback.hostname);
   if (
-    callback.protocol !== "http:"
-    || callback.port !== DISPATCHER_PORT
-    || callback.pathname !== DISPATCHER_PATH
+    !policy.callbackProtocols.includes(callback.protocol)
+    || callback.port !== policy.callbackPort
+    || callback.pathname !== policy.callbackPath
     || callback.search
     || callback.hash
     || !remoteAddress
-    || callbackHost !== remoteAddress
+    || (policy.requireCallbackAddressMatch && callbackHost !== remoteAddress)
   ) {
     return res.status(422).json({
       ok: false,
       code: "SEGMENT_BUILDER_CALLBACK_INVALID",
-      error: "callback must use the caller's private address and the fixed segment-builder endpoint",
+      error: "callback does not satisfy the configured segment-builder policy",
     });
   }
 
   const dispatcher = await segmentBuildJobService.registerDispatcher({
-    id: DISPATCHER_ID,
+    id: policy.dispatcherId,
     callbackUrl: callback.toString(),
     registeredIp: remoteAddress,
   });
@@ -107,7 +137,7 @@ router.get("/jobs/:id/context", asyncRoute(async (req, res) => {
 }));
 
 router.post("/jobs/:id/claim", asyncRoute(async (req, res) => {
-  const agentId = requestedAgentId(req, res);
+  const agentId = await requestedAgentId(req, res);
   if (!agentId) return;
   const job = await segmentBuildJobService.claim(req.params.id, agentId);
   if (!job) return res.status(409).json({ ok: false, code: "SEGMENT_BUILD_JOB_NOT_CLAIMABLE", error: "job is not claimable" });
@@ -115,7 +145,7 @@ router.post("/jobs/:id/claim", asyncRoute(async (req, res) => {
 }));
 
 router.post("/jobs/:id/heartbeat", asyncRoute(async (req, res) => {
-  const agentId = requestedAgentId(req, res);
+  const agentId = await requestedAgentId(req, res);
   if (!agentId) return;
   const job = await segmentBuildJobService.heartbeat(req.params.id, agentId);
   if (!job) return res.status(409).json({ ok: false, error: "job lease is not active" });
@@ -124,7 +154,7 @@ router.post("/jobs/:id/heartbeat", asyncRoute(async (req, res) => {
 
 router.post("/jobs/:id/candidate", asyncRoute(async (req, res) => {
   try {
-    const agentId = requestedAgentId(req, res);
+    const agentId = await requestedAgentId(req, res);
     if (!agentId) return;
     const candidate = req.body?.candidate;
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
@@ -146,7 +176,7 @@ router.post("/jobs/:id/candidate", asyncRoute(async (req, res) => {
 
 router.post("/jobs/:id/canary", asyncRoute(async (req, res) => {
   try {
-    const agentId = requestedAgentId(req, res);
+    const agentId = await requestedAgentId(req, res);
     if (!agentId) return;
     const job = await segmentBuildJobService.get(req.params.id);
     if (
@@ -229,7 +259,7 @@ router.post("/jobs/:id/canary", asyncRoute(async (req, res) => {
 }));
 
 router.post("/jobs/:id/fail", asyncRoute(async (req, res) => {
-  const agentId = requestedAgentId(req, res);
+  const agentId = await requestedAgentId(req, res);
   if (!agentId) return;
   const error = typeof req.body?.error === "string" ? req.body.error : "segment builder failed";
   const job = await segmentBuildJobService.fail(req.params.id, agentId, error, req.body?.blocked === true);

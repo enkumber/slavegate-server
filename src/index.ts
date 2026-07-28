@@ -53,6 +53,11 @@ import {
   ensureSegmentBuilderAgentToken,
   segmentBuildJobService,
 } from "./modules/segment-builder/segment-build-job.service";
+import { segmentBuilderRuntimePolicy } from "./modules/segment-builder/runtime-policy";
+import {
+  ResourceRuntimePolicyUnavailableError,
+  watchResourceRuntimePolicy,
+} from "./modules/runtime-policy/resource-runtime-policy.service";
 
 const PORT = parseInt(process.env.PORT ?? "21211", 10);
 
@@ -74,7 +79,6 @@ async function bootstrap(): Promise<void> {
 
   // ─── Auto-migrate: ensure all schema + migrations are applied ─────────────
   await runMigrations();
-  await ensureSegmentBuilderAgentToken();
   await initializePnqV2RuntimeConfig();
   await initializeWorkflowQueueRuntimePolicy();
   await initializeConnectionRecoveryPolicies();
@@ -286,24 +290,39 @@ async function bootstrap(): Promise<void> {
     );
   }
   if (queueSweepTimer) queueSweepTimer.unref();
-  const segmentBuilderRecoveryTimer = setInterval(() => {
-    segmentBuildJobService.sweepRecovery()
-      .then((summary) => {
+  let segmentBuilderRecoveryTimer: NodeJS.Timeout | null = null;
+  const loadSegmentBuilderPolicy = async () => segmentBuilderRuntimePolicy().catch((error) => {
+    if (error instanceof ResourceRuntimePolicyUnavailableError) return null;
+    throw error;
+  });
+  const scheduleSegmentBuilderRecovery = async (): Promise<void> => {
+    if (segmentBuilderRecoveryTimer) clearTimeout(segmentBuilderRecoveryTimer);
+    segmentBuilderRecoveryTimer = null;
+    const policy = await loadSegmentBuilderPolicy();
+    if (!policy) return;
+    await ensureSegmentBuilderAgentToken();
+    segmentBuilderRecoveryTimer = setTimeout(async () => {
+      try {
+        const summary = await segmentBuildJobService.sweepRecovery();
         if (summary.expiredCanaries > 0 || summary.redispatchedLeases > 0) {
           console.warn(
             `[segment-builder] recovery sweep expiredCanaries=${summary.expiredCanaries} ` +
             `redispatchedLeases=${summary.redispatchedLeases}`,
           );
         }
-      })
-      .catch(err =>
-        console.error("[segment-builder] recovery sweep error:", (err as Error).message)
-      );
-  }, 30_000);
-  segmentBuilderRecoveryTimer.unref();
-  segmentBuildJobService.sweepRecovery().catch(err =>
-    console.error("[segment-builder] startup recovery sweep error:", (err as Error).message)
+      } catch (err) {
+        console.error("[segment-builder] recovery sweep error:", (err as Error).message);
+      } finally {
+        await scheduleSegmentBuilderRecovery();
+      }
+    }, policy.recoverySweepIntervalMs);
+    segmentBuilderRecoveryTimer.unref();
+  };
+  const stopSegmentBuilderPolicyWatch = await watchResourceRuntimePolicy(
+    "segment_build_jobs",
+    scheduleSegmentBuilderRecovery,
   );
+  await scheduleSegmentBuilderRecovery();
   const dispatcherLifecycleTimer = setInterval(() => {
     dispatcherService.sweepStaleJobs()
       .then((summary) => {
@@ -356,7 +375,8 @@ async function bootstrap(): Promise<void> {
     console.log(`\n[server] ${signal} received — shutting down...`);
     httpServer.close();
     if (queueSweepTimer) clearInterval(queueSweepTimer);
-    clearInterval(segmentBuilderRecoveryTimer);
+    if (segmentBuilderRecoveryTimer) clearTimeout(segmentBuilderRecoveryTimer);
+    await stopSegmentBuilderPolicyWatch();
     clearInterval(dispatcherLifecycleTimer);
     if (isPnqV2ShadowRuntimeEnabled()) {
       await pnqV2RuntimeService.close();

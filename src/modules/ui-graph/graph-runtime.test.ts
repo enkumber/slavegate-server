@@ -3,6 +3,17 @@ import { computePageSignature } from "../app-mapping/page-fingerprint";
 import type { UiTreeNode } from "../app-mapping/schema";
 import { GraphRuntimeEngine } from "./graph-runtime";
 import type { UiStateDefinition, UiTransitionDefinition } from "./types";
+import type { StateResolutionPolicy } from "./state-resolver";
+
+const resolutionPolicy: StateResolutionPolicy = {
+  anchorWeights: { resourceid: 1 },
+  defaultAnchorWeight: 1,
+  emptyRequiredScore: 0,
+  maximumFuzzyConfidence: 1,
+  requiredAnchorContribution: 1,
+  optionalAnchorContribution: 0,
+  ambiguityMargin: 0.01,
+};
 
 function tree(label: string): UiTreeNode[] {
   return [{ resourceId: `app:id/${label}`, text: label, className: "android.widget.Button" }];
@@ -12,7 +23,15 @@ function state(id: string): UiStateDefinition {
   const nodes = tree(id);
   return {
     id, appId: "app", key: id, name: id, kind: id === "popup" ? "overlay" : "screen", safetyClass: "navigation",
-    variants: [{ id: `${id}-variant`, key: "default", signatureHash: computePageSignature(nodes), requiredAnchors: [`resourceId:app:id/${id}`], optionalAnchors: [], forbiddenAnchors: [] }],
+    variants: [{
+      id: `${id}-variant`,
+      key: "default",
+      signatureHash: computePageSignature(nodes),
+      requiredAnchors: [`resourceId:app:id/${id}`],
+      optionalAnchors: [],
+      forbiddenAnchors: [],
+      confidenceThreshold: 0.7,
+    }],
   };
 }
 
@@ -30,6 +49,7 @@ describe("GraphRuntimeEngine", () => {
       [transition("home-target", "home", "target"), transition("dismiss", "popup", "home"), transition("popup-target", "popup", "target")],
       { appId: "app" },
       { allowedSafetyClasses: ["navigation"], minimumConfidence: 0.7, maxTransitions: 20 },
+      resolutionPolicy,
       {
         captureUiTree: async () => observations.shift() ?? tree("target"),
         executeTransition: execute,
@@ -46,6 +66,7 @@ describe("GraphRuntimeEngine", () => {
   it("fails closed on an unknown state", async () => {
     const engine = new GraphRuntimeEngine(
       [state("home")], [], { appId: "app" }, { allowedSafetyClasses: ["navigation"], minimumConfidence: 0.7, maxTransitions: 20 },
+      resolutionPolicy,
       { captureUiTree: async () => tree("unknown"), executeTransition: async () => ({ ok: true }), saveCheckpoint: async () => undefined },
       { maxTransitions: 30, maxReplans: 8, maxDurationMs: 180_000 },
     );

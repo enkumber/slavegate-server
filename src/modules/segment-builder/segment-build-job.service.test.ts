@@ -15,6 +15,33 @@ const state = vi.hoisted(() => ({
   },
 }));
 
+vi.mock("./runtime-policy", () => ({
+  segmentBuilderRuntimePolicy: async () => ({
+    agentId: "test-segment-builder",
+    dispatcherId: "test-dispatcher",
+    apiTokenPurpose: "test-purpose",
+    agentTokenHmacContext: "test-agent-token",
+    hookTokenHmacContext: "test-hook-token",
+    managedBy: "test-manager",
+    serverActor: "test-kernel",
+    sessionKeyPrefix: "test-hook:",
+    callbackProtocols: ["http:"],
+    callbackPort: "18788",
+    callbackPath: "/hooks/phone-network-segment",
+    requireCallbackAddressMatch: true,
+    candidateSafetyClasses: ["test-safety"],
+    capabilityMetadata: {},
+    dispatcherTtlMs: 300_000,
+    agentTokenTtlMs: 300_000,
+    leaseDurationMs: 600_000,
+    dispatchTimeoutMs: 10_000,
+    recoverySweepIntervalMs: 30_000,
+    sweepLimit: 25,
+    offlineQueuedCanaryTimeoutMs: 300_000,
+    recoveryRedispatchGuardMs: 600_000,
+  }),
+}));
+
 vi.mock("../../db/client", () => {
   const query = async (text: string, params: unknown[] = []) => {
       state.queries.push(text);
@@ -259,10 +286,11 @@ vi.mock("../../db/client", () => {
 });
 
 import {
-  SEGMENT_BUILDER_AGENT_ID,
   SegmentBuildJobService,
   type SegmentBuildJob,
 } from "./segment-build-job.service";
+
+const TEST_AGENT_ID = "test-segment-builder";
 
 function buildJob(): SegmentBuildJob {
   return {
@@ -276,7 +304,7 @@ function buildJob(): SegmentBuildJob {
     capabilityKey: null,
     reason: "capability_missing",
     status: "pending_agent",
-    assignedAgent: SEGMENT_BUILDER_AGENT_ID,
+    assignedAgent: TEST_AGENT_ID,
     agentSessionKey: null,
     dispatchAttempts: 0,
     lastDispatchError: null,
@@ -303,7 +331,7 @@ describe("SegmentBuildJobService dispatch", () => {
       capability_key: null,
       reason: buildJob().reason,
       status: "pending_agent",
-      assigned_agent: SEGMENT_BUILDER_AGENT_ID,
+      assigned_agent: TEST_AGENT_ID,
       agent_session_key: null,
       dispatch_attempts: 0,
       last_dispatch_error: null,
@@ -368,7 +396,7 @@ describe("SegmentBuildJobService dispatch", () => {
     expect(result.status).toBe("building");
     expect(result.candidate).toEqual({ preserved: true });
     expect(result.dispatchAttempts).toBe(1);
-    expect(state.row.agent_session_key).toBe(`hook:phone-network:${buildJob().id}`);
+    expect(state.row.agent_session_key).toBe(`test-hook:${buildJob().id}`);
   });
 
   it("preserves candidate-ready state while reclaiming an expired lease", async () => {
@@ -378,7 +406,7 @@ describe("SegmentBuildJobService dispatch", () => {
 
     const result = await new SegmentBuildJobService().claim(
       buildJob().id,
-      SEGMENT_BUILDER_AGENT_ID,
+      TEST_AGENT_ID,
     );
 
     expect(result?.status).toBe("candidate_ready");

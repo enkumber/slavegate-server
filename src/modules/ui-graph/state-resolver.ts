@@ -2,8 +2,15 @@ import { computePageSignature } from "../app-mapping/page-fingerprint";
 import type { UiTreeNode } from "../app-mapping/schema";
 import type { StateResolution, UiGraphContext, UiStateDefinition, UiStateVariantDefinition } from "./types";
 
-const DEFAULT_THRESHOLD = 0.72;
-const AMBIGUITY_MARGIN = 0.06;
+export interface StateResolutionPolicy {
+  anchorWeights: Record<string, number>;
+  defaultAnchorWeight: number;
+  emptyRequiredScore: number;
+  maximumFuzzyConfidence: number;
+  requiredAnchorContribution: number;
+  optionalAnchorContribution: number;
+  ambiguityMargin: number;
+}
 
 function clean(value: string | undefined | null): string {
   return (value ?? "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -78,12 +85,12 @@ function variantContextMatches(variant: UiStateVariantDefinition, context: UiGra
     && (!variant.deviceClass || clean(variant.deviceClass) === clean(context.deviceClass));
 }
 
-function anchorWeight(anchor: string): number {
-  if (anchor.startsWith("resourceid:")) return 1.4;
-  if (anchor.startsWith("contentdescription:")) return 1.2;
-  if (anchor.startsWith("package:")) return 1.1;
-  if (anchor.startsWith("text:")) return 1;
-  return 0.65;
+function anchorWeight(anchor: string, policy: StateResolutionPolicy): number {
+  const kind = anchor.slice(0, Math.max(0, anchor.indexOf(":")));
+  const configured = policy.anchorWeights[kind];
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : policy.defaultAnchorWeight;
 }
 
 interface ScoredVariant {
@@ -102,6 +109,7 @@ function scoreVariant(
   fingerprint: string,
   observed: Set<string>,
   context: UiGraphContext,
+  policy: StateResolutionPolicy,
 ): ScoredVariant | null {
   if (!variantContextMatches(variant, context)) return null;
 
@@ -128,13 +136,22 @@ function scoreVariant(
     return { state, variant, confidence: 1, exact: true, matched: [...matchedRequired, ...matchedOptional], missing, forbidden };
   }
 
-  const requiredWeight = required.reduce((sum, a) => sum + anchorWeight(a), 0);
-  const matchedRequiredWeight = matchedRequired.reduce((sum, a) => sum + anchorWeight(a), 0);
-  const optionalWeight = optional.reduce((sum, a) => sum + anchorWeight(a), 0);
-  const matchedOptionalWeight = matchedOptional.reduce((sum, a) => sum + anchorWeight(a), 0);
-  const requiredScore = requiredWeight > 0 ? matchedRequiredWeight / requiredWeight : 0.55;
+  const requiredWeight = required.reduce((sum, a) => sum + anchorWeight(a, policy), 0);
+  const matchedRequiredWeight = matchedRequired.reduce((sum, a) => sum + anchorWeight(a, policy), 0);
+  const optionalWeight = optional.reduce((sum, a) => sum + anchorWeight(a, policy), 0);
+  const matchedOptionalWeight = matchedOptional.reduce((sum, a) => sum + anchorWeight(a, policy), 0);
+  const requiredScore = requiredWeight > 0
+    ? matchedRequiredWeight / requiredWeight
+    : policy.emptyRequiredScore;
   const optionalScore = optionalWeight > 0 ? matchedOptionalWeight / optionalWeight : 0;
-  const confidence = Math.max(0, Math.min(0.99, requiredScore * 0.82 + optionalScore * 0.18));
+  const confidence = Math.max(
+    0,
+    Math.min(
+      policy.maximumFuzzyConfidence,
+      requiredScore * policy.requiredAnchorContribution
+        + optionalScore * policy.optionalAnchorContribution,
+    ),
+  );
 
   return {
     state,
@@ -151,21 +168,23 @@ export function resolveUiState(
   uiTree: UiTreeNode[],
   states: UiStateDefinition[],
   context: UiGraphContext,
+  policy: StateResolutionPolicy,
 ): StateResolution {
   const fingerprint = computePageSignature(uiTree);
   const observed = uiTreeAnchorSet(uiTree);
   const scored = states
     .filter((state) => state.appId === context.appId)
-    .flatMap((state) => state.variants.map((variant) => scoreVariant(state, variant, fingerprint, observed, context)))
+    .flatMap((state) => state.variants.map((variant) => scoreVariant(state, variant, fingerprint, observed, context, policy)))
     .filter((value): value is ScoredVariant => value !== null)
     .sort((a, b) => b.confidence - a.confidence);
 
   const best = scored[0];
   if (!best) return unknown(fingerprint);
 
-  const threshold = best.variant.confidenceThreshold ?? DEFAULT_THRESHOLD;
+  const threshold = best.variant.confidenceThreshold;
+  if (typeof threshold !== "number" || !Number.isFinite(threshold)) return unknown(fingerprint);
   const ambiguousWith = scored.slice(1)
-    .filter((candidate) => best.confidence - candidate.confidence < AMBIGUITY_MARGIN)
+    .filter((candidate) => best.confidence - candidate.confidence < policy.ambiguityMargin)
     .map((candidate) => ({
       stateId: candidate.state.id,
       variantId: candidate.variant.id,

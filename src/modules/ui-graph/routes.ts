@@ -7,9 +7,12 @@ import { uiGraphLearningLoop } from "./learning-loop";
 import { uiGraphRepository } from "./repository";
 import { evaluateCanaryGate, recordCanaryResult } from "./canary.service";
 import { persistStateSnapshot, replaySnapshotCorpus } from "./snapshot-replay.service";
+import {
+  allowedUiGraphScopeTypes,
+  workflowCanaryCohortDefaults,
+} from "./runtime-policy";
 
 const router = Router();
-const SCOPE_TYPES = new Set(["global", "app", "workflow", "device"]);
 
 function actor(req: Request): string {
   const principal = (req as Request & { authPrincipal?: Record<string, unknown> }).authPrincipal;
@@ -251,6 +254,37 @@ router.post("/canary-cohorts", requireAdminAuth, async (req: Request, res: Respo
   const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
   const platform = typeof req.body?.platform === "string" ? req.body.platform.trim() : "";
   if (!name || !platform) return res.status(400).json({ ok: false, error: "name and platform are required" });
+  const defaults = await workflowCanaryCohortDefaults().catch(() => null);
+  if (!defaults) {
+    return res.status(503).json({ ok: false, error: "workflow canary policy is unavailable" });
+  }
+  const safetyClasses = req.body?.safetyClasses === undefined
+    ? defaults.safetyClasses
+    : req.body.safetyClasses;
+  if (
+    !Array.isArray(safetyClasses)
+    || safetyClasses.length === 0
+    || safetyClasses.some((value) => typeof value !== "string" || !value.trim())
+  ) {
+    return res.status(400).json({ ok: false, error: "safetyClasses must contain non-empty strings" });
+  }
+  const requiredDistinctDevices = req.body?.requiredDistinctDevices === undefined
+    ? defaults.requiredDistinctDevices
+    : Number(req.body.requiredDistinctDevices);
+  const requiredDistinctBranches = req.body?.requiredDistinctBranches === undefined
+    ? defaults.requiredDistinctBranches
+    : Number(req.body.requiredDistinctBranches);
+  if (
+    !Number.isSafeInteger(requiredDistinctDevices)
+    || requiredDistinctDevices < 1
+    || !Number.isSafeInteger(requiredDistinctBranches)
+    || requiredDistinctBranches < 1
+  ) {
+    return res.status(400).json({
+      ok: false,
+      error: "requiredDistinctDevices and requiredDistinctBranches must be positive integers",
+    });
+  }
   const result = await getDb().query(
     `INSERT INTO workflow_canary_cohorts
        (name, platform, safety_classes, required_distinct_devices, required_distinct_branches, config)
@@ -262,9 +296,9 @@ router.post("/canary-cohorts", requireAdminAuth, async (req: Request, res: Respo
        config=EXCLUDED.config, updated_at=NOW()
      RETURNING *`,
     [
-      name, platform, JSON.stringify(Array.isArray(req.body?.safetyClasses) ? req.body.safetyClasses : ["read_only", "navigation"]),
-      Math.max(1, Number(req.body?.requiredDistinctDevices ?? 2)),
-      Math.max(1, Number(req.body?.requiredDistinctBranches ?? 2)),
+      name, platform, JSON.stringify(safetyClasses),
+      requiredDistinctDevices,
+      requiredDistinctBranches,
       JSON.stringify(req.body?.config && typeof req.body.config === "object" ? req.body.config : {}),
     ],
   );
@@ -282,7 +316,11 @@ router.get("/canary-cohorts/:cohortId/gate/:cacheKey", requireAdminAuth, async (
 
 router.put("/flags/:scopeType/:scopeValue", requireAdminAuth, async (req: Request, res: Response) => {
   const { scopeType, scopeValue } = req.params;
-  if (!SCOPE_TYPES.has(scopeType)) return res.status(400).json({ ok: false, error: "invalid scope type" });
+  const scopeTypes = await allowedUiGraphScopeTypes().catch(() => null);
+  if (!scopeTypes) {
+    return res.status(503).json({ ok: false, error: "UI Graph scope policy is unavailable" });
+  }
+  if (!scopeTypes.has(scopeType)) return res.status(400).json({ ok: false, error: "invalid scope type" });
   if (!scopeValue.trim()) return res.status(400).json({ ok: false, error: "scope value is required" });
   const enabled = req.body?.enabled === true;
   const result = await getDb().query(

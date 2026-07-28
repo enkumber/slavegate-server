@@ -18,16 +18,13 @@ import {
   serializeLifecycleTransitionSelector,
   type LifecycleTransitionSelector,
 } from "../lifecycle/lifecycle.service";
+import {
+  segmentBuilderRuntimePolicy,
+  type SegmentBuilderRuntimePolicy,
+} from "./runtime-policy";
 
 export type SegmentBuildReason =
-  | "capability_missing"
-  | "composition_missing"
-  | "segment_missing";
-
-export const SEGMENT_BUILDER_AGENT_ID = "segment-builder";
-const SEGMENT_BUILDER_SWEEP_LIMIT = 25;
-const OFFLINE_QUEUED_CANARY_TIMEOUT_MS = 5 * 60_000;
-const RECOVERY_REDISPATCH_GUARD_MS = 10 * 60_000;
+  string;
 
 export interface SegmentBuildJob {
   id: string;
@@ -88,7 +85,7 @@ interface AgentCandidate {
     requiredTerms?: string[];
     forbiddenTerms?: string[];
     safetyClass: string;
-    portabilityScope?: string;
+    portabilityScope: string;
     metadata?: Record<string, unknown>;
   };
   segments: SegmentCandidate[];
@@ -102,13 +99,18 @@ function objectValue(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function assertAgentCandidate(value: Record<string, unknown>): AgentCandidate {
+function assertAgentCandidate(
+  value: Record<string, unknown>,
+  policy: SegmentBuilderRuntimePolicy,
+): AgentCandidate {
   const capability = objectValue(value.capability);
   const composition = objectValue(value.composition);
   if (
     typeof capability.capabilityKey !== "string"
     || typeof capability.platform !== "string"
-    || !["read_only", "navigation"].includes(String(capability.safetyClass))
+    || typeof capability.portabilityScope !== "string"
+    || !capability.portabilityScope.trim()
+    || !policy.candidateSafetyClasses.includes(String(capability.safetyClass))
     || !Array.isArray(value.segments)
     || typeof composition.compositionName !== "string"
     || typeof composition.version !== "string"
@@ -187,7 +189,7 @@ async function resourceVersionIsSuccessful(
   return result.rows[0]?.successful === true;
 }
 
-async function activateCapability(capabilityKey: string): Promise<void> {
+async function activateCapability(capabilityKey: string, managedBy: string): Promise<void> {
   const selector = serializeLifecycleTransitionSelector({
     targetDispatchable: true,
     targetAdministrative: false,
@@ -220,12 +222,12 @@ async function activateCapability(capabilityKey: string): Promise<void> {
               ELSE selected.to_status
             END,
             metadata = (capability.metadata - 'buildJobId')
-              || jsonb_build_object('managedBy', 'segment-builder'),
+              || jsonb_build_object('managedBy', $3::text),
             updated_at = NOW()
        FROM selected
       WHERE capability.capability_key = selected.capability_key
         AND (selected.current_dispatchable OR selected.to_status IS NOT NULL)`,
-    [capabilityKey, selector],
+    [capabilityKey, selector, managedBy],
   );
 }
 
@@ -249,6 +251,9 @@ async function transitionSegmentBuildJob(
   extraParams: unknown[] = [],
   client?: PoolClient,
 ): Promise<SegmentBuildJob | null> {
+  const effectivePatch = patch.refreshLease
+    ? { ...patch, leaseDurationMs: (await segmentBuilderRuntimePolicy()).leaseDurationMs }
+    : patch;
   const patchIndex = extraParams.length + 2;
   const selectorIndex = extraParams.length + 3;
   const selectorPredicate = lifecycleTransitionSelectorPredicate(
@@ -320,7 +325,10 @@ async function transitionSegmentBuildJob(
             END,
             claim_expires_at = CASE
               WHEN COALESCE(($${patchIndex}::jsonb->>'refreshLease')::boolean, false)
-                THEN NOW() + INTERVAL '10 minutes'
+                THEN NOW() + (
+                  ($${patchIndex}::jsonb->>'leaseDurationMs')::bigint
+                  * INTERVAL '1 millisecond'
+                )
               WHEN selected.mark_completed THEN NULL
               ELSE job.claim_expires_at
             END,
@@ -356,18 +364,19 @@ async function transitionSegmentBuildJob(
     [
       id,
       ...extraParams,
-      JSON.stringify(patch),
+      JSON.stringify(effectivePatch),
       serializeLifecycleTransitionSelector(selector),
     ],
   );
   return result.rows[0] ? rowToJob(result.rows[0]) : null;
 }
 
-function hookToken(): string {
+async function hookToken(): Promise<string> {
+  const policy = await segmentBuilderRuntimePolicy();
   const configuredToken = process.env.OPENCLAW_SEGMENT_BUILDER_HOOK_TOKEN?.trim();
   const apiKey = process.env.API_KEY?.trim();
   const token = configuredToken || (apiKey
-    ? crypto.createHmac("sha256", apiKey).update("openclaw-segment-builder-hook-v1").digest("hex")
+    ? crypto.createHmac("sha256", apiKey).update(policy.hookTokenHmacContext).digest("hex")
     : "");
   if (!token) {
     throw Object.assign(new Error("OpenClaw segment-builder hook is not configured"), {
@@ -377,27 +386,29 @@ function hookToken(): string {
   return token;
 }
 
-export function segmentBuilderAgentToken(): string {
+export async function segmentBuilderAgentToken(): Promise<string> {
+  const policy = await segmentBuilderRuntimePolicy();
   const apiKey = process.env.API_KEY?.trim();
   if (!apiKey) {
     throw new Error("API_KEY is required for the segment-builder agent token");
   }
   return crypto
     .createHmac("sha256", apiKey)
-    .update("phone-network-openclaw-agent-v1")
+    .update(policy.agentTokenHmacContext)
     .digest("hex");
 }
 
 export async function ensureSegmentBuilderAgentToken(): Promise<void> {
-  const tokenHash = crypto.createHash("sha256").update(segmentBuilderAgentToken()).digest("hex");
+  const policy = await segmentBuilderRuntimePolicy();
+  const tokenHash = crypto.createHash("sha256").update(await segmentBuilderAgentToken()).digest("hex");
   await getDb().query(
     `INSERT INTO api_tokens (token_hash, purpose, expires_at)
-     VALUES ($1, 'openclaw_agent', NOW() + INTERVAL '10 years')
+     VALUES ($1, $2, NOW() + ($3::bigint * INTERVAL '1 millisecond'))
      ON CONFLICT (token_hash) DO UPDATE SET
-       purpose = 'openclaw_agent',
-       expires_at = NOW() + INTERVAL '10 years',
+       purpose = EXCLUDED.purpose,
+       expires_at = EXCLUDED.expires_at,
        revoked_at = NULL`,
-    [tokenHash],
+    [tokenHash, policy.apiTokenPurpose, policy.agentTokenTtlMs],
   );
 }
 
@@ -529,7 +540,8 @@ export class SegmentBuildJobService {
     callbackUrl: string;
     registeredIp: string;
   }): Promise<{ id: string; callbackUrl: string; expiresAt: string }> {
-    const expiresAt = new Date(Date.now() + 5 * 60_000);
+    const policy = await segmentBuilderRuntimePolicy();
+    const expiresAt = new Date(Date.now() + policy.dispatcherTtlMs);
     const result = await getDb().query(
       `INSERT INTO segment_builder_dispatchers
          (id, callback_url, registered_ip, expires_at)
@@ -551,12 +563,14 @@ export class SegmentBuildJobService {
   }
 
   private async dispatcherUrl(): Promise<string> {
+    const policy = await segmentBuilderRuntimePolicy();
     const result = await getDb().query(
       `SELECT callback_url
        FROM segment_builder_dispatchers
-       WHERE id = 'openclaw-segment-builder'
+       WHERE id = $1
          AND expires_at > NOW()
        LIMIT 1`,
+      [policy.dispatcherId],
     );
     const registered = result.rows[0]?.callback_url;
     if (typeof registered === "string" && registered.length > 0) return registered;
@@ -577,11 +591,13 @@ export class SegmentBuildJobService {
     capabilityKey?: string | null;
     reason: SegmentBuildReason;
   }): Promise<SegmentBuildJob> {
+    const policy = await segmentBuilderRuntimePolicy();
     const idempotencyKey = `segment-build:${input.requestKey}`;
     const result = await getDb().query(
       `INSERT INTO segment_build_jobs
-         (request_key, idempotency_key, device_id, account_id, intent, platform, capability_key, reason)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         (request_key, idempotency_key, device_id, account_id, intent, platform,
+          capability_key, reason, assigned_agent)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT (idempotency_key) DO UPDATE SET updated_at = NOW()
        RETURNING *`,
       [
@@ -593,10 +609,11 @@ export class SegmentBuildJobService {
         input.platform,
         input.capabilityKey ?? null,
         input.reason,
+        policy.agentId,
       ],
     );
     const job = rowToJob(result.rows[0]);
-    await event(job.id, "created_or_reused", "phone-network", { reason: job.reason });
+    await event(job.id, "created_or_reused", policy.serverActor, { reason: job.reason });
     return job;
   }
 
@@ -640,8 +657,9 @@ export class SegmentBuildJobService {
       && Date.parse(job.claimExpiresAt) < Date.now();
     if (!normalDispatch && !expiredLeaseRecovery) return job;
     const url = await this.dispatcherUrl();
-    const token = hookToken();
-    const sessionKey = `hook:phone-network:${job.id}`;
+    const policy = await segmentBuilderRuntimePolicy();
+    const token = await hookToken();
+    const sessionKey = `${policy.sessionKeyPrefix}${job.id}`;
     const reserved = expiredLeaseRecovery
       ? await getDb().query(
         `UPDATE segment_build_jobs job
@@ -661,7 +679,7 @@ export class SegmentBuildJobService {
              OR dispatched_at < NOW() - ($3::bigint * INTERVAL '1 millisecond')
            )
          RETURNING *`,
-        [job.id, sessionKey, RECOVERY_REDISPATCH_GUARD_MS],
+        [job.id, sessionKey, policy.recoveryRedispatchGuardMs],
       )
       : null;
     const transitioned = expiredLeaseRecovery
@@ -678,7 +696,7 @@ export class SegmentBuildJobService {
     await event(
       job.id,
       expiredLeaseRecovery ? "recovery_dispatch_started" : "dispatch_started",
-      "phone-network",
+      policy.serverActor,
       { sessionKey, previousStatus: job.status },
     );
     try {
@@ -695,7 +713,7 @@ export class SegmentBuildJobService {
           reason: job.reason,
           idempotencyKey: job.idempotencyKey,
         }),
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(policy.dispatchTimeoutMs),
       });
       if (!response.ok) {
         throw new Error(`OpenClaw hook returned HTTP ${response.status}`);
@@ -703,7 +721,7 @@ export class SegmentBuildJobService {
       await event(
         job.id,
         expiredLeaseRecovery ? "recovery_dispatched" : "dispatched",
-        "phone-network",
+        policy.serverActor,
         { sessionKey, previousStatus: job.status },
       );
       return (await this.get(job.id)) ?? transitioned;
@@ -715,7 +733,7 @@ export class SegmentBuildJobService {
       }, {
         lastDispatchError: message,
       });
-      await event(job.id, "dispatch_failed", "phone-network", { error: message });
+      await event(job.id, "dispatch_failed", policy.serverActor, { error: message });
       throw Object.assign(new Error(message), { code: "SEGMENT_BUILDER_DISPATCH_FAILED" });
     }
   }
@@ -728,7 +746,9 @@ export class SegmentBuildJobService {
     });
   }
 
-  async sweepExpiredAgentLeases(limit = SEGMENT_BUILDER_SWEEP_LIMIT): Promise<number> {
+  async sweepExpiredAgentLeases(limit?: number): Promise<number> {
+    const policy = await segmentBuilderRuntimePolicy();
+    const effectiveLimit = limit ?? policy.sweepLimit;
     const result = await getDb().query(
       `SELECT *
        FROM segment_build_jobs job
@@ -739,7 +759,7 @@ export class SegmentBuildJobService {
          AND claim_expires_at < NOW()
        ORDER BY claim_expires_at ASC
        LIMIT $1`,
-      [Math.max(1, Math.min(limit, SEGMENT_BUILDER_SWEEP_LIMIT))],
+      [Math.max(1, Math.min(effectiveLimit, policy.sweepLimit))],
     );
     let redispatched = 0;
     for (const row of result.rows) {
@@ -751,9 +771,12 @@ export class SegmentBuildJobService {
   }
 
   async expireOfflineQueuedCanaries(
-    timeoutMs = OFFLINE_QUEUED_CANARY_TIMEOUT_MS,
-    limit = SEGMENT_BUILDER_SWEEP_LIMIT,
+    timeoutMs?: number,
+    limit?: number,
   ): Promise<number> {
+    const policy = await segmentBuilderRuntimePolicy();
+    const effectiveTimeoutMs = timeoutMs ?? policy.offlineQueuedCanaryTimeoutMs;
+    const effectiveLimit = limit ?? policy.sweepLimit;
     const candidates = await getDb().query(
       `SELECT j.id
        FROM segment_build_jobs j
@@ -783,8 +806,8 @@ export class SegmentBuildJobService {
        ORDER BY r.created_at ASC
        LIMIT $2`,
       [
-        Math.max(1_000, timeoutMs),
-        Math.max(1, Math.min(limit, SEGMENT_BUILDER_SWEEP_LIMIT)),
+        Math.max(1, effectiveTimeoutMs),
+        Math.max(1, Math.min(effectiveLimit, policy.sweepLimit)),
       ],
     );
     let expired = 0;
@@ -936,9 +959,10 @@ export class SegmentBuildJobService {
         }
         await client.query(
           `INSERT INTO segment_build_job_events(job_id, event_type, actor, payload)
-           VALUES ($1, 'canary_expired_offline', 'phone-network-kernel', $2::jsonb)`,
+           VALUES ($1, 'canary_expired_offline', $2, $3::jsonb)`,
           [
             candidate.id,
+            policy.serverActor,
             JSON.stringify({
               runId,
               taskId,
@@ -968,7 +992,8 @@ export class SegmentBuildJobService {
   }
 
   async claim(id: string, agentId: string): Promise<SegmentBuildJob | null> {
-    if (agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
+    const policy = await segmentBuilderRuntimePolicy();
+    if (agentId !== policy.agentId) return null;
     let job = await transitionSegmentBuildJob(id, {
       targetTerminal: false,
       transitionExternalAllowed: true,
@@ -982,7 +1007,7 @@ export class SegmentBuildJobService {
         `UPDATE segment_build_jobs job
             SET assigned_agent = $2,
                 claimed_at = COALESCE(claimed_at, NOW()),
-                claim_expires_at = NOW() + INTERVAL '10 minutes',
+                claim_expires_at = NOW() + ($3::bigint * INTERVAL '1 millisecond'),
                 updated_at = NOW()
            FROM lifecycle_state_definitions definition
           WHERE job.id = $1
@@ -991,7 +1016,7 @@ export class SegmentBuildJobService {
             AND NOT definition.terminal
             AND job.claim_expires_at < NOW()
           RETURNING job.*`,
-        [id, agentId],
+        [id, agentId, policy.leaseDurationMs],
       );
       job = recovered.rows[0] ? rowToJob(recovered.rows[0]) : null;
     }
@@ -1001,7 +1026,8 @@ export class SegmentBuildJobService {
   }
 
   async heartbeat(id: string, agentId: string): Promise<SegmentBuildJob | null> {
-    if (agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
+    const policy = await segmentBuilderRuntimePolicy();
+    if (agentId !== policy.agentId) return null;
     const progressed = await transitionSegmentBuildJob(id, {
       targetTerminal: false,
       targetHasAutomaticNonterminalExit: false,
@@ -1013,7 +1039,7 @@ export class SegmentBuildJobService {
     if (progressed) return progressed;
     const result = await getDb().query(
       `UPDATE segment_build_jobs job
-          SET claim_expires_at = NOW() + INTERVAL '10 minutes',
+          SET claim_expires_at = NOW() + ($3::bigint * INTERVAL '1 millisecond'),
               updated_at = NOW()
          FROM lifecycle_state_definitions definition
         WHERE job.id = $1
@@ -1022,14 +1048,15 @@ export class SegmentBuildJobService {
           AND definition.status = job.status
           AND NOT definition.terminal
         RETURNING job.*`,
-      [id, agentId],
+      [id, agentId, policy.leaseDurationMs],
     );
     return result.rows[0] ? rowToJob(result.rows[0]) : null;
   }
 
   async submitCandidate(id: string, agentId: string, candidate: Record<string, unknown>): Promise<SegmentBuildJob | null> {
-    if (agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
-    const parsed = assertAgentCandidate(candidate);
+    const policy = await segmentBuilderRuntimePolicy();
+    if (agentId !== policy.agentId) return null;
+    const parsed = assertAgentCandidate(candidate, policy);
     const canonical = JSON.stringify(candidate);
     const candidateHash = crypto.createHash("sha256").update(canonical).digest("hex");
     const current = await this.get(id);
@@ -1108,11 +1135,11 @@ export class SegmentBuildJobService {
           parsed.capability.requiredTerms ?? [],
           parsed.capability.forbiddenTerms ?? [],
           parsed.capability.safetyClass,
-          parsed.capability.portabilityScope ?? "global",
+          parsed.capability.portabilityScope,
           JSON.stringify({
             ...(parsed.capability.metadata ?? {}),
-            compositionEnabled: true,
-            managedBy: "segment-builder",
+            ...policy.capabilityMetadata,
+            managedBy: policy.managedBy,
             buildJobId: id,
           }),
         ],
@@ -1174,7 +1201,7 @@ export class SegmentBuildJobService {
     executionKey: string;
     requestKey: string;
   }): Promise<SegmentBuildJob | null> {
-    if (input.agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
+    if (input.agentId !== (await segmentBuilderRuntimePolicy()).agentId) return null;
     const transitioned = await transitionSegmentBuildJob(input.id, {
       targetTerminal: false,
       transitionAutomatic: true,
@@ -1199,7 +1226,7 @@ export class SegmentBuildJobService {
     runId: string;
     taskId: string;
   }): Promise<SegmentBuildJob | null> {
-    if (input.agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
+    if (input.agentId !== (await segmentBuilderRuntimePolicy()).agentId) return null;
     const result = await getDb().query(
       `UPDATE segment_build_jobs
        SET result = result || jsonb_build_object(
@@ -1230,7 +1257,7 @@ export class SegmentBuildJobService {
   }
 
   async canaryDispatchFailed(id: string, agentId: string, error: string): Promise<SegmentBuildJob | null> {
-    if (agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
+    if (agentId !== (await segmentBuilderRuntimePolicy()).agentId) return null;
     const message = error.slice(0, 1000);
     const transitioned = await transitionSegmentBuildJob(id, {
       targetTerminal: false,
@@ -1246,6 +1273,7 @@ export class SegmentBuildJobService {
   }
 
   async reconcileCanary(id: string): Promise<SegmentBuildJob | null> {
+    const policy = await segmentBuilderRuntimePolicy();
     const job = await this.get(id);
     if (!job) return job;
     const executionKey = typeof job.result.executionKey === "string" ? job.result.executionKey : "";
@@ -1280,7 +1308,7 @@ export class SegmentBuildJobService {
         },
       });
       if (failed) {
-        await event(id, "canary_failed", "phone-network-kernel", { executionKey });
+        await event(id, "canary_failed", policy.serverActor, { executionKey });
         return failed;
       }
       return this.get(id);
@@ -1315,13 +1343,13 @@ export class SegmentBuildJobService {
         ref.segmentKey,
         ref.segmentVersion,
         evidence,
-        "phone-network-kernel",
+        policy.serverActor,
       );
       await workflowSegmentControlPlaneService.promote(
         "segment",
         ref.segmentKey,
         ref.segmentVersion,
-        "phone-network-kernel",
+        policy.serverActor,
       );
     }
     if (!await resourceVersionIsSuccessful(
@@ -1335,16 +1363,16 @@ export class SegmentBuildJobService {
       compositionName,
       compositionVersion,
       evidence,
-      "phone-network-kernel",
+      policy.serverActor,
     );
     await workflowSegmentControlPlaneService.promote(
       "composition",
       compositionName,
       compositionVersion,
-      "phone-network-kernel",
+      policy.serverActor,
     );
     }
-    await activateCapability(capabilityKey);
+    await activateCapability(capabilityKey, policy.managedBy);
     const completed = await transitionSegmentBuildJob(id, {
       targetTerminal: true,
       targetRetryable: false,
@@ -1360,7 +1388,7 @@ export class SegmentBuildJobService {
       error: null,
     });
     if (!completed) return this.get(id);
-    await event(id, "promoted", "phone-network-kernel", {
+    await event(id, "promoted", policy.serverActor, {
       executionKey,
       compositionName,
       compositionVersion,
@@ -1370,7 +1398,7 @@ export class SegmentBuildJobService {
   }
 
   async fail(id: string, agentId: string, error: string, blocked = false): Promise<SegmentBuildJob | null> {
-    if (agentId !== SEGMENT_BUILDER_AGENT_ID) return null;
+    if (agentId !== (await segmentBuilderRuntimePolicy()).agentId) return null;
     const failed = await transitionSegmentBuildJob(
       id,
       blocked

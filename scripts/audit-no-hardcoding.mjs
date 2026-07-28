@@ -193,6 +193,45 @@ const rules = [
     pattern: /\b(?:attemptsMade|retryCount|retry_count|failureCount|failure_count|successCount|success_count|recoveryCount|recovery_count|distinctDevices|distinct_devices|distinctBranches|distinct_branches)\s*(?:>=|>|<=|<)\s*\d+/g,
   },
   {
+    id: "runtime-navigation-policy-literal-set",
+    scope: (path) => !path.includes("/src/db/migrations/")
+      && /\/(?:ui-graph|segment-builder)\//.test(path)
+      && /\.(?:ts|tsx|kt)$/.test(path),
+    pattern: /\b(?:scopeTypes|allowedScopeTypes|safetyClasses|candidateSafetyClasses|allowedAutomaticSafetyClasses)\b[^;\n]{0,120}(?:new\s+Set\s*\()?\[\s*["'][A-Za-z][A-Za-z0-9_.:-]*["']/gi,
+  },
+  {
+    id: "runtime-navigation-operational-constant",
+    scope: (path) => !path.includes("/src/db/migrations/")
+      && /\/(?:ui-graph|segment-builder)\//.test(path)
+      && /\.(?:ts|tsx)$/.test(path),
+    pattern: /\b(?:const|let)\s+[A-Z][A-Z0-9_]*(?:THRESHOLD|MARGIN|LIMIT|TIMEOUT|GUARD|INTERVAL|TTL)[A-Z0-9_]*\s*=\s*\d[\d_.]*(?:\s*\*\s*\d[\d_.]*)*/g,
+  },
+  {
+    id: "runtime-navigation-operational-default",
+    scope: (path) => !path.includes("/src/db/migrations/")
+      && /\/(?:ui-graph|segment-builder)\//.test(path)
+      && /\.(?:ts|tsx)$/.test(path),
+    pattern: /\b(?:requiredDistinctDevices|requiredDistinctBranches|safetyClasses|portabilityScope|assignedAgent|dispatcherId|agentId|managedBy|callbackPort|callbackPath|recoverySweepIntervalMs|dispatcherTtlMs|leaseDurationMs|dispatchTimeoutMs|sweepLimit|offlineQueuedCanaryTimeoutMs|recoveryRedispatchGuardMs)\b[^;\n]{0,100}\?\?\s*(?:\d[\d_]*|true|false|["'][^"']+["']|\[\s*["'][^"']+["'])/g,
+  },
+  {
+    id: "runtime-segment-builder-identity-literal",
+    scope: (path) => path.includes("/src/modules/segment-builder/")
+      && /\.(?:ts|tsx)$/.test(path),
+    pattern: /\b(?:agentId|dispatcherId|managedBy|serverActor|sessionKeyPrefix|apiTokenPurpose|callbackPort|callbackPath)\s*:\s*["'][^"']+["']/g,
+  },
+  {
+    id: "runtime-segment-builder-fixed-callback",
+    scope: (path) => path.includes("/src/modules/segment-builder/")
+      && /\.(?:ts|tsx)$/.test(path),
+    pattern: /\bcallback\.(?:protocol|port|pathname)\s*(?:===|!==|==|!=)\s*["'][^"']+["']/g,
+  },
+  {
+    id: "runtime-segment-builder-sql-interval",
+    scope: (path) => path.includes("/src/modules/segment-builder/")
+      && /\.(?:ts|tsx)$/.test(path),
+    pattern: /\bINTERVAL\s+["'](?:[2-9]|[1-9]\d+)\s+[^"']+["']/gi,
+  },
+  {
     id: "runtime-status-literal-union",
     scope: (path) => /\.(?:ts|tsx)$/.test(path),
     pattern: /\b(?:status|state|lifecycleStatus|candidateState|promotionState|libraryState|safetyClass|portabilityScope|actionKey)\??\s*:\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'](?:\s*\|\s*["'][A-Za-z][A-Za-z0-9_.:-]*["'])+/g,

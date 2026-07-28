@@ -12,6 +12,7 @@ import type {
   UiTransitionDefinition,
 } from "./types";
 import type { GraphRuntimeCheckpoint } from "./graph-runtime";
+import { uiGraphScopePolicy } from "./runtime-policy";
 
 function jsonArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
@@ -75,7 +76,7 @@ export class UiGraphRepository {
           appVersionPattern: row.app_version_pattern,
           localePattern: row.locale_pattern,
           deviceClass: row.device_class,
-          confidenceThreshold: Number(row.confidence_threshold ?? 0.72),
+          confidenceThreshold: Number(row.confidence_threshold),
         });
       }
     }
@@ -161,26 +162,31 @@ export class UiGraphRepository {
 
   async resolveFlags(context: UiGraphContext): Promise<RuntimeFlags> {
     const fallback = getUiGraphRuntimeFlags();
-    const scopes: Array<[string, string | null | undefined]> = [
-      ["device", context.deviceId],
-      ["workflow", context.workflowId],
-      ["app", context.appId],
-      ["global", "*"],
-    ];
-    const values: string[] = [];
-    const params: unknown[] = [];
-    for (const [scopeType, scopeValue] of scopes) {
-      if (!scopeValue) continue;
-      params.push(scopeType, scopeValue);
-      values.push(`(scope_type = $${params.length - 1} AND scope_value = $${params.length})`);
-    }
-    if (values.length === 0) return fallback;
     try {
+      const scopePolicy = await uiGraphScopePolicy();
+      const contextValues = context as unknown as Record<string, unknown>;
+      const scopes: Array<[string, string | null]> = scopePolicy.map((scope) => {
+        const value = scope.contextField
+          ? contextValues[scope.contextField]
+          : scope.scopeValue;
+        return [
+          scope.scopeType,
+          typeof value === "string" && value.trim() ? value.trim() : null,
+        ];
+      });
+      const values: string[] = [];
+      const params: unknown[] = [];
+      for (const [scopeType, scopeValue] of scopes) {
+        if (!scopeValue) continue;
+        params.push(scopeType, scopeValue);
+        values.push(`(scope_type = $${params.length - 1} AND scope_value = $${params.length})`);
+      }
+      if (values.length === 0) return fallback;
       const result = await getDb().query(
         `SELECT * FROM ui_graph_runtime_flags WHERE ${values.join(" OR ")}`,
         params,
       );
-      const precedence = new Map(scopes.map(([type], index) => [type, index]));
+      const precedence = new Map(scopePolicy.map((scope, index) => [scope.scopeType, index]));
       const row = result.rows.sort((a, b) => (precedence.get(a.scope_type) ?? 99) - (precedence.get(b.scope_type) ?? 99))[0];
       if (!row) return fallback;
       return {
