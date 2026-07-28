@@ -27,7 +27,14 @@ describe("hybrid edge learning reconciliation", () => {
     vi.clearAllMocks();
     mocks.observe.mockResolvedValue("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     mocks.validate.mockResolvedValue({ autoPromotable: false });
-    mocks.resolveFlags.mockResolvedValue({ autoPromotion: true });
+    mocks.resolveFlags.mockResolvedValue({
+      enabled: true,
+      selectorFirst: true,
+      graphRuntime: true,
+      aiRecovery: false,
+      candidateLearning: true,
+      autoPromotion: true,
+    });
     mocks.query.mockResolvedValue({ rowCount: 1, rows: [{ candidate_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }] });
   });
 
@@ -132,5 +139,55 @@ describe("hybrid edge learning reconciliation", () => {
 
     expect(mocks.observe).not.toHaveBeenCalled();
     expect(mocks.validate).not.toHaveBeenCalled();
+  });
+
+  it("does not reconcile evidence when the PostgreSQL rollout disables candidate learning", async () => {
+    mocks.resolveFlags.mockResolvedValueOnce({
+      enabled: true,
+      selectorFirst: true,
+      graphRuntime: true,
+      aiRecovery: false,
+      candidateLearning: false,
+      autoPromotion: false,
+    });
+
+    const variables: Record<string, unknown> = {
+      _runtimeContext: {
+        appId: "app.example",
+        workflowId: "stable-template-id",
+      },
+      _edgeLearningBindings: [{
+        bindingId: "elb_disabled",
+        appId: "app.example",
+        actionStepIndex: 0,
+        verifiedStepIndex: 1,
+        stepId: "tap-search",
+        verificationStepId: "verify-search",
+        payload: { elementKey: "search", strategy: "resource_id", selector: { value: "search_bar_field" } },
+        safetyClass: "navigation",
+      }],
+      _edgeLearningEvidence: [{
+        bindingId: "elb_disabled",
+        result: "success",
+        checkpoint: 1,
+        verificationStepId: "verify-search",
+        postState: { verified: true, outputHash: "hash" },
+      }],
+    };
+
+    await reconcileEdgeLearningStatus({
+      workflowId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      deviceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      status: "completed",
+      currentStep: 2,
+      variables,
+    });
+
+    expect(mocks.resolveFlags).toHaveBeenCalledWith(expect.objectContaining({
+      workflowId: "stable-template-id",
+    }));
+    expect(mocks.observe).not.toHaveBeenCalled();
+    expect(mocks.validate).not.toHaveBeenCalled();
+    expect(variables._learningDelta).toEqual(expect.objectContaining({ created: 0, validated: 0 }));
   });
 });

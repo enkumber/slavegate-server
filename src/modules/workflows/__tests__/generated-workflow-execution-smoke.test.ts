@@ -370,6 +370,18 @@ describe("generated workflow cache-only execution route", () => {
       status: "running",
       mode: "edge",
     });
+    expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.any(Object),
+      expect.objectContaining({
+        _runtimeContext: expect.objectContaining({
+          appId: cached.workflow.platform,
+          deviceId: "11111111-1111-4111-8111-111111111111",
+          workflowId: cached.workflow.id,
+        }),
+      }),
+      "wf-cache-smoke",
+    );
     mocks.workflowService.get.mockResolvedValue({
       id: "wf-cache-smoke",
       status: "running",

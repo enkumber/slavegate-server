@@ -218,7 +218,12 @@ export function attachEdgeLearningBindings(template: WorkflowTemplate, bindings:
   return clone;
 }
 
-export async function prepareEdgeLearningBindings(template: WorkflowTemplate): Promise<EdgeLearningBinding[]> {
+export async function prepareEdgeLearningBindings(
+  template: WorkflowTemplate,
+  context: UiGraphContext,
+): Promise<EdgeLearningBinding[]> {
+  const flags = await uiGraphRepository.resolveFlags(context);
+  if (!flags.enabled || !flags.candidateLearning) return [];
   const [candidates, selectorContexts] = await Promise.all([
     getDb().query(
       `SELECT candidate.id, candidate.app_id, candidate.source_state_id,
@@ -306,8 +311,8 @@ function runtimeContext(
     androidVersion: typeof raw.androidVersion === "string" ? raw.androidVersion : null,
     locale: typeof raw.locale === "string" ? raw.locale : null,
     deviceClass: typeof raw.deviceClass === "string" ? raw.deviceClass : null,
-    deviceId: fallback.deviceId ?? null,
-    workflowId: fallback.workflowId ?? null,
+    deviceId: typeof raw.deviceId === "string" ? raw.deviceId : fallback.deviceId ?? null,
+    workflowId: typeof raw.workflowId === "string" ? raw.workflowId : fallback.workflowId ?? null,
     branchKey: typeof raw.branchKey === "string" ? raw.branchKey : null,
     initialStateKey: typeof raw.initialStateKey === "string" ? raw.initialStateKey : null,
     finalStateKey: typeof variables?._lastObservedState === "string" ? variables._lastObservedState : null,
@@ -370,6 +375,7 @@ async function candidateForEvidence(
 
 async function validateAndMaybePromote(input: {
   workflowId: string;
+  rolloutWorkflowId?: string | null;
   deviceId: string;
   binding: EdgeLearningBinding;
   candidateId: string;
@@ -389,7 +395,7 @@ async function validateAndMaybePromote(input: {
   const context: UiGraphContext = {
     appId: input.binding.appId,
     deviceId: input.deviceId,
-    workflowId: input.workflowId,
+    workflowId: input.rolloutWorkflowId ?? input.workflowId,
     stepId: input.binding.stepId,
     currentStateId: input.binding.sourceStateId ?? null,
   };
@@ -436,6 +442,16 @@ export async function reconcileEdgeLearningStatus(input: {
     degraded: 0,
     snapshotsCaptured: 0,
   };
+  const rolloutContext = runtimeContext(input.variables, {
+    appId: String(object(input.variables?._runtimeContext).appId ?? "android"),
+    deviceId: input.deviceId,
+    workflowId: input.workflowId,
+  });
+  const rolloutFlags = await uiGraphRepository.resolveFlags(rolloutContext);
+  if (!rolloutFlags.enabled || !rolloutFlags.candidateLearning) {
+    if (input.variables) input.variables._learningDelta = delta;
+    return;
+  }
   const bindings = bindingsFromVariables(input.variables);
   const byId = new Map(bindings.map((item) => [item.bindingId, item]));
   const successfulBindings = new Set<string>();
@@ -458,6 +474,7 @@ export async function reconcileEdgeLearningStatus(input: {
     };
     await validateAndMaybePromote({
       workflowId: input.workflowId,
+      rolloutWorkflowId: rolloutContext.workflowId,
       deviceId: input.deviceId,
       binding,
       candidateId,
@@ -479,11 +496,7 @@ export async function reconcileEdgeLearningStatus(input: {
     if (!sourceState || !targetState || !action) continue;
     const transitionKey = `${sourceState}__${action}__${targetState}`;
     const bindingKey = `transition:${transitionKey}:${Number(transition.iteration ?? 0)}`;
-    const context = runtimeContext(input.variables, {
-      appId: String(object(input.variables?._runtimeContext).appId ?? "android"),
-      deviceId: input.deviceId,
-      workflowId: input.workflowId,
-    });
+    const context = { ...rolloutContext };
     context.branchKey = typeof transition.branchKey === "string" ? transition.branchKey : transitionKey;
     context.initialStateKey = sourceState;
     context.finalStateKey = targetState;
@@ -607,6 +620,7 @@ export async function reconcileEdgeLearningStatus(input: {
     };
     await validateAndMaybePromote({
       workflowId: input.workflowId,
+      rolloutWorkflowId: rolloutContext.workflowId,
       deviceId: input.deviceId,
       binding,
       candidateId: binding.candidateId,

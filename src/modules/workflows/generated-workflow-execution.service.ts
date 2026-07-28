@@ -131,7 +131,19 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     },
   });
 
-  const edgeLearningBindings = await prepareEdgeLearningBindings(validation.template);
+  const suppliedRuntimeContext = variables?._runtimeContext;
+  const runtimeContext = suppliedRuntimeContext
+    && typeof suppliedRuntimeContext === "object"
+    && !Array.isArray(suppliedRuntimeContext)
+    ? suppliedRuntimeContext as Record<string, unknown>
+    : {};
+  const edgeRuntimeContext = {
+    ...runtimeContext,
+    appId: validation.template.platform,
+    deviceId,
+    workflowId: templateId,
+  };
+  const edgeLearningBindings = await prepareEdgeLearningBindings(validation.template, edgeRuntimeContext);
   const edgeTemplate = {
     ...attachEdgeLearningBindings(validation.template, edgeLearningBindings),
     lifecycleStatusContract,
@@ -141,6 +153,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     : variables;
   const edgeVariables = {
     ...(dispatchVariables ?? {}),
+    _runtimeContext: edgeRuntimeContext,
     ...(edgeLearningBindings.length > 0 ? { _edgeLearningBindings: edgeLearningBindings } : {}),
   };
 
