@@ -128,8 +128,10 @@ export class UiGraphRepository {
   async loadTransitions(appId: string): Promise<UiTransitionDefinition[]> {
     const db = getDb();
     const result = await db.query(
-      `SELECT id, transition_key, app_id, source_state_id, target_state_id, element_key,
-              action, preconditions, postconditions, cost, safety_class, confidence, status
+      `SELECT transition.id, transition.transition_key, transition.app_id,
+              transition.source_state_id, transition.target_state_id, transition.element_key,
+              transition.action, transition.preconditions, transition.postconditions,
+              transition.cost, transition.safety_class, transition.confidence
        FROM ui_graph_transitions transition
        JOIN lifecycle_resource_bindings binding
          ON binding.resource_table=to_regclass('ui_graph_transitions')
