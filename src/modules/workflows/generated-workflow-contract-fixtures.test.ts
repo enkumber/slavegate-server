@@ -87,6 +87,7 @@ const readOnlyMarketingCompiledPlan = {
     safetyClass: "read_only",
     outputSchema: readOnlyMarketingScanWorkflow.outputSchema,
     allowedRecoveryRequests: readOnlyMarketingScanWorkflow.allowedRecoveryRequests,
+    requiredRecoveryCapabilities: [],
   },
   stepCount: 5,
   actionCount: 4,

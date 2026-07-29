@@ -587,6 +587,7 @@ export interface GeneratedWorkflowCompiledPlan {
     postconditionContract: WorkflowPostconditionContract | null;
     goalContract: WorkflowGoalContract | null;
     allowedRecoveryRequests: string[];
+    requiredRecoveryCapabilities: string[];
     recoveryPolicy: WorkflowRecoveryPolicy | null;
     appMap?: GeneratedWorkflowAppMapCacheMetadata;
   };
@@ -692,6 +693,25 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
       }
     }
   }
+  if (candidate.requiredRecoveryCapabilities !== undefined) {
+    if (
+      !Array.isArray(candidate.requiredRecoveryCapabilities)
+      || candidate.requiredRecoveryCapabilities.length > 32
+      || candidate.requiredRecoveryCapabilities.some((item) => typeof item !== "string" || item.length === 0)
+    ) {
+      errors.push("workflow.requiredRecoveryCapabilities must be an array of at most 32 non-empty strings");
+    } else {
+      if (new Set(candidate.requiredRecoveryCapabilities).size !== candidate.requiredRecoveryCapabilities.length) {
+        errors.push("workflow.requiredRecoveryCapabilities must not contain duplicates");
+      }
+      for (const capability of candidate.requiredRecoveryCapabilities) {
+        if (!/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(capability)) {
+          errors.push("workflow.requiredRecoveryCapabilities must contain safe policy identifiers");
+          break;
+        }
+      }
+    }
+  }
   if (candidate.recoveryPolicy !== undefined) {
     validateGeneratedWorkflowRecoveryPolicy(candidate.recoveryPolicy, "workflow.recoveryPolicy", errors);
   }
@@ -739,6 +759,7 @@ export function summarizeGeneratedWorkflowTemplate(
     postconditionContract: template.postconditionContract ?? null,
     goalContract: template.goalContract ?? null,
     allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
+    requiredRecoveryCapabilities: template.requiredRecoveryCapabilities ?? [],
     recoveryPolicy: template.recoveryPolicy ?? null,
     runtimeContract: template.runtimeContract ?? null,
     stepCount: template.steps.length,
@@ -809,6 +830,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
     postconditionContract: template.postconditionContract ?? null,
     goalContract: template.goalContract ?? null,
     allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
+    requiredRecoveryCapabilities: template.requiredRecoveryCapabilities ?? [],
     recoveryPolicy: template.recoveryPolicy ?? null,
     defaultVerificationStrategy: template.defaultVerificationStrategy,
     steps: template.steps,
@@ -829,6 +851,7 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
       postconditionContract: template.postconditionContract ?? null,
       goalContract: template.goalContract ?? null,
       allowedRecoveryRequests: template.allowedRecoveryRequests ?? [],
+      requiredRecoveryCapabilities: template.requiredRecoveryCapabilities ?? [],
       recoveryPolicy: template.recoveryPolicy ?? null,
       appMap: undefined,
     },
@@ -1101,11 +1124,12 @@ export function getGeneratedWorkflowContract(): Record<string, unknown> {
     },
     template: {
       required: ["id", "name", "platform", "description", "version", "steps"],
-      optional: ["intent", "safetyClass", "outputSchema", "allowedRecoveryRequests", "recoveryPolicy", "defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
+      optional: ["intent", "safetyClass", "outputSchema", "allowedRecoveryRequests", "requiredRecoveryCapabilities", "recoveryPolicy", "defaultVerificationStrategy", "dataRetentionDays", "compatibleAppVersions"],
       platforms: "catalog_managed",
       intents: "catalog_managed",
       safetyClasses: "catalog_managed",
       allowedRecoveryRequests: "catalog_managed",
+      requiredRecoveryCapabilities: "runtime_scope_managed",
       recoveryAutonomy: "catalog_managed",
       defaultVerificationStrategy: "catalog_managed",
       stepTypes: "catalog_managed",

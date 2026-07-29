@@ -9,6 +9,7 @@ const failClosedFlags: RuntimeFlags = {
   aiRecovery: false,
   candidateLearning: false,
   autoPromotion: false,
+  config: {},
 };
 
 export function getUiGraphRuntimeFlags(): RuntimeFlags {

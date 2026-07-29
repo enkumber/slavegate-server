@@ -8,6 +8,7 @@ import { workflowEvents } from "../workflow-events";
 import { assertOperationalRuntimeContract } from "./runtime-contract.service";
 import { scheduleEdgeWorkflowAckWatchdog } from "./edge-workflow-lifecycle.service";
 import { attachEdgeLearningBindings, prepareEdgeLearningBindings } from "../ui-graph/edge-learning.service";
+import { uiGraphRepository } from "../ui-graph/repository";
 import { getResourceLifecycleExecutionStatusContract } from "../lifecycle/lifecycle.service";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
@@ -69,6 +70,37 @@ export interface GeneratedWorkflowControlPlaneContext {
   platform?: string;
   routine?: string;
   source: "api" | "task_runner";
+}
+
+function configuredRecoveryCapabilities(config: Record<string, unknown>): string[] {
+  const value = config.recoveryCapabilities;
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function assertRecoveryAdmission(
+  requiredCapabilities: string[],
+  flags: Awaited<ReturnType<typeof uiGraphRepository.resolveFlags>>,
+): { requiredCapabilities: string[]; authorizedCapabilities: string[] } | null {
+  if (requiredCapabilities.length === 0) return null;
+  if (!flags.enabled || !flags.aiRecovery) {
+    const err = new Error("Workflow recovery is not enabled for the effective UI Graph scope");
+    (err as Error & { status?: number; code?: string }).status = 409;
+    (err as Error & { status?: number; code?: string }).code = "UI_GRAPH_RECOVERY_DISABLED";
+    throw err;
+  }
+  const authorizedCapabilities = configuredRecoveryCapabilities(flags.config);
+  const authorized = new Set(authorizedCapabilities);
+  if (requiredCapabilities.some((capability) => !authorized.has(capability))) {
+    const err = new Error("Workflow recovery capability is not authorized for the effective UI Graph scope");
+    (err as Error & { status?: number; code?: string }).status = 409;
+    (err as Error & { status?: number; code?: string }).code = "UI_GRAPH_RECOVERY_CAPABILITY_DENIED";
+    throw err;
+  }
+  return { requiredCapabilities, authorizedCapabilities };
 }
 
 export async function dispatchGeneratedWorkflowTemplate(input: {
@@ -143,6 +175,11 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     deviceId,
     workflowId: templateId,
   };
+  const runtimeFlags = await uiGraphRepository.resolveFlags(edgeRuntimeContext);
+  const recoveryAdmission = assertRecoveryAdmission(
+    validation.template.requiredRecoveryCapabilities ?? [],
+    runtimeFlags,
+  );
   const edgeLearningBindings = await prepareEdgeLearningBindings(validation.template, edgeRuntimeContext);
   const edgeTemplate = {
     ...attachEdgeLearningBindings(validation.template, edgeLearningBindings),
@@ -154,6 +191,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
   const edgeVariables = {
     ...(dispatchVariables ?? {}),
     _runtimeContext: edgeRuntimeContext,
+    ...(recoveryAdmission ? { _uiGraphRecoveryAdmission: recoveryAdmission } : {}),
     ...(edgeLearningBindings.length > 0 ? { _edgeLearningBindings: edgeLearningBindings } : {}),
   };
 

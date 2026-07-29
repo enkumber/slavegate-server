@@ -132,4 +132,5 @@ export interface RuntimeFlags {
   aiRecovery: boolean;
   candidateLearning: boolean;
   autoPromotion: boolean;
+  config: Record<string, unknown>;
 }

@@ -2,7 +2,7 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Server } from "http";
 import type { WorkflowTemplate } from "../types";
-import { compileGeneratedWorkflowTemplate } from "../workflow-validator";
+import { compileGeneratedWorkflowTemplate, validateGeneratedWorkflowTemplate } from "../workflow-validator";
 
 const mocks = vi.hoisted(() => {
   const executionInc = vi.fn();
@@ -41,6 +41,9 @@ const mocks = vi.hoisted(() => {
     },
     appMapping: {
       loadMap: vi.fn(),
+    },
+    uiGraphRepository: {
+      resolveFlags: vi.fn(),
     },
     db: {
       query: vi.fn(),
@@ -100,6 +103,7 @@ vi.mock("../../../transport/transport", () => ({
   isDeviceOnline: vi.fn(() => true),
 }));
 vi.mock("../../../modules/app-mapping/recorder.service", () => ({ loadMap: mocks.appMapping.loadMap }));
+vi.mock("../../../modules/ui-graph/repository", () => ({ uiGraphRepository: mocks.uiGraphRepository }));
 vi.mock("../../../modules/workflows/workflow.service", () => ({
   workflowService: mocks.workflowService,
 }));
@@ -325,6 +329,15 @@ describe("generated workflow cache-only execution route", () => {
     ]);
     mocks.directWsServer.getAgentVersion.mockReturnValue("4.0.0");
     mocks.appMapping.loadMap.mockResolvedValue(null);
+    mocks.uiGraphRepository.resolveFlags.mockResolvedValue({
+      enabled: false,
+      selectorFirst: false,
+      graphRuntime: false,
+      aiRecovery: false,
+      candidateLearning: false,
+      autoPromotion: false,
+      config: {},
+    });
     mocks.db.query.mockImplementation((sql: string) => Promise.resolve({
       rows: sql.includes("transition.mark_started")
         ? [
@@ -348,6 +361,21 @@ describe("generated workflow cache-only execution route", () => {
     delete process.env.API_KEY;
     delete process.env.EDGE_WORKFLOW_ACK_TIMEOUT_MS;
     vi.useRealTimers();
+  });
+
+  it("validates recovery capability identifiers and rejects duplicates", () => {
+    const valid = redditHomeWorkflow();
+    valid.requiredRecoveryCapabilities = ["selector_cascade", "state_reobserve"];
+    expect(validateGeneratedWorkflowTemplate(valid)).toMatchObject({ ok: true, errors: [] });
+
+    const invalid = redditHomeWorkflow();
+    invalid.requiredRecoveryCapabilities = ["selector_cascade", "selector_cascade"];
+    expect(validateGeneratedWorkflowTemplate(invalid)).toMatchObject({
+      ok: false,
+      errors: expect.arrayContaining([
+        "workflow.requiredRecoveryCapabilities must not contain duplicates",
+      ]),
+    });
   });
 
   it("fails an edge workflow when the device never acknowledges WORKFLOW_START", async () => {
@@ -465,6 +493,91 @@ describe("generated workflow cache-only execution route", () => {
       .rejects.toMatchObject({ code: "RUNTIME_CONTRACT_ACTION_DISABLED", status: 409 });
 
     expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
+  });
+
+  it("rejects declared recovery capabilities when recovery is disabled for the effective scope", async () => {
+    const cached = cacheRecord();
+    cached.workflow.requiredRecoveryCapabilities = ["selector_cascade"];
+    const { dispatchGeneratedWorkflowTemplate } = await import("../generated-workflow-execution.service");
+
+    await expect(dispatchGeneratedWorkflowTemplate({
+      templateId: cached.workflow.id,
+      template: cached.workflow,
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      variables: {},
+    })).rejects.toMatchObject({ code: "UI_GRAPH_RECOVERY_DISABLED", status: 409 });
+
+    expect(mocks.workflowService.create).not.toHaveBeenCalled();
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
+  });
+
+  it("rejects recovery capabilities that are absent from PostgreSQL scope configuration", async () => {
+    const cached = cacheRecord();
+    cached.workflow.requiredRecoveryCapabilities = ["selector_cascade"];
+    mocks.uiGraphRepository.resolveFlags.mockResolvedValue({
+      enabled: true,
+      selectorFirst: true,
+      graphRuntime: true,
+      aiRecovery: true,
+      candidateLearning: false,
+      autoPromotion: false,
+      config: { recoveryCapabilities: ["other_capability"] },
+    });
+    const { dispatchGeneratedWorkflowTemplate } = await import("../generated-workflow-execution.service");
+
+    await expect(dispatchGeneratedWorkflowTemplate({
+      templateId: cached.workflow.id,
+      template: cached.workflow,
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      variables: {},
+    })).rejects.toMatchObject({ code: "UI_GRAPH_RECOVERY_CAPABILITY_DENIED", status: 409 });
+
+    expect(mocks.workflowService.create).not.toHaveBeenCalled();
+    expect(mocks.directWsServer.sendWorkflowStart).not.toHaveBeenCalled();
+  });
+
+  it("admits declared recovery capabilities and records the effective PostgreSQL authorization", async () => {
+    const cached = cacheRecord();
+    cached.workflow.requiredRecoveryCapabilities = ["selector_cascade"];
+    mocks.uiGraphRepository.resolveFlags.mockResolvedValue({
+      enabled: true,
+      selectorFirst: true,
+      graphRuntime: true,
+      aiRecovery: true,
+      candidateLearning: false,
+      autoPromotion: false,
+      config: { recoveryCapabilities: ["selector_cascade", "state_reobserve"] },
+    });
+    const { dispatchGeneratedWorkflowTemplate } = await import("../generated-workflow-execution.service");
+
+    await dispatchGeneratedWorkflowTemplate({
+      templateId: cached.workflow.id,
+      template: cached.workflow,
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      variables: {},
+    });
+
+    expect(mocks.workflowService.create).toHaveBeenCalledWith(expect.objectContaining({
+      checkpoint: expect.objectContaining({
+        variables: expect.objectContaining({
+          _uiGraphRecoveryAdmission: {
+            requiredCapabilities: ["selector_cascade"],
+            authorizedCapabilities: ["selector_cascade", "state_reobserve"],
+          },
+        }),
+      }),
+    }));
+    expect(mocks.directWsServer.sendWorkflowStart).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      expect.any(Object),
+      expect.objectContaining({
+        _uiGraphRecoveryAdmission: {
+          requiredCapabilities: ["selector_cascade"],
+          authorizedCapabilities: ["selector_cascade", "state_reobserve"],
+        },
+      }),
+      "wf-cache-smoke",
+    );
   });
 
   it("keeps PNQ would_wait edge workflows queued instead of falling back to server execution", async () => {

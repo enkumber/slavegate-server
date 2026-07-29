@@ -218,6 +218,7 @@ export interface GeneratedWorkflowTemplate {
   safetyClass?: GeneratedWorkflowSafetyClass;
   outputSchema?: GeneratedWorkflowOutputSchema;
   allowedRecoveryRequests?: GeneratedWorkflowAllowedRecoveryRequest[];
+  requiredRecoveryCapabilities?: string[];
   defaultVerificationStrategy?: GeneratedWorkflowVerificationStrategy;
   dataRetentionDays?: number;
   compatibleAppVersions?: string[];
@@ -243,6 +244,7 @@ export interface GeneratedWorkflowCompiledPlanSummary {
     safetyClass: GeneratedWorkflowSafetyClass | null;
     outputSchema: GeneratedWorkflowOutputSchema | null;
     allowedRecoveryRequests: GeneratedWorkflowAllowedRecoveryRequest[];
+    requiredRecoveryCapabilities: string[];
   };
   stepCount: number;
   actionCount: number;
@@ -316,6 +318,7 @@ export interface GeneratedWorkflowSummary {
   safetyClass: GeneratedWorkflowSafetyClass | null;
   outputSchema: GeneratedWorkflowOutputSchema | null;
   allowedRecoveryRequests: GeneratedWorkflowAllowedRecoveryRequest[];
+  requiredRecoveryCapabilities: string[];
   stepCount: number;
   compiledPlan: GeneratedWorkflowCompiledPlanSummary;
 }

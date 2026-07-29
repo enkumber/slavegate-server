@@ -198,6 +198,7 @@ export class UiGraphRepository {
         aiRecovery: Boolean(row.ai_recovery),
         candidateLearning: Boolean(row.candidate_learning),
         autoPromotion: Boolean(row.auto_promotion),
+        config: jsonObject(row.config),
       };
     } catch {
       return fallback;

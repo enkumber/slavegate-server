@@ -202,6 +202,8 @@ export interface WorkflowTemplate {
   goalContract?: WorkflowGoalContract;
   /** Recovery request types the runtime may ask for after deterministic failure. */
   allowedRecoveryRequests?: string[];
+  /** Recovery capabilities that must be authorized by the effective PostgreSQL UI Graph scope. */
+  requiredRecoveryCapabilities?: string[];
   /** Runtime policy for AI-assisted recovery after deterministic execution fails. */
   recoveryPolicy?: WorkflowRecoveryPolicy;
   steps:       WorkflowStep[];
