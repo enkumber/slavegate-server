@@ -3,6 +3,7 @@ import { executeTaskNow } from "./task-runner.service";
 import { getDb } from "../../db/client";
 import type { TaskRow } from "./task-runner.service";
 import type { WorkflowTemplate } from "../workflows/types";
+import { computeWorkflowSafetyArtifactFingerprint } from "../workflows/workflow-safety-admission.service";
 
 const mocks = vi.hoisted(() => ({
   dbQuery: vi.fn(),
@@ -425,6 +426,39 @@ describe("task-runner generated_workflow routine", () => {
         expect.any(String),
       ],
     );
+  });
+
+  it("recomputes the safety fingerprint from the loaded artifact and exact execution variables", async () => {
+    const cached = cacheRecord();
+    const safetyAdmissionContext = {
+      clientId: CLIENT_ID,
+      accountId: ACCOUNT_ID,
+      deviceId: DEVICE_ID,
+      intent: "private_canary",
+      source: "dashboard_human",
+    };
+    const variables = { inputs: { marker: "private_marker" } };
+    const row = task({
+      requestKey: REQUEST_KEY,
+      variables,
+      safetyAdmissionId: "77777777-7777-4777-8777-777777777777",
+      safetyAdmissionContext,
+    });
+    mockTaskDb(row);
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    await executeTaskNow(TASK_ID);
+
+    expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      controlPlaneContext: expect.objectContaining({
+        safetyAdmissionId: "77777777-7777-4777-8777-777777777777",
+        safetyArtifactFingerprint: computeWorkflowSafetyArtifactFingerprint(
+          cached.compiledPlanHash,
+          variables,
+        ),
+        safetyAdmissionContext,
+      }),
+    }));
   });
 
   it("fails cached dashboard human workflows that do not satisfy their PostgreSQL Goal Contract", async () => {

@@ -106,7 +106,10 @@ import {
   type HumanWorkflowTarget,
 } from "../modules/human-workflow/human-workflow-compiler.service";
 import { resolveCachedWorkflowSafetyClass } from "../modules/human-workflow/human-workflow-normalization";
-import { reserveWorkflowSafetyAdmission } from "../modules/workflows/workflow-safety-admission.service";
+import {
+  computeWorkflowSafetyArtifactFingerprint,
+  reserveWorkflowSafetyAdmission,
+} from "../modules/workflows/workflow-safety-admission.service";
 import {
   humanWorkflowCompileJobService,
   type HumanWorkflowCompileJobRecord,
@@ -315,46 +318,105 @@ export async function queueHumanAgencyWorkflowRun(input: {
         code: "HUMAN_WORKFLOW_INTENT_MISMATCH",
       });
     }
+    const idempotencyKey = input.executionKey ?? input.requestKey;
+    const findExistingRun = async (): Promise<{
+      id: string;
+      task_id: string | null;
+      status: string;
+      cache_key: string;
+      compiled_plan_hash: string;
+      safety_class: string;
+      intent: string;
+      source: string | null;
+    } | null> => {
+      const result = await client.query<{
+        id: string;
+        task_id: string | null;
+        status: string;
+        cache_key: string;
+        compiled_plan_hash: string;
+        safety_class: string;
+        intent: string;
+        source: string | null;
+      }>(
+        `SELECT r.id, r.task_id, r.status, r.cache_key, r.compiled_plan_hash,
+                r.safety_class, r.intent, r.context ->> 'source' AS source
+           FROM agency_workflow_runs r
+          WHERE r.client_id = $1
+            AND r.account_id IS NOT DISTINCT FROM $2
+            AND r.device_id = $3
+            AND r.idempotency_key = $4
+          ORDER BY r.created_at ASC
+          LIMIT 1
+          FOR UPDATE OF r`,
+        [
+          input.target.client_id,
+          input.target.account_id,
+          input.target.device_id,
+          idempotencyKey,
+        ],
+      );
+      const existing = result.rows[0];
+      if (!existing) return null;
+      const sameRequest = existing.cache_key === cached.cache_key
+        && existing.compiled_plan_hash === cached.compiled_plan_hash
+        && existing.safety_class === safetyClass
+        && existing.intent === input.intent
+        && existing.source === "dashboard_human";
+      if (!sameRequest) {
+        throw Object.assign(
+          new Error("idempotency key is already bound to a different dashboard workflow request"),
+          { status: 409, code: "WORKFLOW_IDEMPOTENCY_CONFLICT" },
+        );
+      }
+      if (!existing.task_id) {
+        throw Object.assign(
+          new Error("idempotent workflow request exists without a dispatch task"),
+          { status: 409, code: "WORKFLOW_IDEMPOTENCY_INCOMPLETE" },
+        );
+      }
+      return existing;
+    };
+    const replayBeforeAdmission = await findExistingRun();
+    if (replayBeforeAdmission) {
+      await client.query("COMMIT");
+      return {
+        id: replayBeforeAdmission.id,
+        status: replayBeforeAdmission.status,
+        taskId: replayBeforeAdmission.task_id,
+        requestKey: input.requestKey,
+        cacheKey: cached.cache_key,
+      };
+    }
+    const admissionContext = {
+      clientId: input.target.client_id,
+      accountId: input.target.account_id,
+      deviceId: input.target.device_id,
+      intent: input.intent,
+      source: "dashboard_human",
+    };
+    const safetyExecutionVariables = input.architecture === "segments-v1"
+      ? { inputs: input.runtimeInputs ?? {} }
+      : {};
+    const safetyArtifactFingerprint = computeWorkflowSafetyArtifactFingerprint(
+      String(cached.compiled_plan_hash ?? ""),
+      safetyExecutionVariables,
+    );
     const admission = await reserveWorkflowSafetyAdmission({
       db: client,
       safetyClass,
       workflow: cached.workflow as WorkflowTemplate,
-      context: {
-        clientId: input.target.client_id,
-        accountId: input.target.account_id,
-        deviceId: input.target.device_id,
-        intent: input.intent,
-        source: "dashboard_human",
-      },
-      idempotencyKey: input.executionKey ?? input.requestKey,
+      artifactFingerprint: safetyArtifactFingerprint,
+      context: admissionContext,
+      idempotencyKey,
     });
-
-    const existingRunResult = await client.query<{ id: string; task_id: string | null; status: string }>(
-      `SELECT r.id, r.task_id, r.status
-       FROM agency_workflow_runs r
-       JOIN tasks t ON t.id = r.task_id
-       WHERE r.cache_key = $1
-         AND r.device_id = $2
-         AND r.account_id IS NOT DISTINCT FROM $3
-         AND r.context ->> 'source' = 'dashboard_human'
-         AND r.idempotency_key = $4
-       ORDER BY r.created_at ASC
-       LIMIT 1
-       FOR UPDATE OF r`,
-      [
-        cached.cache_key,
-        input.target.device_id,
-        input.target.account_id,
-        input.executionKey ?? input.requestKey,
-      ],
-    );
-    const existingRun = existingRunResult.rows[0];
-    if (existingRun?.task_id) {
+    const replayAfterAdmission = await findExistingRun();
+    if (replayAfterAdmission) {
       await client.query("COMMIT");
       return {
-        id: existingRun.id,
-        status: existingRun.status,
-        taskId: existingRun.task_id,
+        id: replayAfterAdmission.id,
+        status: replayAfterAdmission.status,
+        taskId: replayAfterAdmission.task_id,
         requestKey: input.requestKey,
         cacheKey: cached.cache_key,
       };
@@ -379,16 +441,16 @@ export async function queueHumanAgencyWorkflowRun(input: {
       safetyAdmissionId: admission.id,
       safetyPolicyVersion: admission.policyVersion,
       safetyScopeKey: admission.scopeKey,
+      safetyArtifactFingerprint,
+      safetyAdmissionContext: admissionContext,
     };
-    let runId = existingRun?.id;
-    if (!runId) {
-      const runResult = await client.query<{ id: string }>(
+    const runResult = await client.query<{ id: string; status: string }>(
 	          `INSERT INTO agency_workflow_runs
 	           (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
 	            canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, context,
 	            safety_admission_id, idempotency_key)
 	         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-         RETURNING id`,
+         RETURNING id, status`,
         [
           input.target.client_id,
           input.target.account_id,
@@ -406,8 +468,8 @@ export async function queueHumanAgencyWorkflowRun(input: {
           input.executionKey ?? input.requestKey,
         ],
       );
-      runId = runResult.rows[0].id;
-    }
+    const runId = runResult.rows[0].id;
+    const runStatus = runResult.rows[0].status;
     const taskParams: Record<string, unknown> = {
       cacheKey: cached.cache_key,
       clientId: input.target.client_id,
@@ -418,6 +480,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
       source: "dashboard_human",
       maxSelfHealingAttempts: 0,
       ...(admission.id ? { safetyAdmissionId: admission.id } : {}),
+      ...(admission.id ? { safetyAdmissionContext: admissionContext } : {}),
     };
     if (input.architecture === "segments-v1") {
       taskParams.architecture = input.architecture;
@@ -446,7 +509,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
     taskRunnerService.pollNow().catch((err) => console.error("[human-workflow] immediate task runner poll failed:", err));
     return {
       id: runId,
-      status: existingRun?.status ?? "queued",
+      status: runStatus,
       taskId,
       requestKey: input.requestKey,
       cacheKey: cached.cache_key,

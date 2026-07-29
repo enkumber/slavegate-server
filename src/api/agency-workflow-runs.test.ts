@@ -572,6 +572,7 @@ describe("agency workflow runs API", () => {
     mocks.client.query
       .mockResolvedValueOnce({ rows: [] }) // BEGIN
       .mockResolvedValueOnce({ rows: [artifact] })
+      .mockResolvedValueOnce({ rows: [] }) // idempotent replay precheck
       .mockResolvedValueOnce({ rows: [{
         payload: {
           version: "deny_v1",
@@ -604,6 +605,70 @@ describe("agency workflow runs API", () => {
     });
     expect(mocks.client.query.mock.calls.some(([sql]) =>
       String(sql).includes("INSERT INTO agency_workflow_runs")
+    )).toBe(false);
+    expect(mocks.client.query.mock.calls.some(([sql]) =>
+      String(sql).includes("INSERT INTO tasks")
+    )).toBe(false);
+  });
+
+  it("rejects an idempotency key already bound to a different canonical request", async () => {
+    const run = hydratedRun({
+      compiled_plan_hash: "b".repeat(64),
+      idempotency_key: "mutation_once",
+    });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [cachedArtifact()] })
+      .mockResolvedValueOnce({ rows: [run] }) // conflicting replay
+      .mockResolvedValueOnce({ rows: [] }); // ROLLBACK
+
+    const response = await postWorkflowRun({
+      clientId: run.client_id,
+      accountId: run.account_id,
+      deviceId: run.device_id,
+      intent: "reddit_account_health_scan",
+      requestKey: run.request_key,
+      idempotencyKey: "mutation_once",
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "WORKFLOW_IDEMPOTENCY_CONFLICT",
+    });
+    expect(mocks.client.query.mock.calls.some(([sql]) =>
+      String(sql).includes("workflow_safety_admission_ledger")
+    )).toBe(false);
+    expect(mocks.client.query.mock.calls.some(([sql]) =>
+      String(sql).includes("INSERT INTO tasks")
+    )).toBe(false);
+  });
+
+  it("returns an exact idempotent replay without requiring a new approval", async () => {
+    const run = hydratedRun({ idempotency_key: "mutation_once" });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [cachedArtifact()] })
+      .mockResolvedValueOnce({ rows: [run] }) // exact replay
+      .mockResolvedValueOnce({ rows: [] }); // COMMIT
+
+    const response = await postWorkflowRun({
+      clientId: run.client_id,
+      accountId: run.account_id,
+      deviceId: run.device_id,
+      intent: run.intent,
+      requestKey: run.request_key,
+      idempotencyKey: "mutation_once",
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      idempotentReplay: true,
+      data: { id: run.id, taskId: run.task_id },
+    });
+    expect(mocks.client.query.mock.calls.some(([sql]) =>
+      String(sql).includes("runtime_semantic_entries")
     )).toBe(false);
     expect(mocks.client.query.mock.calls.some(([sql]) =>
       String(sql).includes("INSERT INTO tasks")

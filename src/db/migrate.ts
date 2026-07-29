@@ -60,7 +60,8 @@ export function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("resource_runtime_policies") ||
     fileName.includes("adopt_configured_lifecycle_resources") ||
     fileName.includes("runtime_semantic_entry_lifecycle_compatibility") ||
-    fileName.includes("phone_network_incidents_and_audits");
+    fileName.includes("phone_network_incidents_and_audits") ||
+    fileName.includes("workflow_safety_admission");
 }
 
 /**

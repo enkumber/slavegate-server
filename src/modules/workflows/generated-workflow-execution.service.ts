@@ -11,6 +11,7 @@ import { attachEdgeLearningBindings, prepareEdgeLearningBindings } from "../ui-g
 import { uiGraphRepository } from "../ui-graph/repository";
 import { getResourceLifecycleExecutionStatusContract } from "../lifecycle/lifecycle.service";
 import { assertWorkflowSafetyDispatch } from "./workflow-safety-admission.service";
+import type { WorkflowSafetyAdmissionContext } from "./workflow-safety-admission.service";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
 
@@ -71,6 +72,8 @@ export interface GeneratedWorkflowControlPlaneContext {
   platform?: string;
   routine?: string;
   safetyAdmissionId?: string;
+  safetyArtifactFingerprint?: string;
+  safetyAdmissionContext?: WorkflowSafetyAdmissionContext;
   source: "api" | "task_runner";
 }
 
@@ -126,13 +129,14 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
   await assertWorkflowSafetyDispatch({
     workflow: validation.template,
     safetyAdmissionId: controlPlaneContext?.safetyAdmissionId,
-    context: {
-      deviceId,
-      accountId: accountId ?? controlPlaneContext?.accountId,
-      clientId: controlPlaneContext?.clientId,
-      campaignId: controlPlaneContext?.campaignId,
-      source: controlPlaneContext?.source,
-    },
+    artifactFingerprint: controlPlaneContext?.safetyArtifactFingerprint,
+    context: controlPlaneContext?.safetyAdmissionContext ?? {
+        deviceId,
+        accountId: accountId ?? controlPlaneContext?.accountId,
+        clientId: controlPlaneContext?.clientId,
+        campaignId: controlPlaneContext?.campaignId,
+        source: controlPlaneContext?.source,
+      },
   });
   await assertOperationalRuntimeContract(validation.template);
   if (!directWsServer.supportsEdgeExecution(deviceId)) {

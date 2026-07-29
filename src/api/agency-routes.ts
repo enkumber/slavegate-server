@@ -39,7 +39,10 @@ import {
 import { transitionWorkflow } from "../modules/workflows/workflow-lifecycle.service";
 import { transitionAgencyWorkflowRun } from "../modules/workflows/agency-workflow-run-lifecycle.service";
 import { resolveCachedWorkflowSafetyClass } from "../modules/human-workflow/human-workflow-normalization";
-import { reserveWorkflowSafetyAdmission } from "../modules/workflows/workflow-safety-admission.service";
+import {
+  computeWorkflowSafetyArtifactFingerprint,
+  reserveWorkflowSafetyAdmission,
+} from "../modules/workflows/workflow-safety-admission.service";
 import {
   getResourceLifecycleState,
   getResourceLifecycleTransition,
@@ -1836,21 +1839,9 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
       : typeof body.context?.idempotencyKey === "string"
         ? body.context.idempotencyKey
         : null;
-    const admission = await reserveWorkflowSafetyAdmission({
-      db: client,
-      safetyClass,
-      workflow: cached.workflow as WorkflowTemplate,
-      context: {
-        clientId: body.clientId,
-        accountId: body.accountId,
-        deviceId: body.deviceId,
-        intent: body.intent,
-        source: "agency_workflow_runs",
-      },
-      idempotencyKey,
-    });
-    if (idempotencyKey) {
-      const replay = await client.query<Record<string, unknown>>(
+    const findIdempotentReplay = async (): Promise<Record<string, unknown> | null> => {
+      if (!idempotencyKey) return null;
+      const result = await client.query<Record<string, unknown>>(
         agencyWorkflowRunSelectSql(
           `r.client_id = $1
            AND r.account_id = $2
@@ -1859,14 +1850,56 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
         ),
         [body.clientId, body.accountId, body.deviceId, idempotencyKey],
       );
-      if (replay.rows[0]) {
-        await client.query("COMMIT");
-        return res.status(200).json({
-          ok: true,
-          data: rowToAgencyWorkflowRun(replay.rows[0]),
-          idempotentReplay: true,
-        });
+      const existing = result.rows[0];
+      if (!existing) return null;
+      const sameRequest = existing.safety_class === safetyClass
+        && existing.intent === body.intent
+        && existing.compiled_plan_hash === cached.compiled_plan_hash
+        && (existing.request_key ?? null) === (hasRequestKey ? body.requestKey : null)
+        && (existing.cache_key ?? null) === (hasCacheKey ? body.cacheKey : null);
+      if (!sameRequest) {
+        throw Object.assign(
+          new Error("idempotency key is already bound to a different agency workflow request"),
+          { status: 409, code: "WORKFLOW_IDEMPOTENCY_CONFLICT" },
+        );
       }
+      return existing;
+    };
+    const replayBeforeAdmission = await findIdempotentReplay();
+    if (replayBeforeAdmission) {
+      await client.query("COMMIT");
+      return res.status(200).json({
+        ok: true,
+        data: rowToAgencyWorkflowRun(replayBeforeAdmission),
+        idempotentReplay: true,
+      });
+    }
+    const admissionContext = {
+      clientId: body.clientId,
+      accountId: body.accountId,
+      deviceId: body.deviceId,
+      intent: body.intent,
+      source: "agency_workflow_runs",
+    };
+    const safetyArtifactFingerprint = computeWorkflowSafetyArtifactFingerprint(
+      String(cached.compiled_plan_hash ?? ""),
+    );
+    const admission = await reserveWorkflowSafetyAdmission({
+      db: client,
+      safetyClass,
+      workflow: cached.workflow as WorkflowTemplate,
+      artifactFingerprint: safetyArtifactFingerprint,
+      context: admissionContext,
+      idempotencyKey,
+    });
+    const replayAfterAdmission = await findIdempotentReplay();
+    if (replayAfterAdmission) {
+      await client.query("COMMIT");
+      return res.status(200).json({
+        ok: true,
+        data: rowToAgencyWorkflowRun(replayAfterAdmission),
+        idempotentReplay: true,
+      });
     }
 
     const runContext = {
@@ -1879,6 +1912,8 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
       safetyAdmissionId: admission.id,
       safetyPolicyVersion: admission.policyVersion,
       safetyScopeKey: admission.scopeKey,
+      safetyArtifactFingerprint,
+      safetyAdmissionContext: admissionContext,
       idempotencyKey,
     };
     const runResult = await client.query<{ id: string }>(
@@ -1914,6 +1949,7 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
       workflowRunId: runId,
       intent: body.intent,
       ...(admission.id ? { safetyAdmissionId: admission.id } : {}),
+      ...(admission.id ? { safetyAdmissionContext: admissionContext } : {}),
     };
     const taskResult = await client.query<{ id: string }>(
       `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time)

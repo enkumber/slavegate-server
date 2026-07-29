@@ -3,6 +3,7 @@ import { getDb } from "../../db/client";
 import type { WorkflowStep, WorkflowTemplate } from "./types";
 
 const IDENTIFIER_RE = /^[a-z0-9][a-z0-9._/-]{0,199}$/;
+const ARTIFACT_FINGERPRINT_RE = /^[a-f0-9]{64}$/;
 const TEMPLATE_TOKEN_RE = /\{\{([a-zA-Z0-9_.-]+)\}\}/g;
 
 interface Queryable {
@@ -248,17 +249,73 @@ function renderScope(template: string, context: WorkflowSafetyAdmissionContext):
   return rendered;
 }
 
-function workflowFingerprint(workflow: WorkflowTemplate): string {
-  return createHash("sha256").update(JSON.stringify(workflow)).digest("hex");
+function canonicalAdmissionContext(
+  context: WorkflowSafetyAdmissionContext,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(context)
+      .filter((entry): entry is [string, string] => (
+        typeof entry[1] === "string" && entry[1].trim().length > 0
+      ))
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
 }
 
-function assertApproval(policy: WorkflowSafetyPolicy): void {
+function sameAdmissionContext(
+  left: unknown,
+  right: Record<string, string>,
+): boolean {
+  if (!isRecord(left)) return false;
+  const leftEntries = Object.entries(left);
+  const rightEntries = Object.entries(right);
+  return leftEntries.length === rightEntries.length
+    && rightEntries.every(([key, value]) => left[key] === value);
+}
+
+function assertArtifactFingerprint(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !ARTIFACT_FINGERPRINT_RE.test(value)) {
+    throw failure(
+      "WORKFLOW_SAFETY_ARTIFACT_FINGERPRINT_REQUIRED",
+      "workflow safety admission requires a canonical artifact fingerprint",
+      409,
+    );
+  }
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function computeWorkflowSafetyArtifactFingerprint(
+  compiledPlanHash: string,
+  executionVariables: Record<string, unknown> = {},
+): string {
+  assertArtifactFingerprint(compiledPlanHash);
+  return createHash("sha256")
+    .update(stableStringify({ compiledPlanHash, executionVariables }))
+    .digest("hex");
+}
+
+async function assertApproval(policy: WorkflowSafetyPolicy, db: Queryable): Promise<void> {
   if (!policy.approval.required) return;
   if (!policy.approval.granted || !policy.approval.grantId) {
     throw failure("WORKFLOW_SAFETY_APPROVAL_REQUIRED", "workflow safety policy has no active approval grant");
   }
-  if (policy.approval.expiresAt && Date.parse(policy.approval.expiresAt) <= Date.now()) {
-    throw failure("WORKFLOW_SAFETY_APPROVAL_EXPIRED", "workflow safety approval grant has expired");
+  if (policy.approval.expiresAt) {
+    const result = await db.query<{ active: boolean }>(
+      `SELECT $1::timestamptz > NOW() AS active`,
+      [policy.approval.expiresAt],
+    );
+    if (result.rows[0]?.active !== true) {
+      throw failure("WORKFLOW_SAFETY_APPROVAL_EXPIRED", "workflow safety approval grant has expired");
+    }
   }
 }
 
@@ -266,6 +323,7 @@ export async function reserveWorkflowSafetyAdmission(input: {
   db: Queryable;
   safetyClass: string;
   workflow: WorkflowTemplate;
+  artifactFingerprint?: string | null;
   context: WorkflowSafetyAdmissionContext;
   idempotencyKey?: string | null;
 }): Promise<WorkflowSafetyAdmission> {
@@ -287,16 +345,19 @@ export async function reserveWorkflowSafetyAdmission(input: {
   if (!input.idempotencyKey || !IDENTIFIER_RE.test(input.idempotencyKey)) {
     throw failure("WORKFLOW_IDEMPOTENCY_KEY_REQUIRED", "workflow requires a valid idempotency key", 400);
   }
-  assertApproval(policy);
+  assertArtifactFingerprint(input.artifactFingerprint);
+  await assertApproval(policy, input.db);
   await input.db.query(
     `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`,
     [input.safetyClass, scopeKey],
   );
   const replay = await input.db.query<{
     id: string;
+    policy_version: string;
     consumed_units: string | number;
+    context: unknown;
   }>(
-    `SELECT id, consumed_units
+    `SELECT id, policy_version, consumed_units, context
        FROM workflow_safety_admission_ledger
       WHERE safety_class = $1
         AND scope_key = $2
@@ -304,6 +365,21 @@ export async function reserveWorkflowSafetyAdmission(input: {
     [input.safetyClass, scopeKey, input.idempotencyKey],
   );
   if (replay.rows[0]) {
+    const replayContext = isRecord(replay.rows[0].context)
+      ? replay.rows[0].context
+      : {};
+    const expectedContext = canonicalAdmissionContext(input.context);
+    if (
+      replay.rows[0].policy_version !== policy.version
+      || replayContext.artifactFingerprint !== input.artifactFingerprint
+      || !sameAdmissionContext(replayContext.admissionContext, expectedContext)
+    ) {
+      throw failure(
+        "WORKFLOW_IDEMPOTENCY_CONFLICT",
+        "idempotency key is already bound to a different workflow safety admission",
+        409,
+      );
+    }
     return {
       id: replay.rows[0].id,
       safetyClass: input.safetyClass,
@@ -315,20 +391,33 @@ export async function reserveWorkflowSafetyAdmission(input: {
     };
   }
   for (const limit of policy.limits) {
-    const usage = await input.db.query<{ runs: string; units: string }>(
-      `SELECT COUNT(*)::text AS runs, COALESCE(SUM(consumed_units), 0)::text AS units
+    const usage = await input.db.query<{
+      run_exhausted: boolean;
+      unit_exhausted: boolean;
+    }>(
+      `SELECT
+         ($4::bigint IS NOT NULL AND COUNT(*) >= $4::bigint) AS run_exhausted,
+         (
+           $5::numeric IS NOT NULL
+           AND COALESCE(SUM(consumed_units), 0) + $6::numeric > $5::numeric
+         ) AS unit_exhausted
          FROM workflow_safety_admission_ledger
         WHERE safety_class = $1
           AND scope_key = $2
           AND created_at >= NOW() - ($3::bigint * INTERVAL '1 millisecond')`,
-      [input.safetyClass, scopeKey, limit.windowMs],
+      [
+        input.safetyClass,
+        scopeKey,
+        limit.windowMs,
+        limit.maxRuns ?? null,
+        limit.maxUnits ?? null,
+        policy.unitCost,
+      ],
     );
-    const runs = Number(usage.rows[0]?.runs ?? 0);
-    const units = Number(usage.rows[0]?.units ?? 0);
-    if (limit.maxRuns !== undefined && runs >= limit.maxRuns) {
+    if (usage.rows[0]?.run_exhausted === true) {
       throw failure("WORKFLOW_SAFETY_RATE_LIMITED", "workflow safety run limit is exhausted", 429);
     }
-    if (limit.maxUnits !== undefined && units + policy.unitCost > limit.maxUnits) {
+    if (usage.rows[0]?.unit_exhausted === true) {
       throw failure("WORKFLOW_SAFETY_BUDGET_EXHAUSTED", "workflow safety unit budget is exhausted", 429);
     }
   }
@@ -344,8 +433,8 @@ export async function reserveWorkflowSafetyAdmission(input: {
       input.idempotencyKey,
       policy.unitCost,
       JSON.stringify({
-        ...input.context,
-        workflowFingerprint: workflowFingerprint(input.workflow),
+        admissionContext: canonicalAdmissionContext(input.context),
+        artifactFingerprint: input.artifactFingerprint,
       }),
     ],
   );
@@ -361,40 +450,43 @@ export async function reserveWorkflowSafetyAdmission(input: {
 }
 
 export async function assertWorkflowSafetyDispatch(input: {
+  db?: Queryable;
   workflow: WorkflowTemplate;
   safetyAdmissionId?: string | null;
+  artifactFingerprint?: string | null;
   context?: WorkflowSafetyAdmissionContext;
 }): Promise<void> {
   const safetyClass = input.workflow.safetyClass;
   if (typeof safetyClass !== "string" || !IDENTIFIER_RE.test(safetyClass)) {
     throw failure("WORKFLOW_SAFETY_CLASS_REQUIRED", "workflow has no valid explicit safety class");
   }
-  const db = getDb();
+  const db = input.db ?? getDb();
   const policy = await loadWorkflowSafetyPolicy(safetyClass, db);
   assertWorkflowMatchesSafetyPolicy(input.workflow, policy);
   if (!policy.requiresAdmissionLedger) return;
-  assertApproval(policy);
+  await assertApproval(policy, db);
   if (!input.safetyAdmissionId) {
     throw failure("WORKFLOW_SAFETY_ADMISSION_REQUIRED", "workflow requires a safety admission receipt");
   }
+  assertArtifactFingerprint(input.artifactFingerprint);
+  const admissionContext = canonicalAdmissionContext(input.context ?? {});
+  const scopeKey = renderScope(policy.scopeTemplate, input.context ?? {});
   const receipt = await db.query<{ id: string }>(
     `SELECT id
        FROM workflow_safety_admission_ledger
       WHERE id = $1
         AND safety_class = $2
         AND policy_version = $3
-        AND context ->> 'workflowFingerprint' = $4
-        AND (context ->> 'deviceId') IS NOT DISTINCT FROM $5
-        AND (context ->> 'accountId') IS NOT DISTINCT FROM $6
-        AND (context ->> 'clientId') IS NOT DISTINCT FROM $7`,
+        AND scope_key = $4
+        AND context ->> 'artifactFingerprint' = $5
+        AND context -> 'admissionContext' = $6::jsonb`,
     [
       input.safetyAdmissionId,
       safetyClass,
       policy.version,
-      workflowFingerprint(input.workflow),
-      input.context?.deviceId ?? null,
-      input.context?.accountId ?? null,
-      input.context?.clientId ?? null,
+      scopeKey,
+      input.artifactFingerprint,
+      JSON.stringify(admissionContext),
     ],
   );
   if (!receipt.rows[0]) {

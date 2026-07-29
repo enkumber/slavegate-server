@@ -54,6 +54,7 @@ import {
   selectResourceLifecycleTransition,
 } from "../lifecycle/lifecycle.service";
 import { hydrateWorkflowNativePolicies } from "../dispatcher/dispatcher.service";
+import { computeWorkflowSafetyArtifactFingerprint } from "../workflows/workflow-safety-admission.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1424,6 +1425,7 @@ async function executeGeneratedWorkflowTask(
     allowCandidateArtifact?: unknown;
     selfHealingAttempt?: unknown;
     safetyAdmissionId?: unknown;
+    safetyAdmissionContext?: unknown;
   };
 
   if (Object.prototype.hasOwnProperty.call(params, "workflow")) {
@@ -1563,6 +1565,21 @@ async function executeGeneratedWorkflowTask(
       ...(campaignId ? { campaignId } : {}),
       ...(typeof params.safetyAdmissionId === "string"
         ? { safetyAdmissionId: params.safetyAdmissionId }
+        : {}),
+      ...(typeof params.safetyAdmissionId === "string"
+        ? {
+            safetyArtifactFingerprint: computeWorkflowSafetyArtifactFingerprint(
+              cached.compiledPlanHash,
+              suppliedVariables ?? {},
+            ),
+          }
+        : {}),
+      ...(params.safetyAdmissionContext
+        && typeof params.safetyAdmissionContext === "object"
+        && !Array.isArray(params.safetyAdmissionContext)
+        ? {
+            safetyAdmissionContext: params.safetyAdmissionContext as GeneratedWorkflowControlPlaneContext["safetyAdmissionContext"],
+          }
         : {}),
     };
     const executableWorkflow = await hydrateWorkflowNativePolicies(
