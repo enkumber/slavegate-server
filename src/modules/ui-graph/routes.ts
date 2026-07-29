@@ -9,6 +9,7 @@ import { evaluateCanaryGate, recordCanaryResult } from "./canary.service";
 import { persistStateSnapshot, replaySnapshotCorpus } from "./snapshot-replay.service";
 import {
   allowedUiGraphScopeTypes,
+  uiGraphLearningRuntimePolicy,
   workflowCanaryCohortDefaults,
 } from "./runtime-policy";
 import { transitionMaterializedCandidate } from "./candidate-materializer";
@@ -150,11 +151,11 @@ router.post("/candidates/:id/validate", requireAdminAuth, async (req: Request, r
   if (typeof req.body?.success !== "boolean" || typeof req.body?.stateVerified !== "boolean") {
     return res.status(400).json({ ok: false, error: "success and stateVerified booleans are required" });
   }
-  const decision = await uiGraphLearningLoop.validate({
-    candidateId: req.params.id,
-    context: {
+  try {
+    const context = {
       appId: String(req.body?.appId ?? "unknown"),
       deviceId: typeof req.body?.deviceId === "string" ? req.body.deviceId : null,
+      workflowId: typeof req.body?.workflowId === "string" ? req.body.workflowId : null,
       appVersion: typeof req.body?.appVersion === "string" ? req.body.appVersion : null,
       appBuild: typeof req.body?.appBuild === "string" ? req.body.appBuild : null,
       androidVersion: typeof req.body?.androidVersion === "string" ? req.body.androidVersion : null,
@@ -164,12 +165,39 @@ router.post("/candidates/:id/validate", requireAdminAuth, async (req: Request, r
       initialStateKey: typeof req.body?.initialStateKey === "string" ? req.body.initialStateKey : null,
       finalStateKey: typeof req.body?.finalStateKey === "string" ? req.body.finalStateKey : null,
       recoveryCount: Number.isFinite(req.body?.recoveryCount) ? Math.max(0, req.body.recoveryCount) : 0,
-    },
-    success: req.body.success,
-    stateVerified: req.body.stateVerified,
-    evidence: req.body?.evidence && typeof req.body.evidence === "object" ? req.body.evidence : {},
-  });
-  res.json({ ok: true, data: { candidateId: req.params.id, decision } });
+    };
+    const decision = await uiGraphLearningLoop.validate({
+      candidateId: req.params.id,
+      context,
+      success: req.body.success,
+      stateVerified: req.body.stateVerified,
+      evidence: req.body?.evidence && typeof req.body.evidence === "object" ? req.body.evidence : {},
+    });
+    const flags = await uiGraphRepository.resolveFlags(context);
+    let promotion: { entityId: string; actor: string; reason: string } | null = null;
+    if (req.body.success && req.body.stateVerified && flags.autoPromotion && decision.autoPromotable) {
+      const attribution = (await uiGraphLearningRuntimePolicy()).autoPromotionAttribution.controlPlane;
+      if (!attribution) throw new Error("control-plane auto-promotion attribution is not configured");
+      const entityId = await uiGraphLearningLoop.promote(
+        req.params.id,
+        attribution.actor,
+        attribution.reason,
+        true,
+      );
+      promotion = { entityId, actor: attribution.actor, reason: attribution.reason };
+    }
+    res.json({
+      ok: true,
+      data: {
+        candidateId: req.params.id,
+        decision,
+        autoPromotionEnabled: flags.autoPromotion,
+        promotion,
+      },
+    });
+  } catch (error) {
+    res.status(409).json({ ok: false, error: (error as Error).message });
+  }
 });
 
 router.post("/snapshots", requireAdminAuth, async (req: Request, res: Response) => {
