@@ -476,20 +476,20 @@ export class WorkflowSegmentControlPlaneService {
       throw Object.assign(new Error("candidate entity version not found"), { status: 404, code: "CONTROL_PLANE_CANDIDATE_NOT_FOUND" });
     }
     const execution = await getDb().query(
-      `SELECT composition_name, composition_version, segment_refs
-       FROM workflow_execution_bindings
+      `SELECT execution.composition_name, execution.composition_version, execution.segment_refs
+       FROM workflow_execution_bindings execution
        JOIN lifecycle_resource_bindings binding
          ON binding.resource_table = to_regclass('workflow_execution_bindings')
-        AND binding.lifecycle_key = workflow_execution_bindings.lifecycle_key
+        AND binding.state_column = 'status'::name
        JOIN lifecycle_state_definitions definition
-         ON definition.lifecycle_key = workflow_execution_bindings.lifecycle_key
-        AND definition.status = workflow_execution_bindings.status
-       WHERE execution_key = $1
+         ON definition.lifecycle_key = binding.lifecycle_key
+        AND definition.status = execution.status
+       WHERE execution.execution_key = $1
          AND definition.terminal
          AND NOT definition.retryable
          AND NOT definition.administrative
-         AND postcondition_verified = TRUE
-       ORDER BY updated_at DESC
+         AND execution.postcondition_verified = TRUE
+       ORDER BY execution.updated_at DESC
        LIMIT 1`,
       [evidence.executionKey],
     );

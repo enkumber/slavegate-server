@@ -13,11 +13,28 @@ describe("workflow segment control plane", () => {
       join(__dirname, "../segment-builder/segment-build-job.service.ts"),
       "utf8",
     );
+    const repositorySource = readFileSync(
+      join(__dirname, "repository.ts"),
+      "utf8",
+    );
+    const executionLifecycleSource = readFileSync(
+      join(__dirname, "execution-lifecycle.service.ts"),
+      "utf8",
+    );
 
     expect(controlPlaneSource).not.toContain("resource.lifecycle_key");
     expect(segmentBuilderSource).not.toContain("resource.lifecycle_key");
+    expect(repositorySource).not.toContain("EXCLUDED.lifecycle_key");
+    expect(controlPlaneSource).not.toContain("workflow_execution_bindings.lifecycle_key");
+    expect(executionLifecycleSource).not.toContain("execution.lifecycle_key");
     expect(controlPlaneSource).toContain("transition.lifecycle_key = binding.lifecycle_key");
     expect(controlPlaneSource).toContain("definition.lifecycle_key = binding.lifecycle_key");
+    expect(repositorySource).toContain(
+      "binding.resource_table = to_regclass('workflow_execution_bindings')",
+    );
+    expect(executionLifecycleSource).toContain(
+      "binding.resource_table = to_regclass('workflow_execution_bindings')",
+    );
     expect(segmentBuilderSource).toContain("definition.lifecycle_key = binding.lifecycle_key");
   });
 

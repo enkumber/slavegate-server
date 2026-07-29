@@ -19,19 +19,22 @@ export async function transitionWorkflowExecutionBinding(
   const predicate = lifecycleTransitionSelectorPredicate("transition", "target", "$2");
   const result = await db.query(
     `WITH selected AS (
-       SELECT binding.request_key, transition.to_status
-         FROM workflow_execution_bindings binding
+       SELECT execution.request_key, transition.to_status
+         FROM workflow_execution_bindings execution
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('workflow_execution_bindings')
+          AND binding.state_column = 'status'::name
          JOIN lifecycle_transitions transition
            ON transition.lifecycle_key = binding.lifecycle_key
-          AND transition.from_status = binding.status
+          AND transition.from_status = execution.status
          JOIN lifecycle_state_definitions target
            ON target.lifecycle_key = transition.lifecycle_key
           AND target.status = transition.to_status
-        WHERE binding.request_key = $1
+        WHERE execution.request_key = $1
           AND ${predicate}
         ORDER BY transition.action_key
         LIMIT 1
-        FOR UPDATE OF binding
+        FOR UPDATE OF execution
      )
      UPDATE workflow_execution_bindings binding
         SET status = selected.to_status,

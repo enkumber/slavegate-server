@@ -213,8 +213,11 @@ export class WorkflowSegmentRepository {
          runtime_inputs = EXCLUDED.runtime_inputs,
          status = (
            SELECT definition.status
-             FROM lifecycle_state_definitions definition
-            WHERE definition.lifecycle_key = EXCLUDED.lifecycle_key
+             FROM lifecycle_resource_bindings binding
+             JOIN lifecycle_state_definitions definition
+               ON definition.lifecycle_key = binding.lifecycle_key
+            WHERE binding.resource_table = to_regclass('workflow_execution_bindings')
+              AND binding.state_column = 'status'::name
               AND definition.initial
             ORDER BY definition.sort_order, definition.status
             LIMIT 1
