@@ -150,6 +150,7 @@ function redditHomeWorkflow(): WorkflowTemplate {
     platform: "reddit",
     description: "Non-mutating generated workflow for cache-only execution tests.",
     version: "1.0.0",
+    safetyClass: "navigation",
     runtimeContract: "edge-workflow/v2",
     defaultVerificationStrategy: "local_with_screenshot",
     dataRetentionDays: 1,
@@ -339,7 +340,22 @@ describe("generated workflow cache-only execution route", () => {
       config: {},
     });
     mocks.db.query.mockImplementation((sql: string) => Promise.resolve({
-      rows: sql.includes("transition.mark_started")
+      rows: sql.includes("entry.namespace = 'workflow_safety_policy'")
+        ? [{
+            payload: {
+              version: "test-v1",
+              requiresAdmissionLedger: false,
+              requireExplicitEffects: false,
+              scopeTemplate: "{{deviceId}}",
+              unitCost: 1,
+              allowedEffects: [],
+              requiredGoalStages: [],
+              requirePostcondition: false,
+              approval: { required: false, granted: false },
+              limits: [],
+            },
+          }]
+        : sql.includes("transition.mark_started")
         ? [
             { role: "active", status: "running" },
             { role: "cancelled", status: "cancelled" },

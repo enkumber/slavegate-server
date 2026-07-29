@@ -27,6 +27,7 @@ import {
   workflowValidationPipelinePolicy,
 } from "../modules/workflow-validation-pipeline/workflow-validation-pipeline";
 import { workflowService } from "../modules/workflows/workflow.service";
+import type { WorkflowTemplate } from "../modules/workflows/types";
 import { compileGeneratedWorkflowTemplate, computeGeneratedWorkflowCompiledPlanHash } from "../modules/workflows/workflow-validator";
 import { taskRunnerService } from "../modules/task-runner";
 import {
@@ -38,6 +39,7 @@ import {
 import { transitionWorkflow } from "../modules/workflows/workflow-lifecycle.service";
 import { transitionAgencyWorkflowRun } from "../modules/workflows/agency-workflow-run-lifecycle.service";
 import { resolveCachedWorkflowSafetyClass } from "../modules/human-workflow/human-workflow-normalization";
+import { reserveWorkflowSafetyAdmission } from "../modules/workflows/workflow-safety-admission.service";
 import {
   getResourceLifecycleState,
   getResourceLifecycleTransition,
@@ -1725,6 +1727,7 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
     cacheKey?: string;
     scheduledTime?: string;
     context?: Record<string, unknown>;
+    idempotencyKey?: string;
     workflow?: unknown;
   };
 
@@ -1828,6 +1831,43 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
         error: "canonical workflow artifact is missing platform metadata",
       });
     }
+    const idempotencyKey = typeof body.idempotencyKey === "string"
+      ? body.idempotencyKey
+      : typeof body.context?.idempotencyKey === "string"
+        ? body.context.idempotencyKey
+        : null;
+    const admission = await reserveWorkflowSafetyAdmission({
+      db: client,
+      safetyClass,
+      workflow: cached.workflow as WorkflowTemplate,
+      context: {
+        clientId: body.clientId,
+        accountId: body.accountId,
+        deviceId: body.deviceId,
+        intent: body.intent,
+        source: "agency_workflow_runs",
+      },
+      idempotencyKey,
+    });
+    if (idempotencyKey) {
+      const replay = await client.query<Record<string, unknown>>(
+        agencyWorkflowRunSelectSql(
+          `r.client_id = $1
+           AND r.account_id = $2
+           AND r.device_id = $3
+           AND r.idempotency_key = $4`,
+        ),
+        [body.clientId, body.accountId, body.deviceId, idempotencyKey],
+      );
+      if (replay.rows[0]) {
+        await client.query("COMMIT");
+        return res.status(200).json({
+          ok: true,
+          data: rowToAgencyWorkflowRun(replay.rows[0]),
+          idempotentReplay: true,
+        });
+      }
+    }
 
     const runContext = {
       ...(body.context ?? {}),
@@ -1836,12 +1876,17 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
       accountId: body.accountId,
       deviceId: body.deviceId,
       intent: body.intent,
+      safetyAdmissionId: admission.id,
+      safetyPolicyVersion: admission.policyVersion,
+      safetyScopeKey: admission.scopeKey,
+      idempotencyKey,
     };
     const runResult = await client.query<{ id: string }>(
 	      `INSERT INTO agency_workflow_runs
 	         (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
-	          canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, context)
-	       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	          canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, context,
+	          safety_admission_id, idempotency_key)
+	       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        RETURNING id`,
       [
         body.clientId,
@@ -1856,6 +1901,8 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
         cached.canonical_workflow_version,
         cached.compiled_plan_hash,
         JSON.stringify(runContext),
+        admission.id,
+        idempotencyKey,
       ]
     );
     const runId = runResult.rows[0].id;
@@ -1866,6 +1913,7 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
       agencyWorkflowRunId: runId,
       workflowRunId: runId,
       intent: body.intent,
+      ...(admission.id ? { safetyAdmissionId: admission.id } : {}),
     };
     const taskResult = await client.query<{ id: string }>(
       `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time)
@@ -1903,7 +1951,12 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
     res.status(201).json({ ok: true, data: rowToAgencyWorkflowRun(hydrated.rows[0]) });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
-    res.status(500).json({ ok: false, error: (err as Error).message });
+    const failure = err as Error & { status?: number; code?: string };
+    res.status(failure.status ?? 500).json({
+      ok: false,
+      error: failure.message,
+      ...(failure.code ? { code: failure.code } : {}),
+    });
   } finally {
     client.release();
   }

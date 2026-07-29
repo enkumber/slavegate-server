@@ -462,6 +462,20 @@ describe("agency workflow runs API", () => {
     mocks.client.query
       .mockResolvedValueOnce({ rows: [] }) // BEGIN
       .mockResolvedValueOnce({ rows: [cachedArtifact()] })
+      .mockResolvedValueOnce({ rows: [{
+        payload: {
+          version: "test_v1",
+          requiresAdmissionLedger: false,
+          requireExplicitEffects: false,
+          scopeTemplate: "{{clientId}}/{{accountId}}/{{deviceId}}",
+          unitCost: 1,
+          allowedEffects: [],
+          requiredGoalStages: [],
+          requirePostcondition: false,
+          approval: { required: false, granted: false },
+          limits: [],
+        },
+      }] })
       .mockResolvedValueOnce({ rows: [{ id: run.id }] })
       .mockResolvedValueOnce({ rows: [{ id: run.task_id }] })
       .mockResolvedValueOnce({ rows: [] })
@@ -504,6 +518,96 @@ describe("agency workflow runs API", () => {
       intent: "reddit_account_health_scan",
     }));
     expect(JSON.parse(taskInsert![1][2])).not.toHaveProperty("workflow");
+  });
+
+  it("fails closed before run or task creation when PostgreSQL has no safety policy", async () => {
+    const run = hydratedRun();
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [cachedArtifact()] })
+      .mockResolvedValueOnce({ rows: [] }) // no active safety policy
+      .mockResolvedValueOnce({ rows: [] }); // ROLLBACK
+
+    const response = await postWorkflowRun({
+      clientId: run.client_id,
+      accountId: run.account_id,
+      deviceId: run.device_id,
+      intent: "reddit_account_health_scan",
+      requestKey: run.request_key,
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "WORKFLOW_SAFETY_POLICY_REQUIRED",
+    });
+    expect(mocks.client.query.mock.calls.some(([sql]) =>
+      String(sql).includes("INSERT INTO agency_workflow_runs")
+    )).toBe(false);
+    expect(mocks.client.query.mock.calls.some(([sql]) =>
+      String(sql).includes("INSERT INTO tasks")
+    )).toBe(false);
+  });
+
+  it("blocks an unapproved mutating class before run or task creation", async () => {
+    const run = hydratedRun();
+    const artifact = cachedArtifact({
+      source_metadata: { safetyClass: "standard", intent: "reddit_account_health_scan" },
+      workflow: {
+        ...cachedArtifact().workflow,
+        safetyClass: "standard",
+        postconditionContract: { version: "1", all: [] },
+        steps: [{
+          type: "action",
+          action: "tap",
+          effect: "business_mutation",
+          params: {},
+        }],
+      },
+      compiled_plan: {
+        ...cachedArtifact().compiled_plan,
+        metadata: { safetyClass: "standard", intent: "reddit_account_health_scan" },
+      },
+    });
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [artifact] })
+      .mockResolvedValueOnce({ rows: [{
+        payload: {
+          version: "deny_v1",
+          requiresAdmissionLedger: true,
+          requireExplicitEffects: true,
+          scopeTemplate: "{{clientId}}/{{accountId}}/{{deviceId}}",
+          unitCost: 1,
+          allowedEffects: ["business_mutation"],
+          requiredGoalStages: [],
+          requirePostcondition: true,
+          approval: { required: true, granted: false },
+          limits: [{ windowMs: 60_000, maxRuns: 1 }],
+        },
+      }] })
+      .mockResolvedValueOnce({ rows: [] }); // ROLLBACK
+
+    const response = await postWorkflowRun({
+      clientId: run.client_id,
+      accountId: run.account_id,
+      deviceId: run.device_id,
+      intent: "reddit_account_health_scan",
+      requestKey: run.request_key,
+      idempotencyKey: "mutation_once",
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({
+      ok: false,
+      code: "WORKFLOW_SAFETY_APPROVAL_REQUIRED",
+    });
+    expect(mocks.client.query.mock.calls.some(([sql]) =>
+      String(sql).includes("INSERT INTO agency_workflow_runs")
+    )).toBe(false);
+    expect(mocks.client.query.mock.calls.some(([sql]) =>
+      String(sql).includes("INSERT INTO tasks")
+    )).toBe(false);
   });
 
   it("rejects openclaw_agent tokens for POST /api/agency/workflow-runs", async () => {

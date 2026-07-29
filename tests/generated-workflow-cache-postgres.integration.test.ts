@@ -100,6 +100,16 @@ describe("generated workflow cache PostgreSQL contract", () => {
           lifecycle_key TEXT NOT NULL,
           state_column NAME NOT NULL
         );
+        CREATE TABLE runtime_semantic_entries (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          namespace TEXT NOT NULL,
+          entry_key TEXT NOT NULL,
+          platform TEXT NOT NULL,
+          status TEXT NOT NULL,
+          lifecycle_key TEXT NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 0,
+          payload JSONB NOT NULL DEFAULT '{}'::jsonb
+        );
       `);
       await pool.query(fs.readFileSync(
         path.join(repoRoot, "src/db/migrations/110_generic_lifecycle_queries.sql"),
@@ -110,12 +120,40 @@ describe("generated workflow cache PostgreSQL contract", () => {
           (lifecycle_key, status, initial, terminal, retryable, administrative, dispatchable, manual, sort_order)
         VALUES
           ('generated_cache_fixture', 'candidate_fixture', TRUE, FALSE, FALSE, FALSE, FALSE, TRUE, 10),
-          ('generated_cache_fixture', 'executable_fixture', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 20);
+          ('generated_cache_fixture', 'executable_fixture', FALSE, FALSE, FALSE, FALSE, TRUE, FALSE, 20),
+          ('generated_cache_policy_fixture', 'enabled_fixture', TRUE, FALSE, FALSE, FALSE, TRUE, FALSE, 10);
         INSERT INTO lifecycle_resource_bindings(resource_table, lifecycle_key, state_column)
         VALUES (
           'generated_workflow_plan_cache'::regclass,
           'generated_cache_fixture',
           'artifact_state'
+        ), (
+          'runtime_semantic_entries'::regclass,
+          'generated_cache_policy_fixture',
+          'status'
+        );
+
+        INSERT INTO runtime_semantic_entries
+          (namespace, entry_key, platform, status, lifecycle_key, priority, payload)
+        VALUES (
+          'workflow_safety_policy',
+          'read_only',
+          '*',
+          'enabled_fixture',
+          'generated_cache_policy_fixture',
+          100,
+          '{
+            "version": "generated_cache_v1",
+            "requiresAdmissionLedger": false,
+            "requireExplicitEffects": false,
+            "scopeTemplate": "{{deviceId}}",
+            "unitCost": 1,
+            "allowedEffects": [],
+            "requiredGoalStages": [],
+            "requirePostcondition": false,
+            "approval": {"required": false, "granted": false},
+            "limits": []
+          }'::jsonb
         );
 
         INSERT INTO workflow_runtime_contracts

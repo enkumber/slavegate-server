@@ -106,6 +106,7 @@ import {
   type HumanWorkflowTarget,
 } from "../modules/human-workflow/human-workflow-compiler.service";
 import { resolveCachedWorkflowSafetyClass } from "../modules/human-workflow/human-workflow-normalization";
+import { reserveWorkflowSafetyAdmission } from "../modules/workflows/workflow-safety-admission.service";
 import {
   humanWorkflowCompileJobService,
   type HumanWorkflowCompileJobRecord,
@@ -314,30 +315,38 @@ export async function queueHumanAgencyWorkflowRun(input: {
         code: "HUMAN_WORKFLOW_INTENT_MISMATCH",
       });
     }
+    const admission = await reserveWorkflowSafetyAdmission({
+      db: client,
+      safetyClass,
+      workflow: cached.workflow as WorkflowTemplate,
+      context: {
+        clientId: input.target.client_id,
+        accountId: input.target.account_id,
+        deviceId: input.target.device_id,
+        intent: input.intent,
+        source: "dashboard_human",
+      },
+      idempotencyKey: input.executionKey ?? input.requestKey,
+    });
 
     const existingRunResult = await client.query<{ id: string; task_id: string | null; status: string }>(
       `SELECT r.id, r.task_id, r.status
        FROM agency_workflow_runs r
        JOIN tasks t ON t.id = r.task_id
-       JOIN lifecycle_state_definitions task_state
-         ON task_state.lifecycle_key = t.lifecycle_key
-        AND task_state.status = t.status
-       JOIN lifecycle_state_definitions run_state
-         ON run_state.lifecycle_key = r.lifecycle_key
-        AND run_state.status = r.status
        WHERE r.cache_key = $1
          AND r.device_id = $2
          AND r.account_id IS NOT DISTINCT FROM $3
          AND r.context ->> 'source' = 'dashboard_human'
-         AND r.context ->> 'requestKey' = $4
-         AND NOT run_state.terminal
-         AND NOT run_state.administrative
-         AND NOT task_state.terminal
-         AND NOT task_state.administrative
+         AND r.idempotency_key = $4
        ORDER BY r.created_at ASC
        LIMIT 1
        FOR UPDATE OF r`,
-      [cached.cache_key, input.target.device_id, input.target.account_id, input.requestKey],
+      [
+        cached.cache_key,
+        input.target.device_id,
+        input.target.account_id,
+        input.executionKey ?? input.requestKey,
+      ],
     );
     const existingRun = existingRunResult.rows[0];
     if (existingRun?.task_id) {
@@ -367,14 +376,18 @@ export async function queueHumanAgencyWorkflowRun(input: {
       executionKey: input.executionKey ?? null,
       segmentKeys: input.segmentKeys ?? [],
       runtimeInputs: input.runtimeInputs ?? {},
+      safetyAdmissionId: admission.id,
+      safetyPolicyVersion: admission.policyVersion,
+      safetyScopeKey: admission.scopeKey,
     };
     let runId = existingRun?.id;
     if (!runId) {
       const runResult = await client.query<{ id: string }>(
 	          `INSERT INTO agency_workflow_runs
 	           (client_id, account_id, device_id, platform, intent, safety_class, request_key, cache_key,
-	            canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, context)
-	         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	            canonical_workflow_id, canonical_workflow_version, compiled_plan_hash, context,
+	            safety_admission_id, idempotency_key)
+	         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          RETURNING id`,
         [
           input.target.client_id,
@@ -389,6 +402,8 @@ export async function queueHumanAgencyWorkflowRun(input: {
           cached.canonical_workflow_version,
           cached.compiled_plan_hash,
           JSON.stringify(context),
+          admission.id,
+          input.executionKey ?? input.requestKey,
         ],
       );
       runId = runResult.rows[0].id;
@@ -402,6 +417,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
       intent: input.intent,
       source: "dashboard_human",
       maxSelfHealingAttempts: 0,
+      ...(admission.id ? { safetyAdmissionId: admission.id } : {}),
     };
     if (input.architecture === "segments-v1") {
       taskParams.architecture = input.architecture;

@@ -10,6 +10,7 @@ import { scheduleEdgeWorkflowAckWatchdog } from "./edge-workflow-lifecycle.servi
 import { attachEdgeLearningBindings, prepareEdgeLearningBindings } from "../ui-graph/edge-learning.service";
 import { uiGraphRepository } from "../ui-graph/repository";
 import { getResourceLifecycleExecutionStatusContract } from "../lifecycle/lifecycle.service";
+import { assertWorkflowSafetyDispatch } from "./workflow-safety-admission.service";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
 
@@ -69,6 +70,7 @@ export interface GeneratedWorkflowControlPlaneContext {
   agencyWorkflowRunId?: string;
   platform?: string;
   routine?: string;
+  safetyAdmissionId?: string;
   source: "api" | "task_runner";
 }
 
@@ -121,6 +123,17 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     (err as Error & { status?: number; code?: string; validationErrors?: string[] }).validationErrors = validation.errors;
     throw err;
   }
+  await assertWorkflowSafetyDispatch({
+    workflow: validation.template,
+    safetyAdmissionId: controlPlaneContext?.safetyAdmissionId,
+    context: {
+      deviceId,
+      accountId: accountId ?? controlPlaneContext?.accountId,
+      clientId: controlPlaneContext?.clientId,
+      campaignId: controlPlaneContext?.campaignId,
+      source: controlPlaneContext?.source,
+    },
+  });
   await assertOperationalRuntimeContract(validation.template);
   if (!directWsServer.supportsEdgeExecution(deviceId)) {
     const err = new Error("Full workflow execution requires an edge-capable Android agent");

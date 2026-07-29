@@ -1423,6 +1423,7 @@ async function executeGeneratedWorkflowTask(
     variables?: unknown;
     allowCandidateArtifact?: unknown;
     selfHealingAttempt?: unknown;
+    safetyAdmissionId?: unknown;
   };
 
   if (Object.prototype.hasOwnProperty.call(params, "workflow")) {
@@ -1560,6 +1561,9 @@ async function executeGeneratedWorkflowTask(
       ...(agencyWorkflowRunIdFromTask(task) ? { agencyWorkflowRunId: agencyWorkflowRunIdFromTask(task)! } : {}),
       ...(clientId ? { clientId } : {}),
       ...(campaignId ? { campaignId } : {}),
+      ...(typeof params.safetyAdmissionId === "string"
+        ? { safetyAdmissionId: params.safetyAdmissionId }
+        : {}),
     };
     const executableWorkflow = await hydrateWorkflowNativePolicies(
       normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata) as unknown as Record<string, unknown>,

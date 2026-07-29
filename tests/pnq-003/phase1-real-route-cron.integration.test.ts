@@ -212,6 +212,26 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
               "parameterTransforms": []
             }
           }'::jsonb
+        ),
+        (
+          'workflow_safety_policy',
+          'standard',
+          '*',
+          'enabled_fixture',
+          'phase1_runtime_fixture',
+          100,
+          '{
+            "version": "phase1_v1",
+            "requiresAdmissionLedger": false,
+            "requireExplicitEffects": false,
+            "scopeTemplate": "{{deviceId}}",
+            "unitCost": 1,
+            "allowedEffects": [],
+            "requiredGoalStages": [],
+            "requirePostcondition": false,
+            "approval": {"required": false, "granted": false},
+            "limits": []
+          }'::jsonb
         );
     `);
     await pool.query(`
