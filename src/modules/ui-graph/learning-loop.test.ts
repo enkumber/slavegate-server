@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   candidateEnvironmentKey,
   candidateKey,
+  enteredRetryableLifecycleState,
   promotionDecision,
   type CandidateObservation,
   type UiGraphPromotionPolicy,
@@ -19,6 +20,12 @@ const POLICY: UiGraphPromotionPolicy = {
 };
 
 describe("UI graph learning policy", () => {
+  it("transitions a linked entity only when the candidate enters a retryable state", () => {
+    expect(enteredRetryableLifecycleState("promoted", "degraded", true)).toBe(true);
+    expect(enteredRetryableLifecycleState("degraded", "degraded", true)).toBe(false);
+    expect(enteredRetryableLifecycleState("promoted", "validating", false)).toBe(false);
+  });
+
   it("generates stable candidate keys independent of object key order", () => {
     const first = candidateKey({ appId: "app", type: "selector", sourceStateId: "home", payload: { strategy: "resource_id", selector: { value: "x", exact: true } } });
     const second = candidateKey({ appId: "app", type: "selector", sourceStateId: "home", payload: { selector: { exact: true, value: "x" }, strategy: "resource_id" } });

@@ -41,6 +41,8 @@ describe("UiGraphRepository", () => {
     const sql = String(query.mock.calls[0]?.[0]);
     expect(sql).toContain("SELECT transition.id");
     expect(sql).toContain("transition.confidence");
+    expect(sql).toContain("state.dispatchable");
+    expect(sql).not.toContain("NOT state.administrative");
     expect(sql).not.toMatch(/,\s*status\s*(?:\n|FROM)/);
     expect(transitions).toEqual([
       expect.objectContaining({

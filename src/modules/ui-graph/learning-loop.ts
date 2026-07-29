@@ -35,6 +35,14 @@ export interface PromotionDecision {
   blockers: string[];
 }
 
+export function enteredRetryableLifecycleState(
+  previousStatus: string,
+  currentStatus: string,
+  currentRetryable: boolean,
+): boolean {
+  return currentRetryable && previousStatus !== currentStatus;
+}
+
 export interface UiGraphPromotionPolicy {
   minimumSuccessCount: number;
   minimumDistinctDevices: number;
@@ -343,7 +351,14 @@ export class UiGraphLearningLoop {
           client,
         )
         : null;
-      if (updatedState?.retryable && updatedCandidate.promoted_entity_id) {
+      if (
+        updatedCandidate.promoted_entity_id
+        && enteredRetryableLifecycleState(
+          String(lockedCandidate.rows[0].status),
+          String(updatedCandidate.status),
+          updatedState?.retryable === true,
+        )
+      ) {
         await transitionMaterializedCandidate(updatedCandidate, "retryable", client);
         const candidateTransition = await getResourceLifecycleTransitionToState(
           "ui_graph_learning_candidates",

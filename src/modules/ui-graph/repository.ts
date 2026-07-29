@@ -139,7 +139,7 @@ export class UiGraphRepository {
        JOIN lifecycle_state_definitions state
          ON state.lifecycle_key=binding.lifecycle_key
         AND state.status=transition.status
-       WHERE transition.app_id = $1 AND NOT state.administrative`,
+       WHERE transition.app_id = $1 AND state.dispatchable`,
       [appId],
     );
     if (result.rows.length === 0) {
