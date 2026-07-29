@@ -1,4 +1,10 @@
-import type { WorkflowStep, WorkflowTemplate } from "../workflows/types";
+import type {
+  WorkflowGoalContract,
+  WorkflowGoalContractStage,
+  WorkflowRecoveryPolicy,
+  WorkflowStep,
+  WorkflowTemplate,
+} from "../workflows/types";
 import { validateGeneratedWorkflowTemplate } from "../workflows/workflow-validator";
 import { computeExecutionKey, fullFingerprint, shortKey } from "./key-utils";
 import { resolveCompositionInputs } from "./input-resolver";
@@ -90,6 +96,151 @@ function prefixStep(
     };
   }
   return withId;
+}
+
+function sortedUnique(values: readonly string[]): string[] {
+  return [...new Set(values)].sort();
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function requireUniformOptionalPolicy<T>(
+  values: Array<T | undefined>,
+  policyName: string,
+): T | undefined {
+  if (values.every((value) => value === undefined)) return undefined;
+  if (values.some((value) => value === undefined)) {
+    throw Object.assign(new Error(`composition segments do not all declare ${policyName}`), {
+      code: "WORKFLOW_COMPOSITION_POLICY_CONFLICT",
+    });
+  }
+  const first = values[0] as T;
+  if (values.some((value) => canonicalJson(value) !== canonicalJson(first))) {
+    throw Object.assign(new Error(`composition segments declare conflicting ${policyName}`), {
+      code: "WORKFLOW_COMPOSITION_POLICY_CONFLICT",
+    });
+  }
+  return structuredClone(first);
+}
+
+function mappedOutputs(values: readonly string[] | undefined, node: WorkflowCompositionNodeRecord): string[] {
+  return sortedUnique((values ?? []).map((value) => node.outputBindings[value] ?? value));
+}
+
+function mergeGoalContractStage(
+  existing: WorkflowGoalContractStage | undefined,
+  incoming: WorkflowGoalContractStage,
+  node: WorkflowCompositionNodeRecord,
+): WorkflowGoalContractStage {
+  const mappedProduces = mappedOutputs(incoming.produces, node);
+  const mappedConsumes = mappedOutputs(incoming.consumes, node);
+  if (!existing) {
+    return {
+      ...structuredClone(incoming),
+      allowedActions: sortedUnique(incoming.allowedActions),
+      ...(incoming.allowedEffects
+        ? { allowedEffects: sortedUnique(incoming.allowedEffects) }
+        : {}),
+      ...(incoming.after ? { after: sortedUnique(incoming.after) } : {}),
+      ...(incoming.produces ? { produces: mappedProduces } : {}),
+      ...(incoming.consumes ? { consumes: mappedConsumes } : {}),
+    };
+  }
+  const existingMinimum = existing.minOccurrences;
+  const incomingMinimum = incoming.minOccurrences;
+  return {
+    id: existing.id,
+    required: existing.required === true || incoming.required === true,
+    allowedActions: sortedUnique([...existing.allowedActions, ...incoming.allowedActions]),
+    ...(
+      existing.allowedEffects || incoming.allowedEffects
+        ? {
+            allowedEffects: sortedUnique([
+              ...(existing.allowedEffects ?? []),
+              ...(incoming.allowedEffects ?? []),
+            ]),
+          }
+        : {}
+    ),
+    ...(
+      existing.after || incoming.after
+        ? { after: sortedUnique([...(existing.after ?? []), ...(incoming.after ?? [])]) }
+        : {}
+    ),
+    ...(
+      existingMinimum !== undefined || incomingMinimum !== undefined
+        ? { minOccurrences: (existingMinimum ?? 0) + (incomingMinimum ?? 0) }
+        : {}
+    ),
+    ...(
+      existing.produces || incoming.produces
+        ? { produces: sortedUnique([...(existing.produces ?? []), ...mappedProduces]) }
+        : {}
+    ),
+    ...(
+      existing.consumes || incoming.consumes
+        ? { consumes: sortedUnique([...(existing.consumes ?? []), ...mappedConsumes]) }
+        : {}
+    ),
+  };
+}
+
+function composeGoalContract(
+  composition: WorkflowCompositionRecord,
+  segments: Map<string, WorkflowSegmentVersionRecord>,
+): WorkflowGoalContract | undefined {
+  const contracts = composition.nodes.map(
+    (node) => segments.get(`${node.segmentKey}@${node.segmentVersion}`)!.template.goalContract,
+  );
+  if (contracts.every((contract) => contract === undefined)) return undefined;
+  if (contracts.some((contract) => contract === undefined)) {
+    throw Object.assign(new Error("composition segments do not all declare goalContract"), {
+      code: "WORKFLOW_COMPOSITION_POLICY_CONFLICT",
+    });
+  }
+  const stages = new Map<string, WorkflowGoalContractStage>();
+  const allowedEffects: string[] = [];
+  const requiredOutputs: string[] = [];
+  for (const [index, node] of composition.nodes.entries()) {
+    const contract = contracts[index]!;
+    allowedEffects.push(...contract.allowedEffects);
+    requiredOutputs.push(...mappedOutputs(contract.requiredOutputs, node));
+    for (const stage of contract.stages) {
+      stages.set(stage.id, mergeGoalContractStage(stages.get(stage.id), stage, node));
+    }
+  }
+  return {
+    version: "1",
+    stages: [...stages.values()],
+    requiredOutputs: sortedUnique(requiredOutputs),
+    allowedEffects: sortedUnique(allowedEffects),
+  };
+}
+
+function composeSafetyClass(
+  composition: WorkflowCompositionRecord,
+  segments: Map<string, WorkflowSegmentVersionRecord>,
+): string | undefined {
+  const declared = composition.nodes
+    .map((node) => segments.get(`${node.segmentKey}@${node.segmentVersion}`)!.template.safetyClass);
+  const classes = sortedUnique(
+    declared.filter((value): value is string => typeof value === "string" && value.length > 0),
+  );
+  if (declared.some((value) => typeof value !== "string" || value.length === 0) || classes.length !== 1) {
+    throw Object.assign(new Error("composition segments must declare one uniform safetyClass"), {
+      code: "WORKFLOW_COMPOSITION_POLICY_CONFLICT",
+    });
+  }
+  return classes[0];
 }
 
 export function validateCompositionGraph(
@@ -310,25 +461,42 @@ export class WorkflowSegmentComposer {
       );
       return segment.template.steps.map((step) => prefixStep(step, node, inputBindings));
     });
+    const segmentTemplates = composition.nodes.map(
+      (node) => segments.get(`${node.segmentKey}@${node.segmentVersion}`)!.template,
+    );
+    const goalContract = composeGoalContract(composition, segments);
+    const allowedRecoveryRequests = requireUniformOptionalPolicy(
+      segmentTemplates.map((template) => template.allowedRecoveryRequests),
+      "allowedRecoveryRequests",
+    );
+    const recoveryPolicy = requireUniformOptionalPolicy<WorkflowRecoveryPolicy>(
+      segmentTemplates.map((template) => template.recoveryPolicy),
+      "recoveryPolicy",
+    );
+    const compatibleAppVersions = requireUniformOptionalPolicy(
+      segmentTemplates.map((template) => template.compatibleAppVersions),
+      "compatibleAppVersions",
+    );
+    const requiredRecoveryCapabilities = sortedUnique(
+      segmentTemplates.flatMap((template) => template.requiredRecoveryCapabilities ?? []),
+    );
     const template: WorkflowTemplate = {
       id: composition.compositionName,
       name: composition.compositionName,
       platform: composition.platform === "*" ? input.platform : composition.platform,
       description: `PostgreSQL composition ${composition.compositionName}@${composition.version}`,
       version: composition.version,
-      safetyClass: composition.nodes.reduce<WorkflowTemplate["safetyClass"]>(
-        (result, node) => {
-          const safety = segments.get(`${node.segmentKey}@${node.segmentVersion}`)!.template.safetyClass;
-          if (result === "standard" || safety === "standard") return "standard";
-          return "read_only";
-        },
-        "read_only",
-      ),
+      safetyClass: composeSafetyClass(composition, segments),
       outputSchema: composition.outputSchema,
       postconditionContract: composition.postconditionContract,
+      ...(goalContract ? { goalContract } : {}),
+      ...(allowedRecoveryRequests ? { allowedRecoveryRequests } : {}),
+      ...(requiredRecoveryCapabilities.length > 0 ? { requiredRecoveryCapabilities } : {}),
+      ...(recoveryPolicy ? { recoveryPolicy } : {}),
       steps,
       defaultVerificationStrategy: composition.executionPolicy.defaultVerificationStrategy,
       dataRetentionDays: composition.executionPolicy.dataRetentionDays,
+      ...(compatibleAppVersions ? { compatibleAppVersions } : {}),
       runtimeContract: composition.executionPolicy.runtimeContract,
     };
     const validation = validateGeneratedWorkflowTemplate(template);

@@ -63,17 +63,42 @@ function fixture() {
       safetyClass: "standard",
       outputSchema,
       postconditionContract,
+      goalContract: {
+        version: "1",
+        stages: [{
+          id: "navigate",
+          required: true,
+          allowedActions: ["classify_ui_tree", "intent_send", "screen_wake", "unlock"],
+          allowedEffects: ["navigation", "observation"],
+          produces: ["navigationResult", "observedDestination"],
+        }],
+        requiredOutputs: ["navigationResult", "observedDestination"],
+        allowedEffects: ["navigation", "observation"],
+      },
+      allowedRecoveryRequests: [],
+      requiredRecoveryCapabilities: ["state_reobserve"],
+      recoveryPolicy: {
+        autonomy: "bounded",
+        aiRecoveryEnabled: false,
+        maxAttemptsPerStep: 0,
+        maxAttemptsPerWorkflow: 0,
+        maxRecoveryActionsPerAttempt: 0,
+        allowedRecoveryRequests: [],
+        requireStateVerification: true,
+        learnFromFailure: false,
+      },
       defaultVerificationStrategy: "local_only",
       dataRetentionDays: 1,
       runtimeContract: "edge-workflow/v2",
       steps: [
-        { type: "action", id: "wake", action: "screen_wake", effect: "navigation" },
-        { type: "action", id: "unlock", action: "unlock", effect: "navigation" },
+        { type: "action", id: "wake", action: "screen_wake", effect: "navigation", goalStage: "navigate" },
+        { type: "action", id: "unlock", action: "unlock", effect: "navigation", goalStage: "navigate" },
         {
           type: "action",
           id: "navigate",
           action: "intent_send",
           effect: "navigation",
+          goalStage: "navigate",
           params: { uri: { $bind: "inputs.destination" } },
           saveOutputAs: "navigationResult",
         },
@@ -82,6 +107,7 @@ function fixture() {
           id: "observe",
           action: "classify_ui_tree",
           effect: "observation",
+          goalStage: "navigate",
           params: {
             outputs: {
               observedDestination: { regex: "https?://[^\\s\\\"]+", group: 0, default: "" },
@@ -210,9 +236,39 @@ describe("workflow segment architecture", () => {
     expect(candidate?.template.defaultVerificationStrategy).toBe(
       composition.executionPolicy.defaultVerificationStrategy,
     );
+    expect(candidate?.template.safetyClass).toBe(segment.template.safetyClass);
+    expect(candidate?.template.goalContract).toEqual(segment.template.goalContract);
+    expect(candidate?.template.allowedRecoveryRequests).toEqual(
+      segment.template.allowedRecoveryRequests,
+    );
+    expect(candidate?.template.requiredRecoveryCapabilities).toEqual(
+      segment.template.requiredRecoveryCapabilities,
+    );
+    expect(candidate?.template.recoveryPolicy).toEqual(segment.template.recoveryPolicy);
     expect(candidate?.template.steps).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "navigate__navigate", saveOutputAs: "navigationResult" }),
     ]));
+  });
+
+  it("fails closed instead of inventing a safety class for a composition", async () => {
+    const { composition, segment, segmentMap } = fixture();
+    delete segment.template.safetyClass;
+    segment.fingerprint = computeSegmentFingerprint(segment);
+    composition.compositionKey = computeCompositionStructureKey(composition, segmentMap);
+    const composer = new WorkflowSegmentComposer({
+      promotedComposition: vi.fn().mockResolvedValue(composition),
+      segmentVersions: vi.fn().mockResolvedValue(segmentMap),
+      saveExecutionBinding: vi.fn(),
+    } as never);
+
+    await expect(composer.compose({
+      capabilityKey: composition.capabilityKey,
+      platform: "android",
+      intent: "open https://example.test",
+      requestKey: "4".repeat(24),
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      accountId: null,
+    })).rejects.toMatchObject({ code: "WORKFLOW_COMPOSITION_POLICY_CONFLICT" });
   });
 
   it("requires outputs to be related to the concrete runtime input", () => {
