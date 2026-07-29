@@ -91,7 +91,7 @@ export async function transitionAgencyWorkflowRun(
               ELSE run.root_error_message
             END,
             root_error_details = CASE
-              WHEN selected.clear_failure THEN NULL
+              WHEN selected.clear_failure THEN '{}'::jsonb
               WHEN $3::jsonb ? 'rootErrorDetails' THEN $3::jsonb->'rootErrorDetails'
               ELSE run.root_error_details
             END

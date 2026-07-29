@@ -54,7 +54,7 @@ describe("policy-free workflow and research lifecycle on real PostgreSQL", () =>
         error TEXT,
         root_error_code TEXT,
         root_error_message TEXT,
-        root_error_details JSONB,
+        root_error_details JSONB NOT NULL DEFAULT '{}'::jsonb,
         started_at TIMESTAMPTZ,
         completed_at TIMESTAMPTZ,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -127,7 +127,9 @@ describe("policy-free workflow and research lifecycle on real PostgreSQL", () =>
       transitionClearFailure: true,
     };
     expect((await transitionWorkflow(workflowId, selector, {}, pool))?.status).toBe("fruit");
-    expect((await transitionAgencyWorkflowRun(runId, selector, {}, pool))?.status).toBe("fruit");
+    const transitionedRun = await transitionAgencyWorkflowRun(runId, selector, {}, pool);
+    expect(transitionedRun?.status).toBe("fruit");
+    expect(transitionedRun?.root_error_details).toEqual({});
     expect((await transitionResearchJob(researchId, selector, {}, pool))?.status).toBe("fruit");
   });
 
