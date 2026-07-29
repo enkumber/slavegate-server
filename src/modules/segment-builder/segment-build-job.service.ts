@@ -1152,6 +1152,44 @@ export class SegmentBuildJobService {
           code: "SEGMENT_BUILDER_CAPABILITY_CONFLICT",
         });
       }
+      const refreshed = await getDb().query(
+        `UPDATE workflow_capabilities
+            SET platform = $2,
+                description = $3,
+                aliases = $4::text[],
+                required_terms = $5::text[],
+                forbidden_terms = $6::text[],
+                safety_class = $7,
+                portability_scope = $8,
+                metadata = metadata || $9::jsonb,
+                updated_at = NOW()
+          WHERE capability_key = $1
+            AND metadata->>'buildJobId' = $10
+        RETURNING capability_key`,
+        [
+          parsed.capability.capabilityKey,
+          parsed.capability.platform,
+          parsed.capability.description ?? null,
+          parsed.capability.aliases ?? [],
+          parsed.capability.requiredTerms ?? [],
+          parsed.capability.forbiddenTerms ?? [],
+          parsed.capability.safetyClass,
+          parsed.capability.portabilityScope,
+          JSON.stringify({
+            ...(parsed.capability.metadata ?? {}),
+            ...policy.capabilityMetadata,
+            managedBy: policy.managedBy,
+            buildJobId: id,
+          }),
+          id,
+        ],
+      );
+      if (!refreshed.rows[0]) {
+        throw Object.assign(new Error("candidate capability ownership changed"), {
+          status: 409,
+          code: "SEGMENT_BUILDER_CAPABILITY_CONFLICT",
+        });
+      }
     }
 
     const segmentRefs: Array<{ segmentKey: string; segmentVersion: string }> = [];

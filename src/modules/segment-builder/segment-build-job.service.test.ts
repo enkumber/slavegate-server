@@ -4,6 +4,7 @@ const state = vi.hoisted(() => ({
   row: {} as Record<string, unknown>,
   queries: [] as string[],
   txQueries: [] as string[],
+  capability: null as null | Record<string, unknown>,
   offlineCanary: null as null | {
     runId: string;
     taskId: string;
@@ -42,6 +43,16 @@ vi.mock("./runtime-policy", () => ({
   }),
 }));
 
+vi.mock("../workflow-segments/control-plane.service", () => ({
+  workflowSegmentControlPlaneService: {
+    createSegmentVersion: vi.fn(async () => ({ status: "created" })),
+    createCompositionVersion: vi.fn(async () => ({ compositionKey: "composition-fixture" })),
+    validate: vi.fn(async () => "validated"),
+    recordCanary: vi.fn(async () => "canary"),
+    promote: vi.fn(async () => "promoted"),
+  },
+}));
+
 vi.mock("../../db/client", () => {
   const query = async (text: string, params: unknown[] = []) => {
       state.queries.push(text);
@@ -59,6 +70,9 @@ vi.mock("../../db/client", () => {
             dispatchable: status === "pending_agent" || status === "failed",
           }],
         };
+      }
+      if (text.includes("SELECT definition.terminal") && text.includes("FROM segment_build_jobs job")) {
+        return { rows: [{ terminal: false }] };
       }
       if (
         text.includes("FROM segment_build_jobs")
@@ -140,6 +154,12 @@ vi.mock("../../db/client", () => {
           && current === "claimed"
         ) {
           target = "building";
+        } else if (
+          selector.targetHasAutomaticNonterminalExit === true
+          && selector.transitionExternalAllowed === true
+          && current === "building"
+        ) {
+          target = "candidate_ready";
         }
         if (!target) return { rows: [] };
         state.row = {
@@ -159,6 +179,11 @@ vi.mock("../../db/client", () => {
           claim_expires_at: patch.refreshLease === true
             ? new Date(Date.now() + 600_000).toISOString()
             : state.row.claim_expires_at,
+          candidate: patch.candidate ?? state.row.candidate,
+          result: {
+            ...((state.row.result as Record<string, unknown> | undefined) ?? {}),
+            ...((patch.resultPatch as Record<string, unknown> | undefined) ?? {}),
+          },
         };
         return { rows: [{ ...state.row }] };
       }
@@ -221,7 +246,31 @@ vi.mock("../../db/client", () => {
           }],
         };
       }
-      if (text.includes("FROM workflow_capabilities")) return { rows: [] };
+      if (text.includes("FROM workflow_capabilities")) {
+        return { rows: state.capability ? [{ ...state.capability }] : [] };
+      }
+      if (text.includes("UPDATE workflow_capabilities")) {
+        if (
+          !state.capability
+          || state.capability.capability_key !== params[0]
+          || (state.capability.metadata as Record<string, unknown> | undefined)?.buildJobId !== params[9]
+        ) return { rows: [] };
+        state.capability = {
+          ...state.capability,
+          platform: params[1],
+          description: params[2],
+          aliases: params[3],
+          required_terms: params[4],
+          forbidden_terms: params[5],
+          safety_class: params[6],
+          portability_scope: params[7],
+          metadata: {
+            ...((state.capability.metadata as Record<string, unknown> | undefined) ?? {}),
+            ...JSON.parse(String(params[8])),
+          },
+        };
+        return { rows: [{ capability_key: params[0] }] };
+      }
       if (text.includes("FROM workflow_segment_versions")) return { rows: [] };
       if (text.includes("FROM workflow_compositions c")) return { rows: [] };
       if (text.includes("FROM runtime_semantic_entries")) return { rows: [] };
@@ -345,6 +394,7 @@ describe("SegmentBuildJobService dispatch", () => {
     };
     state.queries = [];
     state.txQueries = [];
+    state.capability = null;
     state.offlineCanary = null;
     process.env.OPENCLAW_SEGMENT_BUILDER_HOOK_TOKEN = "b".repeat(64);
   });
@@ -474,6 +524,72 @@ describe("SegmentBuildJobService dispatch", () => {
     const result = await new SegmentBuildJobService().claim(buildJob().id, "other-agent");
     expect(result).toBeNull();
     expect(state.queries).toEqual([]);
+  });
+
+  it("refreshes a capability owned by the same build job before accepting a corrected candidate", async () => {
+    state.row.status = "building";
+    state.capability = {
+      capability_key: "corrected_capability",
+      status: "quarantined",
+      safety_class: "underclassified",
+      metadata: { buildJobId: buildJob().id, preserved: true },
+    };
+    const candidate = {
+      capability: {
+        capabilityKey: "corrected_capability",
+        platform: "test.platform",
+        description: "Corrected capability",
+        aliases: ["corrected"],
+        requiredTerms: ["corrected"],
+        forbiddenTerms: ["forbidden"],
+        safetyClass: "test-safety",
+        portabilityScope: "account",
+        metadata: { corrected: true },
+      },
+      segments: [{
+        segmentKey: "corrected_segment",
+        version: "1",
+        platform: "test.platform",
+        template: {},
+        inputSchema: { type: "object", required: [], properties: {} },
+      }],
+      composition: {
+        compositionName: "corrected_composition",
+        version: "1",
+        capabilityKey: "corrected_capability",
+        platform: "test.platform",
+        inputSchema: { type: "object", required: [], properties: {} },
+        outputSchema: { required: [], properties: {} },
+        inputResolver: { version: "1", fields: {} },
+        postconditionContract: { version: "1", all: [] },
+        executionPolicy: {},
+        nodes: [],
+      },
+    };
+
+    const result = await new SegmentBuildJobService().submitCandidate(
+      buildJob().id,
+      TEST_AGENT_ID,
+      candidate,
+    );
+
+    expect(result?.status).toBe("candidate_ready");
+    expect(state.capability).toMatchObject({
+      capability_key: "corrected_capability",
+      platform: "test.platform",
+      safety_class: "test-safety",
+      portability_scope: "account",
+      metadata: {
+        buildJobId: buildJob().id,
+        preserved: true,
+        corrected: true,
+        managedBy: "test-manager",
+      },
+    });
+    expect(state.queries.some((query) =>
+      query.includes("UPDATE workflow_capabilities")
+      && query.includes("metadata->>'buildJobId' = $10")
+    )).toBe(true);
   });
 
   it("loads agent context from the canonical devices schema", async () => {

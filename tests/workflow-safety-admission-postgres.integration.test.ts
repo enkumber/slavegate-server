@@ -270,14 +270,22 @@ describe("workflow safety admission PostgreSQL contract", () => {
         ),
         context: concurrentContext,
         idempotencyKey: "concurrent_second",
-      }).finally(() => {
+      });
+      const observedSecond = second.then(
+        (value) => ({ status: "fulfilled" as const, value }),
+        (error: unknown) => ({ status: "rejected" as const, error }),
+      ).finally(() => {
         secondSettled = true;
       });
 
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(secondSettled).toBe(false);
       await firstClient.query("COMMIT");
-      await expect(second).rejects.toMatchObject({ code: "WORKFLOW_SAFETY_RATE_LIMITED" });
+      const secondOutcome = await observedSecond;
+      expect(secondOutcome.status).toBe("rejected");
+      if (secondOutcome.status === "rejected") {
+        expect(secondOutcome.error).toMatchObject({ code: "WORKFLOW_SAFETY_RATE_LIMITED" });
+      }
       await secondClient.query("ROLLBACK");
     } finally {
       await firstClient.query("ROLLBACK").catch(() => {});
