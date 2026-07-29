@@ -335,6 +335,7 @@ vi.mock("../../db/client", () => {
 });
 
 import {
+  recoverSegmentBuildCandidateIdentity,
   SegmentBuildJobService,
   type SegmentBuildJob,
 } from "./segment-build-job.service";
@@ -634,5 +635,35 @@ describe("SegmentBuildJobService dispatch", () => {
     );
     expect(compositionQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
     expect(compositionQuery).not.toContain("c.lifecycle_key");
+  });
+});
+
+describe("segment-build canary identity recovery", () => {
+  it("recovers promoted resource identity from the durable candidate when transition result patches were lost", () => {
+    expect(recoverSegmentBuildCandidateIdentity({
+      result: {
+        executionKey: "a".repeat(24),
+        canaryRunId: "33333333-3333-4333-8333-333333333333",
+      },
+      candidate: {
+        capability: { capabilityKey: "reddit_private_draft_reversible" },
+        composition: {
+          compositionName: "reddit_private_draft_reversible",
+          version: "2026.07.29.306.7",
+        },
+        segments: [{
+          segmentKey: "reddit_private_draft_reversible",
+          version: "2026.07.29.306.7",
+        }],
+      },
+    })).toEqual({
+      capabilityKey: "reddit_private_draft_reversible",
+      compositionName: "reddit_private_draft_reversible",
+      compositionVersion: "2026.07.29.306.7",
+      segmentRefs: [{
+        segmentKey: "reddit_private_draft_reversible",
+        segmentVersion: "2026.07.29.306.7",
+      }],
+    });
   });
 });

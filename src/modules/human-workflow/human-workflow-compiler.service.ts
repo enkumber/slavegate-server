@@ -384,6 +384,7 @@ async function readyFromComposition(
       {
         source: "dashboard_human",
         architecture: composed.architecture,
+        ...compositionCapabilityMetadata(composed),
         compositionName: composed.compositionName,
         compositionVersion: composed.compositionVersion,
         compositionKey: composed.compositionKey,
@@ -421,6 +422,20 @@ async function readyFromComposition(
     segmentRefs: composed.segmentRefs,
     runtimeInputs: composed.runtimeInputs,
     publicRuntimeInputs: composed.publicRuntimeInputs,
+  };
+}
+
+export function compositionCapabilityMetadata(
+  composed: Pick<ComposedWorkflow, "capabilityKey" | "template">,
+): {
+  capabilityKey: string;
+  capabilityRole: "complete";
+  goalContract: WorkflowGoalContract | undefined;
+} {
+  return {
+    capabilityKey: composed.capabilityKey,
+    capabilityRole: "complete",
+    goalContract: composed.template.goalContract,
   };
 }
 

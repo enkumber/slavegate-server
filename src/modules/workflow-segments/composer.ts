@@ -519,6 +519,7 @@ export class WorkflowSegmentComposer {
     return {
       architecture: "segments-v1",
       template: validation.template,
+      capabilityKey: composition.capabilityKey,
       compositionName: composition.compositionName,
       compositionVersion: composition.version,
       compositionKey: composition.compositionKey,

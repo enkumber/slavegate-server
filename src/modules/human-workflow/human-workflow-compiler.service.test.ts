@@ -1,9 +1,33 @@
 import { describe, expect, it } from "vitest";
 import {
+  compositionCapabilityMetadata,
   completedSegmentBuildCapabilityKey,
   humanWorkflowArtifactMatchesIntent,
   humanWorkflowExactCacheUsable,
 } from "./human-workflow-compiler.service";
+
+describe("composition capability persistence", () => {
+  it("carries the PostgreSQL identity and goal contract into the capability catalog", () => {
+    const goalContract = {
+      version: "1" as const,
+      stages: [{
+        id: "cleanup",
+        required: true,
+        allowedActions: ["tap"],
+      }],
+      requiredOutputs: ["cleanupTree"],
+      allowedEffects: ["local_restore"],
+    };
+    expect(compositionCapabilityMetadata({
+      capabilityKey: "reddit_private_draft_reversible",
+      template: { goalContract } as any,
+    })).toEqual({
+      capabilityKey: "reddit_private_draft_reversible",
+      capabilityRole: "complete",
+      goalContract,
+    });
+  });
+});
 
 describe("human workflow artifact identity", () => {
   it("does not reuse a contextual artifact for a different requested intent", () => {

@@ -91,6 +91,7 @@ export interface WorkflowCompositionRecord {
 export interface ComposedWorkflow {
   architecture: "segments-v1";
   template: WorkflowTemplate;
+  capabilityKey: string;
   compositionName: string;
   compositionVersion: string;
   compositionKey: string;

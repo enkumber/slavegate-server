@@ -99,6 +99,36 @@ function objectValue(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function candidateIdentity(job: SegmentBuildJob): {
+  capabilityKey: string;
+  compositionName: string;
+  compositionVersion: string;
+  segmentRefs: Array<{ segmentKey: string; segmentVersion: string }>;
+} {
+  const candidate = objectValue(job.candidate);
+  const capability = objectValue(candidate.capability);
+  const composition = objectValue(candidate.composition);
+  const candidateSegments = Array.isArray(candidate.segments) ? candidate.segments : [];
+  const resultRefs = Array.isArray(job.result.segmentRefs) ? job.result.segmentRefs : [];
+  const segmentRefs = (resultRefs.length > 0 ? resultRefs : candidateSegments)
+    .map((item) => objectValue(item))
+    .map((item) => ({
+      segmentKey: String(item.segmentKey ?? ""),
+      segmentVersion: String(item.segmentVersion ?? item.version ?? ""),
+    }))
+    .filter((item) => item.segmentKey.length > 0 && item.segmentVersion.length > 0);
+  return {
+    capabilityKey: String(job.result.capabilityKey ?? capability.capabilityKey ?? ""),
+    compositionName: String(job.result.compositionName ?? composition.compositionName ?? ""),
+    compositionVersion: String(job.result.compositionVersion ?? composition.version ?? ""),
+    segmentRefs,
+  };
+}
+
+export function recoverSegmentBuildCandidateIdentity(job: Pick<SegmentBuildJob, "candidate" | "result">) {
+  return candidateIdentity(job as SegmentBuildJob);
+}
+
 function assertAgentCandidate(
   value: Record<string, unknown>,
   policy: SegmentBuilderRuntimePolicy,
@@ -1352,17 +1382,18 @@ export class SegmentBuildJobService {
       return this.get(id);
     }
 
-    const compositionName = String(job.result.compositionName ?? "");
-    const compositionVersion = String(job.result.compositionVersion ?? "");
-    const capabilityKey = String(job.result.capabilityKey ?? "");
-    const segmentRefs = Array.isArray(job.result.segmentRefs)
-      ? job.result.segmentRefs.filter((item): item is { segmentKey: string; segmentVersion: string } => (
-        !!item
-        && typeof item === "object"
-        && typeof (item as Record<string, unknown>).segmentKey === "string"
-        && typeof (item as Record<string, unknown>).segmentVersion === "string"
-      ))
-      : [];
+    const {
+      compositionName,
+      compositionVersion,
+      capabilityKey,
+      segmentRefs,
+    } = candidateIdentity(job);
+    if (!capabilityKey || !compositionName || !compositionVersion || segmentRefs.length === 0) {
+      throw Object.assign(new Error("segment builder candidate identity is incomplete"), {
+        status: 409,
+        code: "SEGMENT_BUILDER_CANDIDATE_IDENTITY_MISSING",
+      });
+    }
     const evidence = {
       passed: true,
       postconditionVerified: true,
@@ -1419,6 +1450,12 @@ export class SegmentBuildJobService {
       transitionMarkCompleted: true,
       transitionClearFailure: true,
     }, {
+      resultPatch: {
+        capabilityKey,
+        compositionName,
+        compositionVersion,
+        segmentRefs,
+      },
       evidencePatch: {
         canaryExecutionKey: executionKey,
         postconditionVerified: true,
