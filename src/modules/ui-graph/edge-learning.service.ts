@@ -6,6 +6,7 @@ import { uiGraphLearningLoop } from "./learning-loop";
 import { uiGraphRepository } from "./repository";
 import type { UiGraphContext, UiSafetyClass } from "./types";
 import { persistStateSnapshot } from "./snapshot-replay.service";
+import { uiGraphLearningRuntimePolicy } from "./runtime-policy";
 
 export interface EdgeLearningBinding {
   bindingId: string;
@@ -224,6 +225,7 @@ export async function prepareEdgeLearningBindings(
 ): Promise<EdgeLearningBinding[]> {
   const flags = await uiGraphRepository.resolveFlags(context);
   if (!flags.enabled || !flags.candidateLearning) return [];
+  const learningPolicy = await uiGraphLearningRuntimePolicy();
   const [candidates, selectorContexts] = await Promise.all([
     getDb().query(
       `SELECT candidate.id, candidate.app_id, candidate.source_state_id,
@@ -236,11 +238,11 @@ export async function prepareEdgeLearningBindings(
            ON definition.lifecycle_key=binding.lifecycle_key
           AND definition.status=candidate.status
         WHERE candidate.app_id = $1
-          AND candidate_type = 'selector'
+          AND candidate_type = ANY($2::text[])
           AND NOT definition.terminal
           AND NOT definition.administrative
         ORDER BY candidate.success_count DESC, candidate.last_observed_at DESC`,
-      [template.platform],
+      [template.platform, learningPolicy.bindingCandidateTypes],
     ),
     getDb().query(
       `SELECT s.state_id, s.element_key, s.strategy, s.selector, st.safety_class,
@@ -409,10 +411,12 @@ async function validateAndMaybePromote(input: {
     });
     const flags = await uiGraphRepository.resolveFlags(context);
     if (input.succeeded && flags.autoPromotion && decision.autoPromotable) {
+      const attribution = (await uiGraphLearningRuntimePolicy()).autoPromotionAttribution.workflow;
+      if (!attribution) throw new Error("workflow auto-promotion attribution is not configured");
       await uiGraphLearningLoop.promote(
         input.candidateId,
-        "edge_workflow_auto_promotion",
-        "Five state-verified edge executions completed without failures",
+        attribution.actor,
+        attribution.reason,
         true,
       );
     }
@@ -563,10 +567,12 @@ export async function reconcileEdgeLearningStatus(input: {
     delta.validated++;
     const flags = await uiGraphRepository.resolveFlags(context);
     if (flags.autoPromotion && decision.autoPromotable) {
+      const attribution = (await uiGraphLearningRuntimePolicy()).autoPromotionAttribution.stateMachine;
+      if (!attribution) throw new Error("state-machine auto-promotion attribution is not configured");
       await uiGraphLearningLoop.promote(
         candidateId,
-        "edge_state_machine_auto_promotion",
-        "Cross-device and cross-branch state transition coverage verified",
+        attribution.actor,
+        attribution.reason,
         true,
       );
       delta.promoted++;

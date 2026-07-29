@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { requireAdminAuth } from "../../api/auth.middleware";
 import { getDb } from "../../db/client";
-import { getResourceLifecycleState, getResourceLifecycleTransition, selectResourceLifecycleTransition } from "../lifecycle/lifecycle.service";
+import { getResourceLifecycleState, getResourceLifecycleTransition } from "../lifecycle/lifecycle.service";
 import { describeUiGraphRuntimeFlags } from "./config";
 import { uiGraphLearningLoop } from "./learning-loop";
 import { uiGraphRepository } from "./repository";
@@ -11,6 +11,7 @@ import {
   allowedUiGraphScopeTypes,
   workflowCanaryCohortDefaults,
 } from "./runtime-policy";
+import { transitionMaterializedCandidate } from "./candidate-materializer";
 
 const router = Router();
 
@@ -392,24 +393,7 @@ router.post("/candidates/:id/transition", requireAdminAuth, async (req: Request,
         [req.params.id, transition.actionKey, locked.rows[0].status, transition.toStatus, actor(req), reason],
       );
       if (target.administrative && locked.rows[0].promoted_entity_id) {
-        for (const table of ["ui_graph_selectors", "ui_graph_transitions"]) {
-          const linked = await client.query(`SELECT status FROM ${table} WHERE id=$1 FOR UPDATE`, [locked.rows[0].promoted_entity_id]);
-          if (!linked.rows[0]) continue;
-          const linkedTransition = await selectResourceLifecycleTransition(
-            table,
-            linked.rows[0].status,
-            { targetAdministrative: true, transitionManualAllowed: true },
-            "status",
-            client,
-          );
-          if (!linkedTransition) {
-            throw new Error("linked UI graph entity has no configured administrative transition");
-          }
-          await client.query(
-            `UPDATE ${table} SET status=$2, updated_at=NOW() WHERE id=$1`,
-            [locked.rows[0].promoted_entity_id, linkedTransition.toStatus],
-          );
-        }
+        await transitionMaterializedCandidate(locked.rows[0], "administrative", client);
       }
       await client.query("COMMIT");
       return res.json({ ok: true, data: { candidateId: req.params.id, status: transition.toStatus } });

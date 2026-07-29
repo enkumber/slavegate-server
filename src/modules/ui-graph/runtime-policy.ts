@@ -76,6 +76,35 @@ export async function workflowCanaryCohortDefaults(): Promise<{
   };
 }
 
+export async function uiGraphLearningRuntimePolicy(): Promise<{
+  bindingCandidateTypes: string[];
+  autoPromotionAttribution: Record<string, { actor: string; reason: string }>;
+}> {
+  const policy = await getResourceRuntimePolicy("ui_graph_learning_candidates");
+  const attribution = policy.autoPromotionAttribution;
+  if (!attribution || typeof attribution !== "object" || Array.isArray(attribution)) {
+    throw new Error("autoPromotionAttribution must be configured as an object");
+  }
+  const autoPromotionAttribution = Object.fromEntries(
+    Object.entries(attribution as Record<string, unknown>).map(([key, raw]) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new Error(`autoPromotionAttribution.${key} must be an object`);
+      }
+      const entry = raw as Record<string, unknown>;
+      const actor = typeof entry.actor === "string" ? entry.actor.trim() : "";
+      const reason = typeof entry.reason === "string" ? entry.reason.trim() : "";
+      if (!actor || !reason) {
+        throw new Error(`autoPromotionAttribution.${key} requires actor and reason`);
+      }
+      return [key, { actor, reason }];
+    }),
+  );
+  return {
+    bindingCandidateTypes: stringList(policy.bindingCandidateTypes, "bindingCandidateTypes"),
+    autoPromotionAttribution,
+  };
+}
+
 export async function uiGraphStateResolutionPolicy(): Promise<StateResolutionPolicy> {
   const policy = await getResourceRuntimePolicy("ui_graph_state_variants");
   if (!policy.anchorWeights || typeof policy.anchorWeights !== "object" || Array.isArray(policy.anchorWeights)) {

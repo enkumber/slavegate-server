@@ -3,11 +3,13 @@ import { getDb } from "../../db/client";
 import {
   getResourceLifecycleState,
   getResourceLifecycleTransitionToState,
-  listResourceLifecycleStates,
   selectResourceLifecycleTransition,
-  type LifecycleQueryable,
 } from "../lifecycle/lifecycle.service";
 import type { UiGraphContext, UiSafetyClass } from "./types";
+import {
+  materializeCandidate,
+  transitionMaterializedCandidate,
+} from "./candidate-materializer";
 
 export type CandidateType = "state" | "selector" | "transition" | "recovery_rule";
 export type CandidateDiscoveryMethod = "ui_tree" | "ocr" | "vlm" | "llm_recovery" | "manual";
@@ -71,18 +73,6 @@ function promotionPolicy(metadata: Record<string, unknown>): UiGraphPromotionPol
     throw new Error("UI graph lifecycle state has invalid promotion policy metadata");
   }
   return policy;
-}
-
-async function dispatchableResourceState(
-  resourceTable: string,
-  db: LifecycleQueryable,
-): Promise<string> {
-  const matches = (await listResourceLifecycleStates(resourceTable, "status", db))
-    .filter((state) => state.dispatchable && !state.terminal && !state.administrative);
-  if (matches.length !== 1) {
-    throw new Error("UI graph resource must have exactly one configured dispatchable state");
-  }
-  return matches[0].status;
 }
 
 function stable(value: unknown): string {
@@ -354,27 +344,7 @@ export class UiGraphLearningLoop {
         )
         : null;
       if (updatedState?.retryable && updatedCandidate.promoted_entity_id) {
-        for (const entityTable of ["ui_graph_selectors", "ui_graph_transitions"]) {
-          const linked = await client.query(
-            `SELECT status FROM ${entityTable} WHERE id=$1 FOR UPDATE`,
-            [updatedCandidate.promoted_entity_id],
-          );
-          if (!linked.rows[0]) continue;
-          const linkedTransition = await selectResourceLifecycleTransition(
-            entityTable,
-            linked.rows[0].status,
-            { targetRetryable: true, transitionAutomatic: true },
-            "status",
-            client,
-          );
-          if (!linkedTransition) {
-            throw new Error("promoted UI graph entity has no configured retryable transition");
-          }
-          await client.query(
-            `UPDATE ${entityTable} SET status=$2, updated_at=NOW() WHERE id=$1`,
-            [updatedCandidate.promoted_entity_id, linkedTransition.toStatus],
-          );
-        }
+        await transitionMaterializedCandidate(updatedCandidate, "retryable", client);
         const candidateTransition = await getResourceLifecycleTransitionToState(
           "ui_graph_learning_candidates",
           lockedCandidate.rows[0].status,
@@ -482,46 +452,7 @@ export class UiGraphLearningLoop {
         throw new Error("candidate has no configured promotion transition");
       }
 
-      const payload = candidate.payload as Record<string, unknown>;
-      let entityId: string;
-      if (candidate.candidate_type === "selector") {
-        const entityStatus = await dispatchableResourceState("ui_graph_selectors", client);
-        const inserted = await client.query(
-          `INSERT INTO ui_graph_selectors
-             (state_id, element_key, strategy, selector, priority, dynamic, confidence, status,
-              app_version_pattern, device_class, success_count, failure_count, last_validated_at, metadata)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),$13)
-           ON CONFLICT (state_id, element_key, strategy, selector) DO UPDATE SET
-             status=EXCLUDED.status, confidence=EXCLUDED.confidence, success_count=EXCLUDED.success_count,
-             failure_count=EXCLUDED.failure_count, last_validated_at=NOW(), updated_at=NOW()
-           RETURNING id`,
-          [candidate.source_state_id, payload.elementKey, payload.strategy, JSON.stringify(payload.selector ?? {}),
-            Number(payload.priority ?? 100), Boolean(payload.dynamic), candidate.confidence, entityStatus,
-            payload.appVersionPattern ?? null, payload.deviceClass ?? null, candidate.success_count,
-            candidate.failure_count, JSON.stringify({ candidateId })],
-        );
-        entityId = inserted.rows[0].id;
-      } else if (candidate.candidate_type === "transition") {
-        const entityStatus = await dispatchableResourceState("ui_graph_transitions", client);
-        const inserted = await client.query(
-          `INSERT INTO ui_graph_transitions
-             (app_id, transition_key, source_state_id, target_state_id, element_key, action,
-              preconditions, postconditions, cost, safety_class, confidence, status, success_count, failure_count, metadata)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-           ON CONFLICT (app_id, transition_key) DO UPDATE SET
-             status=EXCLUDED.status, confidence=EXCLUDED.confidence, action=EXCLUDED.action,
-             preconditions=EXCLUDED.preconditions, postconditions=EXCLUDED.postconditions,
-             success_count=EXCLUDED.success_count, failure_count=EXCLUDED.failure_count, updated_at=NOW()
-           RETURNING id`,
-          [candidate.app_id, payload.transitionKey, candidate.source_state_id, candidate.target_state_id,
-            payload.elementKey ?? null, JSON.stringify(payload.action ?? {}), JSON.stringify(payload.preconditions ?? {}),
-            JSON.stringify(payload.postconditions ?? {}), Number(payload.cost ?? 1), candidate.safety_class,
-            candidate.confidence, entityStatus, candidate.success_count, candidate.failure_count, JSON.stringify({ candidateId })],
-        );
-        entityId = inserted.rows[0].id;
-      } else {
-        throw new Error("UI_GRAPH_CANDIDATE_TYPE_REQUIRES_MANUAL_MATERIALIZATION");
-      }
+      const entityId = await materializeCandidate(candidate, client);
 
       await client.query(
         `UPDATE ui_graph_learning_candidates SET status=$3, promoted_entity_id=$2,
