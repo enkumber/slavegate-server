@@ -198,9 +198,22 @@ export class WorkflowSegmentRepository {
     await getDb().query(
       `INSERT INTO workflow_execution_bindings (
          request_key, execution_key, composition_name, composition_version, composition_key,
-         segment_refs, device_id, account_id, intent, runtime_inputs
+         segment_refs, device_id, account_id, intent, runtime_inputs, status
        )
-       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb)
+       VALUES (
+         $1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,
+         (
+           SELECT definition.status
+             FROM lifecycle_resource_bindings binding
+             JOIN lifecycle_state_definitions definition
+               ON definition.lifecycle_key = binding.lifecycle_key
+            WHERE binding.resource_table = to_regclass('workflow_execution_bindings')
+              AND binding.state_column = 'status'::name
+              AND definition.initial
+            ORDER BY definition.sort_order, definition.status
+            LIMIT 1
+         )
+       )
        ON CONFLICT (request_key) DO UPDATE SET
          execution_key = EXCLUDED.execution_key,
          composition_name = EXCLUDED.composition_name,
@@ -211,17 +224,7 @@ export class WorkflowSegmentRepository {
          account_id = EXCLUDED.account_id,
          intent = EXCLUDED.intent,
          runtime_inputs = EXCLUDED.runtime_inputs,
-         status = (
-           SELECT definition.status
-             FROM lifecycle_resource_bindings binding
-             JOIN lifecycle_state_definitions definition
-               ON definition.lifecycle_key = binding.lifecycle_key
-            WHERE binding.resource_table = to_regclass('workflow_execution_bindings')
-              AND binding.state_column = 'status'::name
-              AND definition.initial
-            ORDER BY definition.sort_order, definition.status
-            LIMIT 1
-         ),
+         status = EXCLUDED.status,
          updated_at = NOW()`,
       [
         input.requestKey,

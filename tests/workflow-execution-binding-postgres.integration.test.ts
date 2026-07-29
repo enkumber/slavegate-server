@@ -60,30 +60,6 @@ describe("workflow execution binding lifecycle resolution", () => {
       VALUES ('fixture_execution', 'fixture_resolved', TRUE, 0);
       INSERT INTO lifecycle_resource_bindings(resource_table, lifecycle_key, state_column)
       VALUES ('workflow_execution_bindings'::regclass, 'fixture_execution', 'status');
-
-      CREATE FUNCTION fixture_initial_execution_state()
-      RETURNS TRIGGER
-      LANGUAGE plpgsql
-      AS $$
-      BEGIN
-        IF NEW.status IS NULL OR BTRIM(NEW.status) = '' THEN
-          SELECT definition.status
-            INTO NEW.status
-            FROM lifecycle_resource_bindings binding
-            JOIN lifecycle_state_definitions definition
-              ON definition.lifecycle_key = binding.lifecycle_key
-           WHERE binding.resource_table = TG_RELID
-             AND binding.state_column = 'status'::name
-             AND definition.initial
-           ORDER BY definition.sort_order, definition.status
-           LIMIT 1;
-        END IF;
-        RETURN NEW;
-      END;
-      $$;
-      CREATE TRIGGER fixture_initial_execution_state
-      BEFORE INSERT OR UPDATE ON workflow_execution_bindings
-      FOR EACH ROW EXECUTE FUNCTION fixture_initial_execution_state();
     `);
     await pool.end();
   });
@@ -167,5 +143,66 @@ describe("workflow execution binding lifecycle resolution", () => {
       execution_key: "c".repeat(24),
       composition_version: "2",
     }]);
+  });
+
+  it("fails closed when PostgreSQL has no configured initial execution state", async () => {
+    const { workflowSegmentRepository } = await import(
+      "../src/modules/workflow-segments/repository"
+    );
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 1,
+    });
+    await pool.query(
+      `UPDATE lifecycle_state_definitions
+          SET initial = FALSE
+        WHERE lifecycle_key = 'fixture_execution'`,
+    );
+    await pool.end();
+
+    await expect(workflowSegmentRepository.saveExecutionBinding({
+      requestKey: "d".repeat(24),
+      executionKey: "e".repeat(24),
+      composition: {
+        compositionName: "fixture_composition",
+        version: "3",
+        compositionKey: "f".repeat(24),
+        capabilityKey: "fixture_capability",
+        platform: "android",
+        status: "candidate",
+        inputSchema: { type: "object", required: [], properties: {} },
+        outputSchema: { required: [], properties: {} },
+        inputResolver: { version: "1", fields: {} },
+        postconditionContract: {
+          version: "1",
+          all: [{
+            left: { value: true },
+            operator: "equals",
+            operatorOpcode: 2,
+            right: { value: true },
+          }],
+        },
+        executionPolicy: {
+          defaultVerificationStrategy: "local_only",
+          dataRetentionDays: 1,
+          runtimeContract: "edge-workflow/v2",
+        },
+        compatibility: {},
+        nodes: [{
+          nodeKey: "fixture",
+          ordinal: 0,
+          segmentKey: "fixture_segment",
+          segmentVersion: "3",
+          inputBindings: {},
+          outputBindings: {},
+          dependsOn: [],
+        }],
+      },
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      accountId: null,
+      intent: "fixture",
+      runtimeInputs: {},
+      auditRuntimeInputs: {},
+    })).rejects.toMatchObject({ code: "23502" });
   });
 });
