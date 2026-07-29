@@ -17,6 +17,7 @@ import { shortcutRegistryService } from "../workflow-shortcuts/shortcut-registry
 import { humanWorkflowCompileJobService, type HumanWorkflowCompileJobRecord } from "./compile-job.service";
 import {
   normalizeCachedHumanWorkflowTemplate,
+  resolveCachedWorkflowSafetyClass,
 } from "./human-workflow-normalization";
 import { loadRuntimeProfile } from "../app-mapping/runtime-profile";
 import {
@@ -347,10 +348,9 @@ function readyFromCache(
   const cachedIntent = typeof cached.sourceMetadata?.intent === "string" ? cached.sourceMetadata.intent : requestKey;
   const workflow = normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata);
   assertHumanWorkflowMeaningful(workflow, cachedIntent);
-  const safetyClass = cached.workflow.safetyClass ?? cached.compiledPlan.metadata.safetyClass;
-  if (typeof safetyClass !== "string" || !/^[a-z0-9][a-z0-9._/-]{0,199}$/.test(safetyClass)) {
-    throw compilerControlPlaneError("cached workflow has no valid explicit safety class");
-  }
+  const safetyClass = resolveCachedWorkflowSafetyClass(
+    cached as unknown as Record<string, unknown>,
+  );
   return {
     ready: true,
     requestKey,

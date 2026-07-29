@@ -568,7 +568,24 @@ describe("agency workflow runs API", () => {
   it("rejects cached artifacts whose happy path still requires LLM", async () => {
     mocks.client.query
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [cachedArtifact({ workflow: { safetyClass: "mutating" }, compiled_plan: { metadata: { safetyClass: "mutating" } } })] })
+      .mockResolvedValueOnce({
+        rows: [cachedArtifact({
+          source_metadata: {
+            safetyClass: "mutating",
+            intent: "reddit_account_health_scan",
+          },
+          workflow: {
+            safetyClass: "mutating",
+            intent: "reddit_account_health_scan",
+          },
+          compiled_plan: {
+            metadata: {
+              safetyClass: "mutating",
+              intent: "reddit_account_health_scan",
+            },
+          },
+        })],
+      })
       .mockResolvedValueOnce({ rows: [] });
 
     const response = await postWorkflowRun({
@@ -581,6 +598,31 @@ describe("agency workflow runs API", () => {
 
     expect(response.status).toBe(400);
     expect(response.body.code).toBe("GENERATED_WORKFLOW_LLM_BUDGET_NOT_CACHE_SAFE");
+  });
+
+  it("fails closed when cached safety-class projections disagree", async () => {
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [cachedArtifact({
+          workflow: {
+            safetyClass: "mutating",
+            intent: "reddit_account_health_scan",
+          },
+        })],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+
+    const response = await postWorkflowRun({
+      clientId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      accountId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      intent: "reddit_account_health_scan",
+      cacheKey: "0123456789abcdef01234567",
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("WORKFLOW_SAFETY_CLASS_CONFLICT");
   });
 
   it("supports list filters for run/account/device/status and canonical keys", async () => {

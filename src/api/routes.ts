@@ -105,6 +105,7 @@ import {
   type HumanWorkflowSafetyClass,
   type HumanWorkflowTarget,
 } from "../modules/human-workflow/human-workflow-compiler.service";
+import { resolveCachedWorkflowSafetyClass } from "../modules/human-workflow/human-workflow-normalization";
 import {
   humanWorkflowCompileJobService,
   type HumanWorkflowCompileJobRecord,
@@ -167,17 +168,6 @@ function compileDurationMs(job: HumanWorkflowCompileJobRecord): number | null {
   const completed = new Date(job.llmCompletedAt).getTime();
   if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) return null;
   return completed - started;
-}
-
-function cachedHumanWorkflowSafetyClass(cached: Record<string, unknown>): HumanWorkflowSafetyClass {
-  const workflow = cached.workflow as { safetyClass?: unknown } | undefined;
-  const compiledPlan = cached.compiled_plan as { metadata?: { safetyClass?: unknown } } | undefined;
-  const camelCompiledPlan = cached.compiledPlan as { metadata?: { safetyClass?: unknown } } | undefined;
-  const value =
-    compiledPlan?.metadata?.safetyClass ??
-    camelCompiledPlan?.metadata?.safetyClass ??
-    workflow?.safetyClass;
-  return value === "standard" || value === "destructive" ? value : "read_only";
 }
 
 async function shortcutKeyForJob(job: HumanWorkflowCompileJobRecord): Promise<string | null> {
@@ -311,7 +301,8 @@ export async function queueHumanAgencyWorkflowRun(input: {
       });
     }
 
-    const safetyClass = cachedHumanWorkflowSafetyClass(cached);
+    const safetyClass: HumanWorkflowSafetyClass =
+      resolveCachedWorkflowSafetyClass(cached);
     assertHumanWorkflowMeaningful(cached.workflow as WorkflowTemplate, input.intent);
     const artifactIntent = typeof (cached.source_metadata as Record<string, unknown> | undefined)?.intent === "string"
       ? String((cached.source_metadata as Record<string, unknown>).intent).trim()

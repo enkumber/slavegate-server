@@ -37,6 +37,7 @@ import {
 } from "../modules/task-lifecycle/task-lifecycle.service";
 import { transitionWorkflow } from "../modules/workflows/workflow-lifecycle.service";
 import { transitionAgencyWorkflowRun } from "../modules/workflows/agency-workflow-run-lifecycle.service";
+import { resolveCachedWorkflowSafetyClass } from "../modules/human-workflow/human-workflow-normalization";
 import {
   getResourceLifecycleState,
   getResourceLifecycleTransition,
@@ -1161,14 +1162,6 @@ function cachedWorkflowLlmHappyPathRequests(cached: Record<string, unknown>): nu
   return typeof llmBudget?.happyPathRequests === "number" ? llmBudget.happyPathRequests : null;
 }
 
-function cachedWorkflowSafetyClass(cached: Record<string, unknown>): string | null {
-  const workflow = cached.workflow as Record<string, unknown> | null;
-  const compiledPlan = (cached.compiled_plan ?? cached.compiledPlan) as Record<string, unknown> | null;
-  const metadata = compiledPlan?.metadata as Record<string, unknown> | undefined;
-  const sourceMetadata = (cached.source_metadata ?? cached.sourceMetadata) as Record<string, unknown> | null;
-  return (metadata?.safetyClass ?? workflow?.safetyClass ?? sourceMetadata?.safetyClass ?? null) as string | null;
-}
-
 function cachedWorkflowIntent(cached: Record<string, unknown>): string | null {
   const workflow = cached.workflow as Record<string, unknown> | null;
   const compiledPlan = (cached.compiled_plan ?? cached.compiledPlan) as Record<string, unknown> | null;
@@ -1797,7 +1790,18 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
       });
     }
 
-    const safetyClass = cachedWorkflowSafetyClass(cached);
+    let safetyClass: string;
+    try {
+      safetyClass = resolveCachedWorkflowSafetyClass(cached);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      const failure = error as Error & { status?: number; code?: string };
+      return res.status(failure.status ?? 409).json({
+        ok: false,
+        code: failure.code ?? "WORKFLOW_SAFETY_CLASS_INVALID",
+        error: failure.message,
+      });
+    }
     const artifactIntent = cachedWorkflowIntent(cached);
     if (artifactIntent && artifactIntent !== body.intent) {
       await client.query("ROLLBACK");
@@ -2816,6 +2820,18 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
         error: "promoted generated workflow artifact was not found for auto-use",
       });
     }
+    let safetyClass: string;
+    try {
+      safetyClass = resolveCachedWorkflowSafetyClass(cached);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      const failure = error as Error & { status?: number; code?: string };
+      return res.status(failure.status ?? 409).json({
+        ok: false,
+        code: failure.code ?? "WORKFLOW_SAFETY_CLASS_INVALID",
+        error: failure.message,
+      });
+    }
 
     const runContext = {
       source: "workflow_definition_auto_use",
@@ -2843,7 +2859,7 @@ router.post("/workflow-definitions/:id/auto-use-run", requireAdminAuth, async (r
         deviceId,
         definition.platform,
         definition.intent,
-        template.safetyClass ?? "standard",
+        safetyClass,
         cached.cache_key,
         cached.canonical_workflow_id,
         cached.canonical_workflow_version,
