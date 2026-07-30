@@ -827,8 +827,11 @@ describe("DB Pool configuration", () => {
     // Should reference scalabilityConfig for pool size
     expect(source).toContain("scalabilityConfig.dbPoolMax");
     expect(source).toContain("scalabilityConfig.dbStatementTimeout");
-    // Should set statement_timeout on each new connection
-    expect(source).toContain("SET statement_timeout");
+    // pg sends this as a connection parameter. An asynchronous query from the
+    // pool "connect" event races the caller's first query on the same client.
+    expect(source).toContain("statement_timeout:        scalabilityConfig.dbStatementTimeout");
+    expect(source).not.toContain('pool.on("connect"');
+    expect(source).not.toContain("SET statement_timeout");
   });
 });
 

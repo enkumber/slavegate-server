@@ -26,12 +26,6 @@ export function getDb(): Pool {
     pool.on("error", (err) => {
       console.error("[db] Unexpected pool error:", err.message);
     });
-
-    pool.on("connect", (client) => {
-      // Per-connection statement timeout as a safety net
-      client.query(`SET statement_timeout = ${scalabilityConfig.dbStatementTimeout}`)
-        .catch(err => console.error("[db] Failed to set statement_timeout:", err.message));
-    });
   }
 
   return pool;

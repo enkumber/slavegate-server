@@ -1,6 +1,6 @@
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { closeDb } from "../src/db/client";
+import { closeDb, getDb } from "../src/db/client";
 import { getDailyAuditSnapshot } from "../src/modules/incidents/incident.service";
 
 const postgresUrl = process.env.PNQ003_PG_URL
@@ -161,11 +161,13 @@ describe("incident daily audit PostgreSQL bindings", () => {
 
   it("executes every audit query with its exact PostgreSQL parameter arity", async () => {
     const snapshot = await getDailyAuditSnapshot("2026-07-30", "Europe/Bucharest");
+    const timeout = await getDb().query<{ statement_timeout: string }>("SHOW statement_timeout");
 
     expect(snapshot).toMatchObject({
       date: "2026-07-30",
       timezone: "Europe/Bucharest",
       findings: [],
     });
+    expect(timeout.rows[0]?.statement_timeout).toBe("15s");
   });
 });
