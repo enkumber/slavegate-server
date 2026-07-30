@@ -2,6 +2,7 @@ const CREDENTIAL_KEYS = /(api[-_]?key|authorization|bearer|token|password|passwd
 
 export function redact(value: unknown): unknown {
   if (typeof value === "string") return redactString(value);
+  if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map((entry) => redact(entry));
   if (!value || typeof value !== "object") return value;
 

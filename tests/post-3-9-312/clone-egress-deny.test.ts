@@ -18,13 +18,35 @@ describe("post-3.9.312 live-derived clone HTTP gate egress seam", () => {
   beforeAll(async () => {
     server = http.createServer((req, res) => {
       requests.push(`${req.method} ${req.url} ${req.headers.authorization ?? ""}`);
+      if (req.method === "GET" && req.url === "/__post312/egress-probe") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          ok: true,
+          candidateSha: "c0c590b0473cd7da5be4c52e30cd0a799952a33e",
+          egressCapture: {
+            mode: "deny",
+            enforcement: "process-preload",
+            candidateSha: "c0c590b0473cd7da5be4c52e30cd0a799952a33e",
+            sourceIdentity: "forge-local-pg17-fixture",
+            capturedAt: "2026-07-30T08:00:00Z",
+            channels: Object.fromEntries(CLONE_EGRESS_CHANNELS.map((channel) => [channel, [{
+              channel,
+              action: "fixture",
+              target: "denied://fixture",
+              denied: true,
+              capturedAt: "2026-07-30T08:00:00Z",
+            }]])),
+          },
+        }));
+        return;
+      }
       if (req.method !== "GET" || req.url !== "/api/audits/daily?fixture=clone") {
         res.writeHead(405, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false }));
         return;
       }
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, data: { fixture: "clone" } }));
+      res.end(JSON.stringify({ ok: true, candidateSha: "c0c590b0473cd7da5be4c52e30cd0a799952a33e", data: { fixture: "clone" } }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
@@ -41,7 +63,7 @@ describe("post-3.9.312 live-derived clone HTTP gate egress seam", () => {
       "PN_POST_312_CLONE_CANDIDATE_SHA",
       "PN_POST_312_CLONE_DATABASE_URL",
       "PN_POST_312_CLONE_SOURCE_IDENTITY",
-      "PN_POST_312_CLONE_API_BASE_URL or PN_POST_312_CLONE_LAUNCH_CONFIG",
+      "PN_POST_312_CLONE_API_BASE_URL or PN_POST_312_CLONE_LAUNCH_COMMAND",
       "PN_POST_312_CLONE_EGRESS_DENY=true",
       "PN_POST_312_CLONE_EGRESS_CAPTURE_PATH",
       "PN_POST_312_CLONE_CLEAN_CHECKOUT_COMMAND",
@@ -93,7 +115,8 @@ describe("post-3.9.312 live-derived clone HTTP gate egress seam", () => {
     });
 
     expect(evidence.status).toBe("PASS");
-    expect(requests).toHaveLength(6);
+    expect(requests.filter((entry) => entry.startsWith("GET /api/audits/daily"))).toHaveLength(7);
+    expect(requests.some((entry) => entry.startsWith("GET /__post312/egress-probe"))).toBe(true);
     expect(evidence.sideEffects).toEqual({
       productionAccess: false,
       phoneDispatch: false,
@@ -101,6 +124,12 @@ describe("post-3.9.312 live-derived clone HTTP gate egress seam", () => {
       vlmCalls: false,
       websocket: false,
       dns: false,
+    });
+    expect(evidence.assertions).toMatchObject({
+      exactCandidateSha: true,
+      egressCaptureAvailable: true,
+      forbiddenEgressDenied: true,
+      zeroForbiddenSideEffects: true,
     });
 
     const persisted = await fs.readFile(capturePath, "utf8");

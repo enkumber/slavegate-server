@@ -12,6 +12,7 @@
     "db:seed": "node -r tsx/cjs src/db/seed.ts",
     "lint": "eslint src --ext .ts",
     "test": "vitest run",
+    "post312:fixture-gates": "node -r tsx/cjs src/harness/post-3-9-312/run-local-fixture-gates.ts",
     "hardcoding:audit": "node scripts/audit-no-hardcoding.mjs",
     "semantic-catalog:audit": "vitest run src/modules/human-workflow/db-authoritative-workflow-semantics.test.ts"
   },

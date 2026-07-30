@@ -205,7 +205,7 @@ describe("incident service", () => {
     ));
 
     await expect(
-      getDailyAuditSnapshot("2026-07-22", "fixture/timezone"),
+      getDailyAuditSnapshot("2026-07-22", "fixture/timezone", "2026-07-22T12:00:00.000Z"),
     ).resolves.toMatchObject({
       date: "2026-07-22",
       timezone: "fixture/timezone",
@@ -219,7 +219,7 @@ describe("incident service", () => {
       ["2026-07-22", "fixture/timezone"],
       ["2026-07-22", "fixture/timezone"],
       ["2026-07-22", "fixture/timezone"],
-      [],
+      ["2026-07-22T12:00:00.000Z"],
       ["2026-07-22", "fixture/timezone", INCIDENT_POLICY.maximumRetryCount],
       ["2026-07-22", "fixture/timezone"],
       ["2026-07-22", "fixture/timezone"],

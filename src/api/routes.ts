@@ -807,7 +807,8 @@ router.get("/audits/daily", async (req, res) => {
   try {
     const date = typeof req.query.date === "string" ? req.query.date : new Date().toISOString().slice(0, 10);
     const timezone = typeof req.query.timezone === "string" ? req.query.timezone : undefined;
-    const data = await incidentService.getDailyAuditSnapshot(date, timezone);
+    const capturedAt = typeof req.query.capturedAt === "string" ? req.query.capturedAt : undefined;
+    const data = await incidentService.getDailyAuditSnapshot(date, timezone, capturedAt);
     res.json({ ok: true, data });
   } catch (err) {
     res.status(400).json({ ok: false, error: (err as Error).message });

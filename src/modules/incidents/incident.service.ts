@@ -506,12 +506,21 @@ export async function addIncidentEvent(input: {
   return addEvent(input.id, eventType, actor, input.details ?? {}, input.idempotencyKey);
 }
 
-export async function getDailyAuditSnapshot(date: string, requestedTimezone?: string): Promise<Record<string, unknown>> {
+export async function getDailyAuditSnapshot(
+  date: string,
+  requestedTimezone?: string,
+  requestedCapturedAt?: string,
+): Promise<Record<string, unknown>> {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("date must use YYYY-MM-DD");
   const db = getDb();
   const operationsPolicy = await loadIncidentOperationsPolicy();
   const timezone = optionalText(requestedTimezone, 120) ?? operationsPolicy.defaultTimezone;
   if (!operationsPolicy.allowedTimezones.has(timezone)) throw new Error("unsupported timezone");
+  const capturedAt = requestedCapturedAt
+    ? new Date(requestedCapturedAt)
+    : new Date();
+  if (Number.isNaN(capturedAt.getTime())) throw new Error("capturedAt must be an ISO timestamp");
+  const capturedAtIso = capturedAt.toISOString();
   const windowParams = [date, timezone];
   const findingParams = [date, timezone, operationsPolicy.maximumRetryCount];
   const windowSql = `(SELECT ($1::date::timestamp AT TIME ZONE $2) AS start_at,
@@ -542,15 +551,16 @@ export async function getDailyAuditSnapshot(date: string, requestedTimezone?: st
       `SELECT status, severity, COUNT(*)::int AS count,
               MIN(last_detected_at) AS oldest_last_detected_at,
               MAX(last_detected_at) AS newest_last_detected_at
-         FROM phone_network_incidents
-        WHERE lifecycle_state_matches(
+       FROM phone_network_incidents
+        WHERE last_detected_at <= $1::timestamptz
+          AND lifecycle_state_matches(
                 'phone_network_incidents'::regclass,
                 status,
                 '{"terminal":false}'::jsonb
               )
         GROUP BY status, severity
         ORDER BY severity, status`,
-      [],
+      [capturedAtIso],
     ),
     db.query(
       `SELECT 'promoted_without_clean_5_of_5' AS kind, 'high' AS severity,
@@ -642,6 +652,7 @@ export async function getDailyAuditSnapshot(date: string, requestedTimezone?: st
   return {
     date,
     timezone,
+    capturedAt: capturedAtIso,
     tasks: tasks.rows,
     workflowRuns: runs.rows,
     workflowArtifacts: artifacts.rows,

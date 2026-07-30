@@ -120,8 +120,18 @@ describe("post-3.9.312 incident reconciliation harness", () => {
         data: {
           date: "2026-07-30",
           timezone: "UTC",
-          incidents: [{ status: "investigating", severity: "medium", count: 1 }],
-          openIncidentBacklog: [{ status: "investigating", severity: "medium", count: 1 }],
+          capturedAt: "2026-07-30T08:00:00.000Z",
+          incidents: [
+            { status: "investigating", severity: "medium", count: 1 },
+            { status: "resolved", severity: "medium", count: 1 },
+          ],
+          openIncidentBacklog: [{
+            status: "investigating",
+            severity: "medium",
+            count: 1,
+            oldest_last_detected_at: "2026-07-30T07:30:00.000Z",
+            newest_last_detected_at: "2026-07-30T07:30:00.000Z",
+          }],
         },
       }));
     });
@@ -190,6 +200,11 @@ describe("post-3.9.312 incident reconciliation harness", () => {
     expect(evidence.comparisons).toMatchObject({
       sameReadback: true,
       dailyAuditOkEnvelope: true,
+      dateMatchesHttp: true,
+      timezoneMatchesHttp: true,
+      capturedAtMatchesHttp: true,
+      dailyIncidentsMatchHttp: true,
+      openBacklogMatchesHttp: true,
       totalShapeFieldsMatch: true,
       nonterminalShapeFieldsMatch: true,
       statusCountsMatch: true,

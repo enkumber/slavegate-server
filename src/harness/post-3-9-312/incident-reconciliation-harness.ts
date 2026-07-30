@@ -113,9 +113,9 @@ export async function runIncidentReconciliationHarness(
     );
     if (readOnly.transaction_read_only !== "on") throw new Error("BLOCKED: PostgreSQL transaction is not read-only");
 
-    const dbShape = await readIncidentShape(client, env.capturedAt!);
+    const dbShape = await readIncidentShape(client, env.capturedAt!, env.date!, env.timezone!);
     const dailyAudit = await fetchDailyAudit(env);
-    const readback = await readIncidentShape(client, env.capturedAt!);
+    const readback = await readIncidentShape(client, env.capturedAt!, env.date!, env.timezone!);
     await client.query("COMMIT");
 
     const evidence: IncidentReconciliationEvidence = {
@@ -147,63 +147,106 @@ export async function runIncidentReconciliationHarness(
   }
 }
 
-async function readIncidentShape(client: PoolClient, capturedAt: string): Promise<Record<string, unknown>> {
-  const [timestamp, incidentCounts, openBacklog, fieldShape, ownerDistribution] = await Promise.all([
-    selectOne<{ captured_at: string }>(client, "SELECT $1::timestamptz AS captured_at", [capturedAt]),
-    selectRows(
-      client,
-      `SELECT status, severity, COUNT(*)::int AS count
-              , MIN(last_detected_at) AS oldest_last_detected_at
-              , FLOOR(EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_detected_at))))::int AS oldest_age_seconds
-         FROM phone_network_incidents
-        WHERE last_detected_at <= $1::timestamptz
-        GROUP BY status, severity
-        ORDER BY status, severity`,
-      [capturedAt],
-    ),
-    selectRows(
-      client,
-      `SELECT status, severity, COUNT(*)::int AS count
-              , MIN(last_detected_at) AS oldest_last_detected_at
-              , FLOOR(EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_detected_at))))::int AS oldest_age_seconds
-         FROM phone_network_incidents
-        WHERE last_detected_at <= $1::timestamptz
-          AND lifecycle_state_matches(
-                'phone_network_incidents'::regclass,
-                status,
-                '{"terminal":false}'::jsonb
-              )
-        GROUP BY status, severity
-        ORDER BY status, severity`,
-      [capturedAt],
-    ),
-    selectOne<{ total_shape_fields: number; nonterminal_shape_fields: number }>(
-      client,
-      `SELECT
-         COUNT(*)::int AS total_shape_fields,
-         COUNT(*) FILTER (WHERE column_name NOT IN ('resolved_at', 'superseded_by_task_id', 'acknowledged_at', 'closed_at', 'terminal_reason'))::int
-           AS nonterminal_shape_fields
-       FROM information_schema.columns
-       WHERE table_name = 'phone_network_incidents'`,
-      [],
-    ),
-    selectRows(
-      client,
-      `SELECT COALESCE(incident_commander, 'unassigned') AS incident_commander,
-              COALESCE(remediation_owner, 'unassigned') AS remediation_owner,
-              COUNT(*)::int AS count
-         FROM phone_network_incidents
-        WHERE last_detected_at <= $1::timestamptz
-        GROUP BY incident_commander, remediation_owner
-        ORDER BY incident_commander, remediation_owner`,
-      [capturedAt],
-    ),
-  ]);
+async function readIncidentShape(
+  client: PoolClient,
+  capturedAt: string,
+  date: string,
+  timezone: string,
+): Promise<Record<string, unknown>> {
+  const timestamp = await selectOne<{ captured_at: string }>(client, "SELECT $1::timestamptz AS captured_at", [capturedAt]);
+  const dailyIncidents = await selectRows(
+    client,
+    `SELECT status, severity, COUNT(*)::int AS count
+       FROM phone_network_incidents,
+            (SELECT ($1::date::timestamp AT TIME ZONE $2) AS start_at,
+                    (($1::date + 1)::timestamp AT TIME ZONE $2) AS end_at) w
+      WHERE last_detected_at >= w.start_at
+        AND last_detected_at < w.end_at
+      GROUP BY status, severity`,
+    [date, timezone],
+  );
+  const incidentCounts = await selectRows(
+    client,
+    `SELECT status, severity, COUNT(*)::int AS count
+            , MIN(last_detected_at) AS oldest_last_detected_at
+            , FLOOR(EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_detected_at))))::int AS oldest_age_seconds
+       FROM phone_network_incidents
+      WHERE last_detected_at <= $1::timestamptz
+      GROUP BY status, severity
+      ORDER BY status, severity`,
+    [capturedAt],
+  );
+  const statusDistribution = await selectRows(
+    client,
+    `SELECT status, severity, COUNT(*)::int AS count
+       FROM phone_network_incidents
+      WHERE last_detected_at <= $1::timestamptz
+      GROUP BY status, severity
+      ORDER BY status, severity`,
+    [capturedAt],
+  );
+  const nonterminal = await selectOne<{ count: number }>(
+    client,
+    `SELECT COUNT(*)::int AS count
+       FROM phone_network_incidents
+      WHERE last_detected_at <= $1::timestamptz
+        AND lifecycle_state_matches('phone_network_incidents'::regclass, status, '{"terminal":false}'::jsonb)`,
+    [capturedAt],
+  );
+  const openBacklog = await selectRows(
+    client,
+    `SELECT status, severity, COUNT(*)::int AS count
+            , MIN(last_detected_at) AS oldest_last_detected_at
+            , MAX(last_detected_at) AS newest_last_detected_at
+       FROM phone_network_incidents
+      WHERE last_detected_at <= $1::timestamptz
+        AND lifecycle_state_matches('phone_network_incidents'::regclass, status, '{"terminal":false}'::jsonb)
+      GROUP BY status, severity
+      ORDER BY status, severity`,
+    [capturedAt],
+  );
+  const oldestAges = await selectRows(
+    client,
+    `SELECT status, MIN(last_detected_at) AS oldest_last_detected_at,
+            FLOOR(EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_detected_at))))::int AS oldest_age_seconds
+       FROM phone_network_incidents
+      WHERE last_detected_at <= $1::timestamptz
+      GROUP BY status
+      ORDER BY status`,
+    [capturedAt],
+  );
+  const fieldShape = await selectOne<{ total_shape_fields: number; nonterminal_shape_fields: number }>(
+    client,
+    `SELECT
+       COUNT(*)::int AS total_shape_fields,
+       COUNT(*) FILTER (WHERE column_name NOT IN ('resolved_at', 'superseded_by_task_id', 'acknowledged_at', 'closed_at', 'terminal_reason'))::int
+         AS nonterminal_shape_fields
+     FROM information_schema.columns
+     WHERE table_name = 'phone_network_incidents'`,
+    [],
+  );
+  const ownerDistribution = await selectRows(
+    client,
+    `SELECT COALESCE(incident_commander, 'unassigned') AS incident_commander,
+            COALESCE(remediation_owner, 'unassigned') AS remediation_owner,
+            COUNT(*)::int AS count
+       FROM phone_network_incidents
+      WHERE last_detected_at <= $1::timestamptz
+      GROUP BY incident_commander, remediation_owner
+      ORDER BY incident_commander, remediation_owner`,
+    [capturedAt],
+  );
 
   return {
     capturedAt: timestamp.captured_at,
+    date,
+    timezone,
+    dailyIncidents,
     incidentCounts,
+    statusDistribution,
+    nonterminalCount: nonterminal.count,
     openBacklog,
+    oldestAges,
     ownerDistribution,
     totalShapeFields: fieldShape.total_shape_fields,
     nonterminalShapeFields: fieldShape.nonterminal_shape_fields,
@@ -219,6 +262,11 @@ function compareShapes(
   const comparisons: Record<string, unknown> = {
     sameReadback: stableJson(dbShape) === stableJson(readback),
     dailyAuditOkEnvelope: isOkDailyAudit(dailyAudit),
+    dateMatchesHttp: dbShape.date === httpBusinessValue(dailyAudit, "date"),
+    timezoneMatchesHttp: dbShape.timezone === httpBusinessValue(dailyAudit, "timezone"),
+    capturedAtMatchesHttp: timestampsEqual(dbShape.capturedAt, httpBusinessValue(dailyAudit, "capturedAt")),
+    dailyIncidentsMatchHttp: stableJson(dbShape.dailyIncidents) === stableJson(httpBusinessValue(dailyAudit, "incidents")),
+    openBacklogMatchesHttp: stableJson(dbShape.openBacklog) === stableJson(httpBusinessValue(dailyAudit, "openIncidentBacklog")),
     statusBacklogSemantics: "daily findings are policy anomalies for the date window; backlog is nonterminal incident state as of the same captured timestamp",
   };
   if (env.baselineTotalShapeFields) {
@@ -240,6 +288,7 @@ async function fetchDailyAudit(env: IncidentReconciliationEnv): Promise<unknown>
   const url = new URL("/api/audits/daily", env.apiBaseUrl);
   url.searchParams.set("date", env.date!);
   url.searchParams.set("timezone", env.timezone!);
+  url.searchParams.set("capturedAt", env.capturedAt!);
   const response = await fetch(url, {
     method: "GET",
     headers: {
@@ -289,6 +338,13 @@ function isOkDailyAudit(value: unknown): boolean {
     && !!(value as Record<string, unknown>).data;
 }
 
+function httpBusinessValue(dailyAudit: unknown, key: string): unknown {
+  if (!dailyAudit || typeof dailyAudit !== "object") return undefined;
+  const data = (dailyAudit as Record<string, unknown>).data;
+  if (!data || typeof data !== "object") return undefined;
+  return (data as Record<string, unknown>)[key];
+}
+
 function isFixtureOrReadOnlyDsn(databaseUrl: string): boolean {
   try {
     const parsed = new URL(databaseUrl);
@@ -300,7 +356,24 @@ function isFixtureOrReadOnlyDsn(databaseUrl: string): boolean {
 }
 
 function stableJson(value: unknown): string {
-  return JSON.stringify(value);
+  return JSON.stringify(normalizeForComparison(value));
+}
+
+function normalizeForComparison(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map((entry) => normalizeForComparison(entry));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, normalizeForComparison(entry)]),
+  );
+}
+
+function timestampsEqual(left: unknown, right: unknown): boolean {
+  const leftTime = typeof left === "string" || left instanceof Date ? new Date(left).getTime() : Number.NaN;
+  const rightTime = typeof right === "string" || right instanceof Date ? new Date(right).getTime() : Number.NaN;
+  return Number.isFinite(leftTime) && leftTime === rightTime;
 }
 
 async function writeBlockedIncidentEvidence(
