@@ -6,5 +6,11 @@
     "blocker": "Live-derived snapshot/export source unavailable; disposable clone HTTP mutation evidence not yet complete for this lane."
   },
   "before": null,
-  "after": null
+  "after": null,
+  "verificationUpdate": {
+    "build": "passed",
+    "semanticCatalogAudit": "passed",
+    "hardcodingAudit": "failed with 53 Android findings using available Android root",
+    "diffCheck": "passed"
+  }
 }

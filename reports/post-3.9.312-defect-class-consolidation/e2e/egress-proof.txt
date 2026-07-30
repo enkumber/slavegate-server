@@ -1,1 +1,3 @@
 Lane B egress proof pending real live-derived clone harness. No phone/ADB/live DB actions were performed by SPARK before this artifact. Candidate egress controls required: DNS/HTTP/WS/VLM/device capture sinks plus network boundary deny.
+
+Verification update: build and semantic audit passed. Hardcoding audit executed with PHONE_NETWORK_ANDROID_ROOT=/data/worktrees/android-agent-device-bundle-hbe-3.9.171 and failed with 53 Android findings; no phone/ADB/live DB action was performed. Real live-derived clone E2E remains blocked pending snapshot/source credentials and egress-capture harness.
