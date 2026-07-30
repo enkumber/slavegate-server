@@ -1,7 +1,7 @@
 {
   "status": "PASS",
-  "candidateSha": "f0a9bac60747bc36f8e6adb44e0d56df2b06ee17",
-  "sourceIdentity": "post312-local-pg17-f0a9bac60747",
+  "candidateSha": "5e04878b663f93083783a72acf4a63b5707245d6",
+  "sourceIdentity": "post312-local-pg17-5e04878b663f",
   "capturedAt": "2026-07-30T08:00:00Z",
   "date": "2026-07-30",
   "timezone": "UTC",
@@ -113,8 +113,8 @@
   },
   "dailyAudit": {
     "ok": true,
-    "candidateSha": "f0a9bac60747bc36f8e6adb44e0d56df2b06ee17",
-    "sourceIdentity": "post312-local-pg17-f0a9bac60747",
+    "candidateSha": "5e04878b663f93083783a72acf4a63b5707245d6",
+    "sourceIdentity": "post312-local-pg17-5e04878b663f",
     "data": {
       "capturedAt": "2026-07-30T08:00:00Z",
       "date": "2026-07-30",
@@ -150,6 +150,71 @@
           "count": 1,
           "oldest_last_detected_at": "2026-07-30T07:30:00.000Z",
           "newest_last_detected_at": "2026-07-30T07:30:00.000Z"
+        }
+      ],
+      "incidentCounts": [
+        {
+          "status": "investigating",
+          "severity": "high",
+          "count": 1,
+          "oldest_last_detected_at": "2026-07-30T07:00:00.000Z",
+          "oldest_age_seconds": 3600
+        },
+        {
+          "status": "investigating",
+          "severity": "medium",
+          "count": 1,
+          "oldest_last_detected_at": "2026-07-30T07:30:00.000Z",
+          "oldest_age_seconds": 1800
+        },
+        {
+          "status": "resolved",
+          "severity": "low",
+          "count": 1,
+          "oldest_last_detected_at": "2026-07-30T07:40:00.000Z",
+          "oldest_age_seconds": 1200
+        }
+      ],
+      "statusDistribution": [
+        {
+          "status": "investigating",
+          "severity": "high",
+          "count": 1
+        },
+        {
+          "status": "investigating",
+          "severity": "medium",
+          "count": 1
+        },
+        {
+          "status": "resolved",
+          "severity": "low",
+          "count": 1
+        }
+      ],
+      "nonterminalCount": 2,
+      "oldestAges": [
+        {
+          "status": "investigating",
+          "oldest_last_detected_at": "2026-07-30T07:00:00.000Z",
+          "oldest_age_seconds": 3600
+        },
+        {
+          "status": "resolved",
+          "oldest_last_detected_at": "2026-07-30T07:40:00.000Z",
+          "oldest_age_seconds": 1200
+        }
+      ],
+      "ownerDistribution": [
+        {
+          "incident_commander": "alice",
+          "remediation_owner": "platform",
+          "count": 2
+        },
+        {
+          "incident_commander": "bob",
+          "remediation_owner": "runtime",
+          "count": 1
         }
       ]
     }
@@ -267,13 +332,18 @@
     "capturedAtMatchesHttp": true,
     "dailyIncidentsMatchHttp": true,
     "openBacklogMatchesHttp": true,
+    "totalsMatchHttp": true,
+    "nonterminalMatchesHttp": true,
+    "statusDistributionMatchesHttp": true,
+    "oldestAgesMatchHttp": true,
+    "ownerDistributionMatchesHttp": true,
     "statusBacklogSemantics": "daily findings are policy anomalies for the date window; backlog is nonterminal incident state as of the same captured timestamp",
     "totalShapeFieldsMatch": true,
     "nonterminalShapeFieldsMatch": true
   },
   "target": {
     "databaseUrl": "[REDACTED]",
-    "apiBaseUrl": "http://127.0.0.1:58765",
+    "apiBaseUrl": "http://127.0.0.1:58922",
     "apiKey": "[REDACTED]"
   }
 }

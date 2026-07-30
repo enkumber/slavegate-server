@@ -1,21 +1,21 @@
 {
   "status": "PASS",
-  "startedAt": "2026-07-30T16:26:04.944Z",
-  "candidateSha": "f0a9bac60747bc36f8e6adb44e0d56df2b06ee17",
-  "sourceIdentity": "post312-local-pg17-f0a9bac60747",
+  "startedAt": "2026-07-30T16:32:36.642Z",
+  "candidateSha": "5e04878b663f93083783a72acf4a63b5707245d6",
+  "sourceIdentity": "post312-local-pg17-5e04878b663f",
   "commands": [
     {
-      "command": "/data/.openclaw/tools/postgresql-17.10/bin/createdb -h 127.0.0.1 -p 58184 post312_fixture_pg17",
-      "startedAt": "2026-07-30T16:26:10.404Z",
-      "finishedAt": "2026-07-30T16:26:10.637Z",
+      "command": "/data/.openclaw/tools/postgresql-17.10/bin/createdb -h 127.0.0.1 -p 58653 post312_fixture_pg17",
+      "startedAt": "2026-07-30T16:32:40.259Z",
+      "finishedAt": "2026-07-30T16:32:40.458Z",
       "exitCode": 0,
       "stdout": "",
       "stderr": ""
     },
     {
-      "command": "gcc -shared -fPIC -O2 -Wall -Wextra -o /tmp/post312-pg17-Vx2TXM/post312-egress-boundary.so src/harness/post-3-9-312/egress-boundary.c -ldl",
-      "startedAt": "2026-07-30T16:26:10.671Z",
-      "finishedAt": "2026-07-30T16:26:10.781Z",
+      "command": "gcc -shared -fPIC -O2 -Wall -Wextra -o /tmp/post312-pg17-FPBQ2i/post312-egress-boundary.so src/harness/post-3-9-312/egress-boundary.c -ldl",
+      "startedAt": "2026-07-30T16:32:40.509Z",
+      "finishedAt": "2026-07-30T16:32:40.635Z",
       "exitCode": 0,
       "stdout": "",
       "stderr": ""
@@ -46,6 +46,11 @@
         "capturedAtMatchesHttp": true,
         "dailyIncidentsMatchHttp": true,
         "openBacklogMatchesHttp": true,
+        "totalsMatchHttp": true,
+        "nonterminalMatchesHttp": true,
+        "statusDistributionMatchesHttp": true,
+        "oldestAgesMatchHttp": true,
+        "ownerDistributionMatchesHttp": true,
         "statusBacklogSemantics": "daily findings are policy anomalies for the date window; backlog is nonterminal incident state as of the same captured timestamp",
         "totalShapeFieldsMatch": true,
         "nonterminalShapeFieldsMatch": true
@@ -56,5 +61,5 @@
     "clonePath": "/data/worktrees/phone-network-post-3.9.312-defect-class-audit/reports/post-3.9.312-defect-class-consolidation/e2e/clone-http-e2e-local-pg17.json",
     "incidentPath": "/data/worktrees/phone-network-post-3.9.312-defect-class-audit/reports/post-3.9.312-defect-class-consolidation/e2e/incident-reconciliation-local-pg17.json"
   },
-  "finishedAt": "2026-07-30T16:26:13.411Z"
+  "finishedAt": "2026-07-30T16:32:43.731Z"
 }

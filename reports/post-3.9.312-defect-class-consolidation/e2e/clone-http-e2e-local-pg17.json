@@ -1,8 +1,8 @@
 {
   "status": "PASS",
-  "candidateSha": "f0a9bac60747bc36f8e6adb44e0d56df2b06ee17",
-  "sourceIdentity": "post312-local-pg17-f0a9bac60747",
-  "cleanCheckoutCommand": "git checkout --detach f0a9bac60747bc36f8e6adb44e0d56df2b06ee17 && git clean -ffdx && npm ci && PN_POST_312_EXPECTED_SHA=f0a9bac60747bc36f8e6adb44e0d56df2b06ee17 npm run post312:fixture-gates",
+  "candidateSha": "5e04878b663f93083783a72acf4a63b5707245d6",
+  "sourceIdentity": "post312-local-pg17-5e04878b663f",
+  "cleanCheckoutCommand": "git checkout --detach 5e04878b663f93083783a72acf4a63b5707245d6 && git clean -ffdx && npm ci && PN_POST_312_EXPECTED_SHA=5e04878b663f93083783a72acf4a63b5707245d6 npm run post312:fixture-gates",
   "ingress": {
     "method": "GET",
     "path": "/api/audits/daily?date=2026-07-30&timezone=UTC&capturedAt=2026-07-30T08%3A00%3A00Z",
@@ -26,9 +26,9 @@
   "egressCapture": {
     "mode": "deny",
     "enforcement": "external-ld-preload-syscall-boundary",
-    "candidateSha": "f0a9bac60747bc36f8e6adb44e0d56df2b06ee17",
-    "sourceIdentity": "post312-local-pg17-f0a9bac60747",
-    "capturedAt": "2026-07-30T16:26:11.360Z",
+    "candidateSha": "5e04878b663f93083783a72acf4a63b5707245d6",
+    "sourceIdentity": "post312-local-pg17-5e04878b663f",
+    "capturedAt": "2026-07-30T16:32:41.265Z",
     "channels": {
       "dns": [
         {
@@ -36,7 +36,7 @@
           "action": "getaddrinfo",
           "target": "example.invalid",
           "denied": true,
-          "capturedAt": "2026-07-30T16:26:11.000Z"
+          "capturedAt": "2026-07-30T16:32:41.000Z"
         }
       ],
       "http": [
@@ -45,7 +45,7 @@
           "action": "connect",
           "target": "198.51.100.10:80",
           "denied": true,
-          "capturedAt": "2026-07-30T16:26:11.000Z"
+          "capturedAt": "2026-07-30T16:32:41.000Z"
         }
       ],
       "ws": [
@@ -54,7 +54,7 @@
           "action": "connect",
           "target": "198.51.100.11:81",
           "denied": true,
-          "capturedAt": "2026-07-30T16:26:11.000Z"
+          "capturedAt": "2026-07-30T16:32:41.000Z"
         }
       ],
       "vlm": [
@@ -63,7 +63,7 @@
           "action": "connect",
           "target": "198.51.100.12:443",
           "denied": true,
-          "capturedAt": "2026-07-30T16:26:11.000Z"
+          "capturedAt": "2026-07-30T16:32:41.000Z"
         }
       ],
       "device": [
@@ -72,7 +72,7 @@
           "action": "connect",
           "target": "198.51.100.13:5555",
           "denied": true,
-          "capturedAt": "2026-07-30T16:26:11.000Z"
+          "capturedAt": "2026-07-30T16:32:41.000Z"
         }
       ],
       "phone_dispatch": [
@@ -81,7 +81,7 @@
           "action": "connect",
           "target": "198.51.100.14:18791",
           "denied": true,
-          "capturedAt": "2026-07-30T16:26:11.000Z"
+          "capturedAt": "2026-07-30T16:32:41.000Z"
         }
       ]
     }
