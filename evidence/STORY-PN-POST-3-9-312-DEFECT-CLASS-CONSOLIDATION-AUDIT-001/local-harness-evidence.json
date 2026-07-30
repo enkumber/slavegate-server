@@ -1,0 +1,30 @@
+{
+  "story": "STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001",
+  "candidateSha": "c0c590b0473cd7da5be4c52e30cd0a799952a33e",
+  "implemented": {
+    "incidentReconciliationHarness": true,
+    "cloneHttpGateEgressDenySeam": true,
+    "failClosedEnvValidation": true,
+    "beginReadOnly": true,
+    "selectOnlyDbReads": true,
+    "sameCapturedTimestamp": true,
+    "httpGetDailyAudit": true,
+    "redaction": true,
+    "sourceIdentity": true,
+    "zeroMutationPhoneRoutes": true
+  },
+  "localVerification": {
+    "vitest": [
+      "tests/post-3-9-312/clone-egress-deny.test.ts",
+      "tests/post-3-9-312/incident-reconciliation-harness-postgres.integration.test.ts"
+    ],
+    "build": "npm run build",
+    "diffCheck": "git diff --check",
+    "jsonParseChecks": [
+      "evidence/STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001/local-harness-evidence.json"
+    ]
+  },
+  "blockersRemaining": [
+    "approved production-derived snapshot/read-only credential for final live reconciliation"
+  ]
+}
