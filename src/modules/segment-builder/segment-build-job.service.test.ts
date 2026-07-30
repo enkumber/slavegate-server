@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
@@ -246,6 +247,9 @@ vi.mock("../../db/client", () => {
           }],
         };
       }
+      if (text.includes("WITH selected AS") && text.includes("UPDATE workflow_capabilities")) {
+        return { rows: [{ capability_key: params[0] }] };
+      }
       if (text.includes("FROM workflow_capabilities")) {
         return { rows: state.capability ? [{ ...state.capability }] : [] };
       }
@@ -335,6 +339,7 @@ vi.mock("../../db/client", () => {
 });
 
 import {
+  activateCapability,
   recoverSegmentBuildCandidateIdentity,
   SegmentBuildJobService,
   type SegmentBuildJob,
@@ -635,6 +640,31 @@ describe("SegmentBuildJobService dispatch", () => {
     );
     expect(compositionQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
     expect(compositionQuery).not.toContain("c.lifecycle_key");
+  });
+
+  it("activates capabilities through the configured lifecycle binding", async () => {
+    await activateCapability("corrected_capability", "test-manager");
+    const source = readFileSync(
+      "src/modules/segment-builder/segment-build-job.service.ts",
+      "utf8",
+    );
+    const activation = source.slice(
+      source.indexOf("async function activateCapability"),
+      source.indexOf("interface SegmentBuildTransitionPatch"),
+    );
+
+    expect(activation).toContain(
+      "binding.resource_table = to_regclass('workflow_capabilities')",
+    );
+    expect(activation).toContain("binding.state_column = 'status'::name");
+    expect(activation).toContain("current.lifecycle_key = binding.lifecycle_key");
+    expect(activation).toContain("compiler_retrievable = selected.compiler_retrievable");
+    expect(activation).toContain("selected.compiler_retrievable IS TRUE");
+    expect(activation).not.toContain("capability.lifecycle_key");
+    expect(state.queries.some((query) =>
+      query.includes("WITH selected AS") &&
+      query.includes("UPDATE workflow_capabilities")
+    )).toBe(true);
   });
 });
 

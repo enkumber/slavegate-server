@@ -219,23 +219,31 @@ async function resourceVersionIsSuccessful(
   return result.rows[0]?.successful === true;
 }
 
-async function activateCapability(capabilityKey: string, managedBy: string): Promise<void> {
+export async function activateCapability(capabilityKey: string, managedBy: string): Promise<void> {
   const selector = serializeLifecycleTransitionSelector({
     targetDispatchable: true,
     targetAdministrative: false,
     transitionAutomatic: true,
   });
   const predicate = lifecycleTransitionSelectorPredicate("transition", "target", "$2");
-  await getDb().query(
+  const result = await getDb().query(
     `WITH selected AS (
        SELECT capability.capability_key, current.dispatchable AS current_dispatchable,
-              transition.to_status
+              transition.to_status,
+              CASE
+                WHEN current.dispatchable
+                  THEN (current.metadata ->> 'compilerRetrievable')::boolean
+                ELSE (target.metadata ->> 'compilerRetrievable')::boolean
+              END AS compiler_retrievable
          FROM workflow_capabilities capability
+         JOIN lifecycle_resource_bindings binding
+           ON binding.resource_table = to_regclass('workflow_capabilities')
+          AND binding.state_column = 'status'::name
          JOIN lifecycle_state_definitions current
-           ON current.lifecycle_key = capability.lifecycle_key
+           ON current.lifecycle_key = binding.lifecycle_key
           AND current.status = capability.status
          LEFT JOIN lifecycle_transitions transition
-           ON transition.lifecycle_key = capability.lifecycle_key
+           ON transition.lifecycle_key = binding.lifecycle_key
           AND transition.from_status = capability.status
          LEFT JOIN lifecycle_state_definitions target
            ON target.lifecycle_key = transition.lifecycle_key
@@ -247,18 +255,27 @@ async function activateCapability(capabilityKey: string, managedBy: string): Pro
         FOR UPDATE OF capability
      )
      UPDATE workflow_capabilities capability
-        SET status = CASE
+       SET status = CASE
               WHEN selected.current_dispatchable THEN capability.status
               ELSE selected.to_status
             END,
+            compiler_retrievable = selected.compiler_retrievable,
             metadata = (capability.metadata - 'buildJobId')
               || jsonb_build_object('managedBy', $3::text),
             updated_at = NOW()
        FROM selected
       WHERE capability.capability_key = selected.capability_key
-        AND (selected.current_dispatchable OR selected.to_status IS NOT NULL)`,
+        AND (selected.current_dispatchable OR selected.to_status IS NOT NULL)
+        AND selected.compiler_retrievable IS TRUE
+      RETURNING capability.capability_key`,
     [capabilityKey, selector, managedBy],
   );
+  if (!result.rows[0]) {
+    throw Object.assign(new Error("capability activation is not configured for compiler retrieval"), {
+      status: 409,
+      code: "SEGMENT_BUILDER_CAPABILITY_ACTIVATION_UNAVAILABLE",
+    });
+  }
 }
 
 interface SegmentBuildTransitionPatch {
