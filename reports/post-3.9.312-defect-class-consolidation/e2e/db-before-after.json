@@ -10,7 +10,8 @@
   "verificationUpdate": {
     "build": "passed",
     "semanticCatalogAudit": "passed",
-    "hardcodingAudit": "failed with 53 Android findings using available Android root",
+    "hardcodingAudit": "passed against canonical Android root /data/.openclaw/workspace/slavegate/android-agent",
+    "quarantinedHardcodingEvidence": "invalid non-product evidence from wrong Android root /data/worktrees/android-agent-device-bundle-hbe-3.9.171 produced 53 irrelevant findings",
     "diffCheck": "passed"
   }
 }

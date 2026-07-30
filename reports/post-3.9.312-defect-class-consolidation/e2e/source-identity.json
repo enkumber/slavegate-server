@@ -2,6 +2,13 @@
   "story": "STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001",
   "generatedAt": "2026-07-30T13:47:33.653Z",
   "baseline": "505f3cddb707bef1dcd510ebde4edd966b245ca9",
+  "correctionHead": "7b648114d2dd298f1eac73f104d4b5fc4fecfe02",
+  "liveStatus": {
+    "installedVersion": "3.9.312",
+    "installedCommit": "505f3cddb707bef1dcd510ebde4edd966b245ca9",
+    "dailyAuditHttp": 200,
+    "installPending": false
+  },
   "productionReadOnlyCounts": {
     "available": false,
     "blocker": "No production read-only DATABASE_URL/PNQ001_PG_URL was provided to this session. No production connection attempted."
