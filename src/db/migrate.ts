@@ -59,6 +59,7 @@ export function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("workflow_execution_generic_lifecycle") ||
     fileName.includes("lifecycle_resource_bindings") ||
     fileName.includes("resource_runtime_policies") ||
+    fileName.includes("human_compile_job_durable_lease") ||
     fileName.includes("adopt_configured_lifecycle_resources") ||
     fileName.includes("runtime_semantic_entry_lifecycle_compatibility") ||
     fileName.includes("phone_network_incidents_and_audits") ||

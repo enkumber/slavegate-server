@@ -1021,3 +1021,22 @@ export class HumanWorkflowCompilerService {
 }
 
 export const humanWorkflowCompilerService = new HumanWorkflowCompilerService();
+
+humanWorkflowCompileJobService.configureRunner(async (job) => {
+  const target = await humanWorkflowCompilerService.resolveTarget(
+    job.deviceId,
+    job.accountId,
+    job.intent,
+  );
+  if (!target) {
+    throw Object.assign(new Error("Device or account not found"), {
+      status: 400,
+      code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND",
+    });
+  }
+  return humanWorkflowCompilerService.compileWithLlm({
+    requestKey: job.requestKey,
+    intent: job.intent,
+    target,
+  });
+});

@@ -1,0 +1,59 @@
+{
+  "storyId": "STORY-PN-HUMAN-COMPILE-JOB-DURABLE-LEASE-RECONCILER-3-9-311-001",
+  "baseSha": "dae0388257af4d5896c4edc63e12fdc83e55980b",
+  "branch": "feat/pn-human-compile-durable-reconciler-3.9.311",
+  "worktree": "/data/worktrees/phone-network-human-compile-durable-reconciler-3.9.311",
+  "constraints": {
+    "release": false,
+    "deploy": false,
+    "liveDatabaseMutation": false,
+    "phoneExecution": false
+  },
+  "gates": [
+    {
+      "command": "npm run build",
+      "exitCode": 0,
+      "result": "pass"
+    },
+    {
+      "command": "npx vitest run src/modules/human-workflow/compile-job.service.test.ts src/api/routes.human-workflow.test.ts",
+      "exitCode": 0,
+      "result": "10 tests passed"
+    },
+    {
+      "command": "npx vitest run tests/human-compile-job-reconciler-postgres.integration.test.ts",
+      "result": "authored; requires local PNQ001_PG_URL clone and is pending LENS execution"
+    },
+    {
+      "command": "PHONE_NETWORK_ANDROID_ROOT=/data/.openclaw/workspace/slavegate/android-agent npm run hardcoding:audit",
+      "exitCode": 0,
+      "result": "pass"
+    },
+    {
+      "command": "npm run semantic-catalog:audit",
+      "exitCode": 0,
+      "result": "5 tests passed"
+    },
+    {
+      "command": "git diff --check",
+      "exitCode": 0,
+      "result": "pass"
+    }
+  ],
+  "implemented": [
+    "mechanical lease and audit persistence without semantic seed data",
+    "PostgreSQL lifecycle/runtime-policy validation",
+    "atomic SKIP LOCKED claim with owner generation fencing",
+    "startup and periodic reconciliation",
+    "expired lease reclaim using database time",
+    "exact replay payload hashing and typed conflict audit",
+    "late stale-generation terminal write rejection"
+  ],
+  "pendingSameShaGates": [
+    "isolated PostgreSQL integration execution",
+    "live-clone HTTP create/poll/replay/conflict/restart gate",
+    "LENS verdict",
+    "ECHO verdict",
+    "FORGE final GO"
+  ]
+}

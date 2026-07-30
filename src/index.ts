@@ -58,6 +58,8 @@ import {
   ResourceRuntimePolicyUnavailableError,
   watchResourceRuntimePolicy,
 } from "./modules/runtime-policy/resource-runtime-policy.service";
+import { humanWorkflowCompileJobService } from "./modules/human-workflow/compile-job.service";
+import "./modules/human-workflow/human-workflow-compiler.service";
 
 const PORT = parseInt(process.env.PORT ?? "21211", 10);
 
@@ -175,6 +177,8 @@ async function bootstrap(): Promise<void> {
   }
   await startEdgeWorkflowProgressWatchdog();
   console.log("[server] Edge workflow progress watchdog started.");
+  await humanWorkflowCompileJobService.startReconciler();
+  console.log("[server] Human workflow compile-job reconciler started.");
 
   // ─── Kill switch — warm up cache from DB (makes isKillSwitchActiveSync reliable) ──
   const ksActive = await isKillSwitchActive();
@@ -297,6 +301,7 @@ async function bootstrap(): Promise<void> {
   });
   const scheduleSegmentBuilderRecovery = async (): Promise<void> => {
     if (segmentBuilderRecoveryTimer) clearTimeout(segmentBuilderRecoveryTimer);
+    humanWorkflowCompileJobService.stopReconciler();
     segmentBuilderRecoveryTimer = null;
     const policy = await loadSegmentBuilderPolicy();
     if (!policy) return;
