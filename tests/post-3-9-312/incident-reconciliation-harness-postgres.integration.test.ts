@@ -132,6 +132,24 @@ describe("post-3.9.312 incident reconciliation harness", () => {
             oldest_last_detected_at: "2026-07-30T07:30:00.000Z",
             newest_last_detected_at: "2026-07-30T07:30:00.000Z",
           }],
+          incidentCounts: [
+            { status: "investigating", severity: "medium", count: 1, oldest_last_detected_at: "2026-07-30T07:30:00.000Z", oldest_age_seconds: 1800 },
+            { status: "resolved", severity: "medium", count: 1, oldest_last_detected_at: "2026-07-30T07:35:00.000Z", oldest_age_seconds: 1500 },
+          ],
+          statusDistribution: [
+            { status: "investigating", severity: "medium", count: 1 },
+            { status: "resolved", severity: "medium", count: 1 },
+          ],
+          nonterminalCount: 1,
+          oldestAges: [
+            { status: "investigating", oldest_last_detected_at: "2026-07-30T07:30:00.000Z", oldest_age_seconds: 1800 },
+            { status: "resolved", oldest_last_detected_at: "2026-07-30T07:35:00.000Z", oldest_age_seconds: 1500 },
+          ],
+          ownerDistribution: [{
+            incident_commander: "fixture-commander",
+            remediation_owner: "fixture-owner",
+            count: 2,
+          }],
         },
       }));
     });
