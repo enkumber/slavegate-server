@@ -2,7 +2,7 @@
 
 Story: STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001
 Inventory source HEAD: ff08a27eab689b8ca02075b8dc0d5370565ade7e
-Review update HEAD: 65e7eff411ce1218d4702cda3df5917232bb8bc9
+Review update HEAD: same commit as this remediation artifact
 Records: 95
 Reviewed: 95
 Method: TypeScript compiler API with PostgreSQL placeholder lexing over static template spans.
@@ -20,3 +20,5 @@ This artifact inventories and individually reviews the 95 unresolved dynamic Pos
 ## Validation
 
 `reports/post-3.9.312-defect-class-consolidation/inventory/sql-bind.json` validates as JSON and contains exactly 95 individually reviewed records. The three defect records are marked remediated after the focused ops-monitor SQL binding regression.
+
+Focused regression coverage in `src/modules/ops-monitor/ops-monitor.service.test.ts` records the SQL text and bind arrays for the affected queries, exercises hostile lookback and timestamp values, asserts exact `$1` arity, and confirms the lifecycle predicate remains `lifecycle_state_matches(...)` rather than hardcoded status literals.

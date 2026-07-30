@@ -4,7 +4,7 @@
   "worktree": "/data/worktrees/phone-network-post-3.9.312-defect-class-audit",
   "branch": "audit/post-3.9.312-defect-class-consolidation",
   "head": "ff08a27eab689b8ca02075b8dc0d5370565ade7e",
-  "statusBeforeArtifactWrite": "clean",
+  "statusBeforeArtifactWrite": "remediation complete; pending final commit",
   "method": {
     "parser": "TypeScript compiler API",
     "selection": "production src/**/*.ts PostgreSQL .query template-expression callsites from the prior AST lane unresolved set",
@@ -2248,14 +2248,12 @@
       "line": 196,
       "column": 24,
       "callee": "db.query",
-      "sqlConstructionPattern": "template with embedded runtime value",
-      "sqlExpression": "` SELECT app, COUNT(*) as total_taps, SUM(CASE WHEN method_used = 'coords' THEN 1 ELSE 0 END) as coords_success, SUM(CASE WHEN method_used = 'ui_tree' THEN 1 ELSE 0 END) as ui_tree_success, SUM(CASE WHEN method_used = 'vision' THEN 1 ELSE 0 END) as vision_success, SUM(CASE WHEN NOT verified THEN 1 ELSE 0 END) as element_not_found_count FROM navigation_logs WHERE created_at > NOW() - INTERVAL '${lookbackHours} hours' GROUP BY app `",
-      "dynamicSqlFragments": [
-        "lookbackHours"
-      ],
+      "sqlConstructionPattern": "static template with bound runtime lookback value",
+      "sqlExpression": "` SELECT app, COUNT(*) as total_taps, SUM(CASE WHEN method_used = 'coords' THEN 1 ELSE 0 END) as coords_success, SUM(CASE WHEN method_used = 'ui_tree' THEN 1 ELSE 0 END) as ui_tree_success, SUM(CASE WHEN method_used = 'vision' THEN 1 ELSE 0 END) as vision_success, SUM(CASE WHEN NOT verified THEN 1 ELSE 0 END) as element_not_found_count FROM navigation_logs WHERE created_at > NOW() - ($1::int * INTERVAL '1 hour') GROUP BY app `",
+      "dynamicSqlFragments": [],
       "paramsConstruction": "bind vector: [lookbackHours]",
       "paramsExpression": "[lookbackHours]",
-      "identifierValueSeparation": "value interpolation present in SQL text; parameters are not fully separated",
+      "identifierValueSeparation": "runtime lookback value is separated from SQL text and passed as positional bind $1",
       "placeholderArityProof": {
         "staticPlaceholderNumbers": [
           1
@@ -2265,19 +2263,20 @@
         "dynamicPlaceholderExpressions": [],
         "proofStatus": "PASS: one SQL placeholder matched by one bound parameter in focused regression"
       },
-      "testRefactorStatus": "remediated with focused ops-monitor SQL binding regression and build/diff-check evidence",
+      "testRefactorStatus": "remediated with focused ops-monitor SQL binding regression covering hostile runtime values, bind arity, lifecycle predicate preservation, build, anti-hardcoding audit, and diff-check",
       "verdict": "remediated: lookbackHours is bound as $1::int and multiplied by INTERVAL '1 hour'",
       "review": {
         "individuallyReviewed": true,
-        "placeholderParameterArity": "fix required: SQL text embeds a scalar runtime value, so placeholder/parameter arity cannot protect this value until it is converted to a bind parameter",
-        "identifierValueSeparation": "fix required: value/SQL separation is violated by a scalar interpolation in the query template",
+        "placeholderParameterArity": "PASS: SQL text contains exactly $1 and params are exactly [lookbackHours]",
+        "identifierValueSeparation": "PASS: lookbackHours is not interpolated; interval structure is static as $1::int * INTERVAL '1 hour'",
         "testsEvidenceCommands": [
-          "TypeScript compiler API dynamic-query inventory generator over src/**/*.ts",
-          "PostgreSQL placeholder lexer over static template spans",
-          "node -e JSON.parse/count validation for sql-bind.json (records=95)"
+          "npx vitest run src/modules/ops-monitor/ops-monitor.service.test.ts (PASS: hostile lookback and JSONB timestamp values remain out of SQL text; exact $1 bind arity asserted)",
+          "npm run build (PASS)",
+          "PHONE_NETWORK_ANDROID_ROOT=/data/.openclaw/workspace/slavegate/android-agent npm run audit:no-hardcoding (PASS)",
+          "git diff --check (PASS)"
         ],
-        "residualRisk": "high until remediated and covered by PG17 regression",
-        "exactDefectFixRequired": "replace interpolated INTERVAL text with a bound numeric interval, for example NOW() - ($1::int * INTERVAL '1 hour'), and pass lookbackHours as the first bind value"
+        "residualRisk": "none for the proven scalar interpolation defect after regression coverage; SQL structure remains static and runtime values are passed only through positional binds",
+        "exactDefectFixRequired": null
       },
       "residualRisk": "none for scalar SQL interpolation; values are bound parameters and lifecycle predicates remain DB-authoritative"
     },
@@ -2287,14 +2286,12 @@
       "line": 285,
       "column": 24,
       "callee": "db.query",
-      "sqlConstructionPattern": "template with embedded runtime value",
-      "sqlExpression": "` SELECT app, app_version, unmapped_elements, elements_failed FROM mapping_reports WHERE created_at > NOW() - INTERVAL '${lookbackHours} hours' ORDER BY created_at DESC `",
-      "dynamicSqlFragments": [
-        "lookbackHours"
-      ],
+      "sqlConstructionPattern": "static template with bound runtime lookback value",
+      "sqlExpression": "` SELECT app, app_version, unmapped_elements, elements_failed FROM mapping_reports WHERE created_at > NOW() - ($1::int * INTERVAL '1 hour') ORDER BY created_at DESC `",
+      "dynamicSqlFragments": [],
       "paramsConstruction": "bind vector: [lookbackHours]",
       "paramsExpression": "[lookbackHours]",
-      "identifierValueSeparation": "value interpolation present in SQL text; parameters are not fully separated",
+      "identifierValueSeparation": "runtime lookback value is separated from SQL text and passed as positional bind $1",
       "placeholderArityProof": {
         "staticPlaceholderNumbers": [
           1
@@ -2304,19 +2301,20 @@
         "dynamicPlaceholderExpressions": [],
         "proofStatus": "PASS: one SQL placeholder matched by one bound parameter in focused regression"
       },
-      "testRefactorStatus": "remediated with focused ops-monitor SQL binding regression and build/diff-check evidence",
+      "testRefactorStatus": "remediated with focused ops-monitor SQL binding regression covering hostile runtime values, bind arity, lifecycle predicate preservation, build, anti-hardcoding audit, and diff-check",
       "verdict": "remediated: lookbackHours is bound as $1::int and multiplied by INTERVAL '1 hour'",
       "review": {
         "individuallyReviewed": true,
-        "placeholderParameterArity": "fix required: SQL text embeds a scalar runtime value, so placeholder/parameter arity cannot protect this value until it is converted to a bind parameter",
-        "identifierValueSeparation": "fix required: value/SQL separation is violated by a scalar interpolation in the query template",
+        "placeholderParameterArity": "PASS: SQL text contains exactly $1 and params are exactly [lookbackHours]",
+        "identifierValueSeparation": "PASS: lookbackHours is not interpolated; interval structure is static as $1::int * INTERVAL '1 hour'",
         "testsEvidenceCommands": [
-          "TypeScript compiler API dynamic-query inventory generator over src/**/*.ts",
-          "PostgreSQL placeholder lexer over static template spans",
-          "node -e JSON.parse/count validation for sql-bind.json (records=95)"
+          "npx vitest run src/modules/ops-monitor/ops-monitor.service.test.ts (PASS: hostile lookback and JSONB timestamp values remain out of SQL text; exact $1 bind arity asserted)",
+          "npm run build (PASS)",
+          "PHONE_NETWORK_ANDROID_ROOT=/data/.openclaw/workspace/slavegate/android-agent npm run audit:no-hardcoding (PASS)",
+          "git diff --check (PASS)"
         ],
-        "residualRisk": "high until remediated and covered by PG17 regression",
-        "exactDefectFixRequired": "replace interpolated INTERVAL text with a bound numeric interval, for example NOW() - ($1::int * INTERVAL '1 hour'), and pass lookbackHours as the first bind value"
+        "residualRisk": "none for the proven scalar interpolation defect after regression coverage; SQL structure remains static and runtime values are passed only through positional binds",
+        "exactDefectFixRequired": null
       },
       "residualRisk": "none for scalar SQL interpolation; values are bound parameters and lifecycle predicates remain DB-authoritative"
     },
@@ -2326,14 +2324,12 @@
       "line": 333,
       "column": 9,
       "callee": "db.query",
-      "sqlConstructionPattern": "template with embedded runtime value",
-      "sqlExpression": "` UPDATE devices SET flags = flags || '{\"last_health_check\": \"${new Date().toISOString()}\"}'::jsonb WHERE NOT lifecycle_state_matches( 'devices'::regclass, status, '{\"terminal\":true}'::jsonb ) `",
-      "dynamicSqlFragments": [
-        "new Date().toISOString()"
-      ],
+      "sqlConstructionPattern": "static template with bound JSONB runtime value",
+      "sqlExpression": "` UPDATE devices SET flags = flags || $1::jsonb WHERE NOT lifecycle_state_matches( 'devices'::regclass, status, '{\"terminal\":true}'::jsonb ) `",
+      "dynamicSqlFragments": [],
       "paramsConstruction": "bind vector: [JSON.stringify({ last_health_check: new Date().toISOString() })]",
       "paramsExpression": "[JSON.stringify({ last_health_check: new Date().toISOString() })]",
-      "identifierValueSeparation": "value interpolation present in SQL text; parameters are not fully separated",
+      "identifierValueSeparation": "runtime last_health_check JSON is separated from SQL text and passed as positional bind $1::jsonb",
       "placeholderArityProof": {
         "staticPlaceholderNumbers": [
           1
@@ -2343,19 +2339,20 @@
         "dynamicPlaceholderExpressions": [],
         "proofStatus": "PASS: one SQL placeholder matched by one bound parameter in focused regression"
       },
-      "testRefactorStatus": "remediated with focused ops-monitor SQL binding regression and build/diff-check evidence",
+      "testRefactorStatus": "remediated with focused ops-monitor SQL binding regression covering hostile runtime values, bind arity, lifecycle predicate preservation, build, anti-hardcoding audit, and diff-check",
       "verdict": "remediated: last_health_check JSON object is serialized and passed as $1::jsonb",
       "review": {
         "individuallyReviewed": true,
-        "placeholderParameterArity": "fix required: SQL text embeds a scalar runtime value, so placeholder/parameter arity cannot protect this value until it is converted to a bind parameter",
-        "identifierValueSeparation": "fix required: value/SQL separation is violated by a scalar interpolation in the query template",
+        "placeholderParameterArity": "PASS: SQL text contains exactly $1 and params are exactly [JSON.stringify({ last_health_check: isoTimestamp })]",
+        "identifierValueSeparation": "PASS: timestamp string is not interpolated; serialized JSONB object is passed as a positional bind",
         "testsEvidenceCommands": [
-          "TypeScript compiler API dynamic-query inventory generator over src/**/*.ts",
-          "PostgreSQL placeholder lexer over static template spans",
-          "node -e JSON.parse/count validation for sql-bind.json (records=95)"
+          "npx vitest run src/modules/ops-monitor/ops-monitor.service.test.ts (PASS: hostile lookback and JSONB timestamp values remain out of SQL text; exact $1 bind arity asserted)",
+          "npm run build (PASS)",
+          "PHONE_NETWORK_ANDROID_ROOT=/data/.openclaw/workspace/slavegate/android-agent npm run audit:no-hardcoding (PASS)",
+          "git diff --check (PASS)"
         ],
-        "residualRisk": "high until remediated and covered by PG17 regression",
-        "exactDefectFixRequired": "replace JSONB string interpolation with jsonb_build_object or a $1::jsonb bind containing last_health_check"
+        "residualRisk": "none for the proven scalar interpolation defect after regression coverage; SQL structure remains static and runtime values are passed only through positional binds",
+        "exactDefectFixRequired": null
       },
       "residualRisk": "none for scalar SQL interpolation; values are bound parameters and lifecycle predicates remain DB-authoritative"
     },
@@ -3749,30 +3746,11 @@
   ],
   "reviewGate": {
     "gate": "gate-1-95-dynamic-postgresql-callsites",
-    "updatedAt": "2026-07-30T14:33:52.490Z",
-    "updatedOnHead": "65e7eff411ce1218d4702cda3df5917232bb8bc9",
-    "productionCodeMutated": false,
+    "updatedAt": "2026-07-30T14:44:30.858Z",
+    "updatedOnHead": "same commit as this remediation artifact",
+    "productionCodeMutated": true,
     "reviewedRecordCount": 95,
-    "exactDefectsRequiringPatchBeforePromotion": [
-      {
-        "id": "dyn-sql-059",
-        "file": "src/modules/ops-monitor/ops-monitor.service.ts",
-        "line": 196,
-        "fixScope": "replace interpolated INTERVAL text with a bound numeric interval, for example NOW() - ($1::int * INTERVAL '1 hour'), and pass lookbackHours as the first bind value"
-      },
-      {
-        "id": "dyn-sql-060",
-        "file": "src/modules/ops-monitor/ops-monitor.service.ts",
-        "line": 285,
-        "fixScope": "replace interpolated INTERVAL text with a bound numeric interval, for example NOW() - ($1::int * INTERVAL '1 hour'), and pass lookbackHours as the first bind value"
-      },
-      {
-        "id": "dyn-sql-061",
-        "file": "src/modules/ops-monitor/ops-monitor.service.ts",
-        "line": 333,
-        "fixScope": "replace JSONB string interpolation with jsonb_build_object or a $1::jsonb bind containing last_health_check"
-      }
-    ]
+    "exactDefectsRequiringPatchBeforePromotion": []
   },
   "reviewUpdateHead": "same commit as this remediation artifact",
   "remediationHead": "same commit as this remediation artifact"
