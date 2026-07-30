@@ -1,4 +1,4 @@
-const CREDENTIAL_KEYS = /(api[-_]?key|authorization|bearer|token|password|passwd|secret|credential|dsn|database[-_]?url)/i;
+const CREDENTIAL_KEYS = /^(api_key|authorization|bearer|token|password|passwd|secret|credential|dsn|database_url)$/i;
 
 export function redact(value: unknown): unknown {
   if (typeof value === "string") return redactString(value);
@@ -9,9 +9,16 @@ export function redact(value: unknown): unknown {
   return Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
       key,
-      CREDENTIAL_KEYS.test(key) ? "[REDACTED]" : redact(entry),
+      isCredentialKey(key) ? "[REDACTED]" : redact(entry),
     ]),
   );
+}
+
+function isCredentialKey(key: string): boolean {
+  const normalized = key
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[-\s]+/g, "_");
+  return CREDENTIAL_KEYS.test(normalized);
 }
 
 export function redactString(value: string): string {

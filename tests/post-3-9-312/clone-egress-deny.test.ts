@@ -9,6 +9,7 @@ import {
   validateCloneHttpGateEnv,
   writeEmptyCloneEgressCapture,
 } from "../../src/harness/post-3-9-312/clone-egress-deny";
+import { redact } from "../../src/harness/post-3-9-312/redaction";
 
 describe("post-3.9.312 live-derived clone HTTP gate egress seam", () => {
   let server: http.Server;
@@ -52,6 +53,18 @@ describe("post-3.9.312 live-derived clone HTTP gate egress seam", () => {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server did not bind TCP");
     serverUrl = `http://127.0.0.1:${address.port}`;
+  });
+
+  it("redacts credential keys without hiding unrelated audit booleans", () => {
+    expect(redact({
+      apiKey: "secret",
+      databaseUrl: "postgresql://user:password@localhost/test",
+      dailyAuditOkEnvelope: true,
+    })).toEqual({
+      apiKey: "[REDACTED]",
+      databaseUrl: "[REDACTED]",
+      dailyAuditOkEnvelope: true,
+    });
   });
 
   afterAll(async () => {
