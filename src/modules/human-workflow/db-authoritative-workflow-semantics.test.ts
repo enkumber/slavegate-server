@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
+import { isFailClosedMigration } from "../../db/migrate";
 
 const serverRoot = path.resolve(__dirname, "..", "..");
 const androidRoot = path.resolve(serverRoot, "..", "..", "android-agent", "app", "src", "main");
@@ -104,6 +105,10 @@ describe("DB-authoritative workflow semantics", () => {
       path.join(__dirname, "..", "..", "db", "migrations", "100_postgres_compiler_control_plane.sql"),
       "utf8",
     );
+    const descriptorCoverageMigration = fs.readFileSync(
+      path.join(__dirname, "..", "..", "db", "migrations", "121_capability_descriptor_coverage.sql"),
+      "utf8",
+    );
 
     expect(semanticMigration).toContain("runtime_semantic_entries");
     expect(semanticMigration).not.toMatch(/\bINSERT\s+INTO\b/i);
@@ -113,8 +118,13 @@ describe("DB-authoritative workflow semantics", () => {
     expect(controlPlaneMigration).toContain("compiler_tokens");
     expect(controlPlaneMigration).not.toMatch(/\bINSERT\s+INTO\b/i);
     expect(controlPlaneMigration).not.toMatch(/\bUPDATE\b/i);
+    expect(descriptorCoverageMigration).toContain("resolve_workflow_capabilities");
+    expect(descriptorCoverageMigration).toContain("cardinality(descriptor_tokens)");
+    expect(descriptorCoverageMigration).not.toMatch(/\bINSERT\s+INTO\b/i);
+    expect(descriptorCoverageMigration).not.toMatch(/\bUPDATE\b/i);
+    expect(isFailClosedMigration("121_capability_descriptor_coverage.sql")).toBe(true);
 
-    const releaseMigrations = `${semanticMigration}\n${controlPlaneMigration}`.toLowerCase();
+    const releaseMigrations = `${semanticMigration}\n${controlPlaneMigration}\n${descriptorCoverageMigration}`.toLowerCase();
     for (const forbidden of [
       "com.android.chrome",
       "google.com",

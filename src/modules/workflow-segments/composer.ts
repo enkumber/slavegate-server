@@ -194,9 +194,9 @@ function mergeGoalContractStage(
   };
 }
 
-function composeGoalContract(
-  composition: WorkflowCompositionRecord,
-  segments: Map<string, WorkflowSegmentVersionRecord>,
+export function composeGoalContract(
+  composition: Pick<WorkflowCompositionRecord, "nodes">,
+  segments: Map<string, Pick<WorkflowSegmentVersionRecord, "template">>,
 ): WorkflowGoalContract | undefined {
   const contracts = composition.nodes.map(
     (node) => segments.get(`${node.segmentKey}@${node.segmentVersion}`)!.template.goalContract,

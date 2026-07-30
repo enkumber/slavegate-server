@@ -540,6 +540,16 @@ describe("SegmentBuildJobService dispatch", () => {
       safety_class: "underclassified",
       metadata: { buildJobId: buildJob().id, preserved: true },
     };
+    const goalContract = {
+      version: "1",
+      stages: [{
+        id: "verify",
+        required: true,
+        allowedActions: ["ui_tree_dump"],
+      }],
+      requiredOutputs: [],
+      allowedEffects: ["observation"],
+    };
     const candidate = {
       capability: {
         capabilityKey: "corrected_capability",
@@ -556,7 +566,7 @@ describe("SegmentBuildJobService dispatch", () => {
         segmentKey: "corrected_segment",
         version: "1",
         platform: "test.platform",
-        template: {},
+        template: { goalContract },
         inputSchema: { type: "object", required: [], properties: {} },
       }],
       composition: {
@@ -569,7 +579,15 @@ describe("SegmentBuildJobService dispatch", () => {
         inputResolver: { version: "1", fields: {} },
         postconditionContract: { version: "1", all: [] },
         executionPolicy: {},
-        nodes: [],
+        nodes: [{
+          nodeKey: "verify",
+          ordinal: 0,
+          segmentKey: "corrected_segment",
+          segmentVersion: "1",
+          inputBindings: {},
+          outputBindings: {},
+          dependsOn: [],
+        }],
       },
     };
 
@@ -589,6 +607,7 @@ describe("SegmentBuildJobService dispatch", () => {
         buildJobId: buildJob().id,
         preserved: true,
         corrected: true,
+        goalContract,
         managedBy: "test-manager",
       },
     });

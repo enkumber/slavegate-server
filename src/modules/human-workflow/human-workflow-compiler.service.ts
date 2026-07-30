@@ -23,6 +23,7 @@ import { loadRuntimeProfile } from "../app-mapping/runtime-profile";
 import {
   capabilityCatalogService,
   formatCompilerRetrievalContext,
+  type CompilerRetrievalContext,
 } from "./capability-catalog.service";
 import { workflowGoalContractReason } from "../workflows/goal-contract";
 import {
@@ -139,6 +140,13 @@ export function completedSegmentBuildCapabilityKey(
 ): string | null {
   const value = job.result.capabilityKey;
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+export function humanWorkflowCatalogHasCapability(
+  context: Pick<CompilerRetrievalContext, "matchedCapabilityKey">,
+): boolean {
+  return typeof context.matchedCapabilityKey === "string"
+    && context.matchedCapabilityKey.length > 0;
 }
 
 async function humanWorkflowPackageName(platform: string): Promise<string> {
@@ -580,7 +588,7 @@ export class HumanWorkflowCompilerService {
       target.account_platform,
       controlPlane.retrievalPolicy,
     );
-    if (!catalogContext.matchedCapabilityKey || !catalogContext.goalContract) {
+    if (!humanWorkflowCatalogHasCapability(catalogContext)) {
       const job = await segmentBuildJobService.createOrGet({
         requestKey,
         deviceId: input.deviceId,
@@ -623,8 +631,9 @@ export class HumanWorkflowCompilerService {
         reason: "capability_missing",
       };
     }
+    const matchedCapabilityKey = catalogContext.matchedCapabilityKey!;
     const composed = await workflowSegmentComposer.compose({
-      capabilityKey: catalogContext.matchedCapabilityKey,
+      capabilityKey: matchedCapabilityKey,
       platform: target.account_platform,
       intent,
       requestKey,
@@ -639,7 +648,7 @@ export class HumanWorkflowCompilerService {
         accountId: input.accountId ?? null,
         intent,
         platform: target.account_platform,
-        capabilityKey: catalogContext.matchedCapabilityKey,
+        capabilityKey: matchedCapabilityKey,
         reason: "composition_missing",
       });
       segmentBuildJobService.dispatchInBackground(job);
@@ -651,6 +660,14 @@ export class HumanWorkflowCompilerService {
         source: "agent",
         reason: "composition_missing",
       };
+    }
+    if (!catalogContext.goalContract) {
+      throw Object.assign(new Error("PostgreSQL capability has no Goal Contract and no promoted composition"), {
+        status: 409,
+        code: "HUMAN_WORKFLOW_CAPABILITY_CONTRACT_MISSING",
+        retryable: true,
+        nextAction: "configure_capability",
+      });
     }
 
     if (catalogContext.fullArtifactCacheKey) {

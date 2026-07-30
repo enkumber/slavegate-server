@@ -35,6 +35,7 @@ describe("workflow capability catalog PostgreSQL migration", () => {
       "034_generated_workflow_request_key.sql",
       "035_generated_workflow_canonical_artifact.sql",
       "060_generated_workflow_artifact_lifecycle.sql",
+      "088_app_runtime_profiles.sql",
     ]) {
       await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", migration), "utf8"));
     }
@@ -138,5 +139,41 @@ describe("workflow capability catalog PostgreSQL migration", () => {
       role: "complete",
       status: "active",
     }]);
+  });
+
+  it("matches a configured alias inside a detailed intent without bypassing PostgreSQL thresholds", async () => {
+    await pool.query(fs.readFileSync(
+      path.join(repoRoot, "src/db/migrations/100_postgres_compiler_control_plane.sql"),
+      "utf8",
+    ));
+    await pool.query(fs.readFileSync(
+      path.join(repoRoot, "src/db/migrations/121_capability_descriptor_coverage.sql"),
+      "utf8",
+    ));
+    await pool.query(
+      `UPDATE workflow_capabilities
+          SET aliases = ARRAY['remote support screen share'],
+              required_terms = ARRAY['remote support'],
+              min_match_score = 0.62,
+              ambiguity_margin = 0.12,
+              compiler_retrievable = TRUE
+        WHERE capability_key = 'remote_support_enable_screen_share'`,
+    );
+
+    const resolved = await pool.query(
+      `SELECT capability_key, score, selected
+         FROM resolve_workflow_capabilities($1, $2)`,
+      [
+        "Please enable remote support screen share on the connected device, verify the ready state, and keep the session private and reversible.",
+        "android",
+      ],
+    );
+
+    expect(resolved.rows).toHaveLength(1);
+    expect(resolved.rows[0]).toMatchObject({
+      capability_key: "remote_support_enable_screen_share",
+      selected: true,
+    });
+    expect(Number(resolved.rows[0].score)).toBe(1);
   });
 });

@@ -2,6 +2,7 @@ import crypto from "crypto";
 import type { PoolClient } from "pg";
 import { getDb } from "../../db/client";
 import { workflowSegmentControlPlaneService } from "../workflow-segments/control-plane.service";
+import { composeGoalContract } from "../workflow-segments/composer";
 import { transitionWorkflowExecutionBinding } from "../workflow-segments/execution-lifecycle.service";
 import type {
   SegmentInputResolver,
@@ -1154,6 +1155,20 @@ export class SegmentBuildJobService {
         });
       }
     }
+    const goalContract = composeGoalContract(
+      parsed.composition,
+      new Map(parsed.segments.map((segment) => [
+        `${segment.segmentKey}@${segment.version}`,
+        { template: segment.template },
+      ])),
+    );
+    const capabilityMetadata = {
+      ...(parsed.capability.metadata ?? {}),
+      ...policy.capabilityMetadata,
+      ...(goalContract ? { goalContract } : {}),
+      managedBy: policy.managedBy,
+      buildJobId: id,
+    };
 
     const existingCapability = await getDb().query(
       `SELECT capability_key, status, metadata
@@ -1183,12 +1198,7 @@ export class SegmentBuildJobService {
           parsed.capability.forbiddenTerms ?? [],
           parsed.capability.safetyClass,
           parsed.capability.portabilityScope,
-          JSON.stringify({
-            ...(parsed.capability.metadata ?? {}),
-            ...policy.capabilityMetadata,
-            managedBy: policy.managedBy,
-            buildJobId: id,
-          }),
+          JSON.stringify(capabilityMetadata),
         ],
       );
     } else {
@@ -1222,12 +1232,7 @@ export class SegmentBuildJobService {
           parsed.capability.forbiddenTerms ?? [],
           parsed.capability.safetyClass,
           parsed.capability.portabilityScope,
-          JSON.stringify({
-            ...(parsed.capability.metadata ?? {}),
-            ...policy.capabilityMetadata,
-            managedBy: policy.managedBy,
-            buildJobId: id,
-          }),
+          JSON.stringify(capabilityMetadata),
           id,
         ],
       );

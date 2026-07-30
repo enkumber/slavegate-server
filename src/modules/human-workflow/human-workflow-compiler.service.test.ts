@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   compositionCapabilityMetadata,
   completedSegmentBuildCapabilityKey,
+  humanWorkflowCatalogHasCapability,
   humanWorkflowArtifactMatchesIntent,
   humanWorkflowExactCacheUsable,
 } from "./human-workflow-compiler.service";
@@ -87,6 +88,18 @@ describe("completed segment-build reconciliation", () => {
     expect(completedSegmentBuildCapabilityKey({
       result: {},
     })).toBeNull();
+  });
+});
+
+describe("PostgreSQL composition retrieval", () => {
+  it("does not classify a matched capability as missing when its legacy metadata lacks goalContract", () => {
+    expect(humanWorkflowCatalogHasCapability({
+      matchedCapabilityKey: "reversible_private_draft_cleanup",
+    })).toBe(true);
+  });
+
+  it("classifies only an absent capability match as missing", () => {
+    expect(humanWorkflowCatalogHasCapability({ matchedCapabilityKey: null })).toBe(false);
   });
 });
 
