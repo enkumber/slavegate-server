@@ -1,6 +1,6 @@
 {
   "story": "STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001",
-  "generatedAt": "2026-07-30T13:47:33.653Z",
+  "generatedAt": "2026-07-30T14:32:26.064Z",
   "baseline": "505f3cddb707bef1dcd510ebde4edd966b245ca9",
   "correctionHead": "7b648114d2dd298f1eac73f104d4b5fc4fecfe02",
   "liveStatus": {
@@ -11,7 +11,16 @@
   },
   "productionReadOnlyCounts": {
     "available": false,
-    "blocker": "No production read-only DATABASE_URL/PNQ001_PG_URL was provided to this session. No production connection attempted."
+    "sourceLocated": true,
+    "source": "/data/.openclaw/workspace/slavegate/server/.env:DATABASE_URL",
+    "attemptedReadOnly": true,
+    "blocker": "DATABASE_URL exists in the live server .env, but this OpenClaw container cannot reach the configured PostgreSQL host. BEGIN READ ONLY failed before any SELECT with connect EHOSTUNREACH 10.21.0.21:5432.",
+    "httpReadbackAttempt": {
+      "url": "http://127.0.0.1:18791/api/audits/daily?date=2026-07-30&timezone=Europe%2FBucharest",
+      "method": "GET",
+      "available": false,
+      "blocker": "Configured live HTTP port is container-local to the server runtime and is not reachable from this OpenClaw session; fetch failed before any HTTP status was returned."
+    }
   },
   "requiredCounts": [
     "human_workflow_compile_jobs total",
