@@ -212,13 +212,14 @@ describe("incident service", () => {
     });
 
     const snapshotCalls = mocks.db.query.mock.calls.slice(1);
-    expect(snapshotCalls).toHaveLength(8);
+    expect(snapshotCalls).toHaveLength(9);
     expect(snapshotCalls.map((call) => call[1])).toEqual([
       ["2026-07-22", "fixture/timezone"],
       ["2026-07-22", "fixture/timezone"],
       ["2026-07-22", "fixture/timezone"],
       ["2026-07-22", "fixture/timezone"],
       ["2026-07-22", "fixture/timezone"],
+      [],
       ["2026-07-22", "fixture/timezone", INCIDENT_POLICY.maximumRetryCount],
       ["2026-07-22", "fixture/timezone"],
       ["2026-07-22", "fixture/timezone"],

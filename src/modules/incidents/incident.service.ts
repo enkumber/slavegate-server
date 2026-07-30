@@ -516,7 +516,17 @@ export async function getDailyAuditSnapshot(date: string, requestedTimezone?: st
   const findingParams = [date, timezone, operationsPolicy.maximumRetryCount];
   const windowSql = `(SELECT ($1::date::timestamp AT TIME ZONE $2) AS start_at,
                               (($1::date + 1)::timestamp AT TIME ZONE $2) AS end_at)`;
-  const [tasks, runs, artifacts, candidates, incidents, findings, changedArtifacts, changedCandidates] = await Promise.all([
+  const [
+    tasks,
+    runs,
+    artifacts,
+    candidates,
+    incidents,
+    openIncidentBacklog,
+    findings,
+    changedArtifacts,
+    changedCandidates,
+  ] = await Promise.all([
     db.query(`SELECT status, COUNT(*)::int AS count FROM tasks, ${windowSql} w
               WHERE COALESCE(completed_at, scheduled_time) >= w.start_at
                 AND COALESCE(completed_at, scheduled_time) < w.end_at GROUP BY status`, windowParams),
@@ -528,6 +538,20 @@ export async function getDailyAuditSnapshot(date: string, requestedTimezone?: st
               WHERE updated_at >= w.start_at AND updated_at < w.end_at GROUP BY status, candidate_type`, windowParams),
     db.query(`SELECT status, severity, COUNT(*)::int AS count FROM phone_network_incidents, ${windowSql} w
               WHERE last_detected_at >= w.start_at AND last_detected_at < w.end_at GROUP BY status, severity`, windowParams),
+    db.query(
+      `SELECT status, severity, COUNT(*)::int AS count,
+              MIN(last_detected_at) AS oldest_last_detected_at,
+              MAX(last_detected_at) AS newest_last_detected_at
+         FROM phone_network_incidents
+        WHERE lifecycle_state_matches(
+                'phone_network_incidents'::regclass,
+                status,
+                '{"terminal":false}'::jsonb
+              )
+        GROUP BY status, severity
+        ORDER BY severity, status`,
+      [],
+    ),
     db.query(
       `SELECT 'promoted_without_clean_5_of_5' AS kind, 'high' AS severity,
               candidate.id::text AS subject_id, candidate.candidate_key,
@@ -623,6 +647,7 @@ export async function getDailyAuditSnapshot(date: string, requestedTimezone?: st
     workflowArtifacts: artifacts.rows,
     learningCandidates: candidates.rows,
     incidents: incidents.rows,
+    openIncidentBacklog: openIncidentBacklog.rows,
     findings: findings.rows,
     changedArtifacts: changedArtifacts.rows,
     changedCandidates: changedCandidates.rows,

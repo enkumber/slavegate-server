@@ -35,6 +35,7 @@ describe("incident daily audit PostgreSQL bindings", () => {
       CREATE TABLE lifecycle_state_definitions (
         lifecycle_key TEXT NOT NULL,
         status TEXT NOT NULL,
+        terminal BOOLEAN NOT NULL DEFAULT FALSE,
         dispatchable BOOLEAN NOT NULL,
         metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
         PRIMARY KEY (lifecycle_key, status)
@@ -98,28 +99,41 @@ describe("incident daily audit PostgreSQL bindings", () => {
         outcome TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL
       );
-      CREATE OR REPLACE FUNCTION lifecycle_state_matches(
-        resource_table REGCLASS,
-        current_status TEXT,
-        selector JSONB
-      ) RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$
-        SELECT current_status = 'promoted'
-      $$;
       CREATE TABLE lifecycle_resource_bindings (
         resource_table REGCLASS NOT NULL,
         state_column NAME NOT NULL,
         lifecycle_key TEXT NOT NULL
       );
+      CREATE OR REPLACE FUNCTION lifecycle_state_matches(
+        resource_table REGCLASS,
+        current_status TEXT,
+        selector JSONB
+      ) RETURNS BOOLEAN LANGUAGE SQL STABLE AS $$
+        SELECT COALESCE((
+          SELECT (NOT selector ? 'terminal'
+                    OR definition.terminal = (selector->>'terminal')::boolean)
+             AND (NOT selector ? 'dispatchable'
+                    OR definition.dispatchable = (selector->>'dispatchable')::boolean)
+            FROM lifecycle_resource_bindings binding
+            JOIN lifecycle_state_definitions definition
+              ON definition.lifecycle_key = binding.lifecycle_key
+             AND definition.status = current_status
+           WHERE binding.resource_table = $1
+        ), FALSE)
+      $$;
 
       INSERT INTO lifecycle_state_definitions
-        (lifecycle_key, status, dispatchable)
+        (lifecycle_key, status, terminal, dispatchable)
       VALUES
-        ('runtime_semantic_entry', 'active', TRUE),
-        ('candidate_lifecycle', 'promoted', TRUE);
+        ('runtime_semantic_entry', 'active', FALSE, TRUE),
+        ('candidate_lifecycle', 'promoted', TRUE, TRUE),
+        ('incident_lifecycle', 'investigating', FALSE, FALSE),
+        ('incident_lifecycle', 'resolved', TRUE, FALSE);
       INSERT INTO lifecycle_resource_bindings
         (resource_table, state_column, lifecycle_key)
       VALUES
-        ('ui_graph_learning_candidates'::regclass, 'status', 'candidate_lifecycle');
+        ('ui_graph_learning_candidates'::regclass, 'status', 'candidate_lifecycle'),
+        ('phone_network_incidents'::regclass, 'status', 'incident_lifecycle');
       INSERT INTO runtime_semantic_entries
         (id, namespace, entry_key, lifecycle_key, status, priority, payload)
       VALUES (
@@ -144,6 +158,10 @@ describe("incident daily audit PostgreSQL bindings", () => {
           }
         }}'::jsonb
       );
+      INSERT INTO phone_network_incidents (status, severity, last_detected_at)
+      VALUES
+        ('investigating', 'medium', '2026-07-23T08:00:00Z'),
+        ('resolved', 'medium', '2026-07-23T09:00:00Z');
     `);
 
     previousDatabaseUrl = process.env.DATABASE_URL;
@@ -167,6 +185,11 @@ describe("incident daily audit PostgreSQL bindings", () => {
       date: "2026-07-30",
       timezone: "Europe/Bucharest",
       findings: [],
+      openIncidentBacklog: [{
+        status: "investigating",
+        severity: "medium",
+        count: 1,
+      }],
     });
     expect(timeout.rows[0]?.statement_timeout).toBe("15s");
   });
