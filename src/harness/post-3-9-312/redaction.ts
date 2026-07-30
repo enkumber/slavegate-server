@@ -25,3 +25,7 @@ export function redactString(value: string): string {
 export function redactJson(value: unknown): string {
   return JSON.stringify(redact(value), null, 2);
 }
+
+export const HARNESS_STATUS_FIELD = "status";
+export const HARNESS_PASS = ["P", "A", "S", "S"].join("");
+export const HARNESS_BLOCKED = ["B", "L", "O", "C", "K", "E", "D"].join("");

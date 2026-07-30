@@ -68,6 +68,8 @@ describe("post-3.9.312 incident reconciliation harness", () => {
         source_id TEXT,
         task_id TEXT,
         device_id TEXT,
+        incident_commander TEXT,
+        remediation_owner TEXT,
         last_detected_at TIMESTAMPTZ NOT NULL,
         resolved_at TIMESTAMPTZ,
         superseded_by_task_id TEXT,
@@ -95,9 +97,9 @@ describe("post-3.9.312 incident reconciliation harness", () => {
              ('incident_lifecycle', 'resolved', TRUE, FALSE);
       INSERT INTO lifecycle_resource_bindings (resource_table, state_column, lifecycle_key)
       VALUES ('phone_network_incidents'::regclass, 'status', 'incident_lifecycle');
-      INSERT INTO phone_network_incidents (id, status, severity, incident_key, source_type, source_id, task_id, device_id, last_detected_at)
-      VALUES ('11111111-1111-4111-8111-111111111111', 'investigating', 'medium', 'task:1', 'task', '1', '1', 'fixture-device', '2026-07-30T07:30:00Z'),
-             ('22222222-2222-4222-8222-222222222222', 'resolved', 'medium', 'task:2', 'task', '2', '2', 'fixture-device', '2026-07-30T07:35:00Z');
+      INSERT INTO phone_network_incidents (id, status, severity, incident_key, source_type, source_id, task_id, device_id, incident_commander, remediation_owner, last_detected_at)
+      VALUES ('11111111-1111-4111-8111-111111111111', 'investigating', 'medium', 'task:1', 'task', '1', '1', 'fixture-device', 'fixture-commander', 'fixture-owner', '2026-07-30T07:30:00Z'),
+             ('22222222-2222-4222-8222-222222222222', 'resolved', 'medium', 'task:2', 'task', '2', '2', 'fixture-device', 'fixture-commander', 'fixture-owner', '2026-07-30T07:35:00Z');
     `);
 
     server = http.createServer((req, res) => {
@@ -136,20 +138,26 @@ describe("post-3.9.312 incident reconciliation harness", () => {
     await adminPool?.end();
   });
 
-  it("fails closed before touching network or DB when mandatory config is absent", () => {
+  it("fails closed before touching network or DB when mandatory config is absent", async () => {
+    const blockedPath = path.join(os.tmpdir(), `incident-recon-blocked-${process.pid}-${Date.now()}.json`);
     expect(validateIncidentReconciliationEnv({})).toContain("PN_POST_312_INCIDENT_CANDIDATE_SHA");
-    expect(validateIncidentReconciliationEnv({
+    const blocked = await runIncidentReconciliationHarness({
       candidateSha: "a",
       expectedCandidateSha: "b",
-      sourceIdentity: "fixture-source",
+      sourceIdentity: "fixture-source\nAuthorization: Bearer leaked",
       capturedAt: "2026-07-30T08:00:00Z",
       date: "2026-07-30",
       timezone: "UTC",
       databaseUrl: "postgresql://pnqtest:secret@127.0.0.1:55432/pnq001_test",
       apiBaseUrl: "http://127.0.0.1:1",
       apiKey: "secret",
-      evidencePath: "/tmp/unused.json",
-    })).toContain("candidate SHA must exactly match PN_POST_312_INCIDENT_EXPECTED_CANDIDATE_SHA");
+      evidencePath: blockedPath,
+    });
+    expect(blocked.status).toBe("BLOCKED");
+    expect(blocked.blockedReasons).toContain("candidate SHA must exactly match PN_POST_312_INCIDENT_EXPECTED_CANDIDATE_SHA");
+    const persisted = await fs.readFile(blockedPath, "utf8");
+    expect(persisted).not.toContain("secret");
+    expect(persisted).not.toContain("Bearer leaked");
   });
 
   it("uses BEGIN READ ONLY, SELECT-only database reads, one timestamp, and HTTP GET daily audit", async () => {
@@ -169,8 +177,12 @@ describe("post-3.9.312 incident reconciliation harness", () => {
       apiBaseUrl: serverUrl,
       apiKey: "fixture-secret-token",
       evidencePath,
-      baselineTotalShapeFields: "14",
-      baselineNonterminalShapeFields: "9",
+      baselineTotalShapeFields: "16",
+      baselineNonterminalShapeFields: "11",
+      baselineStatusCountsJson: JSON.stringify([
+        { status: "investigating", severity: "medium", count: 1, oldest_last_detected_at: "2026-07-30T07:30:00.000Z", oldest_age_seconds: 1800 },
+        { status: "resolved", severity: "medium", count: 1, oldest_last_detected_at: "2026-07-30T07:35:00.000Z", oldest_age_seconds: 1500 },
+      ]),
     });
 
     expect(evidence.status).toBe("PASS");
@@ -180,7 +192,14 @@ describe("post-3.9.312 incident reconciliation harness", () => {
       dailyAuditOkEnvelope: true,
       totalShapeFieldsMatch: true,
       nonterminalShapeFieldsMatch: true,
+      statusCountsMatch: true,
     });
+    expect(evidence.comparisons.statusBacklogSemantics).toContain("daily findings");
+    expect(evidence.dbShape.ownerDistribution).toEqual([{
+      incident_commander: "fixture-commander",
+      remediation_owner: "fixture-owner",
+      count: 2,
+    }]);
     expect(lastRequest).toMatchObject({
       method: "GET",
       sourceIdentity: "forge-local-pg17-fixture",

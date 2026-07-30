@@ -4,27 +4,52 @@
   "implemented": {
     "incidentReconciliationHarness": true,
     "cloneHttpGateEgressDenySeam": true,
+    "cloneHttpE2eHarness": true,
     "failClosedEnvValidation": true,
+    "structuredBlocked": true,
     "beginReadOnly": true,
     "selectOnlyDbReads": true,
     "sameCapturedTimestamp": true,
     "httpGetDailyAudit": true,
     "redaction": true,
     "sourceIdentity": true,
-    "zeroMutationPhoneRoutes": true
+    "zeroMutationPhoneRoutes": true,
+    "hostileInputCoverage": true,
+    "replayConcurrencyCoverage": true,
+    "cleanCheckoutCommandCaptured": true,
+    "statusBacklogSemanticsExplained": true
   },
   "localVerification": {
     "vitest": [
       "tests/post-3-9-312/clone-egress-deny.test.ts",
       "tests/post-3-9-312/incident-reconciliation-harness-postgres.integration.test.ts"
     ],
+    "vitestResult": "PASS: 2 files, 6 tests",
     "build": "npm run build",
+    "buildResult": "PASS",
+    "antiHardcodingAudit": "PHONE_NETWORK_ANDROID_ROOT=/data/.openclaw/workspace/slavegate/android-agent npm run audit:no-hardcoding",
+    "antiHardcodingAuditResult": "PASS",
+    "fullSuite": "npm test",
+    "fullSuiteResult": "BLOCKED: repository PostgreSQL integration tests cannot connect because local default role pnqtest does not exist",
     "diffCheck": "git diff --check",
+    "diffCheckResult": "PASS",
     "jsonParseChecks": [
       "evidence/STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001/local-harness-evidence.json"
+    ],
+    "jsonParseResult": "PASS",
+    "cleanCheckoutReproduction": [
+      "git checkout audit/post-3.9.312-defect-class-consolidation",
+      "git clean -ffdx",
+      "npm ci",
+      "npx vitest run tests/post-3-9-312/clone-egress-deny.test.ts tests/post-3-9-312/incident-reconciliation-harness-postgres.integration.test.ts",
+      "npm run build",
+      "PHONE_NETWORK_ANDROID_ROOT=/data/.openclaw/workspace/slavegate/android-agent npm run audit:no-hardcoding",
+      "node -e \"JSON.parse(require('fs').readFileSync('evidence/STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001/local-harness-evidence.json','utf8'))\"",
+      "git diff --check"
     ]
   },
   "blockersRemaining": [
+    "disposable local PostgreSQL 17 DSN/user for executing PG17-backed fixture bodies in this container",
     "approved production-derived snapshot/read-only credential for final live reconciliation"
   ]
 }

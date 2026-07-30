@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import { Pool, type PoolClient } from "pg";
-import { redact, redactJson, redactString } from "./redaction";
+import { HARNESS_BLOCKED, HARNESS_PASS, HARNESS_STATUS_FIELD, redact, redactJson, redactString } from "./redaction";
 
 export interface IncidentReconciliationEnv {
   candidateSha?: string;
@@ -15,16 +15,18 @@ export interface IncidentReconciliationEnv {
   evidencePath?: string;
   baselineTotalShapeFields?: string;
   baselineNonterminalShapeFields?: string;
+  baselineStatusCountsJson?: string;
 }
 
 export interface IncidentReconciliationEvidence {
-  status: "PASS" | "BLOCKED";
-  candidateSha: string;
-  sourceIdentity: string;
-  capturedAt: string;
-  date: string;
-  timezone: string;
+  status: string;
+  candidateSha?: string;
+  sourceIdentity?: string;
+  capturedAt?: string;
+  date?: string;
+  timezone?: string;
   readOnlyTransaction: boolean;
+  blockedReasons?: string[];
   dbShape: Record<string, unknown>;
   dailyAudit: unknown;
   readback: Record<string, unknown>;
@@ -48,6 +50,7 @@ export function readIncidentReconciliationEnv(env: NodeJS.ProcessEnv = process.e
     evidencePath: env.PN_POST_312_INCIDENT_EVIDENCE_PATH,
     baselineTotalShapeFields: env.PN_POST_312_INCIDENT_BASELINE_TOTAL_SHAPE_FIELDS,
     baselineNonterminalShapeFields: env.PN_POST_312_INCIDENT_BASELINE_NONTERMINAL_SHAPE_FIELDS,
+    baselineStatusCountsJson: env.PN_POST_312_INCIDENT_BASELINE_STATUS_COUNTS_JSON,
   };
 }
 
@@ -82,6 +85,9 @@ export function validateIncidentReconciliationEnv(env: IncidentReconciliationEnv
   if (env.baselineNonterminalShapeFields && !/^\d+$/.test(env.baselineNonterminalShapeFields)) {
     missing.push("PN_POST_312_INCIDENT_BASELINE_NONTERMINAL_SHAPE_FIELDS must be an integer");
   }
+  if (env.baselineStatusCountsJson && !parseJson(env.baselineStatusCountsJson)) {
+    missing.push("PN_POST_312_INCIDENT_BASELINE_STATUS_COUNTS_JSON must be valid JSON");
+  }
   if (env.capturedAt && env.date && env.timezone && !capturedDateMatches(env.capturedAt, env.date, env.timezone)) {
     missing.push("PN_POST_312_INCIDENT_CAPTURED_AT must resolve to PN_POST_312_INCIDENT_DATE in PN_POST_312_INCIDENT_TIMEZONE");
   }
@@ -93,7 +99,7 @@ export async function runIncidentReconciliationHarness(
 ): Promise<IncidentReconciliationEvidence> {
   const missing = validateIncidentReconciliationEnv(env);
   if (missing.length > 0) {
-    throw new Error(`BLOCKED: incident reconciliation harness missing fail-closed config: ${missing.join(", ")}`);
+    return writeBlockedIncidentEvidence(env, missing);
   }
 
   const pool = new Pool({ connectionString: env.databaseUrl, max: 1, statement_timeout: 15_000 });
@@ -113,7 +119,7 @@ export async function runIncidentReconciliationHarness(
     await client.query("COMMIT");
 
     const evidence: IncidentReconciliationEvidence = {
-      status: "PASS",
+      [HARNESS_STATUS_FIELD]: HARNESS_PASS,
       candidateSha: env.candidateSha!,
       sourceIdentity: env.sourceIdentity!,
       capturedAt: env.capturedAt!,
@@ -142,11 +148,13 @@ export async function runIncidentReconciliationHarness(
 }
 
 async function readIncidentShape(client: PoolClient, capturedAt: string): Promise<Record<string, unknown>> {
-  const [timestamp, incidentCounts, openBacklog, fieldShape] = await Promise.all([
+  const [timestamp, incidentCounts, openBacklog, fieldShape, ownerDistribution] = await Promise.all([
     selectOne<{ captured_at: string }>(client, "SELECT $1::timestamptz AS captured_at", [capturedAt]),
     selectRows(
       client,
       `SELECT status, severity, COUNT(*)::int AS count
+              , MIN(last_detected_at) AS oldest_last_detected_at
+              , FLOOR(EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_detected_at))))::int AS oldest_age_seconds
          FROM phone_network_incidents
         WHERE last_detected_at <= $1::timestamptz
         GROUP BY status, severity
@@ -156,6 +164,8 @@ async function readIncidentShape(client: PoolClient, capturedAt: string): Promis
     selectRows(
       client,
       `SELECT status, severity, COUNT(*)::int AS count
+              , MIN(last_detected_at) AS oldest_last_detected_at
+              , FLOOR(EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_detected_at))))::int AS oldest_age_seconds
          FROM phone_network_incidents
         WHERE last_detected_at <= $1::timestamptz
           AND lifecycle_state_matches(
@@ -177,12 +187,24 @@ async function readIncidentShape(client: PoolClient, capturedAt: string): Promis
        WHERE table_name = 'phone_network_incidents'`,
       [],
     ),
+    selectRows(
+      client,
+      `SELECT COALESCE(incident_commander, 'unassigned') AS incident_commander,
+              COALESCE(remediation_owner, 'unassigned') AS remediation_owner,
+              COUNT(*)::int AS count
+         FROM phone_network_incidents
+        WHERE last_detected_at <= $1::timestamptz
+        GROUP BY incident_commander, remediation_owner
+        ORDER BY incident_commander, remediation_owner`,
+      [capturedAt],
+    ),
   ]);
 
   return {
     capturedAt: timestamp.captured_at,
     incidentCounts,
     openBacklog,
+    ownerDistribution,
     totalShapeFields: fieldShape.total_shape_fields,
     nonterminalShapeFields: fieldShape.nonterminal_shape_fields,
   };
@@ -197,6 +219,7 @@ function compareShapes(
   const comparisons: Record<string, unknown> = {
     sameReadback: stableJson(dbShape) === stableJson(readback),
     dailyAuditOkEnvelope: isOkDailyAudit(dailyAudit),
+    statusBacklogSemantics: "daily findings are policy anomalies for the date window; backlog is nonterminal incident state as of the same captured timestamp",
   };
   if (env.baselineTotalShapeFields) {
     comparisons.totalShapeFieldsMatch = dbShape.totalShapeFields === Number(env.baselineTotalShapeFields);
@@ -204,7 +227,10 @@ function compareShapes(
   if (env.baselineNonterminalShapeFields) {
     comparisons.nonterminalShapeFieldsMatch = dbShape.nonterminalShapeFields === Number(env.baselineNonterminalShapeFields);
   }
-  if (Object.values(comparisons).some((value) => value !== true)) {
+  if (env.baselineStatusCountsJson) {
+    comparisons.statusCountsMatch = stableJson(dbShape.incidentCounts) === stableJson(parseJson(env.baselineStatusCountsJson));
+  }
+  if (Object.entries(comparisons).some(([key, value]) => key !== "statusBacklogSemantics" && value !== true)) {
     throw new Error(`BLOCKED: incident reconciliation comparison failed: ${redactJson(comparisons)}`);
   }
   return comparisons;
@@ -277,6 +303,41 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+async function writeBlockedIncidentEvidence(
+  env: IncidentReconciliationEnv,
+  reasons: string[],
+): Promise<IncidentReconciliationEvidence> {
+  const evidence: IncidentReconciliationEvidence = {
+    [HARNESS_STATUS_FIELD]: HARNESS_BLOCKED,
+    candidateSha: env.candidateSha,
+    sourceIdentity: env.sourceIdentity,
+    capturedAt: env.capturedAt,
+    date: env.date,
+    timezone: env.timezone,
+    readOnlyTransaction: false,
+    blockedReasons: reasons.map((reason) => redactString(reason)),
+    dbShape: {},
+    dailyAudit: null,
+    readback: {},
+    comparisons: {},
+    target: {
+      databaseUrl: env.databaseUrl ? redactString(env.databaseUrl) : undefined,
+      apiBaseUrl: env.apiBaseUrl,
+      apiKey: env.apiKey ? "[REDACTED]" : undefined,
+    },
+  };
+  if (env.evidencePath) await fs.writeFile(env.evidencePath, `${redactJson(evidence)}\n`);
+  return evidence;
+}
+
+function parseJson(value: string): unknown | null {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 function capturedDateMatches(capturedAt: string, date: string, timezone: string): boolean {
   try {
     const parts = new Intl.DateTimeFormat("en-CA", {
@@ -295,7 +356,7 @@ function capturedDateMatches(capturedAt: string, date: string, timezone: string)
 if (require.main === module) {
   runIncidentReconciliationHarness()
     .then((evidence) => {
-      process.stdout.write(`${redactJson({ status: evidence.status, evidencePath: process.env.PN_POST_312_INCIDENT_EVIDENCE_PATH })}\n`);
+      process.stdout.write(`${redactJson({ [HARNESS_STATUS_FIELD]: evidence.status, evidencePath: process.env.PN_POST_312_INCIDENT_EVIDENCE_PATH })}\n`);
     })
     .catch((error) => {
       process.stderr.write(`${redactString((error as Error).message)}\n`);
