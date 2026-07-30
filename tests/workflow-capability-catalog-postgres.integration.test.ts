@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { closeDb } from "../src/db/client";
+import { CapabilityCatalogService } from "../src/modules/human-workflow/capability-catalog.service";
 
 const repoRoot = path.resolve(__dirname, "..");
 const postgresUrl = process.env.GENERATED_WORKFLOW_PG_URL
@@ -12,6 +14,8 @@ const postgresUrl = process.env.GENERATED_WORKFLOW_PG_URL
 let adminPool: Pool;
 let schema = "";
 let pool: Pool;
+let isolatedUrl = "";
+const previousDatabaseUrl = process.env.DATABASE_URL;
 
 describe("workflow capability catalog PostgreSQL migration", () => {
   beforeAll(async () => {
@@ -27,7 +31,8 @@ describe("workflow capability catalog PostgreSQL migration", () => {
     await adminPool.query(`CREATE SCHEMA "${schema}"`);
     const url = new URL(postgresUrl);
     url.searchParams.set("options", `-c search_path=${schema}`);
-    pool = new Pool({ connectionString: url.toString(), max: 2 });
+    isolatedUrl = url.toString();
+    pool = new Pool({ connectionString: isolatedUrl, max: 2 });
 
     await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/schema.sql"), "utf8"));
     for (const migration of [
@@ -77,6 +82,9 @@ describe("workflow capability catalog PostgreSQL migration", () => {
   });
 
   afterAll(async () => {
+    await closeDb();
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
     await pool?.end();
     if (schema) await adminPool?.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await adminPool?.end();
@@ -175,5 +183,61 @@ describe("workflow capability catalog PostgreSQL migration", () => {
       selected: true,
     });
     expect(Number(resolved.rows[0].score)).toBe(1);
+  });
+
+  it("retrieves a dispatchable artifact through the configured lifecycle binding", async () => {
+    for (const migration of [
+      "011_marketing_agency.sql",
+      "087_ui_graph_runtime.sql",
+      "105_generic_resource_lifecycle.sql",
+      "107_lifecycle_resource_bindings.sql",
+      "111_multi_column_lifecycle_bindings.sql",
+    ]) {
+      await pool.query(fs.readFileSync(
+        path.join(repoRoot, "src/db/migrations", migration),
+        "utf8",
+      ));
+    }
+    await pool.query(`
+      INSERT INTO lifecycle_state_definitions (
+        lifecycle_key, status, initial, terminal, retryable,
+        administrative, dispatchable, manual, sort_order
+      ) VALUES
+        ('test_capability_artifact_lifecycle', 'active', TRUE, TRUE, FALSE, FALSE, TRUE, FALSE, 1),
+        ('test_generated_cache_lifecycle', 'promoted', TRUE, TRUE, FALSE, FALSE, TRUE, FALSE, 1);
+      SELECT configure_lifecycle_resource_binding(
+        'workflow_capability_artifacts'::regclass,
+        'test_capability_artifact_lifecycle',
+        'status'
+      );
+      SELECT configure_lifecycle_resource_binding(
+        'generated_workflow_plan_cache'::regclass,
+        'test_generated_cache_lifecycle',
+        'artifact_state'
+      );
+    `);
+
+    process.env.DATABASE_URL = isolatedUrl;
+    const context = await new CapabilityCatalogService().retrieve(
+      "Please enable remote support screen share on the connected device, verify the ready state, and keep the session private and reversible.",
+      "android",
+      {
+        maxContextArtifacts: 4,
+        maxContextUiItems: 10,
+        maxContextFailures: 4,
+        maxRankedCapabilities: 5,
+        maxArtifactRows: 20,
+        maxFailedArtifactRows: 50,
+        maxArtifactSteps: 16,
+        artifactParamAllowlist: [],
+        uiGraphSafetyAllowlist: ["standard"],
+        artifactSafetyAllowlist: { standard: ["standard"] },
+      },
+    );
+
+    expect(context).toMatchObject({
+      matchedCapabilityKey: "remote_support_enable_screen_share",
+      fullArtifactCacheKey: "aaaaaaaaaaaaaaaaaaaaaaaa",
+    });
   });
 });

@@ -238,9 +238,9 @@ export class CapabilityCatalogService {
          JOIN generated_workflow_plan_cache cache ON cache.cache_key = binding.cache_key
          JOIN lifecycle_resource_bindings binding_lifecycle
            ON binding_lifecycle.resource_table = to_regclass('workflow_capability_artifacts')
-          AND binding_lifecycle.lifecycle_key = binding.lifecycle_key
+          AND binding_lifecycle.state_column = 'status'::name
          JOIN lifecycle_state_definitions binding_state
-           ON binding_state.lifecycle_key = binding.lifecycle_key
+           ON binding_state.lifecycle_key = binding_lifecycle.lifecycle_key
           AND binding_state.status = binding.status
          JOIN lifecycle_resource_bindings cache_lifecycle
            ON cache_lifecycle.resource_table = to_regclass('generated_workflow_plan_cache')

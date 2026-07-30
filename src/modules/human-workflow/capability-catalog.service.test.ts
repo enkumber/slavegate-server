@@ -167,6 +167,12 @@ describe("retrieval-before-LLM compiler context", () => {
     expect(selectorQuery).not.toContain("selector.lifecycle_key");
     expect(transitionQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
     expect(transitionQuery).not.toContain("ui_graph_transitions.lifecycle_key");
+    expect(artifactQuery).toContain("binding_lifecycle.state_column = 'status'::name");
+    expect(artifactQuery).toContain(
+      "binding_state.lifecycle_key = binding_lifecycle.lifecycle_key",
+    );
+    expect(artifactQuery).not.toContain("binding_lifecycle.lifecycle_key = binding.lifecycle_key");
+    expect(artifactQuery).not.toContain("binding_state.lifecycle_key = binding.lifecycle_key");
     expect(artifactQuery).toContain("cache_state.lifecycle_key = cache_lifecycle.lifecycle_key");
     expect(artifactQuery).not.toContain("cache.lifecycle_key");
     expect(failureQuery).toContain("definition.lifecycle_key = binding.lifecycle_key");
