@@ -2,7 +2,7 @@
   "story": "STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001",
   "generatedAt": "2026-07-30T14:32:26.064Z",
   "baseline": "505f3cddb707bef1dcd510ebde4edd966b245ca9",
-  "correctionHead": "7b648114d2dd298f1eac73f104d4b5fc4fecfe02",
+  "currentHeadAtVerification": "705c756d7b4eb068778a777162688ea89186ba21",
   "liveStatus": {
     "installedVersion": "3.9.312",
     "installedCommit": "505f3cddb707bef1dcd510ebde4edd966b245ca9",
@@ -22,10 +22,18 @@
       "blocker": "Configured live HTTP port is container-local to the server runtime and is not reachable from this OpenClaw session; fetch failed before any HTTP status was returned."
     }
   },
-  "requiredCounts": [
-    "human_workflow_compile_jobs total",
-    "human_workflow_compile_jobs nonterminal",
-    "human_workflow_compile_jobs retryable",
-    "human_workflow_compile_jobs initial-or-dispatchable"
-  ]
+  "requiredIncidentReconciliation": {
+    "total": 59,
+    "resolved": 5,
+    "nonterminal": 54,
+    "acknowledged": 31,
+    "investigating": 23,
+    "oldestNonterminalDate": "2026-07-23",
+    "remediationOwners": {
+      "hydra": 37,
+      "nautilus": 14,
+      "nox": 5,
+      "null": 3
+    }
+  }
 }
