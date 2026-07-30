@@ -104,6 +104,31 @@ describe("PostgreSQL composition retrieval", () => {
 });
 
 describe("exact canonical cache precedence", () => {
+  it("recomposes segment artifacts so request-bound inputs and execution identity are preserved", () => {
+    expect(humanWorkflowExactCacheUsable({
+      workflow: {
+        outputSchema: {
+          required: ["finalState"],
+          properties: {
+            finalState: { type: "object" },
+          },
+        },
+        postconditionContract: {
+          version: "1",
+          all: [{
+            left: { path: "outputs.finalState" },
+            operator: "truthy",
+          }],
+        },
+      },
+      sourceMetadata: {
+        architecture: "segments-v1",
+        compositionName: "request_bound_composition",
+        compositionKey: "composition-fingerprint",
+      },
+    } as any, "current-control-plane")).toBe(false);
+  });
+
   it("reuses a currently compiled canonical artifact with verifiable outputs", () => {
     expect(humanWorkflowExactCacheUsable({
       workflow: {

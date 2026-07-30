@@ -342,7 +342,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
         `SELECT r.id, r.task_id, r.status, r.cache_key, r.compiled_plan_hash,
                 r.safety_class, r.intent, r.context ->> 'source' AS source
            FROM agency_workflow_runs r
-          WHERE r.client_id = $1
+          WHERE r.client_id IS NOT DISTINCT FROM $1
             AND r.account_id IS NOT DISTINCT FROM $2
             AND r.device_id = $3
             AND r.idempotency_key = $4

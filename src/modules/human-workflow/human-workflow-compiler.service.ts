@@ -75,6 +75,7 @@ export type HumanWorkflowCompileReady = {
   shortcutId?: string | null;
   llmDebug?: HumanWorkflowLlmDebug;
   architecture?: "segments-v1";
+  capabilityKey?: string;
   compositionName?: string;
   compositionVersion?: string;
   compositionKey?: string;
@@ -219,6 +220,13 @@ export function humanWorkflowExactCacheUsable(
   cached: GeneratedWorkflowPlanCacheRecord,
   compilerVersion: string,
 ): boolean {
+  if (
+    cached.sourceMetadata?.architecture === "segments-v1"
+    || typeof cached.sourceMetadata?.compositionKey === "string"
+    || typeof cached.sourceMetadata?.compositionName === "string"
+  ) {
+    return false;
+  }
   if (humanWorkflowCacheUsable(cached, compilerVersion)) return true;
   return (cached.workflow.outputSchema?.required?.length ?? 0) > 0
     && (cached.workflow.postconditionContract?.all?.length ?? 0) > 0;
@@ -422,6 +430,7 @@ async function readyFromComposition(
     target,
     llmBudget: compiledPlan.llmBudget,
     architecture: composed.architecture,
+    capabilityKey: composed.capabilityKey,
     compositionName: composed.compositionName,
     compositionVersion: composed.compositionVersion,
     compositionKey: composed.compositionKey,
