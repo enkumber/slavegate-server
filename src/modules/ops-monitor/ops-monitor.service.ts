@@ -202,9 +202,9 @@ async function collectUIMetrics(db: any, lookbackHours: number): Promise<UIMetri
       SUM(CASE WHEN method_used = 'vision' THEN 1 ELSE 0 END) as vision_success,
       SUM(CASE WHEN NOT verified THEN 1 ELSE 0 END) as element_not_found_count
     FROM navigation_logs
-    WHERE created_at > NOW() - INTERVAL '${lookbackHours} hours'
+    WHERE created_at > NOW() - ($1::int * INTERVAL '1 hour')
     GROUP BY app
-  `);
+  `, [lookbackHours]);
   
   return result.rows.map((row: any) => {
     const total = parseInt(row.total_taps) || 1;
@@ -289,9 +289,9 @@ async function collectMappingMetrics(db: any, lookbackHours: number): Promise<Ma
       unmapped_elements,
       elements_failed
     FROM mapping_reports
-    WHERE created_at > NOW() - INTERVAL '${lookbackHours} hours'
+    WHERE created_at > NOW() - ($1::int * INTERVAL '1 hour')
     ORDER BY created_at DESC
-  `);
+  `, [lookbackHours]);
   
   // Dedupe by app (keep latest)
   const byApp = new Map<string, MappingMetrics>();
@@ -332,13 +332,13 @@ async function flagDevice(db: any, deviceId: string, minutesOffline: number): Pr
 async function updateDeviceHealthCheck(db: any): Promise<void> {
   await db.query(`
     UPDATE devices
-    SET flags = flags || '{"last_health_check": "${new Date().toISOString()}"}'::jsonb
+    SET flags = flags || $1::jsonb
     WHERE NOT lifecycle_state_matches(
       'devices'::regclass,
       status,
       '{"terminal":true}'::jsonb
     )
-  `);
+  `, [JSON.stringify({ last_health_check: new Date().toISOString() })]);
 }
 
 async function flagAccount(db: any, accountId: string, softBlocked: boolean, rateLimitHits: number): Promise<void> {

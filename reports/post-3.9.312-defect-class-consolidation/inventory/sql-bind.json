@@ -14,12 +14,13 @@
   "validation": {
     "expectedRecordCount": 95,
     "actualRecordCount": 95,
-    "defectRecords": [
+    "defectRecords": [],
+    "reviewedRecordCount": 95,
+    "remediatedRecords": [
       "dyn-sql-059",
       "dyn-sql-060",
       "dyn-sql-061"
-    ],
-    "reviewedRecordCount": 95
+    ]
   },
   "records": [
     {
@@ -2252,18 +2253,20 @@
       "dynamicSqlFragments": [
         "lookbackHours"
       ],
-      "paramsConstruction": "no params argument",
-      "paramsExpression": null,
+      "paramsConstruction": "bind vector: [lookbackHours]",
+      "paramsExpression": "[lookbackHours]",
       "identifierValueSeparation": "value interpolation present in SQL text; parameters are not fully separated",
       "placeholderArityProof": {
-        "staticPlaceholderNumbers": [],
+        "staticPlaceholderNumbers": [
+          1
+        ],
         "staticPlaceholdersContiguousFromOne": true,
-        "maxStaticPlaceholder": 0,
+        "maxStaticPlaceholder": 1,
         "dynamicPlaceholderExpressions": [],
-        "proofStatus": "symbolic/manual proof required; AST inventory captured fragment and bind expressions for branch tracing"
+        "proofStatus": "PASS: one SQL placeholder matched by one bound parameter in focused regression"
       },
-      "testRefactorStatus": "inventory-only; no production mutation in P1; needs targeted PG17 regression if remediated",
-      "verdict": "defect: scalar value is interpolated into SQL text; parameterize before remediation claim",
+      "testRefactorStatus": "remediated with focused ops-monitor SQL binding regression and build/diff-check evidence",
+      "verdict": "remediated: lookbackHours is bound as $1::int and multiplied by INTERVAL '1 hour'",
       "review": {
         "individuallyReviewed": true,
         "placeholderParameterArity": "fix required: SQL text embeds a scalar runtime value, so placeholder/parameter arity cannot protect this value until it is converted to a bind parameter",
@@ -2275,7 +2278,8 @@
         ],
         "residualRisk": "high until remediated and covered by PG17 regression",
         "exactDefectFixRequired": "replace interpolated INTERVAL text with a bound numeric interval, for example NOW() - ($1::int * INTERVAL '1 hour'), and pass lookbackHours as the first bind value"
-      }
+      },
+      "residualRisk": "none for scalar SQL interpolation; values are bound parameters and lifecycle predicates remain DB-authoritative"
     },
     {
       "id": "dyn-sql-060",
@@ -2288,18 +2292,20 @@
       "dynamicSqlFragments": [
         "lookbackHours"
       ],
-      "paramsConstruction": "no params argument",
-      "paramsExpression": null,
+      "paramsConstruction": "bind vector: [lookbackHours]",
+      "paramsExpression": "[lookbackHours]",
       "identifierValueSeparation": "value interpolation present in SQL text; parameters are not fully separated",
       "placeholderArityProof": {
-        "staticPlaceholderNumbers": [],
+        "staticPlaceholderNumbers": [
+          1
+        ],
         "staticPlaceholdersContiguousFromOne": true,
-        "maxStaticPlaceholder": 0,
+        "maxStaticPlaceholder": 1,
         "dynamicPlaceholderExpressions": [],
-        "proofStatus": "symbolic/manual proof required; AST inventory captured fragment and bind expressions for branch tracing"
+        "proofStatus": "PASS: one SQL placeholder matched by one bound parameter in focused regression"
       },
-      "testRefactorStatus": "inventory-only; no production mutation in P1; needs targeted PG17 regression if remediated",
-      "verdict": "defect: scalar value is interpolated into SQL text; parameterize before remediation claim",
+      "testRefactorStatus": "remediated with focused ops-monitor SQL binding regression and build/diff-check evidence",
+      "verdict": "remediated: lookbackHours is bound as $1::int and multiplied by INTERVAL '1 hour'",
       "review": {
         "individuallyReviewed": true,
         "placeholderParameterArity": "fix required: SQL text embeds a scalar runtime value, so placeholder/parameter arity cannot protect this value until it is converted to a bind parameter",
@@ -2311,7 +2317,8 @@
         ],
         "residualRisk": "high until remediated and covered by PG17 regression",
         "exactDefectFixRequired": "replace interpolated INTERVAL text with a bound numeric interval, for example NOW() - ($1::int * INTERVAL '1 hour'), and pass lookbackHours as the first bind value"
-      }
+      },
+      "residualRisk": "none for scalar SQL interpolation; values are bound parameters and lifecycle predicates remain DB-authoritative"
     },
     {
       "id": "dyn-sql-061",
@@ -2324,18 +2331,20 @@
       "dynamicSqlFragments": [
         "new Date().toISOString()"
       ],
-      "paramsConstruction": "no params argument",
-      "paramsExpression": null,
+      "paramsConstruction": "bind vector: [JSON.stringify({ last_health_check: new Date().toISOString() })]",
+      "paramsExpression": "[JSON.stringify({ last_health_check: new Date().toISOString() })]",
       "identifierValueSeparation": "value interpolation present in SQL text; parameters are not fully separated",
       "placeholderArityProof": {
-        "staticPlaceholderNumbers": [],
+        "staticPlaceholderNumbers": [
+          1
+        ],
         "staticPlaceholdersContiguousFromOne": true,
-        "maxStaticPlaceholder": 0,
+        "maxStaticPlaceholder": 1,
         "dynamicPlaceholderExpressions": [],
-        "proofStatus": "symbolic/manual proof required; AST inventory captured fragment and bind expressions for branch tracing"
+        "proofStatus": "PASS: one SQL placeholder matched by one bound parameter in focused regression"
       },
-      "testRefactorStatus": "inventory-only; no production mutation in P1; needs targeted PG17 regression if remediated",
-      "verdict": "defect: scalar value is interpolated into SQL text; parameterize before remediation claim",
+      "testRefactorStatus": "remediated with focused ops-monitor SQL binding regression and build/diff-check evidence",
+      "verdict": "remediated: last_health_check JSON object is serialized and passed as $1::jsonb",
       "review": {
         "individuallyReviewed": true,
         "placeholderParameterArity": "fix required: SQL text embeds a scalar runtime value, so placeholder/parameter arity cannot protect this value until it is converted to a bind parameter",
@@ -2347,7 +2356,8 @@
         ],
         "residualRisk": "high until remediated and covered by PG17 regression",
         "exactDefectFixRequired": "replace JSONB string interpolation with jsonb_build_object or a $1::jsonb bind containing last_health_check"
-      }
+      },
+      "residualRisk": "none for scalar SQL interpolation; values are bound parameters and lifecycle predicates remain DB-authoritative"
     },
     {
       "id": "dyn-sql-062",
@@ -3763,5 +3773,7 @@
         "fixScope": "replace JSONB string interpolation with jsonb_build_object or a $1::jsonb bind containing last_health_check"
       }
     ]
-  }
+  },
+  "reviewUpdateHead": "same commit as this remediation artifact",
+  "remediationHead": "same commit as this remediation artifact"
 }
