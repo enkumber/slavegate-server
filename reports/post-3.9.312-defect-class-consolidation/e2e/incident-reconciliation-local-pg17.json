@@ -1,7 +1,7 @@
 {
   "status": "PASS",
-  "candidateSha": "4ab7337bfd8ff532fffe72ea83c9937b91a6488d",
-  "sourceIdentity": "post312-local-pg17-4ab7337bfd8f",
+  "candidateSha": "f0a9bac60747bc36f8e6adb44e0d56df2b06ee17",
+  "sourceIdentity": "post312-local-pg17-f0a9bac60747",
   "capturedAt": "2026-07-30T08:00:00Z",
   "date": "2026-07-30",
   "timezone": "UTC",
@@ -113,8 +113,8 @@
   },
   "dailyAudit": {
     "ok": true,
-    "candidateSha": "4ab7337bfd8ff532fffe72ea83c9937b91a6488d",
-    "sourceIdentity": "post312-local-pg17-4ab7337bfd8f",
+    "candidateSha": "f0a9bac60747bc36f8e6adb44e0d56df2b06ee17",
+    "sourceIdentity": "post312-local-pg17-f0a9bac60747",
     "data": {
       "capturedAt": "2026-07-30T08:00:00Z",
       "date": "2026-07-30",
@@ -273,7 +273,7 @@
   },
   "target": {
     "databaseUrl": "[REDACTED]",
-    "apiBaseUrl": "http://127.0.0.1:58202",
+    "apiBaseUrl": "http://127.0.0.1:58765",
     "apiKey": "[REDACTED]"
   }
 }

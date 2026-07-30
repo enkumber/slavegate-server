@@ -50,7 +50,7 @@ async function handleDailyAudit(url: URL, res: http.ServerResponse): Promise<voi
 async function readBusinessShape(capturedAt: string, date: string, timezone: string): Promise<Record<string, unknown>> {
   const windowSql = `(SELECT ($1::date::timestamp AT TIME ZONE $2) AS start_at,
                             (($1::date + 1)::timestamp AT TIME ZONE $2) AS end_at)`;
-  const [incidents, openIncidentBacklog] = await Promise.all([
+  const [incidents, openIncidentBacklog, incidentCounts, nonterminal, oldestAges, ownerDistribution] = await Promise.all([
     pool.query(`SELECT status, severity, COUNT(*)::int AS count
                   FROM phone_network_incidents, ${windowSql} w
                  WHERE last_detected_at >= w.start_at AND last_detected_at < w.end_at
@@ -67,6 +67,30 @@ async function readBusinessShape(capturedAt: string, date: string, timezone: str
                        )
                  GROUP BY status, severity
                  ORDER BY severity, status`, [capturedAt]),
+    pool.query(`SELECT status, severity, COUNT(*)::int AS count,
+                       MIN(last_detected_at) AS oldest_last_detected_at,
+                       FLOOR(EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_detected_at))))::int AS oldest_age_seconds
+                  FROM phone_network_incidents
+                 WHERE last_detected_at <= $1::timestamptz
+                 GROUP BY status, severity
+                 ORDER BY status, severity`, [capturedAt]),
+    pool.query(`SELECT COUNT(*)::int AS count
+                  FROM phone_network_incidents
+                 WHERE last_detected_at <= $1::timestamptz
+                   AND lifecycle_state_matches('phone_network_incidents'::regclass, status, '{"terminal":false}'::jsonb)`,
+      [capturedAt]),
+    pool.query(`SELECT status, MIN(last_detected_at) AS oldest_last_detected_at,
+                       FLOOR(EXTRACT(EPOCH FROM ($1::timestamptz - MIN(last_detected_at))))::int AS oldest_age_seconds
+                  FROM phone_network_incidents
+                 WHERE last_detected_at <= $1::timestamptz
+                 GROUP BY status ORDER BY status`, [capturedAt]),
+    pool.query(`SELECT COALESCE(incident_commander, 'unassigned') AS incident_commander,
+                       COALESCE(remediation_owner, 'unassigned') AS remediation_owner,
+                       COUNT(*)::int AS count
+                  FROM phone_network_incidents
+                 WHERE last_detected_at <= $1::timestamptz
+                 GROUP BY incident_commander, remediation_owner
+                 ORDER BY incident_commander, remediation_owner`, [capturedAt]),
   ]);
   return {
     capturedAt,
@@ -74,6 +98,11 @@ async function readBusinessShape(capturedAt: string, date: string, timezone: str
     timezone,
     incidents: incidents.rows,
     openIncidentBacklog: openIncidentBacklog.rows,
+    incidentCounts: incidentCounts.rows,
+    statusDistribution: incidentCounts.rows.map(({ oldest_last_detected_at: _oldest, oldest_age_seconds: _age, ...row }) => row),
+    nonterminalCount: nonterminal.rows[0]?.count,
+    oldestAges: oldestAges.rows,
+    ownerDistribution: ownerDistribution.rows,
   };
 }
 

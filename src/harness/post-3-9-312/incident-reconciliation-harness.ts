@@ -267,6 +267,11 @@ function compareShapes(
     capturedAtMatchesHttp: timestampsEqual(dbShape.capturedAt, httpBusinessValue(dailyAudit, "capturedAt")),
     dailyIncidentsMatchHttp: stableJson(dbShape.dailyIncidents) === stableJson(httpBusinessValue(dailyAudit, "incidents")),
     openBacklogMatchesHttp: stableJson(dbShape.openBacklog) === stableJson(httpBusinessValue(dailyAudit, "openIncidentBacklog")),
+    totalsMatchHttp: stableJson(dbShape.incidentCounts) === stableJson(httpBusinessValue(dailyAudit, "incidentCounts")),
+    nonterminalMatchesHttp: dbShape.nonterminalCount === httpBusinessValue(dailyAudit, "nonterminalCount"),
+    statusDistributionMatchesHttp: stableJson(dbShape.statusDistribution) === stableJson(httpBusinessValue(dailyAudit, "statusDistribution")),
+    oldestAgesMatchHttp: stableJson(dbShape.oldestAges) === stableJson(httpBusinessValue(dailyAudit, "oldestAges")),
+    ownerDistributionMatchesHttp: stableJson(dbShape.ownerDistribution) === stableJson(httpBusinessValue(dailyAudit, "ownerDistribution")),
     statusBacklogSemantics: "daily findings are policy anomalies for the date window; backlog is nonterminal incident state as of the same captured timestamp",
   };
   if (env.baselineTotalShapeFields) {
