@@ -1,0 +1,10 @@
+{
+  "story": "STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001",
+  "generatedAt": "2026-07-30T13:47:33.653Z",
+  "clone": {
+    "available": false,
+    "blocker": "Live-derived snapshot/export source unavailable; disposable clone HTTP mutation evidence not yet complete for this lane."
+  },
+  "before": null,
+  "after": null
+}

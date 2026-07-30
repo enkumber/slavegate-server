@@ -1,0 +1,1 @@
+Lane B egress proof pending real live-derived clone harness. No phone/ADB/live DB actions were performed by SPARK before this artifact. Candidate egress controls required: DNS/HTTP/WS/VLM/device capture sinks plus network boundary deny.

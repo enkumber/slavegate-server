@@ -1,0 +1,61 @@
+{
+  "story": "STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001",
+  "generatedAt": "2026-07-30T13:47:33.653Z",
+  "baseline": "505f3cddb707bef1dcd510ebde4edd966b245ca9",
+  "matrix": [
+    {
+      "surface": "human compile jobs",
+      "tables": "human_workflow_compile_jobs",
+      "states": "initial/pending, active/running, retryable, terminal",
+      "restartProof": "lease_expires_at + startup/reconcileOnce discovery",
+      "concurrencyProof": "lease_owner + lease_generation; stale owner update returns zero rows",
+      "idempotencyProof": "request_key and request_payload_hash exact replay/conflict",
+      "requiredLaneBEvidence": "real HTTP or PG17 clone transcript required before promotion claim"
+    },
+    {
+      "surface": "segment build jobs",
+      "tables": "segment_build_jobs",
+      "states": "queued/running/retryable/terminal",
+      "restartProof": "claim expiry and dispatcher re-registration",
+      "concurrencyProof": "agent_session_key/claim_expires_at fencing",
+      "idempotencyProof": "idempotency_key unique",
+      "requiredLaneBEvidence": "real HTTP or PG17 clone transcript required before promotion claim"
+    },
+    {
+      "surface": "workflow runs",
+      "tables": "agency_workflow_runs/workflows/generated_workflow_plan_cache",
+      "states": "accepted/running/blocked/retryable/terminal",
+      "restartProof": "readback after restart through /api/workflows and /api/agency/workflow-runs",
+      "concurrencyProof": "advisory lock/idempotency key/dispatch task linkage",
+      "idempotencyProof": "same request key replay; conflict on canonical payload",
+      "requiredLaneBEvidence": "real HTTP or PG17 clone transcript required before promotion claim"
+    },
+    {
+      "surface": "device execution queue",
+      "tables": "device_execution_roots / pnq v2 tables",
+      "states": "queued/leased/running/terminal",
+      "restartProof": "lease expiry sweep/reclaim",
+      "concurrencyProof": "SKIP LOCKED/CAS generation and node identity",
+      "idempotencyProof": "node_id + request_key idempotency",
+      "requiredLaneBEvidence": "real HTTP or PG17 clone transcript required before promotion claim"
+    },
+    {
+      "surface": "incidents/audits",
+      "tables": "phone_network_incidents/daily audit tables",
+      "states": "open/reconciled/terminal",
+      "restartProof": "incident list/readback after restart",
+      "concurrencyProof": "monotonic status/event append",
+      "idempotencyProof": "daily audit/reconcile is idempotent",
+      "requiredLaneBEvidence": "real HTTP or PG17 clone transcript required before promotion claim"
+    },
+    {
+      "surface": "UI graph recovery",
+      "tables": "ui graph candidates/recovery events",
+      "states": "pending/running/retryable/terminal",
+      "restartProof": "runtime policy reload and pending recovery readback",
+      "concurrencyProof": "owner/attempt fencing; stale recovery rejected",
+      "idempotencyProof": "duplicate recovery request coalesces",
+      "requiredLaneBEvidence": "real HTTP or PG17 clone transcript required before promotion claim"
+    }
+  ]
+}

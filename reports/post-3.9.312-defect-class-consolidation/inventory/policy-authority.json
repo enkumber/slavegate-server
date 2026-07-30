@@ -1,0 +1,147 @@
+{
+  "story": "STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001",
+  "generatedAt": "2026-07-30T13:47:33.653Z",
+  "baseline": "505f3cddb707bef1dcd510ebde4edd966b245ca9",
+  "policies": [
+    {
+      "name": "runtime semantics",
+      "file": "src/modules/runtime-semantics/runtime-semantics.service.ts",
+      "table": "runtime_semantic_entries",
+      "authority": "lifecycle_resource_bindings + lifecycle_state_definitions dispatchable filters",
+      "validation": "JSON object payload, namespace/key/platform/lifecycle/status validation",
+      "matrix": {
+        "active_valid": "must proceed",
+        "missing": "must fail closed or report unavailable",
+        "disabled_non_dispatchable": "must not proceed from cache",
+        "malformed_duplicate": "must reject or return 409/503 typed failure"
+      },
+      "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
+    },
+    {
+      "name": "resource runtime policies",
+      "file": "src/modules/runtime-policy/resource-runtime-policy.service.ts",
+      "table": "resource_runtime_policies",
+      "authority": "route admin auth; no lifecycle state but resource table regclass authority",
+      "validation": "policy must be JSON object",
+      "matrix": {
+        "active_valid": "must proceed",
+        "missing": "must fail closed or report unavailable",
+        "disabled_non_dispatchable": "must not proceed from cache",
+        "malformed_duplicate": "must reject or return 409/503 typed failure"
+      },
+      "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
+    },
+    {
+      "name": "lifecycle resource policies",
+      "file": "src/modules/lifecycle/lifecycle.service.ts",
+      "table": "lifecycle_resource_policies",
+      "authority": "binding/resource table/state column and enabled/disabled JSON",
+      "validation": "policy object; unavailable throws fail-closed",
+      "matrix": {
+        "active_valid": "must proceed",
+        "missing": "must fail closed or report unavailable",
+        "disabled_non_dispatchable": "must not proceed from cache",
+        "malformed_duplicate": "must reject or return 409/503 typed failure"
+      },
+      "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
+    },
+    {
+      "name": "human workflow compiler control plane",
+      "file": "src/modules/human-workflow/compiler-control-plane.service.ts",
+      "table": "runtime_semantic_entries + system_prompts + tool_catalog",
+      "authority": "dispatchable runtime semantic entry only",
+      "validation": "valid prompt keys, llm integers, retrieval policy arrays/maps",
+      "matrix": {
+        "active_valid": "must proceed",
+        "missing": "must fail closed or report unavailable",
+        "disabled_non_dispatchable": "must not proceed from cache",
+        "malformed_duplicate": "must reject or return 409/503 typed failure"
+      },
+      "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
+    },
+    {
+      "name": "model config",
+      "file": "src/modules/model-config/model-config.service.ts",
+      "table": "model_configs",
+      "authority": "role-scoped DB rows; credential refs only",
+      "validation": "metadata-only updates, provider/model validation",
+      "matrix": {
+        "active_valid": "must proceed",
+        "missing": "must fail closed or report unavailable",
+        "disabled_non_dispatchable": "must not proceed from cache",
+        "malformed_duplicate": "must reject or return 409/503 typed failure"
+      },
+      "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
+    },
+    {
+      "name": "segment builder runtime policy",
+      "file": "src/modules/segment-builder/runtime-policy.ts",
+      "table": "resource_runtime_policies",
+      "authority": "DB policy load for segment_build_jobs",
+      "validation": "lease/dispatcher timings and owner policy",
+      "matrix": {
+        "active_valid": "must proceed",
+        "missing": "must fail closed or report unavailable",
+        "disabled_non_dispatchable": "must not proceed from cache",
+        "malformed_duplicate": "must reject or return 409/503 typed failure"
+      },
+      "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
+    },
+    {
+      "name": "ui graph runtime policy",
+      "file": "src/modules/ui-graph/runtime-policy.ts",
+      "table": "resource_runtime_policies/runtime_semantic_entries",
+      "authority": "DB/config policy gates for learning/recovery",
+      "validation": "typed runtime policy object",
+      "matrix": {
+        "active_valid": "must proceed",
+        "missing": "must fail closed or report unavailable",
+        "disabled_non_dispatchable": "must not proceed from cache",
+        "malformed_duplicate": "must reject or return 409/503 typed failure"
+      },
+      "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
+    },
+    {
+      "name": "workflow runtime policy",
+      "file": "src/modules/workflows/workflow-runtime-config.ts",
+      "table": "resource_runtime_policies",
+      "authority": "DB configured workflow runtime behavior",
+      "validation": "typed worker/retry controls",
+      "matrix": {
+        "active_valid": "must proceed",
+        "missing": "must fail closed or report unavailable",
+        "disabled_non_dispatchable": "must not proceed from cache",
+        "malformed_duplicate": "must reject or return 409/503 typed failure"
+      },
+      "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
+    },
+    {
+      "name": "connection recovery policy",
+      "file": "src/ws/connection-recovery-config.ts",
+      "table": "resource_runtime_policies",
+      "authority": "DB configured recovery behavior",
+      "validation": "typed cooldown/reconnect policy",
+      "matrix": {
+        "active_valid": "must proceed",
+        "missing": "must fail closed or report unavailable",
+        "disabled_non_dispatchable": "must not proceed from cache",
+        "malformed_duplicate": "must reject or return 409/503 typed failure"
+      },
+      "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
+    },
+    {
+      "name": "device execution runtime",
+      "file": "src/modules/device-execution/pnq-v2-runtime-config.ts",
+      "table": "resource_runtime_policies",
+      "authority": "DB configured queue-v2 runtime",
+      "validation": "typed sweep/claim policies",
+      "matrix": {
+        "active_valid": "must proceed",
+        "missing": "must fail closed or report unavailable",
+        "disabled_non_dispatchable": "must not proceed from cache",
+        "malformed_duplicate": "must reject or return 409/503 typed failure"
+      },
+      "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
+    }
+  ]
+}
