@@ -119,15 +119,16 @@ function handleConflict(url: URL, res: http.ServerResponse): void {
 }
 
 async function exerciseForbiddenEgress(): Promise<void> {
-  const results = await Promise.allSettled([
+  const probes = [
     import("node:dns/promises").then((dns) => dns.lookup("example.invalid")),
     fetch("http://198.51.100.10/"),
     fetch("http://198.51.100.11:81/socket"),
     fetch("https://198.51.100.12/v1/vlm"),
     fetch("http://198.51.100.13:5555/device-dispatch"),
     fetch("http://198.51.100.14:18791/phone-dispatch"),
-  ]);
-  if (results.some((result) => result.status === "fulfilled")) {
+  ];
+  const boundaryEscapes = await Promise.all(probes.map((probe) => probe.then(() => true, () => false)));
+  if (boundaryEscapes.some(Boolean)) {
     throw new Error("external boundary allowed a forbidden operation");
   }
 }
