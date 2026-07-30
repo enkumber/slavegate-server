@@ -5,6 +5,7 @@
  * DirectWS only transport.
  */
 
+import crypto from "crypto";
 import { directWsServer } from "../ws/direct-ws.server";
 import { deviceExecutionArbiter } from "../modules/device-execution";
 import { getDb } from "../db/client";
@@ -78,6 +79,74 @@ export interface EdgeWorkflowSendResult {
   queued: boolean;
 }
 
+class PromotionGateCaptureConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PromotionGateCaptureConfigurationError";
+  }
+}
+
+function promotionGateCaptureRequested(): boolean {
+  return process.env.PN_PROMOTION_GATE_EGRESS_CAPTURE === "enabled";
+}
+
+async function promotionGateDbFingerprint(): Promise<string> {
+  const result = await getDb().query<{ database_name: string; schema_name: string }>(
+    "SELECT current_database() AS database_name, current_schema() AS schema_name",
+  );
+  const row = result.rows[0];
+  return crypto
+    .createHash("sha256")
+    .update(`${row.database_name}:${row.schema_name}`)
+    .digest("hex");
+}
+
+async function assertPromotionGateCaptureReady(): Promise<string> {
+  if (!promotionGateCaptureRequested()) {
+    throw new PromotionGateCaptureConfigurationError("promotion gate egress capture is not enabled");
+  }
+  const expected = process.env.PN_PROMOTION_GATE_DB_FINGERPRINT;
+  if (!expected || !/^[a-f0-9]{64}$/.test(expected)) {
+    throw new PromotionGateCaptureConfigurationError("promotion gate DB fingerprint is not configured");
+  }
+  const actual = await promotionGateDbFingerprint();
+  if (actual !== expected) {
+    throw new PromotionGateCaptureConfigurationError("promotion gate DB fingerprint mismatch");
+  }
+  return actual;
+}
+
+async function capturePromotionGateEgress(envelope: DeviceExecutionJobReplayEnvelopeV1 | DeviceExecutionEdgeWorkflowReplayEnvelopeV1): Promise<boolean> {
+  if (!promotionGateCaptureRequested()) return false;
+  const fingerprint = await assertPromotionGateCaptureReady();
+  const dispatchIdentity = `${envelope.boundary}:${envelope.rootKind}:${envelope.rootExternalId}:${envelope.operationKind}:${envelope.operationId}`;
+  const result = await getDb().query(
+    `INSERT INTO promotion_gate_egress_captures
+       (capture_mode, db_fingerprint, device_id, boundary, root_kind, root_external_id,
+        operation_kind, operation_id, dispatch_identity, envelope)
+     VALUES ('isolated_live_clone_http', $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+     ON CONFLICT (capture_mode, db_fingerprint, dispatch_identity)
+     DO UPDATE SET envelope = promotion_gate_egress_captures.envelope
+       WHERE promotion_gate_egress_captures.envelope = EXCLUDED.envelope
+     RETURNING id`,
+    [
+      fingerprint,
+      envelope.deviceId,
+      envelope.boundary,
+      envelope.rootKind,
+      envelope.rootExternalId,
+      envelope.operationKind,
+      envelope.operationId,
+      dispatchIdentity,
+      JSON.stringify(envelope),
+    ],
+  );
+  if (!result.rows[0]) {
+    throw new Error("promotion gate egress capture identity conflict");
+  }
+  return true;
+}
+
 export type LegacyGeneratedWorkflowJobSendResult = Pick<
   StandaloneJobSendResult,
   "decision" | "root" | "operation" | "handle" | "reason" | "sent" | "queued"
@@ -96,6 +165,9 @@ export interface LegacyGeneratedWorkflowJobSendOptions {
  * Returns true if sent successfully, false if device unreachable.
  */
 export function sendJobToDevice(deviceId: string, payload: JobDispatchPayload): boolean {
+  if (promotionGateCaptureRequested()) {
+    throw new Error("raw DirectWS JOB send is forbidden in promotion gate capture mode");
+  }
   if (!isDeviceExecutionEnforced()) {
     return sendObserveOnlyJobToDevice(deviceId, payload);
   }
@@ -157,6 +229,9 @@ export async function sendLegacyGeneratedWorkflowJobToDevice(
   payload: JobDispatchPayload,
   options: LegacyGeneratedWorkflowJobSendOptions = {},
 ): Promise<LegacyGeneratedWorkflowJobSendResult> {
+  if (promotionGateCaptureRequested()) {
+    throw new Error("legacy raw DirectWS JOB send is forbidden in promotion gate capture mode");
+  }
   const executionTimeoutMs = payload.timeoutMs ?? 300_000;
   const { sent, resultPromise } = directWsServer.sendLegacyGeneratedWorkflowJob(
     deviceId,
@@ -224,7 +299,10 @@ export async function sendDeviceExecutionJobToDevice(
     registerWaiter: (permit) => {
       directWsServer.registerJobWaiterWithPermit(permit, payload.timeoutMs ?? 300_000);
     },
-    wireDispatch: (permit) => directWsServer.sendJobWithPermit(permit, payload),
+    wireDispatch: async (permit) => {
+      if (await capturePromotionGateEgress(replayEnvelope)) return true;
+      return directWsServer.sendJobWithPermit(permit, payload);
+    },
   });
 
   if (!result.sent && result.permit) {
@@ -340,7 +418,10 @@ export async function sendEdgeWorkflowToDeviceEnforced(
       dispatchEnvelope: replayEnvelope,
       observeSource: options.observeSource ?? "transport.sendEdgeWorkflowToDeviceEnforced",
     },
-    wireDispatch: (handle) => directWsServer.sendWorkflowStartWithHandle(handle, hydratedTemplate, variables),
+    wireDispatch: async (handle) => {
+      if (await capturePromotionGateEgress(replayEnvelope)) return true;
+      return directWsServer.sendWorkflowStartWithHandle(handle, hydratedTemplate, variables);
+    },
   });
   return {
     decision: dispatch.decision,
@@ -359,6 +440,9 @@ function sendObserveOnlyWorkflowStartToDevice(
   template: Record<string, unknown>,
   variables?: Record<string, unknown>,
 ): boolean {
+  if (promotionGateCaptureRequested()) {
+    throw new Error("raw DirectWS WORKFLOW_START send is forbidden in promotion gate capture mode");
+  }
   assertObserveOnlyTransportBoundary("observe-only WORKFLOW transport compatibility");
   return directWsServer.sendWorkflowStart(deviceId, template, variables, workflowId);
 }
@@ -404,6 +488,9 @@ async function cancelUnreplayableObservedAttempt(
 }
 
 export async function sendWorkflowCancellationControl(deviceId: string, workflowId: string): Promise<boolean> {
+  if (promotionGateCaptureRequested()) {
+    throw new Error("raw DirectWS WORKFLOW_CANCEL send is forbidden in promotion gate capture mode");
+  }
   await deviceExecutionArbiter.recordControlEgress({
     deviceId,
     operationId: workflowId,

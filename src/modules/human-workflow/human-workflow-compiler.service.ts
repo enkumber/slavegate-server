@@ -574,10 +574,11 @@ export class HumanWorkflowCompilerService {
     deviceId: string;
     accountId?: string | null;
     intent: string;
+    requestKey?: string;
   }): Promise<HumanWorkflowCompileResult> {
     const intent = input.intent.trim();
     const controlPlane = await loadHumanWorkflowCompilerControlPlane();
-    const requestKey = computeHumanWorkflowRequestKey(input.deviceId, input.accountId, intent);
+    const requestKey = input.requestKey ?? computeHumanWorkflowRequestKey(input.deviceId, input.accountId, intent);
     const target = await this.resolveTarget(input.deviceId, input.accountId, intent);
     if (!target) {
       throw Object.assign(new Error("Device or account not found"), { status: 400, code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND" });
@@ -713,23 +714,28 @@ export class HumanWorkflowCompilerService {
       return ready;
     }
 
-    const segmentJob = await segmentBuildJobService.createOrGet({
+    const job = await humanWorkflowCompileJobService.createOrGet({
       requestKey,
       deviceId: input.deviceId,
       accountId: input.accountId ?? null,
       intent,
       platform: target.account_platform,
-      capabilityKey: catalogContext.matchedCapabilityKey,
-      reason: "segment_missing",
     });
-    segmentBuildJobService.dispatchInBackground(segmentJob);
+    const state = await humanWorkflowCompileJobService.state(job);
+    if (state?.terminal && !state.retryable && !state.administrative && job.result) {
+      return job.result as HumanWorkflowCompileReady;
+    }
+    humanWorkflowCompileJobService.runInProcess(job.id, () => this.compileWithLlm({
+      requestKey: job.requestKey,
+      intent: job.intent,
+      target,
+    }));
     return {
       ready: false,
       requestKey,
-      segmentBuildJobId: segmentJob.id,
+      compileJobId: job.id,
       retryAfterMs: ASYNC_COMPILE_RETRY_AFTER_MS,
-      source: "agent",
-      reason: "segment_missing",
+      source: "llm",
     };
 
   }

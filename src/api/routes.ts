@@ -1370,10 +1370,11 @@ router.get("/workflows", requireAuth, async (req, res) => {
 
 router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
   try {
-    const { device_id, account_id, intent } = req.body as {
+    const { device_id, account_id, intent, requestKey } = req.body as {
       device_id?: unknown;
       account_id?: unknown;
       intent?: unknown;
+      requestKey?: unknown;
     };
     if (typeof device_id !== "string" || !UUID_RE.test(device_id)) {
       return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "device_id must be a UUID" });
@@ -1388,6 +1389,9 @@ router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
     if (account_id !== undefined && account_id !== null && !accountId) {
       return res.status(400).json({ ok: false, code: "ACCOUNT_ID_INVALID", error: "account_id must be a UUID when provided" });
     }
+    if (requestKey !== undefined && (typeof requestKey !== "string" || !GENERATED_WORKFLOW_KEY_RE.test(requestKey))) {
+      return res.status(400).json({ ok: false, code: "REQUEST_KEY_INVALID", error: "requestKey must be a 24-character lowercase hex string" });
+    }
     if (!accountId && !isAccountlessHumanWorkflowIntent(intent)) {
       return res.status(400).json({
         ok: false,
@@ -1400,6 +1404,7 @@ router.post("/workflows/human/compile", requireAdminAuth, async (req, res) => {
       deviceId: device_id,
       accountId,
       intent,
+      requestKey: typeof requestKey === "string" ? requestKey : undefined,
     });
     if (!data.ready) {
       return res.status(202).json({ ok: true, data });

@@ -1,0 +1,108 @@
+{
+  "story": "STORY-PN-HUMAN-COMPILE-JOB-DURABLE-LEASE-RECONCILER-3-9-311-001",
+  "candidate_before_gate": {
+    "branch": "feat/pn-human-compile-durable-reconciler-3.9.311",
+    "sha": "75cc12fb4a8d68ab5ae13043e55f1d5695f19ead",
+    "worktree": "/data/worktrees/phone-network-human-compile-durable-reconciler-3.9.311",
+    "initial_status": "clean"
+  },
+  "postgres_clone": {
+    "tooling": "/data/.openclaw/tools/postgresql-17.10/bin",
+    "cluster": "/tmp/pn-human-compile-pg-3341",
+    "url_redacted": "postgresql://pnqtest@127.0.0.1:56543/pnq001_clone",
+    "identity": {
+      "database": "pnq001_clone",
+      "host": "127.0.0.1/32",
+      "port": 56543,
+      "user": "pnqtest"
+    },
+    "isolation": {
+      "schema": "human_compile_http_e2e_745286_1785408960786",
+      "candidate_database_url_search_path": "schema-only search_path on disposable local database",
+      "production_database_url_connected": false,
+      "phone_or_direct_ws_egress_enabled": false
+    },
+    "live_snapshot_access": {
+      "available_in_this_session": false,
+      "blocker": "No live-derived dump/export path or source PNQ001_PG_URL was available in the environment. A fresh disposable local PostgreSQL clone was used for all safe HTTP/reconciler validation."
+    },
+    "read_only_probe": {
+      "command": "SHOW transaction_read_only",
+      "result": "off",
+      "scope": "disposable local clone; no live/source database connection was available"
+    }
+  },
+  "http_gate_transcript": [
+    "create_status=202 body={\"ok\":true,\"data\":{\"ready\":false,\"requestKey\":\"aaaaaaaaaaaaaaaaaaaaaaaa\",\"compileJobId\":\"a8d31320-7721-4a83-8c9b-46c0cd4dac50\",\"retryAfterMs\":2000,\"source\":\"llm\"}}",
+    "poll_ready_status=200 body.data.ready=true body.data.status=complete body.data.requestKey=aaaaaaaaaaaaaaaaaaaaaaaa",
+    "zero_egress_counts={\"jobs\":0,\"command_log\":0,\"job_execution_events\":0}",
+    "exact_replay_status=200 body.data.ready=true body.data.requestKey=aaaaaaaaaaaaaaaaaaaaaaaa",
+    "conflict_status=409 body.code=COMPILE_REQUEST_IDEMPOTENCY_CONFLICT",
+    "two_worker_claims=[1,0]",
+    "expired_reclaim_row={\"lease_generation\":\"2\",\"lease_owner\":null,\"completed_at\":\"2026-07-30T10:56:03.892Z\"}",
+    "stale_generation_update_rows=0 events=[{\"event_key\":\"lease_claimed\",\"lease_generation\":\"2\"},{\"event_key\":\"lease_completed\",\"lease_generation\":\"2\"}]"
+  ],
+  "commands": [
+    {
+      "command": "git -C /data/worktrees/phone-network-human-compile-durable-reconciler-3.9.311 rev-parse HEAD && git -C /data/worktrees/phone-network-human-compile-durable-reconciler-3.9.311 status --short --branch",
+      "exit_code": 0,
+      "summary": "HEAD 75cc12fb4a8d68ab5ae13043e55f1d5695f19ead; branch feat/pn-human-compile-durable-reconciler-3.9.311; no dirty entries."
+    },
+    {
+      "command": "PG_BIN=/data/.openclaw/tools/postgresql-17.10/bin; initdb; pg_ctl start -o '-F -p 56543 -c listen_addresses=127.0.0.1'; createdb pnq001_clone",
+      "exit_code": 0,
+      "summary": "Started disposable local PostgreSQL on 127.0.0.1:56543 with database pnq001_clone."
+    },
+    {
+      "command": "PNQ001_PG_URL='postgresql://pnqtest@127.0.0.1:56543/pnq001_clone' npm test -- --run tests/human-compile-job-reconciler-postgres.integration.test.ts",
+      "exit_code": 0,
+      "summary": "1 file passed; 4 tests passed. Real Express HTTP compile create/poll, exact replay, conflict, two-worker race, expired reclaim, stale generation rejection."
+    },
+    {
+      "command": "npm run build",
+      "exit_code": 0,
+      "summary": "TypeScript build passed."
+    },
+    {
+      "command": "npm test -- --run src/modules/human-workflow/compile-job.service.test.ts src/modules/human-workflow/compiler-control-plane.service.test.ts src/modules/human-workflow/capability-catalog.service.test.ts src/api/routes.human-workflow.test.ts tests/human-compile-job-reconciler-postgres.integration.test.ts",
+      "exit_code": 0,
+      "summary": "14 focused service/API tests passed; PostgreSQL integration skipped in this combined command because PNQ001_PG_URL is intentionally not inherited."
+    },
+    {
+      "command": "npm run semantic-catalog:audit",
+      "exit_code": 0,
+      "summary": "DB-authoritative workflow semantics audit passed: 5 tests."
+    },
+    {
+      "command": "npm run hardcoding:audit",
+      "exit_code": 2,
+      "summary": "Blocked before scan: Android source is absent. Script requires PHONE_NETWORK_ANDROID_ROOT."
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0,
+      "summary": "No whitespace errors."
+    }
+  ],
+  "egress": {
+    "direct_ws_dispatch_attempted": false,
+    "phone_send_attempted": false,
+    "proof": "HTTP gate asserted jobs=0, command_log=0, job_execution_events=0 in the disposable clone after compile create/poll."
+  },
+  "secrets_and_pii": {
+    "redacted": true,
+    "notes": "Evidence stores local-only DB identity and synthetic UUIDs/request keys; no production URL, token, phone number, or account secret is included."
+  },
+  "blockers": [
+    {
+      "id": "live-derived-snapshot-unavailable",
+      "status": "not_resolved_in_this_session",
+      "detail": "No live snapshot/export source was provided or discoverable. The gate used a disposable fresh local PostgreSQL clone and records this as safe progress, not as proof of live-derived data restore."
+    },
+    {
+      "id": "hardcoding-audit-android-source-absent",
+      "status": "not_resolved_in_this_session",
+      "detail": "scripts/audit-no-hardcoding.mjs exits 2 when app/src/main/kotlin or PHONE_NETWORK_ANDROID_ROOT is absent."
+    }
+  ]
+}

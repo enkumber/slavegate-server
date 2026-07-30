@@ -27,3 +27,22 @@ CREATE TABLE IF NOT EXISTS human_workflow_compile_job_events (
 
 CREATE INDEX IF NOT EXISTS human_workflow_compile_job_events_job_idx
   ON human_workflow_compile_job_events(job_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS promotion_gate_egress_captures (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  capture_mode TEXT NOT NULL,
+  db_fingerprint TEXT NOT NULL,
+  device_id UUID NOT NULL,
+  boundary TEXT NOT NULL,
+  root_kind TEXT NOT NULL,
+  root_external_id TEXT NOT NULL,
+  operation_kind TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  dispatch_identity TEXT NOT NULL,
+  envelope JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (capture_mode, db_fingerprint, dispatch_identity)
+);
+
+CREATE INDEX IF NOT EXISTS promotion_gate_egress_captures_operation_idx
+  ON promotion_gate_egress_captures(operation_id, created_at);
