@@ -15,6 +15,10 @@ async function main(): Promise<void> {
   await fs.mkdir(reportDir, { recursive: true });
   const startedAt = new Date().toISOString();
   const candidateSha = git(["rev-parse", "HEAD"]);
+  const expectedSha = process.env.PN_POST_312_EXPECTED_SHA;
+  if (!expectedSha || expectedSha !== candidateSha) {
+    throw new Error(`BLOCKED: PN_POST_312_EXPECTED_SHA must exactly equal checked-out HEAD ${candidateSha}`);
+  }
   const sourceIdentity = `post312-local-pg17-${candidateSha.slice(0, 12)}`;
   const pg = await startPg17();
     const dsn = `postgresql://${encodeURIComponent(os.userInfo().username)}@127.0.0.1:${pg.port}/post312_fixture_pg17`;
@@ -36,6 +40,9 @@ async function main(): Promise<void> {
     const commonDate = "2026-07-30";
     const capturedAt = "2026-07-30T08:00:00Z";
     const launchCommand = "node -r tsx/cjs src/harness/post-3-9-312/fixture-candidate-server.ts";
+    const boundaryLibraryPath = path.join(pg.dir, "post312-egress-boundary.so");
+    const boundaryLogPath = path.join(pg.dir, "post312-egress-boundary.log");
+    await run(`gcc -shared -fPIC -O2 -Wall -Wextra -o ${boundaryLibraryPath} src/harness/post-3-9-312/egress-boundary.c -ldl`, ledger);
 
     const cloneEvidence = await runCloneHttpE2eHarness({
       candidateSha,
@@ -45,7 +52,9 @@ async function main(): Promise<void> {
       launchCommand,
       egressDeny: "true",
       egressCapturePath: clonePath,
-      cleanCheckoutCommand: "git clone <repo> post312-clean && cd post312-clean && git checkout <candidate-sha> && npm ci && npm run post312:fixture-gates",
+      boundaryLibraryPath,
+      boundaryLogPath,
+      cleanCheckoutCommand: `git checkout --detach ${candidateSha} && git clean -ffdx && npm ci && PN_POST_312_EXPECTED_SHA=${candidateSha} npm run post312:fixture-gates`,
       ingressPath: `/api/audits/daily?date=${commonDate}&timezone=UTC&capturedAt=${encodeURIComponent(capturedAt)}`,
       restartPath: "/__post312/restart",
       conflictPath: "/__post312/conflict",

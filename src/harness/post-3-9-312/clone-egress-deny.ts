@@ -15,7 +15,7 @@ export type CloneEgressChannel = typeof CLONE_EGRESS_CHANNELS[number];
 
 export interface CloneEgressCapture {
   mode: "deny";
-  enforcement: "process-preload";
+  enforcement: "external-ld-preload-syscall-boundary";
   candidateSha: string;
   sourceIdentity: string;
   capturedAt: string;
@@ -40,6 +40,8 @@ export interface CloneHttpGateEnv {
   launchCommand?: string;
   egressDeny?: string;
   egressCapturePath?: string;
+  boundaryLogPath?: string;
+  boundaryLibraryPath?: string;
   cleanCheckoutCommand?: string;
   ingressPath?: string;
   restartPath?: string;
@@ -89,6 +91,8 @@ export function readCloneHttpGateEnv(env: NodeJS.ProcessEnv = process.env): Clon
     launchCommand: env.PN_POST_312_CLONE_LAUNCH_COMMAND,
     egressDeny: env.PN_POST_312_CLONE_EGRESS_DENY,
     egressCapturePath: env.PN_POST_312_CLONE_EGRESS_CAPTURE_PATH,
+    boundaryLogPath: env.PN_POST_312_CLONE_BOUNDARY_LOG_PATH,
+    boundaryLibraryPath: env.PN_POST_312_CLONE_BOUNDARY_LIBRARY_PATH,
     cleanCheckoutCommand: env.PN_POST_312_CLONE_CLEAN_CHECKOUT_COMMAND,
     ingressPath: env.PN_POST_312_CLONE_INGRESS_PATH,
     restartPath: env.PN_POST_312_CLONE_RESTART_PATH,
@@ -109,6 +113,8 @@ export function validateCloneHttpGateEnv(env: CloneHttpGateEnv): string[] {
   if (env.apiBaseUrl && !env.apiKey) missing.push("PN_POST_312_CLONE_API_KEY");
   if (env.egressDeny !== "1" && env.egressDeny !== "true") missing.push("PN_POST_312_CLONE_EGRESS_DENY=true");
   if (!env.egressCapturePath) missing.push("PN_POST_312_CLONE_EGRESS_CAPTURE_PATH");
+  if (env.launchCommand && !env.boundaryLogPath) missing.push("PN_POST_312_CLONE_BOUNDARY_LOG_PATH");
+  if (env.launchCommand && !env.boundaryLibraryPath) missing.push("PN_POST_312_CLONE_BOUNDARY_LIBRARY_PATH");
   if (!env.cleanCheckoutCommand) missing.push("PN_POST_312_CLONE_CLEAN_CHECKOUT_COMMAND");
   if (!env.ingressPath) missing.push("PN_POST_312_CLONE_INGRESS_PATH");
   if (env.ingressPath && !isAllowedIngressPath(env.ingressPath)) {
@@ -182,7 +188,9 @@ export async function runCloneHttpE2eHarness(env: CloneHttpGateEnv = readCloneHt
     const egressProbe = await fetchJson(apiBaseUrl, "/__post312/egress-probe", env, "egress-probe");
     statuses.push(egressProbe.status);
     responseBodies.push(egressProbe.body);
-    const capture = normalizeCapture(egressProbe.body, env);
+    const capture = env.launchCommand
+      ? await readBoundaryCapture(env)
+      : normalizeCapture(egressProbe.body, env);
     const sideEffects = summarizeSideEffects(capture);
     const assertions = {
       exactCandidateSha: responseBodies.some((body) => bodyHasCandidateSha(body, env.candidateSha!)),
@@ -237,7 +245,7 @@ export async function writeDeniedCloneEgressCapture(
   }
   const capture: CloneEgressCapture = {
     mode: "deny",
-    enforcement: "process-preload",
+    enforcement: "external-ld-preload-syscall-boundary",
     candidateSha: env.candidateSha!,
     sourceIdentity: env.sourceIdentity!,
     capturedAt: now.toISOString(),
@@ -347,6 +355,8 @@ async function launchCandidateIfRequested(env: CloneHttpGateEnv): Promise<{
       PN_POST_312_CLONE_SOURCE_IDENTITY: env.sourceIdentity!,
       PN_POST_312_CLONE_DATABASE_URL: env.fixtureDatabaseUrl!,
       PN_POST_312_CLONE_EGRESS_DENY: env.egressDeny!,
+      PN_POST_312_BOUNDARY_LOG: env.boundaryLogPath!,
+      LD_PRELOAD: env.boundaryLibraryPath!,
     },
   });
   const stderr: string[] = [];
@@ -422,6 +432,32 @@ function normalizeCapture(value: unknown, env: CloneHttpGateEnv): CloneEgressCap
     throw new Error("BLOCKED: candidate egress capture identity mismatch");
   }
   return capture;
+}
+
+async function readBoundaryCapture(env: CloneHttpGateEnv): Promise<CloneEgressCapture> {
+  const text = await fs.readFile(env.boundaryLogPath!, "utf8").catch(() => "");
+  const channels = Object.fromEntries(
+    CLONE_EGRESS_CHANNELS.map((channel) => [channel, [] as CloneEgressEvent[]]),
+  ) as unknown as CloneEgressCapture["channels"];
+  for (const line of text.trim().split("\n").filter(Boolean)) {
+    const [channel, action, target, epoch] = line.split("\t");
+    if (!CLONE_EGRESS_CHANNELS.includes(channel as CloneEgressChannel)) continue;
+    channels[channel as CloneEgressChannel].push({
+      channel: channel as CloneEgressChannel,
+      action,
+      target,
+      denied: true,
+      capturedAt: new Date(Number(epoch) * 1000).toISOString(),
+    });
+  }
+  return {
+    mode: "deny",
+    enforcement: "external-ld-preload-syscall-boundary",
+    candidateSha: env.candidateSha!,
+    sourceIdentity: env.sourceIdentity!,
+    capturedAt: new Date().toISOString(),
+    channels,
+  };
 }
 
 function summarizeSideEffects(capture: CloneEgressCapture): CloneHttpGateEvidence["sideEffects"] {

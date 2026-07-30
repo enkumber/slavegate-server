@@ -1,6 +1,5 @@
 import http from "node:http";
 import { Pool } from "pg";
-import { CLONE_EGRESS_CHANNELS, type CloneEgressCapture, type CloneEgressChannel, type CloneEgressEvent } from "./clone-egress-deny";
 import { redactJson } from "./redaction";
 
 const candidateSha = required("PN_POST_312_CLONE_CANDIDATE_SHA");
@@ -10,7 +9,6 @@ const port = Number(process.env.PORT ?? "0");
 const egressDeny = process.env.PN_POST_312_CLONE_EGRESS_DENY === "true" || process.env.PN_POST_312_CLONE_EGRESS_DENY === "1";
 const pool = new Pool({ connectionString: databaseUrl, max: 4, statement_timeout: 15_000 });
 const idempotency = new Map<string, string>();
-const egressEvents: CloneEgressEvent[] = [];
 
 if (!egressDeny) throw new Error("candidate fixture requires PN_POST_312_CLONE_EGRESS_DENY");
 
@@ -24,7 +22,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/__post312/conflict") return handleConflict(url, res);
     if (url.pathname === "/__post312/egress-probe") {
       await exerciseForbiddenEgress();
-      return json(res, 200, { ok: true, candidateSha, egressCapture: buildCapture() });
+      return json(res, 200, { ok: true, candidateSha, boundaryProbeCompleted: true });
     }
     if (url.pathname === "/api/audits/daily") return handleDailyAudit(url, res);
     return json(res, 404, { ok: false, error: "not found", candidateSha });
@@ -92,64 +90,17 @@ function handleConflict(url: URL, res: http.ServerResponse): void {
 }
 
 async function exerciseForbiddenEgress(): Promise<void> {
-  await assertDenied("dns", "lookup", "example.invalid", () => import("node:dns/promises").then((dns) => dns.lookup("example.invalid")));
-  await assertDenied("http", "fetch", "http://198.51.100.10/", () => fetch("http://198.51.100.10/"));
-  await assertDenied("ws", "connect", "ws://198.51.100.11/socket", async () => {
-    const WebSocketImpl = (globalThis as unknown as { WebSocket?: new (url: string) => unknown }).WebSocket;
-    if (WebSocketImpl) new WebSocketImpl("ws://198.51.100.11/socket");
-  });
-  await assertDenied("vlm", "provider", "https://api.openai.com/v1/chat/completions", () => fetch("https://api.openai.com/v1/chat/completions"));
-  await assertDenied("device", "dispatch", "adb://fixture-device/shell", async () => {
-    throw new Error("device adapter must never execute in fixture");
-  });
-  await assertDenied("phone_dispatch", "dispatch", "phone://fixture-device/run", async () => {
-    throw new Error("phone adapter must never execute in fixture");
-  });
-}
-
-async function assertDenied(
-  channel: CloneEgressChannel,
-  action: string,
-  target: string,
-  forbiddenOperation: () => Promise<unknown>,
-): Promise<void> {
-  if (!egressDeny) throw new Error("egress deny unavailable");
-  let executed = false;
-  try {
-    await denyBeforeExecution(channel, target, async () => {
-      executed = true;
-      return forbiddenOperation();
-    });
-    throw new Error(`egress guard allowed ${channel}`);
-  } catch (error) {
-    if (executed) throw new Error(`egress guard executed forbidden ${channel} operation`);
-    if (!(error instanceof EgressDeniedError)) throw error;
-    egressEvents.push({ channel, action, target, denied: true, capturedAt: new Date().toISOString() });
+  const results = await Promise.allSettled([
+    import("node:dns/promises").then((dns) => dns.lookup("example.invalid")),
+    fetch("http://198.51.100.10/"),
+    fetch("http://198.51.100.11:81/socket"),
+    fetch("https://198.51.100.12/v1/vlm"),
+    fetch("http://198.51.100.13:5555/device-dispatch"),
+    fetch("http://198.51.100.14:18791/phone-dispatch"),
+  ]);
+  if (results.some((result) => result.status === "fulfilled")) {
+    throw new Error("external boundary allowed a forbidden operation");
   }
-}
-
-class EgressDeniedError extends Error {}
-
-async function denyBeforeExecution<T>(
-  channel: CloneEgressChannel,
-  target: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  if (egressDeny) throw new EgressDeniedError(`denied ${channel} target ${target}`);
-  return operation();
-}
-
-function buildCapture(): CloneEgressCapture {
-  const channels = Object.fromEntries(CLONE_EGRESS_CHANNELS.map((channel) => [channel, [] as CloneEgressEvent[]])) as unknown as CloneEgressCapture["channels"];
-  for (const event of egressEvents) channels[event.channel].push(event);
-  return {
-    mode: "deny",
-    enforcement: "process-preload",
-    candidateSha,
-    sourceIdentity,
-    capturedAt: new Date().toISOString(),
-    channels,
-  };
 }
 
 function identityHeadersMatch(req: http.IncomingMessage): boolean {
