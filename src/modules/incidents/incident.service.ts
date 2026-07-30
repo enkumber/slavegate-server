@@ -512,21 +512,22 @@ export async function getDailyAuditSnapshot(date: string, requestedTimezone?: st
   const operationsPolicy = await loadIncidentOperationsPolicy();
   const timezone = optionalText(requestedTimezone, 120) ?? operationsPolicy.defaultTimezone;
   if (!operationsPolicy.allowedTimezones.has(timezone)) throw new Error("unsupported timezone");
-  const params = [date, timezone, operationsPolicy.maximumRetryCount];
+  const windowParams = [date, timezone];
+  const findingParams = [date, timezone, operationsPolicy.maximumRetryCount];
   const windowSql = `(SELECT ($1::date::timestamp AT TIME ZONE $2) AS start_at,
                               (($1::date + 1)::timestamp AT TIME ZONE $2) AS end_at)`;
   const [tasks, runs, artifacts, candidates, incidents, findings, changedArtifacts, changedCandidates] = await Promise.all([
     db.query(`SELECT status, COUNT(*)::int AS count FROM tasks, ${windowSql} w
               WHERE COALESCE(completed_at, scheduled_time) >= w.start_at
-                AND COALESCE(completed_at, scheduled_time) < w.end_at GROUP BY status`, params),
+                AND COALESCE(completed_at, scheduled_time) < w.end_at GROUP BY status`, windowParams),
     db.query(`SELECT status, COUNT(*)::int AS count FROM workflow_runs, ${windowSql} w
-              WHERE created_at >= w.start_at AND created_at < w.end_at GROUP BY status`, params),
+              WHERE created_at >= w.start_at AND created_at < w.end_at GROUP BY status`, windowParams),
     db.query(`SELECT artifact_state AS status, COUNT(*)::int AS count FROM generated_workflow_plan_cache, ${windowSql} w
-              WHERE updated_at >= w.start_at AND updated_at < w.end_at GROUP BY artifact_state`, params),
+              WHERE updated_at >= w.start_at AND updated_at < w.end_at GROUP BY artifact_state`, windowParams),
     db.query(`SELECT status, candidate_type, COUNT(*)::int AS count FROM ui_graph_learning_candidates, ${windowSql} w
-              WHERE updated_at >= w.start_at AND updated_at < w.end_at GROUP BY status, candidate_type`, params),
+              WHERE updated_at >= w.start_at AND updated_at < w.end_at GROUP BY status, candidate_type`, windowParams),
     db.query(`SELECT status, severity, COUNT(*)::int AS count FROM phone_network_incidents, ${windowSql} w
-              WHERE last_detected_at >= w.start_at AND last_detected_at < w.end_at GROUP BY status, severity`, params),
+              WHERE last_detected_at >= w.start_at AND last_detected_at < w.end_at GROUP BY status, severity`, windowParams),
     db.query(
       `SELECT 'promoted_without_clean_5_of_5' AS kind, 'high' AS severity,
               candidate.id::text AS subject_id, candidate.candidate_key,
@@ -587,7 +588,7 @@ export async function getDailyAuditSnapshot(date: string, requestedTimezone?: st
             )
           )
        ORDER BY severity DESC LIMIT 200`,
-      params,
+      findingParams,
     ),
     db.query(
       `SELECT cache_key, template_id, platform, artifact_state, hit_count, updated_at,
@@ -601,7 +602,7 @@ export async function getDailyAuditSnapshot(date: string, requestedTimezone?: st
          FROM generated_workflow_plan_cache, ${windowSql} w
         WHERE updated_at >= w.start_at AND updated_at < w.end_at
         ORDER BY updated_at DESC LIMIT 500`,
-      params,
+      windowParams,
     ),
     db.query(
       `SELECT id, candidate_key, app_id, candidate_type, status, discovery_method,
@@ -611,7 +612,7 @@ export async function getDailyAuditSnapshot(date: string, requestedTimezone?: st
          FROM ui_graph_learning_candidates, ${windowSql} w
         WHERE updated_at >= w.start_at AND updated_at < w.end_at
         ORDER BY updated_at DESC LIMIT 500`,
-      params,
+      windowParams,
     ),
   ]);
   return {

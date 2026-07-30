@@ -196,4 +196,32 @@ describe("incident service", () => {
     await expect(getDailyAuditSnapshot("2026-07-22", "Etc/Unsafe")).rejects.toThrow("unsupported timezone");
     expect(mocks.db.query).toHaveBeenCalledTimes(1);
   });
+
+  it("binds the retry threshold only to the finding query that consumes it", async () => {
+    mocks.db.query.mockImplementation(async (sql: unknown) => (
+      String(sql).includes("incidentAuditPolicy")
+        ? { rows: [{ policy: INCIDENT_POLICY }] }
+        : { rows: [] }
+    ));
+
+    await expect(
+      getDailyAuditSnapshot("2026-07-22", "fixture/timezone"),
+    ).resolves.toMatchObject({
+      date: "2026-07-22",
+      timezone: "fixture/timezone",
+    });
+
+    const snapshotCalls = mocks.db.query.mock.calls.slice(1);
+    expect(snapshotCalls).toHaveLength(8);
+    expect(snapshotCalls.map((call) => call[1])).toEqual([
+      ["2026-07-22", "fixture/timezone"],
+      ["2026-07-22", "fixture/timezone"],
+      ["2026-07-22", "fixture/timezone"],
+      ["2026-07-22", "fixture/timezone"],
+      ["2026-07-22", "fixture/timezone"],
+      ["2026-07-22", "fixture/timezone", INCIDENT_POLICY.maximumRetryCount],
+      ["2026-07-22", "fixture/timezone"],
+      ["2026-07-22", "fixture/timezone"],
+    ]);
+  });
 });
