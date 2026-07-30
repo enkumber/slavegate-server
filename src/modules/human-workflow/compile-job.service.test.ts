@@ -33,6 +33,12 @@ function jobRow(overrides: Record<string, unknown> = {}) {
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     completed_at: null,
+    lease_owner: null,
+    lease_generation: 0,
+    lease_expires_at: null,
+    lease_heartbeat_at: null,
+    claimed_at: null,
+    execution_attempt_id: null,
     ...overrides,
   };
 }
@@ -148,8 +154,12 @@ describe("humanWorkflowCompileJobService", () => {
       }],
     };
     mocks.db.query
-      .mockResolvedValueOnce({ rows: [jobRow({ llm_started_at: null })] })
-      .mockResolvedValueOnce({ rows: [jobRow({ llm_started_at: new Date().toISOString() })] })
+      .mockResolvedValueOnce({ rows: [{ policy: { leaseMs: 120000, reconcileBatchSize: 1, reconcileIntervalMs: 5000 } }] })
+      .mockResolvedValueOnce({ rows: [jobRow({
+        llm_started_at: new Date().toISOString(),
+        lease_owner: "compile-worker:test",
+        lease_generation: 1,
+      })] })
       .mockResolvedValueOnce({ rows: [] });
 
     humanWorkflowCompileJobService.runInProcess(
@@ -164,9 +174,31 @@ describe("humanWorkflowCompileJobService", () => {
 
     expect(mocks.db.query).toHaveBeenCalledTimes(3);
     expect(mocks.db.query.mock.calls[2][0]).toContain("llmDebugHistory");
+    expect(mocks.db.query.mock.calls[2][0]).toContain("job.lease_owner = $4");
     expect(JSON.parse(mocks.db.query.mock.calls[2][1][2])).toMatchObject({
       error: "human workflow undercompiled",
       appendDebug: { llmDebug },
     });
+  });
+
+  it("claims the next eligible compile job with a lease generation", async () => {
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [{ policy: { leaseMs: 30000, reconcileBatchSize: 5, reconcileIntervalMs: 1000 } }] })
+      .mockResolvedValueOnce({ rows: [jobRow({
+        status: "running",
+        llm_started_at: new Date().toISOString(),
+        lease_owner: "worker-a",
+        lease_generation: 3,
+        lease_expires_at: new Date(Date.now() + 30_000).toISOString(),
+        claimed_at: new Date().toISOString(),
+      })] });
+
+    const job = await humanWorkflowCompileJobService.claimNext("worker-a");
+
+    expect(job?.leaseOwner).toBe("worker-a");
+    expect(job?.leaseGeneration).toBe(3);
+    expect(mocks.db.query.mock.calls[1][0]).toContain("FOR UPDATE OF job SKIP LOCKED");
+    expect(mocks.db.query.mock.calls[1][0]).toContain("job.retry_count > 0");
+    expect(mocks.db.query.mock.calls[1][0]).toContain("lease_generation = job.lease_generation + 1");
   });
 });

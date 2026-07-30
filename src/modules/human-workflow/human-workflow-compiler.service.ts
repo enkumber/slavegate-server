@@ -758,6 +758,23 @@ export class HumanWorkflowCompilerService {
     return job;
   }
 
+  startCompileJobReconciler(): void {
+    humanWorkflowCompileJobService.startReconciler(async (job) => {
+      const target = await this.resolveTarget(job.deviceId, job.accountId, job.intent);
+      if (!target) {
+        throw Object.assign(new Error("Device or account not found"), {
+          status: 400,
+          code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND",
+        });
+      }
+      return this.compileWithLlm({
+        requestKey: job.requestKey,
+        intent: job.intent,
+        target,
+      });
+    });
+  }
+
   async compileShortcut(
     shortcutId: string,
     shortcutKey: string,

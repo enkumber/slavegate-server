@@ -49,6 +49,7 @@ import configRoutes, { seedSystemPrompts } from "./api/config-routes";
 import uiGraphRoutes from "./modules/ui-graph/routes";
 import { describeUiGraphRuntimeFlags } from "./modules/ui-graph/config";
 import segmentBuilderRoutes from "./modules/segment-builder/routes";
+import { humanWorkflowCompilerService } from "./modules/human-workflow/human-workflow-compiler.service";
 import {
   ensureSegmentBuilderAgentToken,
   segmentBuildJobService,
@@ -102,6 +103,8 @@ async function bootstrap(): Promise<void> {
     const summary = await pnqV2RuntimeService.reconcileStartup();
     console.log(`[server] Queue v2 shadow startup reconciliation: ok=${summary.ok} error=${summary.observed_error ?? "none"}.`);
   }
+  humanWorkflowCompilerService.startCompileJobReconciler();
+  console.log("[server] Human workflow compile job reconciler started.");
 
   // First move every pre-restart in-flight root into the fail-closed
   // reconciliation state. Terminal workflow cleanup below deliberately only

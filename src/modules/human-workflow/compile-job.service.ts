@@ -1,9 +1,14 @@
+import { randomUUID } from "crypto";
 import { getDb } from "../../db/client";
 import {
   lifecycleTransitionSelectorPredicate,
   serializeLifecycleTransitionSelector,
   type LifecycleTransitionSelector,
 } from "../lifecycle/lifecycle.service";
+import {
+  getResourceRuntimePolicy,
+  ResourceRuntimePolicyUnavailableError,
+} from "../runtime-policy/resource-runtime-policy.service";
 
 export type HumanWorkflowCompileJobSource = "cache" | "shortcut" | "llm";
 export type HumanWorkflowCompileJobErrorClass = "timeout" | "provider_error" | "validation_error" | "unknown";
@@ -31,6 +36,12 @@ export interface HumanWorkflowCompileJobRecord {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  leaseOwner: string | null;
+  leaseGeneration: number;
+  leaseExpiresAt: string | null;
+  leaseHeartbeatAt: string | null;
+  claimedAt: string | null;
+  executionAttemptId: string | null;
 }
 
 export interface HumanWorkflowCompileJobState {
@@ -43,6 +54,7 @@ export interface HumanWorkflowCompileJobState {
 
 const DEFAULT_STALE_RUNNING_JOB_MS = 150_000;
 const DEFAULT_COMPILE_TIMEOUT_MS = 120_000;
+const COMPILE_JOB_RESOURCE_TABLE = "human_workflow_compile_jobs";
 
 function staleRunningJobMs(): number {
   const configured = Number.parseInt(process.env.HUMAN_WORKFLOW_COMPILE_JOB_STALE_MS ?? "", 10);
@@ -61,6 +73,25 @@ function errorClassFromError(error: string | null | undefined): HumanWorkflowCom
   if (normalized.includes("validation")) return "validation_error";
   if (normalized.includes("provider")) return "provider_error";
   return "unknown";
+}
+
+function runtimePolicyNumber(policy: Record<string, unknown>, key: string): number {
+  const value = policy[key];
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new ResourceRuntimePolicyUnavailableError(
+      `runtime policy for ${COMPILE_JOB_RESOURCE_TABLE} is missing positive numeric ${key}`,
+    );
+  }
+  return Math.floor(value);
+}
+
+async function compileJobRuntimePolicy(): Promise<{ leaseMs: number; reconcileBatchSize: number; reconcileIntervalMs: number }> {
+  const policy = await getResourceRuntimePolicy(COMPILE_JOB_RESOURCE_TABLE);
+  return {
+    leaseMs: runtimePolicyNumber(policy, "leaseMs"),
+    reconcileBatchSize: runtimePolicyNumber(policy, "reconcileBatchSize"),
+    reconcileIntervalMs: runtimePolicyNumber(policy, "reconcileIntervalMs"),
+  };
 }
 
 function rowToJob(row: Record<string, unknown>): HumanWorkflowCompileJobRecord {
@@ -88,6 +119,12 @@ function rowToJob(row: Record<string, unknown>): HumanWorkflowCompileJobRecord {
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     completedAt: (row.completed_at as string | null) ?? null,
+    leaseOwner: (row.lease_owner as string | null) ?? null,
+    leaseGeneration: Number(row.lease_generation ?? 0),
+    leaseExpiresAt: (row.lease_expires_at as string | null) ?? null,
+    leaseHeartbeatAt: (row.lease_heartbeat_at as string | null) ?? null,
+    claimedAt: (row.claimed_at as string | null) ?? null,
+    executionAttemptId: (row.execution_attempt_id as string | null) ?? null,
   };
 }
 
@@ -126,6 +163,7 @@ async function transitionCompileJob(
   id: string,
   selector: LifecycleTransitionSelector,
   patch: CompileJobPatch = {},
+  fence?: { leaseOwner: string; leaseGeneration: number },
 ): Promise<HumanWorkflowCompileJobRecord | null> {
   const selectorPredicate = lifecycleTransitionSelectorPredicate("transition", "target", "$2");
   const result = await getDb().query(
@@ -224,17 +262,38 @@ async function transitionCompileJob(
               WHEN COALESCE(($3::jsonb->>'markRetried')::boolean, false) THEN NOW()
               ELSE job.last_retried_at
             END,
+            lease_owner = CASE
+              WHEN selected.mark_completed THEN NULL
+              ELSE job.lease_owner
+            END,
+            lease_expires_at = CASE
+              WHEN selected.mark_completed THEN NULL
+              ELSE job.lease_expires_at
+            END,
+            lease_heartbeat_at = CASE
+              WHEN selected.mark_completed THEN NULL
+              ELSE job.lease_heartbeat_at
+            END,
             updated_at = NOW()
        FROM selected
       WHERE job.id = selected.id
+        AND ($4::text IS NULL OR (job.lease_owner = $4 AND job.lease_generation = $5::integer))
       RETURNING job.*`,
-    [id, serializeLifecycleTransitionSelector(selector), JSON.stringify(patch)],
+    [
+      id,
+      serializeLifecycleTransitionSelector(selector),
+      JSON.stringify(patch),
+      fence?.leaseOwner ?? null,
+      fence?.leaseGeneration ?? null,
+    ],
   );
   return result.rows[0] ? rowToJob(result.rows[0]) : null;
 }
 
 export class HumanWorkflowCompileJobService {
   private running = new Set<string>();
+  private reconcilerTimer: NodeJS.Timeout | null = null;
+  private reconcilerRunning = false;
 
   async createOrGet(input: {
     requestKey: string;
@@ -335,48 +394,258 @@ export class HumanWorkflowCompileJobService {
     });
   }
 
+  async claimNext(owner = `compile-worker:${process.pid}:${randomUUID()}`): Promise<HumanWorkflowCompileJobRecord | null> {
+    const policy = await compileJobRuntimePolicy();
+    const result = await getDb().query(
+      `WITH candidate AS (
+         SELECT job.id,
+                (job.lease_owner IS NOT NULL AND job.lease_expires_at < NOW()) AS reclaim_running
+           FROM human_workflow_compile_jobs job
+           JOIN lifecycle_state_definitions state
+             ON state.lifecycle_key = job.lifecycle_key
+            AND state.status = job.status
+          WHERE state.terminal = false
+            AND job.retry_count > 0
+            AND job.last_retried_at IS NOT NULL
+            AND (state.initial = true OR state.dispatchable = true OR job.lease_expires_at < NOW())
+            AND (job.lease_owner IS NULL OR job.lease_expires_at IS NULL OR job.lease_expires_at < NOW())
+          ORDER BY COALESCE(job.lease_expires_at, job.created_at), job.created_at
+          LIMIT 1
+          FOR UPDATE OF job SKIP LOCKED
+       ),
+       transition AS (
+         SELECT candidate.id, job.status AS to_status, false AS mark_started
+           FROM candidate
+           JOIN human_workflow_compile_jobs job ON job.id = candidate.id
+          WHERE candidate.reclaim_running
+         UNION ALL
+         SELECT DISTINCT candidate.id, lifecycle_transition.to_status,
+                lifecycle_transition.mark_started
+           FROM candidate
+           JOIN human_workflow_compile_jobs job ON job.id = candidate.id
+           JOIN lifecycle_transitions lifecycle_transition
+             ON lifecycle_transition.lifecycle_key = job.lifecycle_key
+            AND lifecycle_transition.from_status = job.status
+           JOIN lifecycle_state_definitions target
+             ON target.lifecycle_key = lifecycle_transition.lifecycle_key
+            AND target.status = lifecycle_transition.to_status
+          WHERE target.terminal = false
+            AND lifecycle_transition.mark_started = true
+            AND NOT candidate.reclaim_running
+       ),
+       selected AS (
+         SELECT ranked.*
+           FROM (
+             SELECT transition.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+               FROM transition
+           ) ranked
+          WHERE ranked.candidate_count = 1
+       )
+       UPDATE human_workflow_compile_jobs job
+          SET status = selected.to_status,
+              llm_started_at = CASE WHEN selected.mark_started THEN NOW() ELSE job.llm_started_at END,
+              lease_owner = $1,
+              lease_generation = job.lease_generation + 1,
+              lease_expires_at = NOW() + ($2::integer * INTERVAL '1 millisecond'),
+              lease_heartbeat_at = NOW(),
+              claimed_at = NOW(),
+              execution_attempt_id = gen_random_uuid(),
+              updated_at = NOW()
+         FROM selected
+        WHERE job.id = selected.id
+        RETURNING job.*`,
+      [owner, policy.leaseMs],
+    );
+    return result.rows[0] ? rowToJob(result.rows[0]) : null;
+  }
+
+  async heartbeatLease(job: Pick<HumanWorkflowCompileJobRecord, "id" | "leaseOwner" | "leaseGeneration">): Promise<boolean> {
+    if (!job.leaseOwner) return false;
+    const policy = await compileJobRuntimePolicy();
+    const result = await getDb().query(
+      `UPDATE human_workflow_compile_jobs
+          SET lease_expires_at = NOW() + ($4::integer * INTERVAL '1 millisecond'),
+              lease_heartbeat_at = NOW(),
+              updated_at = NOW()
+        WHERE id = $1
+          AND lease_owner = $2
+          AND lease_generation = $3
+        RETURNING id`,
+      [job.id, job.leaseOwner, job.leaseGeneration, policy.leaseMs],
+    );
+    return result.rowCount === 1;
+  }
+
+  async runClaimed(
+    job: HumanWorkflowCompileJobRecord,
+    runner: () => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>,
+  ): Promise<void> {
+    if (!job.leaseOwner) throw new Error("compile job must be durably claimed before execution");
+    try {
+      const result = await runner();
+      await transitionCompileJob(job.id, {
+        targetTerminal: true,
+        targetRetryable: false,
+        transitionMarkCompleted: true,
+        transitionClearFailure: true,
+      }, {
+        cacheKey: result.cacheKey ?? null,
+        source: "llm",
+        shortcutId: result.shortcutId ?? null,
+        result,
+      }, {
+        leaseOwner: job.leaseOwner,
+        leaseGeneration: job.leaseGeneration,
+      });
+    } catch (err) {
+      const typed = err as Error & { validationErrors?: string[]; debugPayload?: Record<string, unknown> };
+      const validationDetail = Array.isArray(typed.validationErrors) && typed.validationErrors.length > 0
+        ? `: ${typed.validationErrors.slice(0, 6).join("; ")}`
+        : "";
+      await transitionCompileJob(job.id, {
+        targetTerminal: true,
+        targetRetryable: true,
+        transitionAutomatic: true,
+        transitionMarkCompleted: true,
+      }, {
+        error: `${typed.message}${validationDetail}`,
+        appendDebug: typed.debugPayload ?? null,
+      }, {
+        leaseOwner: job.leaseOwner,
+        leaseGeneration: job.leaseGeneration,
+      }).catch(() => {});
+    }
+  }
+
+  async reconcileOnce(runnerForJob: (job: HumanWorkflowCompileJobRecord) => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>): Promise<number> {
+    const policy = await compileJobRuntimePolicy();
+    let claimed = 0;
+    for (let i = 0; i < policy.reconcileBatchSize; i += 1) {
+      const job = await this.claimNext();
+      if (!job) break;
+      claimed += 1;
+      this.dispatchClaimed(job, runnerForJob);
+    }
+    return claimed;
+  }
+
+  startReconciler(runnerForJob: (job: HumanWorkflowCompileJobRecord) => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>): void {
+    if (this.reconcilerTimer) return;
+    const tick = async () => {
+      if (this.reconcilerRunning) return;
+      this.reconcilerRunning = true;
+      try {
+        await this.reconcileOnce(runnerForJob);
+      } catch (err) {
+        console.error("[human-workflow] compile job reconciliation failed:", (err as Error).message);
+      } finally {
+        this.reconcilerRunning = false;
+      }
+    };
+    void tick();
+    void compileJobRuntimePolicy().then((policy) => {
+      this.reconcilerTimer = setInterval(() => void tick(), policy.reconcileIntervalMs);
+    }).catch((err) => {
+      console.error("[human-workflow] compile job reconciler disabled:", (err as Error).message);
+    });
+  }
+
+  stopReconciler(): void {
+    if (!this.reconcilerTimer) return;
+    clearInterval(this.reconcilerTimer);
+    this.reconcilerTimer = null;
+  }
+
+  private dispatchClaimed(
+    job: HumanWorkflowCompileJobRecord,
+    runnerForJob: (job: HumanWorkflowCompileJobRecord) => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>,
+  ): void {
+    if (this.running.has(job.id)) return;
+    this.running.add(job.id);
+    setImmediate(async () => {
+      try {
+        await this.runClaimed(job, () => runnerForJob(job));
+      } finally {
+        this.running.delete(job.id);
+      }
+    });
+  }
+
   runInProcess(jobId: string, runner: () => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>): void {
     if (this.running.has(jobId)) return;
     this.running.add(jobId);
     setImmediate(async () => {
       try {
-        const current = await this.getById(jobId);
-        if (!current) return;
-        const claimed = await transitionCompileJob(jobId, {
-          targetTerminal: false,
-          transitionMarkStarted: true,
-        });
+        const claimed = await this.claimSpecific(jobId);
         if (!claimed) return;
-        const result = await runner();
-        await transitionCompileJob(jobId, {
-          targetTerminal: true,
-          targetRetryable: false,
-          transitionMarkCompleted: true,
-          transitionClearFailure: true,
-        }, {
-          cacheKey: result.cacheKey ?? null,
-          source: "llm",
-          shortcutId: result.shortcutId ?? null,
-          result,
-        });
-      } catch (err) {
-        const typed = err as Error & { validationErrors?: string[]; debugPayload?: Record<string, unknown> };
-        const validationDetail = Array.isArray(typed.validationErrors) && typed.validationErrors.length > 0
-          ? `: ${typed.validationErrors.slice(0, 6).join("; ")}`
-          : "";
-        await transitionCompileJob(jobId, {
-          targetTerminal: true,
-          targetRetryable: true,
-          transitionAutomatic: true,
-          transitionMarkCompleted: true,
-        }, {
-          error: `${typed.message}${validationDetail}`,
-          appendDebug: typed.debugPayload ?? null,
-        }).catch(() => {});
+        await this.runClaimed(claimed, runner);
       } finally {
         this.running.delete(jobId);
       }
     });
+  }
+
+  private async claimSpecific(jobId: string, owner = `compile-worker:${process.pid}:${randomUUID()}`): Promise<HumanWorkflowCompileJobRecord | null> {
+    const policy = await compileJobRuntimePolicy();
+    const result = await getDb().query(
+      `WITH candidate AS (
+         SELECT job.id,
+                (job.lease_owner IS NOT NULL AND job.lease_expires_at < NOW()) AS reclaim_running
+           FROM human_workflow_compile_jobs job
+           JOIN lifecycle_state_definitions state
+             ON state.lifecycle_key = job.lifecycle_key
+            AND state.status = job.status
+          WHERE job.id = $1
+            AND state.terminal = false
+            AND job.retry_count > 0
+            AND job.last_retried_at IS NOT NULL
+            AND (job.lease_owner IS NULL OR job.lease_expires_at IS NULL OR job.lease_expires_at < NOW())
+          FOR UPDATE OF job
+       ),
+       transition AS (
+         SELECT candidate.id, job.status AS to_status, false AS mark_started
+           FROM candidate
+           JOIN human_workflow_compile_jobs job ON job.id = candidate.id
+          WHERE candidate.reclaim_running
+         UNION ALL
+         SELECT DISTINCT candidate.id, lifecycle_transition.to_status,
+                lifecycle_transition.mark_started
+           FROM candidate
+           JOIN human_workflow_compile_jobs job ON job.id = candidate.id
+           JOIN lifecycle_transitions lifecycle_transition
+             ON lifecycle_transition.lifecycle_key = job.lifecycle_key
+            AND lifecycle_transition.from_status = job.status
+           JOIN lifecycle_state_definitions target
+             ON target.lifecycle_key = lifecycle_transition.lifecycle_key
+            AND target.status = lifecycle_transition.to_status
+          WHERE target.terminal = false
+            AND lifecycle_transition.mark_started = true
+            AND NOT candidate.reclaim_running
+       ),
+       selected AS (
+         SELECT ranked.*
+           FROM (
+             SELECT transition.*, COUNT(*) OVER (PARTITION BY id) AS candidate_count
+               FROM transition
+           ) ranked
+          WHERE ranked.candidate_count = 1
+       )
+       UPDATE human_workflow_compile_jobs job
+          SET status = selected.to_status,
+              llm_started_at = CASE WHEN selected.mark_started THEN NOW() ELSE job.llm_started_at END,
+              lease_owner = $2,
+              lease_generation = job.lease_generation + 1,
+              lease_expires_at = NOW() + ($3::integer * INTERVAL '1 millisecond'),
+              lease_heartbeat_at = NOW(),
+              claimed_at = NOW(),
+              execution_attempt_id = gen_random_uuid(),
+              updated_at = NOW()
+         FROM selected
+        WHERE job.id = selected.id
+        RETURNING job.*`,
+      [jobId, owner, policy.leaseMs],
+    );
+    return result.rows[0] ? rowToJob(result.rows[0]) : null;
   }
 }
 
