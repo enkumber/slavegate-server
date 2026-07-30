@@ -1,0 +1,113 @@
+{
+  "status": "PASS",
+  "candidateSha": "4ab7337bfd8ff532fffe72ea83c9937b91a6488d",
+  "sourceIdentity": "post312-local-pg17-4ab7337bfd8f",
+  "cleanCheckoutCommand": "git clone <repo> post312-clean && cd post312-clean && git checkout <candidate-sha> && npm ci && npm run post312:fixture-gates",
+  "ingress": {
+    "method": "GET",
+    "path": "/api/audits/daily?date=2026-07-30&timezone=UTC&capturedAt=2026-07-30T08%3A00%3A00Z",
+    "replayCount": 2,
+    "concurrency": 3,
+    "httpStatuses": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      201,
+      200,
+      409,
+      200
+    ]
+  },
+  "egressCapture": {
+    "mode": "deny",
+    "enforcement": "process-preload",
+    "candidateSha": "4ab7337bfd8ff532fffe72ea83c9937b91a6488d",
+    "sourceIdentity": "post312-local-pg17-4ab7337bfd8f",
+    "capturedAt": "2026-07-30T15:56:46.731Z",
+    "channels": {
+      "dns": [
+        {
+          "channel": "dns",
+          "action": "lookup",
+          "target": "example.invalid",
+          "denied": true,
+          "capturedAt": "2026-07-30T15:56:46.731Z"
+        }
+      ],
+      "http": [
+        {
+          "channel": "http",
+          "action": "fetch",
+          "target": "http://198.51.100.10/",
+          "denied": true,
+          "capturedAt": "2026-07-30T15:56:46.731Z"
+        }
+      ],
+      "ws": [
+        {
+          "channel": "ws",
+          "action": "connect",
+          "target": "ws://198.51.100.11/socket",
+          "denied": true,
+          "capturedAt": "2026-07-30T15:56:46.731Z"
+        }
+      ],
+      "vlm": [
+        {
+          "channel": "vlm",
+          "action": "provider",
+          "target": "https://api.openai.com/v1/chat/completions",
+          "denied": true,
+          "capturedAt": "2026-07-30T15:56:46.731Z"
+        }
+      ],
+      "device": [
+        {
+          "channel": "device",
+          "action": "dispatch",
+          "target": "adb://fixture-device/shell",
+          "denied": true,
+          "capturedAt": "2026-07-30T15:56:46.731Z"
+        }
+      ],
+      "phone_dispatch": [
+        {
+          "channel": "phone_dispatch",
+          "action": "dispatch",
+          "target": "phone://fixture-device/run",
+          "denied": true,
+          "capturedAt": "2026-07-30T15:56:46.731Z"
+        }
+      ]
+    }
+  },
+  "sideEffects": {
+    "productionAccess": false,
+    "phoneDispatch": false,
+    "deviceDispatch": false,
+    "vlmCalls": false,
+    "websocket": false,
+    "dns": false
+  },
+  "assertions": {
+    "exactCandidateSha": true,
+    "httpIngress2xx": true,
+    "replayCovered": true,
+    "concurrencyCovered": true,
+    "restartCovered": true,
+    "conflictCovered": true,
+    "egressCaptureAvailable": true,
+    "forbiddenEgressDenied": true,
+    "zeroForbiddenSideEffects": true
+  },
+  "candidateLaunch": {
+    "command": "node -r tsx/cjs src/harness/post-3-9-312/fixture-candidate-server.ts",
+    "exactSha": true,
+    "restarts": 1
+  }
+}

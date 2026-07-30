@@ -1,0 +1,52 @@
+{
+  "status": "PASS",
+  "startedAt": "2026-07-30T15:56:42.967Z",
+  "candidateSha": "4ab7337bfd8ff532fffe72ea83c9937b91a6488d",
+  "sourceIdentity": "post312-local-pg17-4ab7337bfd8f",
+  "commands": [
+    {
+      "command": "/data/.openclaw/tools/postgresql-17.10/bin/createdb -h 127.0.0.1 -p 57469 post312_fixture_pg17",
+      "startedAt": "2026-07-30T15:56:46.178Z",
+      "finishedAt": "2026-07-30T15:56:46.281Z",
+      "exitCode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": "runCloneHttpE2eHarness",
+      "status": "PASS",
+      "assertions": {
+        "exactCandidateSha": true,
+        "httpIngress2xx": true,
+        "replayCovered": true,
+        "concurrencyCovered": true,
+        "restartCovered": true,
+        "conflictCovered": true,
+        "egressCaptureAvailable": true,
+        "forbiddenEgressDenied": true,
+        "zeroForbiddenSideEffects": true
+      }
+    },
+    {
+      "command": "runIncidentReconciliationHarness",
+      "status": "PASS",
+      "comparisons": {
+        "sameReadback": true,
+        "dailyAuditOkEnvelope": true,
+        "dateMatchesHttp": true,
+        "timezoneMatchesHttp": true,
+        "capturedAtMatchesHttp": true,
+        "dailyIncidentsMatchHttp": true,
+        "openBacklogMatchesHttp": true,
+        "statusBacklogSemantics": "daily findings are policy anomalies for the date window; backlog is nonterminal incident state as of the same captured timestamp",
+        "totalShapeFieldsMatch": true,
+        "nonterminalShapeFieldsMatch": true
+      }
+    }
+  ],
+  "artifacts": {
+    "clonePath": "/data/worktrees/phone-network-post-3.9.312-defect-class-audit/reports/post-3.9.312-defect-class-consolidation/e2e/clone-http-e2e-local-pg17.json",
+    "incidentPath": "/data/worktrees/phone-network-post-3.9.312-defect-class-audit/reports/post-3.9.312-defect-class-consolidation/e2e/incident-reconciliation-local-pg17.json"
+  },
+  "finishedAt": "2026-07-30T15:56:48.320Z"
+}
