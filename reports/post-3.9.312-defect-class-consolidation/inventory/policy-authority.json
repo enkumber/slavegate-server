@@ -2,6 +2,9 @@
   "story": "STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001",
   "generatedAt": "2026-07-30T13:47:33.653Z",
   "baseline": "505f3cddb707bef1dcd510ebde4edd966b245ca9",
+  "candidateAtInventory": "ff08a27eab689b8ca02075b8dc0d5370565ade7e",
+  "evidenceState": "SOURCE_INVENTORY_ONLY_EXECUTION_PROOF_REQUIRED",
+  "doneContract": "gate-4-done.md#2-policy-authority",
   "policies": [
     {
       "name": "runtime semantics",
@@ -143,5 +146,7 @@
       },
       "cacheVerdict": "warm cache must invalidate/reload on policy change; no disabled truth resurrection accepted"
     }
-  ]
+  ],
+  "requiredProofArtifact": "policy-authority-proof.json",
+  "acceptance": "All policies pass valid/missing/disabled/malformed cases through real consumers on cold and warm paths; only valid active proceeds; zero stale-cache resurrection and zero outbound attempts."
 }

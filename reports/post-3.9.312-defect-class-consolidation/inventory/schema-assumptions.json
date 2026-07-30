@@ -1,0 +1,149 @@
+{
+  "story": "STORY-PN-POST-3-9-312-DEFECT-CLASS-CONSOLIDATION-AUDIT-001",
+  "candidateAtInventory": "ff08a27eab689b8ca02075b8dc0d5370565ade7e",
+  "scope": "Gate 4 schema assumptions used by policy authority and restart/concurrency paths",
+  "verificationMode": "Migration/source trace now; pg_catalog proof must be captured from the same disposable PG17 live-shape clone used by Gate 2",
+  "assumptions": [
+    {
+      "surface": "runtime semantics",
+      "relations": ["runtime_semantic_entries"],
+      "migrationSources": ["116_ui_graph_runtime_structural_enablement.sql", "117_runtime_semantic_entry_lifecycle_compatibility.sql"],
+      "requiredShape": [
+        "semantic namespace/key/platform identity resolves at most one authoritative row",
+        "payload is jsonb and validated as an object by the consumer",
+        "lifecycle_key/status are compatible with lifecycle_state_definitions",
+        "disabled or non-dispatchable state cannot satisfy an active lookup"
+      ],
+      "cardinality": "zero => typed unavailable/fail closed; one valid active row => proceed; duplicate/ambiguous => typed failure",
+      "catalogProbe": "pg_catalog columns, constraints, indexes and foreign keys for runtime_semantic_entries plus lifecycle_state_definitions",
+      "status": "SOURCE_MAPPED_CLONE_PROOF_REQUIRED"
+    },
+    {
+      "surface": "generic lifecycle bindings",
+      "relations": ["lifecycle_resource_bindings", "lifecycle_state_definitions", "lifecycle_transitions"],
+      "migrationSources": ["105_generic_resource_lifecycle.sql", "107_lifecycle_resource_bindings.sql", "109_generic_lifecycle_state_columns.sql", "111_multi_column_lifecycle_bindings.sql", "119_lifecycle_resource_bindings_semantic_constraint_cleanup.sql"],
+      "requiredShape": [
+        "resource table and state/lifecycle columns are explicit binding data",
+        "binding identity is unique for a resource",
+        "initial/dispatchable/terminal/retryable flags come from lifecycle_state_definitions",
+        "configured state columns have validated foreign-key-compatible values"
+      ],
+      "cardinality": "missing/ambiguous binding => fail closed; exactly one enabled compatible binding => proceed",
+      "catalogProbe": "binding columns and uniqueness; lifecycle state partial unique initial index; transition PK/FK/check constraints",
+      "status": "SOURCE_MAPPED_CLONE_PROOF_REQUIRED"
+    },
+    {
+      "surface": "lifecycle resource policy",
+      "relations": ["lifecycle_resource_policies"],
+      "migrationSources": ["114_lifecycle_resource_policies.sql"],
+      "requiredShape": [
+        "policy is jsonb object",
+        "resource/binding identity is unique",
+        "consumer never substitutes TypeScript semantic defaults for missing policy"
+      ],
+      "cardinality": "zero => unavailable/fail closed; one valid row => proceed; malformed/duplicate => typed failure",
+      "catalogProbe": "columns, jsonb type/check constraints, unique identity and foreign keys",
+      "status": "SOURCE_MAPPED_CLONE_PROOF_REQUIRED"
+    },
+    {
+      "surface": "resource runtime policy",
+      "relations": ["resource_runtime_policies"],
+      "migrationSources": ["118_resource_runtime_policies.sql"],
+      "requiredShape": [
+        "resource_name is authoritative identity",
+        "policy is jsonb object",
+        "updated_at supports observable reload/invalidation"
+      ],
+      "cardinality": "zero => unavailable/fail closed; one valid row => proceed; malformed/duplicate => typed failure",
+      "catalogProbe": "primary/unique identity, jsonb constraint/default, nullability and timestamp default",
+      "status": "SOURCE_MAPPED_CLONE_PROOF_REQUIRED"
+    },
+    {
+      "surface": "human compile jobs",
+      "relations": ["human_workflow_compile_jobs"],
+      "migrationSources": ["080_human_workflow_endpoint_repairs.sql", "091_human_workflow_compiler_policy.sql", "105_generic_resource_lifecycle.sql", "107_lifecycle_resource_bindings.sql"],
+      "requiredShape": [
+        "request_key and payload hash support replay/conflict discrimination",
+        "lease owner/generation/expiry support stale-owner rejection",
+        "status/lifecycle state is DB authoritative"
+      ],
+      "cardinality": "request identity resolves zero or one durable job; replay returns same identity; conflicting payload is rejected",
+      "catalogProbe": "request identity unique index, lease generation/check/defaults, lifecycle FK/columns and status indexes",
+      "status": "SOURCE_MAPPED_CLONE_PROOF_REQUIRED"
+    },
+    {
+      "surface": "segment build jobs",
+      "relations": ["segment_build_jobs", "segment_build_job_events", "segment_builder_dispatchers"],
+      "migrationSources": ["102_segment_builder_agent_jobs.sql", "118_resource_runtime_policies.sql"],
+      "requiredShape": [
+        "request_key format and uniqueness support idempotency",
+        "claim owner/expiry and dispatcher expiry support recovery",
+        "dispatch_attempts is nonnegative",
+        "resource runtime policy is DB authoritative"
+      ],
+      "cardinality": "request identity resolves zero or one job; concurrent claims update exactly one owner",
+      "catalogProbe": "request/claim indexes, checks, defaults, event FK and dispatcher expiry index",
+      "status": "SOURCE_MAPPED_CLONE_PROOF_REQUIRED"
+    },
+    {
+      "surface": "device execution queue",
+      "relations": ["device_execution_roots", "device_execution_operations", "device_execution_events", "pnq_nodes", "pnq_jobs", "pnq_resolution_audit", "pnq_resolution_policies"],
+      "migrationSources": ["081_device_execution_queue.sql", "082_pnq_queue_v2_contract.sql", "083_pnq_v2_runtime_shadow.sql", "115_device_execution_structural_indexes.sql"],
+      "requiredShape": [
+        "external/root and operation identities are unique",
+        "owner/dispatch generations are nonnegative and used as CAS fences",
+        "execution identity is required in execution states",
+        "recovery and FIFO indexes match claim predicates"
+      ],
+      "cardinality": "one root/job per idempotency identity; one winner per claim generation; stale result cannot terminalize",
+      "catalogProbe": "unique and partial indexes, generation checks/defaults, execution-id state check, event foreign keys",
+      "status": "SOURCE_MAPPED_CLONE_PROOF_REQUIRED"
+    },
+    {
+      "surface": "workflow runs",
+      "relations": ["agency_workflow_runs", "workflow_safety_admission_ledger", "workflow_execution_bindings"],
+      "migrationSources": ["076_workflow_definition_versioning_and_auto_use_gates.sql", "097_verified_ui_state_machine_runtime.sql", "101_generic_workflow_segments.sql", "106_workflow_execution_generic_lifecycle.sql", "120_workflow_safety_admission_ledger.sql"],
+      "requiredShape": [
+        "idempotency key is unique where present",
+        "request/execution keys satisfy canonical format checks",
+        "lifecycle/status values are DB authoritative",
+        "safety admission rows are durable across restart"
+      ],
+      "cardinality": "same request returns same run/binding; conflicting canonical payload is rejected",
+      "catalogProbe": "idempotency unique index and predicate, lifecycle columns/FKs, binding PK/checks and admission window index",
+      "status": "SOURCE_MAPPED_CLONE_PROOF_REQUIRED"
+    },
+    {
+      "surface": "incidents and daily audits",
+      "relations": ["phone_network_incidents", "phone_network_incident_events", "phone_network_audit_runs", "phone_network_audit_findings"],
+      "migrationSources": ["094_phone_network_incidents_and_audits.sql", "095_incident_reconciliation_and_artifact_safety.sql"],
+      "requiredShape": [
+        "incident status/severity and ownership are durable",
+        "event_key is unique for idempotent event append",
+        "audit run/findings preserve one coherent snapshot identity",
+        "open backlog readback is derived from DB lifecycle state"
+      ],
+      "cardinality": "incident identity resolves one row; duplicate event key is idempotent; repeated daily audit is stable for the same snapshot",
+      "catalogProbe": "status/severity checks, event-key unique index, audit finding FK/index, reconciliation columns/defaults",
+      "status": "SOURCE_MAPPED_LIVE_SHAPE_AND_CLONE_PROOF_REQUIRED"
+    },
+    {
+      "surface": "UI graph recovery",
+      "relations": ["ui_graph_learning_candidates", "ui_graph_candidate_validations", "ui_graph_runtime_flags", "ui_graph_state_snapshots", "ui_graph_candidate_coverage"],
+      "migrationSources": ["087_ui_graph_runtime.sql", "097_verified_ui_state_machine_runtime.sql", "116_ui_graph_runtime_structural_enablement.sql"],
+      "requiredShape": [
+        "candidate and validation confidence/status checks are enforced",
+        "runtime enablement is structural and DB authoritative",
+        "snapshot replay identity and coverage uniqueness support coalescing"
+      ],
+      "cardinality": "one active runtime authority per scope; duplicate recovery context coalesces; stale owner cannot promote",
+      "catalogProbe": "status/confidence checks, active/runtime columns, replay and coverage unique indexes, foreign keys",
+      "status": "SOURCE_MAPPED_CLONE_PROOF_REQUIRED"
+    }
+  ],
+  "requiredCatalogCapture": {
+    "commandFile": "reports/post-3.9.312-defect-class-consolidation/inventory/gate-4-done.md",
+    "outputArtifact": "reports/post-3.9.312-defect-class-consolidation/inventory/schema-catalog-proof.json",
+    "acceptance": "Every relation above must have a captured PG17 row for columns, defaults, nullability, PK/FK/unique/check constraints and relevant index predicates; no UNKNOWN or mismatch is accepted."
+  }
+}
