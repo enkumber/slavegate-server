@@ -130,6 +130,14 @@ export function recoverSegmentBuildCandidateIdentity(job: Pick<SegmentBuildJob, 
   return candidateIdentity(job as SegmentBuildJob);
 }
 
+function hasCandidateIdentity(job: SegmentBuildJob): boolean {
+  const identity = candidateIdentity(job);
+  return !!identity.capabilityKey
+    && !!identity.compositionName
+    && !!identity.compositionVersion
+    && identity.segmentRefs.length > 0;
+}
+
 function assertAgentCandidate(
   value: Record<string, unknown>,
   policy: SegmentBuilderRuntimePolicy,
@@ -415,6 +423,68 @@ async function transitionSegmentBuildJob(
       JSON.stringify(effectivePatch),
       serializeLifecycleTransitionSelector(selector),
     ],
+  );
+  return result.rows[0] ? rowToJob(result.rows[0]) : null;
+}
+
+async function reconcileTerminalSegmentBuildJobForRetry(
+  id: string,
+  agentId: string,
+  reason: string,
+  previousStatus: string,
+  previousError: string | null,
+): Promise<SegmentBuildJob | null> {
+  const result = await getDb().query(
+    `WITH locked AS (
+       SELECT job.*
+         FROM segment_build_jobs job
+         JOIN lifecycle_state_definitions current_state
+           ON current_state.lifecycle_key = job.lifecycle_key
+          AND current_state.status = job.status
+        WHERE job.id = $1
+          AND job.assigned_agent = $2
+          AND current_state.terminal
+          AND current_state.manual
+          AND NOT (job.evidence @> '{"blockedReconciliation":{"reopened":true}}'::jsonb)
+        FOR UPDATE
+     ),
+     retry_targets AS (
+       SELECT locked.id, target.status, COUNT(*) OVER (PARTITION BY locked.id) AS target_count
+         FROM locked
+         JOIN lifecycle_state_definitions target
+           ON target.lifecycle_key = locked.lifecycle_key
+        WHERE target.initial
+          AND NOT target.terminal
+          AND target.dispatchable
+          AND NOT target.administrative
+     ),
+     selected AS (
+       SELECT id, status
+         FROM retry_targets
+        WHERE target_count = 1
+     )
+     UPDATE segment_build_jobs job
+        SET status = selected.status,
+            dispatch_attempts = 0,
+            last_dispatch_error = NULL,
+            error = NULL,
+            claim_expires_at = NULL,
+            completed_at = NULL,
+            evidence = job.evidence || jsonb_build_object(
+              'blockedReconciliation',
+              jsonb_build_object(
+                'reopened', true,
+                'reason', $3::text,
+                'previousStatus', $4::text,
+                'previousError', $5::text,
+                'at', NOW()
+              )
+            ),
+            updated_at = NOW()
+       FROM selected
+      WHERE job.id = selected.id
+      RETURNING job.*`,
+    [id, agentId, reason, previousStatus, previousError],
   );
   return result.rows[0] ? rowToJob(result.rows[0]) : null;
 }
@@ -816,6 +886,36 @@ export class SegmentBuildJobService {
       if (after.dispatchAttempts > before.dispatchAttempts) redispatched += 1;
     }
     return redispatched;
+  }
+
+  async reconcileBlockedForRetry(input: {
+    id: string;
+    agentId: string;
+    reason?: string;
+  }): Promise<{ job: SegmentBuildJob; reconciled: boolean } | null> {
+    if (input.agentId !== (await segmentBuilderRuntimePolicy()).agentId) return null;
+    const current = await this.get(input.id);
+    if (!current) return null;
+    const priorReconciliation = objectValue(current.evidence.blockedReconciliation);
+    if (priorReconciliation.reopened === true) {
+      return { job: current, reconciled: false };
+    }
+    if (!hasCandidateIdentity(current)) return null;
+    const reason = (input.reason ?? "blocked precondition recovered").slice(0, 500);
+    const transitioned = await reconcileTerminalSegmentBuildJobForRetry(
+      input.id,
+      input.agentId,
+      reason,
+      current.status,
+      current.error ?? current.lastDispatchError ?? null,
+    );
+    if (!transitioned) return null;
+    await event(input.id, "blocked_reconciled", input.agentId, {
+      previousStatus: current.status,
+      reason,
+    });
+    const dispatched = await this.dispatch(transitioned);
+    return { job: dispatched, reconciled: true };
   }
 
   async expireOfflineQueuedCanaries(

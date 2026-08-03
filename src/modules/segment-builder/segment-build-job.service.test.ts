@@ -127,6 +127,39 @@ vi.mock("../../db/client", () => {
       }
       if (
         text.includes("WITH locked AS (")
+        && text.includes("retry_targets AS")
+        && text.includes("blockedReconciliation")
+      ) {
+        if (
+          String(state.row.status) !== "blocked"
+          || state.row.assigned_agent !== params[1]
+          || ((state.row.evidence as Record<string, unknown> | undefined)?.blockedReconciliation as Record<string, unknown> | undefined)?.reopened === true
+        ) {
+          return { rows: [] };
+        }
+        state.row = {
+          ...state.row,
+          status: "pending_agent",
+          dispatch_attempts: 0,
+          last_dispatch_error: null,
+          error: null,
+          claim_expires_at: null,
+          completed_at: null,
+          evidence: {
+            ...((state.row.evidence as Record<string, unknown> | undefined) ?? {}),
+            blockedReconciliation: {
+              reopened: true,
+              reason: params[2],
+              previousStatus: params[3],
+              previousError: params[4],
+              at: new Date().toISOString(),
+            },
+          },
+        };
+        return { rows: [{ ...state.row }] };
+      }
+      if (
+        text.includes("WITH locked AS (")
         && text.includes("UPDATE segment_build_jobs job")
         && text.includes("lifecycle_transitions")
       ) {
@@ -185,6 +218,11 @@ vi.mock("../../db/client", () => {
             ...((state.row.result as Record<string, unknown> | undefined) ?? {}),
             ...((patch.resultPatch as Record<string, unknown> | undefined) ?? {}),
           },
+          evidence: {
+            ...((state.row.evidence as Record<string, unknown> | undefined) ?? {}),
+            ...((patch.evidencePatch as Record<string, unknown> | undefined) ?? {}),
+          },
+          error: patch.error === null ? null : state.row.error,
         };
         return { rows: [{ ...state.row }] };
       }
@@ -482,6 +520,91 @@ describe("SegmentBuildJobService dispatch", () => {
     expect(duplicateSweep).toBe(0);
     expect(state.row.status).toBe("building");
     expect(state.row.dispatch_attempts).toBe(1);
+  });
+
+  it("reconciles a terminal manual blocked job exactly once through policy transitions", async () => {
+    state.row.status = "blocked";
+    state.row.error = "stale precondition";
+    state.row.candidate = {
+      capability: { capabilityKey: "capability" },
+      composition: {
+        compositionName: "composition",
+        version: "1",
+      },
+      segments: [{
+        segmentKey: "segment",
+        version: "1",
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 202 })));
+
+    const service = new SegmentBuildJobService();
+    const first = await service.reconcileBlockedForRetry({
+      id: buildJob().id,
+      agentId: TEST_AGENT_ID,
+      reason: "device online",
+    });
+    const second = await service.reconcileBlockedForRetry({
+      id: buildJob().id,
+      agentId: TEST_AGENT_ID,
+      reason: "device online",
+    });
+
+    expect(first?.reconciled).toBe(true);
+    expect(first?.job.status).toBe("dispatched");
+    expect(second?.reconciled).toBe(false);
+    expect(second?.job.status).toBe("dispatched");
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(state.row.dispatch_attempts).toBe(1);
+    expect(state.row.error).toBeNull();
+    expect(state.row.evidence).toMatchObject({
+      blockedReconciliation: {
+        reopened: true,
+        reason: "device online",
+        previousStatus: "blocked",
+        previousError: "stale precondition",
+      },
+    });
+  });
+
+  it("leaves ineligible terminal blocked jobs closed", async () => {
+    state.row.status = "blocked";
+    state.row.candidate = null;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 202 })));
+
+    const result = await new SegmentBuildJobService().reconcileBlockedForRetry({
+      id: buildJob().id,
+      agentId: TEST_AGENT_ID,
+    });
+
+    expect(result).toBeNull();
+    expect(state.row.status).toBe("blocked");
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects blocked reconciliation from an unauthorized agent", async () => {
+    state.row.status = "blocked";
+    state.row.candidate = {
+      capability: { capabilityKey: "capability" },
+      composition: {
+        compositionName: "composition",
+        version: "1",
+      },
+      segments: [{
+        segmentKey: "segment",
+        version: "1",
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 202 })));
+
+    const result = await new SegmentBuildJobService().reconcileBlockedForRetry({
+      id: buildJob().id,
+      agentId: "other-agent",
+    });
+
+    expect(result).toBeNull();
+    expect(state.row.status).toBe("blocked");
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it("atomically expires an offline queued canary and its task", async () => {

@@ -152,6 +152,25 @@ router.post("/jobs/:id/heartbeat", asyncRoute(async (req, res) => {
   res.json({ ok: true, data: job });
 }));
 
+router.post("/jobs/:id/reconcile-blocked", asyncRoute(async (req, res) => {
+  const agentId = await requestedAgentId(req, res);
+  if (!agentId) return;
+  const reason = typeof req.body?.reason === "string" ? req.body.reason : undefined;
+  const result = await segmentBuildJobService.reconcileBlockedForRetry({
+    id: req.params.id,
+    agentId,
+    reason,
+  });
+  if (!result) {
+    return res.status(409).json({
+      ok: false,
+      code: "SEGMENT_BUILD_BLOCKED_RECONCILE_NOT_ELIGIBLE",
+      error: "blocked job is not eligible for reconciliation",
+    });
+  }
+  res.json({ ok: true, data: result.job, reconciled: result.reconciled });
+}));
+
 router.post("/jobs/:id/candidate", asyncRoute(async (req, res) => {
   try {
     const agentId = await requestedAgentId(req, res);

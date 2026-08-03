@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { WorkflowSegmentComposer, computeCompositionStructureKey, computeSegmentFingerprint } from "./composer";
+import { WorkflowSegmentComposer, composeGoalContract, computeCompositionStructureKey, computeSegmentFingerprint } from "./composer";
 import { compileGeneratedWorkflowTemplate } from "../workflows/workflow-validator";
 import { evaluatePostconditionContract } from "./postcondition";
 import { resolveCompositionInputs } from "./input-resolver";
@@ -275,6 +275,67 @@ describe("workflow segment architecture", () => {
       deviceId: "11111111-1111-4111-8111-111111111111",
       accountId: null,
     })).rejects.toMatchObject({ code: "WORKFLOW_COMPOSITION_POLICY_CONFLICT" });
+  });
+
+  it("derives a legacy goal contract from structural step policy when promoted segments omit one", () => {
+    const { composition, segment } = fixture();
+    delete segment.template.goalContract;
+    segment.template.steps = [{
+      id: "observe",
+      type: "action",
+      action: "ui_tree_dump",
+      observationOnly: true,
+      effect: "observation",
+      saveOutputAs: "tree",
+    }];
+
+    const contract = composeGoalContract(composition, new Map([
+      [`${segment.segmentKey}@${segment.version}`, segment],
+    ]));
+
+    expect(contract).toEqual({
+      version: "1",
+      stages: [{
+        id: "navigate",
+        required: true,
+        allowedActions: ["ui_tree_dump"],
+        allowedEffects: ["observation"],
+        produces: ["navigationResult", "observedDestination"],
+      }],
+      requiredOutputs: ["navigationResult", "observedDestination"],
+      allowedEffects: ["observation"],
+    });
+  });
+
+  it("fails closed when a mixed legacy goal contract cannot be derived", () => {
+    const { composition, segment } = fixture();
+    const declared = { ...segment };
+    const legacy = {
+      ...segment,
+      segmentKey: "legacy_missing_contract",
+      template: {
+        ...segment.template,
+        goalContract: undefined,
+        steps: [{ id: "opaque", type: "checkpoint", reason: "legacy" }],
+      },
+    } as WorkflowSegmentVersionRecord;
+    composition.nodes = [
+      composition.nodes[0],
+      {
+        nodeKey: "legacy",
+        ordinal: 1,
+        segmentKey: legacy.segmentKey,
+        segmentVersion: legacy.version,
+        inputBindings: {},
+        outputBindings: {},
+        dependsOn: ["navigate"],
+      },
+    ];
+
+    expect(() => composeGoalContract(composition, new Map([
+      [`${declared.segmentKey}@${declared.version}`, declared],
+      [`${legacy.segmentKey}@${legacy.version}`, legacy],
+    ]))).toThrow(/composition segments do not all declare goalContract/);
   });
 
   it("requires outputs to be related to the concrete runtime input", () => {

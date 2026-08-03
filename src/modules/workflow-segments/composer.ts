@@ -1,6 +1,7 @@
 import type {
   WorkflowGoalContract,
   WorkflowGoalContractStage,
+  WorkflowInteractionEffect,
   WorkflowRecoveryPolicy,
   WorkflowStep,
   WorkflowTemplate,
@@ -199,7 +200,10 @@ export function composeGoalContract(
   segments: Map<string, Pick<WorkflowSegmentVersionRecord, "template">>,
 ): WorkflowGoalContract | undefined {
   const contracts = composition.nodes.map(
-    (node) => segments.get(`${node.segmentKey}@${node.segmentVersion}`)!.template.goalContract,
+    (node) => {
+      const segment = segments.get(`${node.segmentKey}@${node.segmentVersion}`)!;
+      return segment.template.goalContract ?? deriveLegacyGoalContract(node, segment.template);
+    },
   );
   if (contracts.every((contract) => contract === undefined)) return undefined;
   if (contracts.some((contract) => contract === undefined)) {
@@ -223,6 +227,67 @@ export function composeGoalContract(
     stages: [...stages.values()],
     requiredOutputs: sortedUnique(requiredOutputs),
     allowedEffects: sortedUnique(allowedEffects),
+  };
+}
+
+function stepActionsAndEffects(step: WorkflowStep): {
+  actions: string[];
+  effects: WorkflowInteractionEffect[];
+} {
+  if (step.type === "action") {
+    return {
+      actions: [step.action],
+      effects: typeof step.effect === "string" && step.effect.length > 0
+        ? [step.effect]
+        : step.observationOnly === true
+        ? ["observation"]
+        : [],
+    };
+  }
+  if (step.type === "wait") {
+    return {
+      actions: typeof step.until?.action === "string" ? [step.until.action] : [],
+      effects: step.until?.observationOnly === true ? ["observation"] : [],
+    };
+  }
+  if (step.type === "condition") {
+    const branches = [...step.if_true, ...(step.if_false ?? [])].flatMap(stepActionsAndEffects);
+    return {
+      actions: sortedUnique(branches.flatMap((item) => item.actions)),
+      effects: sortedUnique(branches.flatMap((item) => item.effects)),
+    };
+  }
+  if (step.type === "loop") {
+    const nested = step.steps.flatMap(stepActionsAndEffects);
+    return {
+      actions: sortedUnique(nested.flatMap((item) => item.actions)),
+      effects: sortedUnique(nested.flatMap((item) => item.effects)),
+    };
+  }
+  return { actions: [], effects: [] };
+}
+
+function deriveLegacyGoalContract(
+  node: WorkflowCompositionNodeRecord,
+  template: WorkflowTemplate,
+): WorkflowGoalContract | undefined {
+  if (template.goalContract !== undefined) return template.goalContract;
+  const stepPolicy = template.steps.flatMap(stepActionsAndEffects);
+  const allowedActions = sortedUnique(stepPolicy.flatMap((item) => item.actions));
+  const allowedEffects = sortedUnique(stepPolicy.flatMap((item) => item.effects));
+  const produces = sortedUnique(Object.values(node.outputBindings).filter(Boolean));
+  if (allowedActions.length === 0 || allowedEffects.length === 0) return undefined;
+  return {
+    version: "1",
+    stages: [{
+      id: node.nodeKey,
+      required: true,
+      allowedActions,
+      allowedEffects,
+      ...(produces.length > 0 ? { produces } : {}),
+    }],
+    ...(produces.length > 0 ? { requiredOutputs: produces } : {}),
+    allowedEffects,
   };
 }
 
