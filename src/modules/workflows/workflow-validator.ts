@@ -867,6 +867,87 @@ export function compileGeneratedWorkflowTemplate(template: WorkflowTemplate): Ge
   };
 }
 
+export function validateGeneratedWorkflowCompiledPlan(
+  template: WorkflowTemplate,
+  compiledPlan: unknown,
+): string[] {
+  const errors: string[] = [];
+  if (!isRecord(compiledPlan)) {
+    return ["compiledPlan must be an object"];
+  }
+  const candidate = compiledPlan as Partial<GeneratedWorkflowCompiledPlan>;
+  const expected = compileGeneratedWorkflowTemplate(template);
+
+  const requiredScalar = (
+    key: keyof Pick<
+      GeneratedWorkflowCompiledPlan,
+      "planVersion" | "cacheKey" | "templateId" | "platform" | "templateVersion"
+    >,
+  ): void => {
+    if (candidate[key] !== expected[key]) {
+      errors.push(`compiledPlan.${key} must match the validated workflow template`);
+    }
+  };
+  requiredScalar("planVersion");
+  requiredScalar("cacheKey");
+  requiredScalar("templateId");
+  requiredScalar("platform");
+  requiredScalar("templateVersion");
+
+  for (const key of ["stepCount", "actionCount", "checkpointCount", "maxDepth"] as const) {
+    if (candidate[key] !== expected[key]) {
+      errors.push(`compiledPlan.${key} must match the validated workflow template`);
+    }
+  }
+
+  if (!isRecord(candidate.llmBudget)) {
+    errors.push("compiledPlan.llmBudget must be an object");
+  } else {
+    if (candidate.llmBudget.happyPathRequests !== expected.llmBudget.happyPathRequests) {
+      errors.push("compiledPlan.llmBudget.happyPathRequests must match the validated workflow template");
+    }
+    if (candidate.llmBudget.recoveryRequests !== expected.llmBudget.recoveryRequests) {
+      errors.push("compiledPlan.llmBudget.recoveryRequests must match the validated workflow template");
+    }
+  }
+
+  if (!Array.isArray(candidate.steps)) {
+    errors.push("compiledPlan.steps must be an array");
+    return errors;
+  }
+  if (candidate.steps.length !== expected.steps.length) {
+    errors.push("compiledPlan.steps must not add or omit executable workflow steps");
+  }
+  candidate.steps.forEach((step, index) => {
+    const path = `compiledPlan.steps[${index}]`;
+    if (!isRecord(step)) {
+      errors.push(`${path} must be an object`);
+      return;
+    }
+    const expectedStep = expected.steps[index];
+    if (!expectedStep) {
+      errors.push(`${path} is not present in the validated workflow template`);
+      return;
+    }
+    if (step.path !== expectedStep.path) errors.push(`${path}.path must match the validated workflow template`);
+    if (step.type !== expectedStep.type) errors.push(`${path}.type must match the validated workflow template`);
+    if (step.id !== expectedStep.id) errors.push(`${path}.id must match the validated workflow template`);
+
+    const action = step.action;
+    if (step.type === "action") {
+      if (typeof action !== "string" || action.length === 0) {
+        errors.push(`${path}.action must be a non-empty string for executable action steps`);
+      } else if (action !== expectedStep.action) {
+        errors.push(`${path}.action must match the validated workflow template`);
+      }
+    } else if (Object.prototype.hasOwnProperty.call(step, "action") && action !== undefined) {
+      errors.push(`${path}.action must not be declared for non-action steps`);
+    }
+  });
+
+  return errors;
+}
+
 export function inferGeneratedWorkflowBindingSource(step: WorkflowStep): GeneratedWorkflowBindingSource {
   return getGeneratedWorkflowStepProvenance(step).bindingSource;
 }
