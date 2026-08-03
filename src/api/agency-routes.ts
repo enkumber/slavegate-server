@@ -38,7 +38,10 @@ import {
 } from "../modules/task-lifecycle/task-lifecycle.service";
 import { transitionWorkflow } from "../modules/workflows/workflow-lifecycle.service";
 import { transitionAgencyWorkflowRun } from "../modules/workflows/agency-workflow-run-lifecycle.service";
-import { resolveCachedWorkflowSafetyClass } from "../modules/human-workflow/human-workflow-normalization";
+import {
+  normalizeCachedHumanWorkflowTemplate,
+  resolveCachedWorkflowSafetyClass,
+} from "../modules/human-workflow/human-workflow-normalization";
 import {
   computeWorkflowSafetyArtifactFingerprint,
   reserveWorkflowSafetyAdmission,
@@ -1206,7 +1209,11 @@ async function findPromotedWorkflowDefinitionArtifact(db: ReturnType<typeof getD
 
 function workflowTemplateFromCachedArtifact(cached: Record<string, unknown>): any | null {
   const workflow = cached.workflow;
-  return workflow && typeof workflow === "object" && !Array.isArray(workflow) ? workflow : null;
+  if (!workflow || typeof workflow !== "object" || Array.isArray(workflow)) return null;
+  return normalizeCachedHumanWorkflowTemplate(
+    workflow as WorkflowTemplate,
+    (cached.source_metadata ?? cached.sourceMetadata) as Record<string, unknown> | null | undefined,
+  );
 }
 
 function agencyWorkflowRunSelectSql(where: string): string {

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { resolveCachedWorkflowSafetyClass } from "./human-workflow-normalization";
+import {
+  normalizeCachedHumanWorkflowTemplate,
+  resolveCachedWorkflowSafetyClass,
+} from "./human-workflow-normalization";
+import type { WorkflowTemplate } from "../workflows/types";
 
 describe("cached workflow safety-class resolution", () => {
   it("preserves an opaque PostgreSQL-owned safety class without code mapping", () => {
@@ -38,5 +42,62 @@ describe("cached workflow safety-class resolution", () => {
       workflow: { safetyClass: "read_only" },
       compiled_plan: { metadata: { safetyClass: "mutating" } },
     })).toThrow("projections disagree");
+  });
+});
+
+function cachedWorkflow(overrides: Partial<WorkflowTemplate> = {}): WorkflowTemplate {
+  return {
+    id: "generic_cached_boundary_probe",
+    name: "Generic cached boundary probe",
+    platform: "generic",
+    description: "Schema-only cached workflow boundary fixture.",
+    version: "1.0.0",
+    defaultVerificationStrategy: "local",
+    dataRetentionDays: 0,
+    steps: [
+      {
+        type: "action",
+        id: "collect_structural_data",
+        action: "collect_structural_data",
+        params: {},
+      },
+    ],
+    ...overrides,
+  };
+}
+
+describe("cached workflow executable-structure normalization", () => {
+  it("rejects cached action steps with a null action before dispatch", () => {
+    const workflow = cachedWorkflow({
+      steps: [
+        {
+          type: "action",
+          id: "missing_executable_discriminator",
+          action: null,
+          params: { outputVariable: "numericOutput" },
+        } as unknown as WorkflowTemplate["steps"][number],
+      ],
+    });
+
+    expect(() => normalizeCachedHumanWorkflowTemplate(workflow, {})).toThrow(
+      "cached workflow has invalid executable structure",
+    );
+  });
+
+  it("rejects observation output nodes that are not executable workflow steps", () => {
+    const workflow = cachedWorkflow({
+      steps: [
+        {
+          type: "countMatches",
+          id: "count_output_node",
+          outputVariable: "matchCount",
+          selector: { text: "any" },
+        } as unknown as WorkflowTemplate["steps"][number],
+      ],
+    });
+
+    expect(() => normalizeCachedHumanWorkflowTemplate(workflow, {})).toThrow(
+      "workflow.steps[0].type must be a valid executable step discriminator",
+    );
   });
 });

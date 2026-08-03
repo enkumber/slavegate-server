@@ -1524,7 +1524,8 @@ async function executeGeneratedWorkflowTask(
     }
     const intent = artifactIntent;
     try {
-      assertHumanWorkflowMeaningful(cached.workflow, intent);
+      const cachedWorkflow = normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata);
+      assertHumanWorkflowMeaningful(cachedWorkflow, intent);
     } catch (err) {
       const typed = err as Error & { code?: string };
       generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "dispatch_failed").inc();
@@ -1582,8 +1583,9 @@ async function executeGeneratedWorkflowTask(
           }
         : {}),
     };
+    const cachedWorkflow = normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata);
     const executableWorkflow = await hydrateWorkflowNativePolicies(
-      normalizeCachedHumanWorkflowTemplate(cached.workflow, cached.sourceMetadata) as unknown as Record<string, unknown>,
+      cachedWorkflow as unknown as Record<string, unknown>,
     ) as unknown as WorkflowTemplate;
     const dispatch = await dispatchGeneratedWorkflowTemplate({
       templateId: executableWorkflow.id,

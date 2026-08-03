@@ -510,6 +510,53 @@ describe("task-runner generated_workflow routine", () => {
     expect(mocks.taskRunnerDispatchLabels).toHaveBeenCalledWith("generated_workflow", "request_key", "dispatch_failed");
   });
 
+  it("rejects cached dashboard human output nodes before generated workflow dispatch", async () => {
+    const cached = cacheRecord({
+      sourceMetadata: {
+        source: "dashboard_human",
+        intent: "collect numeric observation",
+        platform: "generic",
+      },
+    });
+    cached.workflow = {
+      ...cached.workflow,
+      id: "generic_cached_output_boundary_probe",
+      name: "Generic cached output boundary probe",
+      platform: "generic",
+      intent: "collect_numeric_observation",
+      safetyClass: "read_only",
+      outputSchema: {
+        required: ["numericOutput"],
+        properties: { numericOutput: { type: "number" } },
+      },
+      steps: [
+        {
+          type: "action",
+          id: "numeric_observation_node",
+          action: null,
+          params: { outputVariable: "numericOutput" },
+        } as unknown as WorkflowTemplate["steps"][number],
+      ],
+    };
+    mockTaskDb(task({
+      requestKey: REQUEST_KEY,
+      intent: "collect numeric observation",
+      source: "dashboard_human",
+    }), "generic");
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: false,
+      failReason: expect.stringContaining("cached workflow has invalid executable structure"),
+      generatedWorkflow: expect.objectContaining({
+        failureCode: "CACHED_WORKFLOW_EXECUTABLE_STRUCTURE_INVALID",
+      }),
+    });
+    expect(mocks.dispatchGeneratedWorkflowTemplate).not.toHaveBeenCalled();
+  });
+
   it("does not rewrite application packages from cached workflow data", async () => {
     const cached = cacheRecord({
       sourceMetadata: {

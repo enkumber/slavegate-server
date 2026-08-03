@@ -105,7 +105,10 @@ import {
   type HumanWorkflowSafetyClass,
   type HumanWorkflowTarget,
 } from "../modules/human-workflow/human-workflow-compiler.service";
-import { resolveCachedWorkflowSafetyClass } from "../modules/human-workflow/human-workflow-normalization";
+import {
+  normalizeCachedHumanWorkflowTemplate,
+  resolveCachedWorkflowSafetyClass,
+} from "../modules/human-workflow/human-workflow-normalization";
 import {
   computeWorkflowSafetyArtifactFingerprint,
   reserveWorkflowSafetyAdmission,
@@ -307,7 +310,11 @@ export async function queueHumanAgencyWorkflowRun(input: {
 
     const safetyClass: HumanWorkflowSafetyClass =
       resolveCachedWorkflowSafetyClass(cached);
-    assertHumanWorkflowMeaningful(cached.workflow as WorkflowTemplate, input.intent);
+    const cachedWorkflow = normalizeCachedHumanWorkflowTemplate(
+      cached.workflow as WorkflowTemplate,
+      cached.source_metadata as Record<string, unknown> | null | undefined,
+    );
+    assertHumanWorkflowMeaningful(cachedWorkflow, input.intent);
     const artifactIntent = typeof (cached.source_metadata as Record<string, unknown> | undefined)?.intent === "string"
       ? String((cached.source_metadata as Record<string, unknown>).intent).trim()
       : "";
@@ -405,7 +412,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
     const admission = await reserveWorkflowSafetyAdmission({
       db: client,
       safetyClass,
-      workflow: cached.workflow as WorkflowTemplate,
+      workflow: cachedWorkflow,
       artifactFingerprint: safetyArtifactFingerprint,
       context: admissionContext,
       idempotencyKey,
