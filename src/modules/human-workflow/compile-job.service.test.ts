@@ -198,7 +198,6 @@ describe("humanWorkflowCompileJobService", () => {
     expect(job?.leaseOwner).toBe("worker-a");
     expect(job?.leaseGeneration).toBe(3);
     expect(mocks.db.query.mock.calls[1][0]).toContain("FOR UPDATE OF job SKIP LOCKED");
-    expect(mocks.db.query.mock.calls[1][0]).toContain("job.retry_count > 0");
     expect(mocks.db.query.mock.calls[1][0]).toContain("lease_generation = job.lease_generation + 1");
   });
 });

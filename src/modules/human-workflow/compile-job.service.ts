@@ -401,12 +401,10 @@ export class HumanWorkflowCompileJobService {
          SELECT job.id,
                 (job.lease_owner IS NOT NULL AND job.lease_expires_at < NOW()) AS reclaim_running
            FROM human_workflow_compile_jobs job
-           JOIN lifecycle_state_definitions state
+          JOIN lifecycle_state_definitions state
              ON state.lifecycle_key = job.lifecycle_key
             AND state.status = job.status
           WHERE state.terminal = false
-            AND job.retry_count > 0
-            AND job.last_retried_at IS NOT NULL
             AND (state.initial = true OR state.dispatchable = true OR job.lease_expires_at < NOW())
             AND (job.lease_owner IS NULL OR job.lease_expires_at IS NULL OR job.lease_expires_at < NOW())
           ORDER BY COALESCE(job.lease_expires_at, job.created_at), job.created_at
@@ -562,7 +560,7 @@ export class HumanWorkflowCompileJobService {
   ): void {
     if (this.running.has(job.id)) return;
     this.running.add(job.id);
-    setImmediate(async () => {
+    void Promise.resolve().then(async () => {
       try {
         await this.runClaimed(job, () => runnerForJob(job));
       } finally {
@@ -574,7 +572,7 @@ export class HumanWorkflowCompileJobService {
   runInProcess(jobId: string, runner: () => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>): void {
     if (this.running.has(jobId)) return;
     this.running.add(jobId);
-    setImmediate(async () => {
+    void Promise.resolve().then(async () => {
       try {
         const claimed = await this.claimSpecific(jobId);
         if (!claimed) return;
@@ -592,13 +590,11 @@ export class HumanWorkflowCompileJobService {
          SELECT job.id,
                 (job.lease_owner IS NOT NULL AND job.lease_expires_at < NOW()) AS reclaim_running
            FROM human_workflow_compile_jobs job
-           JOIN lifecycle_state_definitions state
+          JOIN lifecycle_state_definitions state
              ON state.lifecycle_key = job.lifecycle_key
             AND state.status = job.status
           WHERE job.id = $1
             AND state.terminal = false
-            AND job.retry_count > 0
-            AND job.last_retried_at IS NOT NULL
             AND (job.lease_owner IS NULL OR job.lease_expires_at IS NULL OR job.lease_expires_at < NOW())
           FOR UPDATE OF job
        ),

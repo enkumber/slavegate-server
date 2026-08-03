@@ -345,6 +345,153 @@ describe("PostgreSQL job action catalog", () => {
       })],
     }));
   });
+
+  it("materializes primitive countMatches workflows with edge structural discriminators", async () => {
+    mocks.dbQuery
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            policy: {
+              actionKey: "classify_ui_tree",
+              allowed: true,
+              requiresRoot: false,
+              nativeOpcode: 101,
+              verificationOpcode: 0,
+              executionPolicy: {
+                verificationStrategy: "database_local",
+                l1TimeoutMs: 11,
+                l2SettleMs: 12,
+              },
+            },
+          },
+          {
+            policy: {
+              actionKey: "ui_tree_dump",
+              allowed: true,
+              requiresRoot: false,
+              nativeOpcode: 12,
+              verificationOpcode: 0,
+              observationOnly: true,
+              executionPolicy: {
+                verificationStrategy: "database_observe",
+                l1TimeoutMs: 21,
+                l2SettleMs: 22,
+              },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          policy: {
+            distributionOpcodes: { database_distribution: 2 },
+            conditionOpcodes: { database_condition: 4 },
+            predicateOpcodes: { database_predicate: 6 },
+            failureOpcodes: { database_default: 0 },
+            defaultFailureMode: "database_default",
+            verificationOpcodes: { database_verification: 2 },
+            defaultVerificationMode: "database_verification",
+            runtimeDefaults: {
+              actionRetries: 0,
+              actionRetryDelayMs: 0,
+              actionDelayAfterMs: 0,
+              actionTimeoutMs: 1000,
+              pollIntervalMs: 100,
+              pollTimeoutMs: 1000,
+              conditionProbability: 0.5,
+              regexGroup: 0,
+              recoveryAutonomy: "disabled",
+              recoveryAiEnabled: false,
+              recoveryMaxAttemptsPerStep: 0,
+              recoveryMaxAttemptsPerWorkflow: 0,
+              recoveryMaxActionsPerAttempt: 0,
+              recoveryAllowedRequests: [],
+              recoveryRequireStateVerification: false,
+              recoveryLearnFromFailure: false,
+              recoveryPlannerInstruction: "",
+              recoveryExecuteDecisionKey: "",
+              recoveryRetryDecisionKey: "",
+              recoveryAbortDecisionKey: "",
+              recoveryProbeActionKey: "",
+              recoveryProbeTimeoutMs: 0,
+              recoveryPlannerSystem: "",
+              recoveryMaxTokens: 0,
+              recoveryPlannerMaxTokens: 0,
+              recoveryPlannerTimeoutMs: 0,
+            },
+            enginePolicy: {
+              maxNestedDepth: 8,
+              minActionTimeoutMs: 100,
+              captureTimeoutMs: 1000,
+              defaultSubstepTimeoutMs: 1000,
+              substepTimeoutPaddingMs: 100,
+            },
+          },
+        }],
+      });
+
+    await expect(hydrateWorkflowNativePolicies({
+      steps: [
+        {
+          type: "action",
+          id: "count_visible_descriptions",
+          action: "classify_ui_tree",
+          params: {
+            outputs: {
+              visibleCheckableFocusableContentDescriptionCount: {
+                countMatches: {
+                  regex: "contentDescription=.+",
+                  flags: "i",
+                },
+              },
+            },
+            observationPrimitive: {
+              action: "ui_tree_dump",
+              params: {},
+              timeoutMs: 1000,
+            },
+          },
+        },
+        {
+          type: "checkpoint",
+          id: "count_matches_observed",
+          reason: "countMatches materialized",
+        },
+      ],
+    })).resolves.toEqual(expect.objectContaining({
+      steps: [
+        expect.objectContaining({
+          action: "classify_ui_tree",
+          nativeOpcode: 101,
+          params: expect.objectContaining({
+            outputs: {
+              visibleCheckableFocusableContentDescriptionCount: expect.objectContaining({
+                countMatches: expect.objectContaining({
+                  regex: "contentDescription=.+",
+                  flags: "i",
+                }),
+              }),
+            },
+            observationPrimitive: expect.objectContaining({
+              action: "ui_tree_dump",
+              primitive: true,
+              nativeOpcode: 12,
+              observationOnly: true,
+              verificationOpcode: 2,
+              verificationStrategy: "database_observe",
+              l1TimeoutMs: 21,
+              l2SettleMs: 22,
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          type: "checkpoint",
+          id: "count_matches_observed",
+          phase: "countMatches materialized",
+        }),
+      ],
+    }));
+  });
 });
 
 describe("PNQ v2 shadow dispatch side effect", () => {
