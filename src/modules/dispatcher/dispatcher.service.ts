@@ -218,11 +218,25 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
     if (typeof source.regex === "string") {
       hydrated.group = source.group ?? runtimeDefault("regexGroup");
     }
+    if (source.type === "condition") {
+      hydrated.then = Array.isArray(source.then) ? visit(source.then) : visit(source.if_true);
+      hydrated.else = Array.isArray(source.else) ? visit(source.else) : visit(source.if_false ?? []);
+    }
+    if (source.type === "checkpoint" && typeof source.phase !== "string") {
+      hydrated.phase = typeof source.reason === "string" && source.reason.trim()
+        ? source.reason.trim()
+        : source.id;
+    }
+
     const actionKey = typeof source.action === "string" ? source.action.trim() : "";
     const actionShaped = source.type === "action"
       || source.primitive === true
       || Object.prototype.hasOwnProperty.call(source, "outputPath")
-      || Object.prototype.hasOwnProperty.call(source, "postcondition");
+      || Object.prototype.hasOwnProperty.call(source, "postcondition")
+      || (
+        Object.prototype.hasOwnProperty.call(source, "params")
+        && Object.prototype.hasOwnProperty.call(source, "timeoutMs")
+      );
     if (!actionKey || !actionShaped) return hydrated;
     const policy = policies.get(actionKey);
     if (!policy) throw new Error(`PostgreSQL job action policy is missing for edge action '${actionKey}'`);
@@ -277,6 +291,7 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
       ...actionExecutionFields,
       ...pollingFields,
       params: transformedParams,
+      ...(source.primitive === true || source.type !== "action" ? { primitive: true } : {}),
       nativeOpcode: policy.nativeOpcode,
       observationOnly: policy.observationOnly,
       verificationOpcode: opcodeFrom("verificationOpcodes", verificationMode),
