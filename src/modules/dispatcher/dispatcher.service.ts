@@ -233,6 +233,7 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
       || source.primitive === true
       || Object.prototype.hasOwnProperty.call(source, "outputPath")
       || Object.prototype.hasOwnProperty.call(source, "postcondition")
+      || Object.prototype.hasOwnProperty.call(source, "timeoutMs")
       || (
         Object.prototype.hasOwnProperty.call(source, "params")
         && Object.prototype.hasOwnProperty.call(source, "timeoutMs")

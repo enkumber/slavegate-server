@@ -447,7 +447,6 @@ describe("PostgreSQL job action catalog", () => {
             },
             observationPrimitive: {
               action: "ui_tree_dump",
-              params: {},
               timeoutMs: 1000,
             },
           },
@@ -474,6 +473,7 @@ describe("PostgreSQL job action catalog", () => {
             },
             observationPrimitive: expect.objectContaining({
               action: "ui_tree_dump",
+              params: {},
               primitive: true,
               nativeOpcode: 12,
               observationOnly: true,
