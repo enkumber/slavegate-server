@@ -6,6 +6,7 @@ import {
   compileGeneratedWorkflowTemplate,
   computeGeneratedWorkflowCompiledPlanHash,
   summarizeGeneratedWorkflowTemplate,
+  validateGeneratedWorkflowCompiledPlan,
   validateGeneratedWorkflowTemplate,
 } from "../workflow-validator";
 
@@ -293,6 +294,74 @@ describe("generated workflow plan cache service", () => {
     await expect(service.saveGeneratedPlanCache(workflow, compiledPlan, "c02c59dfbe512562f8c65c97"))
       .rejects.toMatchObject({ code: "GENERATED_WORKFLOW_CACHE_LLM_BUDGET_UNSAFE" });
     expect(query).not.toHaveBeenCalled();
+  });
+
+  it("rejects generated observation output nodes that leak into the compiled executable plan", async () => {
+    const service = new WorkflowService();
+    const workflow = redditAccountHealthWorkflow();
+    const compiledPlan = compileGeneratedWorkflowTemplate(workflow);
+    const corruptedPlan = {
+      ...compiledPlan,
+      stepCount: compiledPlan.stepCount + 1,
+      actionCount: compiledPlan.actionCount + 1,
+      steps: [
+        ...compiledPlan.steps,
+        {
+          path: "workflow.steps[2].params.outputs.contentDescriptionCount",
+          type: "action",
+          id: "foreground_and_observe__checkable_focusable_content_description_count_observed",
+          action: null,
+        },
+      ],
+    } as any;
+    const query = mockDbQuery();
+
+    await expect(service.saveGeneratedPlanCache(workflow, corruptedPlan, "c02c59dfbe512562f8c65c97"))
+      .rejects.toMatchObject({
+        code: "GENERATED_WORKFLOW_COMPILED_PLAN_VALIDATION_FAILED",
+        validationErrors: expect.arrayContaining([
+          "compiledPlan.steps must not add or omit executable workflow steps",
+          "compiledPlan.steps[2] is not present in the validated workflow template",
+        ]),
+      });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("keeps countMatches-style observation output extractors as action params, not executable steps", () => {
+    const workflow = redditAccountHealthWorkflow();
+    workflow.steps = [
+      {
+        type: "action",
+        id: "foreground_and_observe",
+        action: "classify_ui_tree",
+        effect: "observation",
+        params: {
+          outputs: {
+            contentDescriptionCount: {
+              countMatches: {
+                field: "contentDescription",
+                regex: ".+",
+              },
+              default: 0,
+            },
+          },
+        },
+      },
+    ];
+
+    const validation = validateGeneratedWorkflowTemplate(workflow);
+    expect(validation.errors).toEqual([]);
+    const compiledPlan = compileGeneratedWorkflowTemplate(validation.template!);
+
+    expect(compiledPlan.steps).toEqual([
+      expect.objectContaining({
+        path: "workflow.steps[0]",
+        type: "action",
+        id: "foreground_and_observe",
+        action: "classify_ui_tree",
+      }),
+    ]);
+    expect(validateGeneratedWorkflowCompiledPlan(validation.template!, compiledPlan)).toEqual([]);
   });
 
   it("maps cacheKey hits and increments usage atomically", async () => {
