@@ -20,6 +20,7 @@ import type {
 import {
   computeGeneratedWorkflowCompiledPlanHash,
   validateGeneratedWorkflowTemplate,
+  validateGeneratedWorkflowCompiledPlan,
   type GeneratedWorkflowCompiledPlan,
 } from "./workflow-validator";
 import { portableCapabilityMetadata } from "../human-workflow/portable-capability";
@@ -554,6 +555,13 @@ export class WorkflowService {
       throw Object.assign(
         new Error("generated workflow cache persistence requires compiledPlan.llmBudget.happyPathRequests=0"),
         { code: "GENERATED_WORKFLOW_CACHE_LLM_BUDGET_UNSAFE" }
+      );
+    }
+    const compiledPlanErrors = validateGeneratedWorkflowCompiledPlan(validation.template, compiledPlan);
+    if (compiledPlanErrors.length > 0) {
+      throw Object.assign(
+        new Error(`generated workflow compiled plan failed validation: ${compiledPlanErrors.join("; ")}`),
+        { code: "GENERATED_WORKFLOW_COMPILED_PLAN_VALIDATION_FAILED", validationErrors: compiledPlanErrors }
       );
     }
     const artifactState = options.artifactState
