@@ -364,6 +364,63 @@ describe("generated workflow plan cache service", () => {
     expect(validateGeneratedWorkflowCompiledPlan(validation.template!, compiledPlan)).toEqual([]);
   });
 
+  it.each([
+    ["missing", undefined, {}],
+    ["null", null, {}],
+    ["array", [], {}],
+    ["scalar", "invalid", {}],
+    ["object", { source: "ui_tree", includeInvisible: false }, { source: "ui_tree", includeInvisible: false }],
+  ])("normalizes %s nested observationPrimitive.params before validation", (_label, params, expectedParams) => {
+    const workflow = redditAccountHealthWorkflow();
+    const observationPrimitive: Record<string, unknown> = {
+      action: "ui_tree_dump",
+      timeoutMs: 1000,
+    };
+    if (params !== undefined) observationPrimitive.params = params;
+    workflow.steps = [
+      {
+        type: "action",
+        id: "foreground_and_observe__verify_chrome_foreground",
+        action: "classify_ui_tree",
+        effect: "observation",
+        params: {
+          observationPrimitive,
+          outputs: {
+            visibleCheckableFocusableContentDescriptionCount: {
+              countMatches: {
+                field: "contentDescription",
+                regex: ".+",
+              },
+              default: 0,
+            },
+          },
+        },
+      },
+    ];
+
+    const validation = validateGeneratedWorkflowTemplate(workflow);
+    expect(validation.errors).toEqual([]);
+    expect(validation.template!.steps[0]).toEqual(expect.objectContaining({
+      params: expect.objectContaining({
+        observationPrimitive: expect.objectContaining({
+          action: "ui_tree_dump",
+          params: expectedParams,
+        }),
+      }),
+    }));
+    const compiledPlan = compileGeneratedWorkflowTemplate(validation.template!);
+
+    expect(compiledPlan.steps).toEqual([
+      expect.objectContaining({
+        path: "workflow.steps[0]",
+        type: "action",
+        id: "foreground_and_observe__verify_chrome_foreground",
+        action: "classify_ui_tree",
+      }),
+    ]);
+    expect(validateGeneratedWorkflowCompiledPlan(validation.template!, compiledPlan)).toEqual([]);
+  });
+
   it("maps cacheKey hits and increments usage atomically", async () => {
     const row = cacheRow();
     const service = new WorkflowService();

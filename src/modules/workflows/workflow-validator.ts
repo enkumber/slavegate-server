@@ -154,6 +154,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function normalizeNestedObservationPrimitiveParams<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeNestedObservationPrimitiveParams(item)) as T;
+  }
+  if (!isRecord(value)) return value;
+
+  const normalized: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    normalized[key] = normalizeNestedObservationPrimitiveParams(item);
+  }
+
+  if (isRecord(normalized.observationPrimitive)) {
+    const observationPrimitive = normalized.observationPrimitive;
+    normalized.observationPrimitive = {
+      ...observationPrimitive,
+      params: isRecord(observationPrimitive.params) ? observationPrimitive.params : {},
+    };
+  }
+
+  return normalized as T;
+}
+
 function normalizeGeneratedWorkflowPlatform(platform: string): string {
   return platform.trim().toLowerCase();
 }
@@ -625,7 +647,7 @@ export function validateGeneratedWorkflowTemplate(template: unknown): GeneratedW
     return { ok: false, errors: ["workflow must be an object"] };
   }
 
-  const candidate = template as Partial<WorkflowTemplate>;
+  const candidate = normalizeNestedObservationPrimitiveParams(template) as Partial<WorkflowTemplate>;
   if (
     candidate.runtimeContract !== undefined
     && (
