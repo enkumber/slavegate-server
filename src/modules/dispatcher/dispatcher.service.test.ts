@@ -346,7 +346,7 @@ describe("PostgreSQL job action catalog", () => {
     }));
   });
 
-  it("materializes primitive countMatches workflows with edge structural discriminators", async () => {
+  function mockEdgePrimitivePolicyDefinitions(): void {
     mocks.dbQuery
       .mockResolvedValueOnce({
         rows: [
@@ -429,7 +429,10 @@ describe("PostgreSQL job action catalog", () => {
           },
         }],
       });
+  }
 
+  it("materializes primitive countMatches workflows with edge structural discriminators", async () => {
+    mockEdgePrimitivePolicyDefinitions();
     await expect(hydrateWorkflowNativePolicies({
       steps: [
         {
@@ -447,7 +450,6 @@ describe("PostgreSQL job action catalog", () => {
             },
             observationPrimitive: {
               action: "ui_tree_dump",
-              params: {},
               timeoutMs: 1000,
             },
           },
@@ -474,6 +476,7 @@ describe("PostgreSQL job action catalog", () => {
             },
             observationPrimitive: expect.objectContaining({
               action: "ui_tree_dump",
+              params: {},
               primitive: true,
               nativeOpcode: 12,
               observationOnly: true,
@@ -488,6 +491,48 @@ describe("PostgreSQL job action catalog", () => {
           type: "checkpoint",
           id: "count_matches_observed",
           phase: "countMatches materialized",
+        }),
+      ],
+    }));
+  });
+
+  it.each([
+    ["missing", undefined, {}],
+    ["null", null, {}],
+    ["array", [], {}],
+    ["scalar", "invalid", {}],
+    ["object", { source: "ui_tree", includeInvisible: false }, { source: "ui_tree", includeInvisible: false }],
+  ])("normalizes %s observationPrimitive.params at the dispatcher boundary", async (_label, params, expectedParams) => {
+    mockEdgePrimitivePolicyDefinitions();
+    const observationPrimitive: Record<string, unknown> = {
+      action: "ui_tree_dump",
+      timeoutMs: 1000,
+    };
+    if (params !== undefined) observationPrimitive.params = params;
+
+    await expect(hydrateWorkflowNativePolicies({
+      steps: [
+        {
+          type: "action",
+          id: "foreground_and_observe",
+          action: "classify_ui_tree",
+          params: {
+            observationPrimitive,
+          },
+        },
+      ],
+    })).resolves.toEqual(expect.objectContaining({
+      steps: [
+        expect.objectContaining({
+          params: expect.objectContaining({
+            observationPrimitive: expect.objectContaining({
+              action: "ui_tree_dump",
+              params: expectedParams,
+              primitive: true,
+              nativeOpcode: 12,
+              observationOnly: true,
+            }),
+          }),
         }),
       ],
     }));

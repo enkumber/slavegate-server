@@ -54,6 +54,10 @@ function readPolicyPath(value: unknown, path: string): unknown {
   return current;
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 export function assertJobActionResultPolicy(
   result: unknown,
   policy: Record<string, unknown>,
@@ -233,11 +237,13 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
       || source.primitive === true
       || Object.prototype.hasOwnProperty.call(source, "outputPath")
       || Object.prototype.hasOwnProperty.call(source, "postcondition")
+      || Object.prototype.hasOwnProperty.call(source, "timeoutMs")
       || (
         Object.prototype.hasOwnProperty.call(source, "params")
         && Object.prototype.hasOwnProperty.call(source, "timeoutMs")
       );
     if (!actionKey || !actionShaped) return hydrated;
+    hydrated.params = isPlainRecord(source.params) ? hydrated.params : {};
     const policy = policies.get(actionKey);
     if (!policy) throw new Error(`PostgreSQL job action policy is missing for edge action '${actionKey}'`);
     if (!policy.allowed) throw new Error(`PostgreSQL job action policy blocks edge action '${actionKey}'`);
