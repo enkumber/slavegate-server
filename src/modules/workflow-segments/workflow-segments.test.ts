@@ -214,9 +214,10 @@ describe("workflow segment architecture", () => {
     segment.status = "candidate";
     segment.fingerprint = computeSegmentFingerprint(segment);
     composition.compositionKey = computeCompositionStructureKey(composition, segmentMap);
+    const compositionVersion = vi.fn().mockResolvedValue(composition);
     const composer = new WorkflowSegmentComposer({
       promotedComposition: vi.fn(),
-      compositionVersion: vi.fn().mockResolvedValue(composition),
+      compositionVersion,
       segmentVersions: vi.fn().mockResolvedValue(segmentMap),
       saveExecutionBinding: vi.fn(),
     } as never);
@@ -232,6 +233,11 @@ describe("workflow segment architecture", () => {
     });
 
     expect(candidate?.runtimeInputs).toEqual({ destination: "https://example.test" });
+    expect(compositionVersion).toHaveBeenCalledWith(
+      composition.compositionName,
+      composition.version,
+      { dispatchable: true },
+    );
     expect(candidate?.publicRuntimeInputs).toEqual({ destination: "[secret]" });
     expect(candidate?.template.defaultVerificationStrategy).toBe(
       composition.executionPolicy.defaultVerificationStrategy,

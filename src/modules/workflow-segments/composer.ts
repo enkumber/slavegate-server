@@ -393,7 +393,7 @@ export class WorkflowSegmentComposer {
     const composition = await this.repository.compositionVersion(
       input.compositionName,
       input.compositionVersion,
-      { terminal: false, dispatchable: true },
+      { dispatchable: true },
     );
     if (!composition) return null;
     const segments = await this.repository.segmentVersions(composition.nodes, { dispatchable: true });
