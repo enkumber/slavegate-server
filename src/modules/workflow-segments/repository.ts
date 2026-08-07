@@ -133,28 +133,34 @@ export class WorkflowSegmentRepository {
   }
 
   async compositionVersion(
-    compositionName: string,
+    compositionIdentity: string,
     version: string,
     selector: ResourceStateSelector,
   ): Promise<WorkflowCompositionRecord | null> {
     const db = getDb();
     const result = await db.query(
-      `SELECT *
+       `SELECT *
        FROM workflow_compositions
-       WHERE composition_name = $1
+       WHERE (composition_name = $1 OR composition_key = $1)
          AND version = $2
          AND ${lifecycleSelectorSql("lifecycle_status", 3)}
-       LIMIT 1`,
-      [compositionName, version, "workflow_compositions", ...selectorValues(selector)],
+       LIMIT 2`,
+      [compositionIdentity, version, "workflow_compositions", ...selectorValues(selector)],
     );
+    if (result.rows.length > 1) {
+      throw Object.assign(new Error("workflow composition identity matches multiple records"), {
+        status: 409,
+        code: "WORKFLOW_COMPOSITION_IDENTITY_AMBIGUOUS",
+      });
+    }
     const row = result.rows[0] as Record<string, unknown> | undefined;
     if (!row) return null;
     const nodes = await db.query(
-      `SELECT *
+       `SELECT *
        FROM workflow_composition_nodes
        WHERE composition_name = $1 AND composition_version = $2
        ORDER BY ordinal`,
-      [compositionName, version],
+      [row.composition_name, version],
     );
     return mapComposition(row, nodes.rows.map((node) => mapNode(node as Record<string, unknown>)));
   }

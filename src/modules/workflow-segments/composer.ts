@@ -447,7 +447,7 @@ export class WorkflowSegmentComposer {
   }
 
   async composeCandidate(input: {
-    compositionName: string;
+    compositionIdentity: string;
     compositionVersion: string;
     platform: string;
     intent: string;
@@ -456,7 +456,7 @@ export class WorkflowSegmentComposer {
     accountId: string | null;
   }): Promise<ComposedWorkflow | null> {
     const composition = await this.repository.compositionVersion(
-      input.compositionName,
+      input.compositionIdentity,
       input.compositionVersion,
       { dispatchable: true },
     );

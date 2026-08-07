@@ -223,7 +223,7 @@ describe("workflow segment architecture", () => {
     } as never);
 
     const candidate = await composer.composeCandidate({
-      compositionName: composition.compositionName,
+      compositionIdentity: composition.compositionKey,
       compositionVersion: composition.version,
       platform: "android",
       intent: "open https://example.test",
@@ -234,7 +234,7 @@ describe("workflow segment architecture", () => {
 
     expect(candidate?.runtimeInputs).toEqual({ destination: "https://example.test" });
     expect(compositionVersion).toHaveBeenCalledWith(
-      composition.compositionName,
+      composition.compositionKey,
       composition.version,
       { dispatchable: true },
     );

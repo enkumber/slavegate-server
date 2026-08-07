@@ -811,6 +811,16 @@ describe("SegmentBuildJobService dispatch", () => {
 });
 
 describe("segment-build canary identity recovery", () => {
+  it("gives every queued segment-build canary a fresh idempotency identity", () => {
+    const source = readFileSync("src/modules/segment-builder/routes.ts", "utf8");
+    const canaryRoute = source.slice(
+      source.indexOf('router.post("/jobs/:id/canary"'),
+      source.indexOf('router.post("/jobs/:id/fail"'),
+    );
+
+    expect(canaryRoute).toContain('idempotencyKey: crypto.randomBytes(12).toString("hex")');
+  });
+
   it("recovers promoted resource identity from the durable candidate when transition result patches were lost", () => {
     expect(recoverSegmentBuildCandidateIdentity({
       result: {

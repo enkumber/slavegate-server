@@ -207,7 +207,7 @@ router.post("/jobs/:id/canary", asyncRoute(async (req, res) => {
       return res.status(409).json({ ok: false, code: "SEGMENT_BUILD_CANARY_NOT_READY", error: "candidate is not ready for canary" });
     }
     const compiled = await humanWorkflowCompilerService.compileCandidateComposition({
-      compositionName: job.result.compositionName,
+      compositionIdentity: job.result.compositionName,
       compositionVersion: job.result.compositionVersion,
       deviceId: job.deviceId,
       accountId: job.accountId,
@@ -242,6 +242,7 @@ router.post("/jobs/:id/canary", asyncRoute(async (req, res) => {
         segmentKeys: compiled.segmentKeys,
         segmentRefs: compiled.segmentRefs,
         runtimeInputs: compiled.runtimeInputs,
+        idempotencyKey: crypto.randomBytes(12).toString("hex"),
       });
       const started = await segmentBuildJobService.attachCanaryRun({
         id: job.id,

@@ -537,7 +537,7 @@ export class HumanWorkflowCompilerService {
   }
 
   async compileCandidateComposition(input: {
-    compositionName: string;
+    compositionIdentity: string;
     compositionVersion: string;
     deviceId: string;
     accountId?: string | null;
@@ -553,7 +553,7 @@ export class HumanWorkflowCompilerService {
       });
     }
     const composed = await workflowSegmentComposer.composeCandidate({
-      compositionName: input.compositionName,
+      compositionIdentity: input.compositionIdentity,
       compositionVersion: input.compositionVersion,
       platform: target.account_platform,
       intent,

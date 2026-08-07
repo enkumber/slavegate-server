@@ -240,6 +240,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
   segmentKeys?: string[];
   segmentRefs?: Array<{ segmentKey: string; segmentVersion: string }>;
   runtimeInputs?: Record<string, unknown>;
+  idempotencyKey?: string;
 }): Promise<Record<string, unknown>> {
   const db = getDb();
   const client = await db.connect();
@@ -318,7 +319,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
         code: "HUMAN_WORKFLOW_INTENT_MISMATCH",
       });
     }
-    const idempotencyKey = input.executionKey ?? input.requestKey;
+    const idempotencyKey = input.idempotencyKey ?? input.executionKey ?? input.requestKey;
     const findExistingRun = async (): Promise<{
       id: string;
       task_id: string | null;
@@ -386,6 +387,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
         taskId: replayBeforeAdmission.task_id,
         requestKey: input.requestKey,
         cacheKey: cached.cache_key,
+        idempotentReplay: true,
       };
     }
     const admissionContext = {
@@ -419,6 +421,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
         taskId: replayAfterAdmission.task_id,
         requestKey: input.requestKey,
         cacheKey: cached.cache_key,
+        idempotentReplay: true,
       };
     }
 
@@ -465,7 +468,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
           cached.compiled_plan_hash,
           JSON.stringify(context),
           admission.id,
-          input.executionKey ?? input.requestKey,
+          idempotencyKey,
         ],
       );
     const runId = runResult.rows[0].id;
@@ -513,6 +516,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
       taskId,
       requestKey: input.requestKey,
       cacheKey: cached.cache_key,
+      idempotentReplay: false,
     };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -1511,7 +1515,7 @@ router.post("/workflow-compositions/:key/:version/canary/compile", requireAdminA
       return res.status(400).json({ ok: false, code: "ACCOUNT_ID_INVALID", error: "account_id must be a UUID when provided" });
     }
     const data = await humanWorkflowCompilerService.compileCandidateComposition({
-      compositionName: req.params.key,
+      compositionIdentity: req.params.key,
       compositionVersion: req.params.version,
       deviceId: device_id,
       accountId,
@@ -1543,7 +1547,7 @@ router.post("/workflow-compositions/:key/:version/canary/run", requireAdminAuth,
       return res.status(400).json({ ok: false, code: "ACCOUNT_ID_INVALID", error: "account_id must be a UUID when provided" });
     }
     const compiled = await humanWorkflowCompilerService.compileCandidateComposition({
-      compositionName: req.params.key,
+      compositionIdentity: req.params.key,
       compositionVersion: req.params.version,
       deviceId: device_id,
       accountId,
@@ -1562,6 +1566,7 @@ router.post("/workflow-compositions/:key/:version/canary/run", requireAdminAuth,
       segmentKeys: compiled.segmentKeys,
       segmentRefs: compiled.segmentRefs,
       runtimeInputs: compiled.runtimeInputs,
+      idempotencyKey: crypto.randomBytes(12).toString("hex"),
     });
     res.status(201).json({ ok: true, data: run });
   } catch (err) {
