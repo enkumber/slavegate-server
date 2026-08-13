@@ -181,19 +181,32 @@ export async function resolveCanonicalHumanWorkflowPlatformIdentifier(platform: 
   return canonical;
 }
 
-async function resolveCanonicalHumanWorkflowPlatformBinding(intent: string, accountPlatform: string): Promise<string> {
-  const result = await getDb().query<{ canonical_platform: string }>(
-    "SELECT canonical_platform FROM resolve_human_workflow_platform_binding($1, $2)",
-    [intent, accountPlatform],
+type HumanWorkflowBoundTargetRow = {
+  device_id: string;
+  device_model: string | null;
+  device_name: string | null;
+  account_id: string;
+  account_username: string | null;
+  account_platform: string;
+  account_device_id: string;
+  client_id: string | null;
+  canonical_account_platform: string;
+  canonical_workflow_platform: string;
+  platform_bound: boolean;
+  account_device_bound: boolean;
+};
+
+async function resolveHumanWorkflowBoundTarget(
+  deviceId: string,
+  accountId: string,
+  intent: string,
+): Promise<HumanWorkflowBoundTargetRow | null> {
+  const result = await getDb().query<HumanWorkflowBoundTargetRow>(
+    `SELECT *
+       FROM resolve_human_workflow_bound_target($1, $2, $3)`,
+    [deviceId, accountId, intent],
   );
-  const canonical = result.rows[0]?.canonical_platform;
-  if (!canonical) {
-    throw Object.assign(new Error("Supplied account is not bound to the workflow platform resolved by PostgreSQL policy"), {
-      status: 409,
-      code: "ACCOUNT_PLATFORM_MISMATCH",
-    });
-  }
-  return canonical;
+  return result.rows[0] ?? null;
 }
 
 export function isAccountlessHumanWorkflowIntent(goal: string): boolean {
@@ -523,37 +536,61 @@ export class HumanWorkflowCompilerService {
       };
     }
     if (!accountId) return null;
-    const result = await getDb().query(
-      `SELECT
-         d.id AS device_id,
-         d.model AS device_model,
-         d.friendly_name AS device_name,
-         a.id AS account_id,
-         a.username AS account_username,
-         a.platform AS account_platform,
-         a.device_id AS account_device_id,
-         a.client_id AS client_id
-       FROM devices d
-       LEFT JOIN accounts a ON a.id = $2
-       WHERE d.id = $1`,
-      [deviceId, accountId],
-    );
-    const row = result.rows[0] as Record<string, unknown> | undefined;
-    if (!row || !row.account_id) return null;
-    if (row.account_device_id !== row.device_id) {
+    if (!intent) {
+      const result = await getDb().query(
+        `SELECT
+           d.id AS device_id,
+           d.model AS device_model,
+           d.friendly_name AS device_name,
+           a.id AS account_id,
+           a.username AS account_username,
+           a.platform AS account_platform,
+           a.device_id AS account_device_id,
+           a.client_id AS client_id
+         FROM devices d
+         LEFT JOIN accounts a ON a.id = $2
+         WHERE d.id = $1`,
+        [deviceId, accountId],
+      );
+      const row = result.rows[0] as Record<string, unknown> | undefined;
+      if (!row || !row.account_id) return null;
+      if (row.account_device_id !== row.device_id) {
+        throw Object.assign(new Error("Account is not bound to selected device"), { status: 400, code: "ACCOUNT_DEVICE_MISMATCH" });
+      }
+      return {
+        device_id: row.device_id as string,
+        device_model: (row.device_model as string | null) ?? null,
+        device_name: (row.device_name as string | null) ?? null,
+        account_id: row.account_id as string,
+        account_username: row.account_username as string,
+        account_platform: await resolveCanonicalHumanWorkflowPlatformIdentifier(String(row.account_platform)),
+        client_id: (row.client_id as string | null) ?? null,
+      };
+    }
+    const row = await resolveHumanWorkflowBoundTarget(deviceId, accountId, intent);
+    if (!row) {
+      throw Object.assign(new Error("Supplied account is not bound to the workflow platform resolved by PostgreSQL policy"), {
+        status: 409,
+        code: "ACCOUNT_PLATFORM_MISMATCH",
+      });
+    }
+    if (!row.account_device_bound) {
       throw Object.assign(new Error("Account is not bound to selected device"), { status: 400, code: "ACCOUNT_DEVICE_MISMATCH" });
     }
-    const accountPlatform = intent
-      ? await resolveCanonicalHumanWorkflowPlatformBinding(intent, String(row.account_platform))
-      : await resolveCanonicalHumanWorkflowPlatformIdentifier(String(row.account_platform));
+    if (!row.platform_bound) {
+      throw Object.assign(new Error("Supplied account is not bound to the workflow platform resolved by PostgreSQL policy"), {
+        status: 409,
+        code: "ACCOUNT_PLATFORM_MISMATCH",
+      });
+    }
     return {
-      device_id: row.device_id as string,
-      device_model: (row.device_model as string | null) ?? null,
-      device_name: (row.device_name as string | null) ?? null,
-      account_id: row.account_id as string,
-      account_username: row.account_username as string,
-      account_platform: accountPlatform,
-      client_id: (row.client_id as string | null) ?? null,
+      device_id: row.device_id,
+      device_model: row.device_model,
+      device_name: row.device_name,
+      account_id: row.account_id,
+      account_username: row.account_username,
+      account_platform: row.canonical_account_platform,
+      client_id: row.client_id,
     };
   }
 

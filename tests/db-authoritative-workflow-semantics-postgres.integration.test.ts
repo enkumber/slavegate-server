@@ -53,6 +53,7 @@ describe("DB-authoritative AI workflow semantics migration", () => {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    await pool.query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS client_id UUID");
   });
 
   afterAll(async () => {
@@ -189,7 +190,10 @@ describe("DB-authoritative AI workflow semantics migration", () => {
     await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", "100_postgres_compiler_control_plane.sql"), "utf8"));
     await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", "122_platform_identifier_aliases.sql"), "utf8"));
 
-    await pool.query("TRUNCATE platform_identifier_aliases, app_runtime_profiles");
+    await pool.query("DELETE FROM platform_identifier_aliases");
+    await pool.query("DELETE FROM accounts");
+    await pool.query("DELETE FROM devices");
+    await pool.query("DELETE FROM app_runtime_profiles");
     await pool.query(
       `INSERT INTO app_runtime_profiles (app_id, app_name, package_name, metadata)
        VALUES
@@ -240,5 +244,113 @@ describe("DB-authoritative AI workflow semantics migration", () => {
       ["open example surface", "friendly account"],
     );
     expect(disabled.rows).toHaveLength(0);
+  });
+
+  it("resolves bound workflow targets and platform conflicts through one PostgreSQL authority snapshot", async () => {
+    await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", "100_postgres_compiler_control_plane.sql"), "utf8"));
+    await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", "122_platform_identifier_aliases.sql"), "utf8"));
+
+    await pool.query("DELETE FROM platform_identifier_aliases");
+    await pool.query("DELETE FROM accounts");
+    await pool.query("DELETE FROM devices");
+    await pool.query("DELETE FROM app_runtime_profiles");
+    await pool.query(
+      `INSERT INTO app_runtime_profiles (app_id, app_name, package_name, metadata)
+       VALUES
+         ('canonical_app', 'Example Surface', 'org.example.surface', '{"compilerAliases":["example surface"]}'::jsonb),
+         ('other_app', 'Other Surface', 'org.example.other', '{"compilerAliases":["other surface"]}'::jsonb)`,
+    );
+    await pool.query(
+      `INSERT INTO platform_identifier_aliases(alias, canonical_platform)
+       VALUES ('friendly account', 'canonical_app')`,
+    );
+    await pool.query(
+      `INSERT INTO devices (id, friendly_name, model, status)
+       VALUES ('11111111-1111-4111-8111-111111111111', 'Fixture', 'Pixel', 'online')`,
+    );
+    await pool.query(
+      `INSERT INTO accounts (
+         id, platform, username, device_id, status, simulated_timezone, client_id
+       )
+       VALUES (
+         '22222222-2222-4222-8222-222222222222',
+         'friendly account',
+         'fixture',
+         '11111111-1111-4111-8111-111111111111',
+         'active',
+         'UTC',
+         '33333333-3333-4333-8333-333333333333'
+       )`,
+    );
+
+    const target = await pool.query(
+      `SELECT device_id::text, account_id::text, client_id::text,
+              canonical_account_platform, canonical_workflow_platform,
+              platform_bound, account_device_bound
+         FROM resolve_human_workflow_bound_target($1, $2, $3)`,
+      [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "open example surface",
+      ],
+    );
+    expect(target.rows).toEqual([{
+      device_id: "11111111-1111-4111-8111-111111111111",
+      account_id: "22222222-2222-4222-8222-222222222222",
+      client_id: "33333333-3333-4333-8333-333333333333",
+      canonical_account_platform: "canonical_app",
+      canonical_workflow_platform: "canonical_app",
+      platform_bound: true,
+      account_device_bound: true,
+    }]);
+
+    await pool.query("UPDATE platform_identifier_aliases SET active = FALSE WHERE alias = 'friendly account'");
+    const missing = await pool.query(
+      "SELECT * FROM resolve_human_workflow_bound_target($1, $2, $3)",
+      [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "open example surface",
+      ],
+    );
+    expect(missing.rows).toHaveLength(0);
+
+    await pool.query("UPDATE platform_identifier_aliases SET active = TRUE WHERE alias = 'friendly account'");
+    await pool.query(
+      `INSERT INTO platform_identifier_aliases(alias, canonical_platform)
+       VALUES ('canonical_app', 'other_app')`,
+    );
+    const ambiguous = await pool.query(
+      "SELECT * FROM resolve_human_workflow_bound_target($1, $2, $3)",
+      [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "open example surface",
+      ],
+    );
+    expect(ambiguous.rows).toHaveLength(0);
+
+    await pool.query("DELETE FROM platform_identifier_aliases WHERE alias = 'canonical_app'");
+    await pool.query(
+      `UPDATE accounts
+          SET platform = 'other_app'
+        WHERE id = '22222222-2222-4222-8222-222222222222'`,
+    );
+    const drift = await pool.query(
+      "SELECT * FROM resolve_human_workflow_bound_target($1, $2, $3)",
+      [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "open example surface",
+      ],
+    );
+    expect(drift.rows).toEqual([
+      expect.objectContaining({
+        canonical_account_platform: "other_app",
+        canonical_workflow_platform: "canonical_app",
+        platform_bound: false,
+        account_device_bound: true,
+      }),
+    ]);
   });
 });

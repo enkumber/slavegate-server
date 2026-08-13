@@ -97,3 +97,88 @@ AS $$
      AND (SELECT COUNT(*) FROM account_canonical) = 1
      AND (SELECT COUNT(*) FROM binding) = 1;
 $$;
+
+CREATE OR REPLACE FUNCTION resolve_human_workflow_bound_target(
+  p_device_id UUID,
+  p_account_id UUID,
+  p_intent TEXT
+)
+RETURNS TABLE(
+  device_id UUID,
+  device_model TEXT,
+  device_name TEXT,
+  account_id UUID,
+  account_username TEXT,
+  account_platform TEXT,
+  account_device_id UUID,
+  client_id UUID,
+  canonical_account_platform TEXT,
+  canonical_workflow_platform TEXT,
+  platform_bound BOOLEAN,
+  account_device_bound BOOLEAN
+)
+LANGUAGE sql
+STABLE
+AS $$
+  WITH target AS (
+    SELECT
+      d.id AS device_id,
+      d.model AS device_model,
+      d.friendly_name AS device_name,
+      a.id AS account_id,
+      a.username AS account_username,
+      a.platform AS account_platform,
+      a.device_id AS account_device_id,
+      a.client_id AS client_id
+    FROM devices d
+    JOIN accounts a
+      ON a.id = p_account_id
+    WHERE d.id = p_device_id
+  ),
+  workflow_platform AS (
+    SELECT app_id
+      FROM resolve_human_workflow_platform(p_intent)
+  ),
+  workflow_canonical AS (
+    SELECT resolved.canonical_platform
+      FROM workflow_platform
+      JOIN LATERAL resolve_canonical_platform_identifier(workflow_platform.app_id) resolved
+        ON TRUE
+  ),
+  account_canonical AS (
+    SELECT resolved.canonical_platform
+      FROM target
+      JOIN LATERAL resolve_canonical_platform_identifier(target.account_platform) resolved
+        ON TRUE
+  ),
+  binding AS (
+    SELECT
+      target.*,
+      account_canonical.canonical_platform AS canonical_account_platform,
+      workflow_canonical.canonical_platform AS canonical_workflow_platform,
+      account_canonical.canonical_platform = workflow_canonical.canonical_platform AS platform_bound,
+      target.account_device_id = target.device_id AS account_device_bound
+    FROM target
+    CROSS JOIN account_canonical
+    CROSS JOIN workflow_canonical
+  )
+  SELECT
+    binding.device_id,
+    binding.device_model,
+    binding.device_name,
+    binding.account_id,
+    binding.account_username,
+    binding.account_platform,
+    binding.account_device_id,
+    binding.client_id,
+    binding.canonical_account_platform,
+    binding.canonical_workflow_platform,
+    binding.platform_bound,
+    binding.account_device_bound
+  FROM binding
+  WHERE (SELECT COUNT(*) FROM target) = 1
+    AND (SELECT COUNT(*) FROM workflow_platform) = 1
+    AND (SELECT COUNT(*) FROM workflow_canonical) = 1
+    AND (SELECT COUNT(*) FROM account_canonical) = 1
+    AND (SELECT COUNT(*) FROM binding) = 1;
+$$;
