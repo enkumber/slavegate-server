@@ -32,6 +32,22 @@ describe("human workflow PostgreSQL policy", () => {
     await pool.query("CREATE TABLE agency_workflow_runs(id uuid)");
     await pool.query("CREATE TABLE workflow_compositions(id uuid)");
     await pool.query(
+      `CREATE TABLE lifecycle_state_definitions (
+         lifecycle_key TEXT NOT NULL,
+         status TEXT NOT NULL,
+         dispatchable BOOLEAN NOT NULL DEFAULT FALSE
+       )`,
+    );
+    await pool.query(
+      `CREATE TABLE runtime_semantic_entries (
+         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+         lifecycle_key TEXT NOT NULL,
+         status TEXT NOT NULL,
+         payload JSONB NOT NULL,
+         priority INTEGER NOT NULL DEFAULT 0
+       )`,
+    );
+    await pool.query(
       `CREATE TABLE resource_runtime_policies (
          resource_table REGCLASS PRIMARY KEY,
          policy JSONB NOT NULL,
@@ -153,6 +169,54 @@ describe("human workflow PostgreSQL policy", () => {
       "workflow_compositions",
       pool,
     )).toBe(false);
+  });
+
+  it("fails closed when canonical predicate metadata is missing or split across legacy interpreter policy", async () => {
+    const contract = {
+      version: "1" as const,
+      all: [{ left: { path: "outputs.result" }, operator: "truthy" }],
+    };
+    await pool.query(
+      `UPDATE resource_runtime_policies
+          SET policy = '{"identityPolicy":{"explicitAdmitted":true,"implicitGenerated":true}}'::jsonb
+        WHERE resource_table = 'workflow_compositions'::regclass`,
+    );
+    expect(await postconditionContractHasClassifyingPredicate(
+      contract as never,
+      "workflow_compositions",
+      pool,
+    )).toBe(false);
+
+    await pool.query(
+      `UPDATE resource_runtime_policies
+          SET policy = $1::jsonb
+        WHERE resource_table = 'workflow_compositions'::regclass`,
+      [JSON.stringify({ predicateMetadata: { truthy: {
+        eligible: true, classifying: true, operand: operand(false),
+      } } })],
+    );
+    expect(await postconditionContractHasClassifyingPredicate(
+      contract as never,
+      "workflow_compositions",
+      pool,
+    )).toBe(true);
+
+    await pool.query(
+      `INSERT INTO lifecycle_state_definitions(lifecycle_key, status, dispatchable)
+       VALUES ('legacy_interpreter', 'active', TRUE)`,
+    );
+    await pool.query(
+      `INSERT INTO runtime_semantic_entries(lifecycle_key, status, payload)
+       VALUES ('legacy_interpreter', 'active', $1::jsonb)`,
+      [JSON.stringify({ workflowInterpreterPolicy: { predicateMetadata: { truthy: {} } } })],
+    );
+    expect(await postconditionContractHasClassifyingPredicate(
+      contract as never,
+      "workflow_compositions",
+      pool,
+    )).toBe(false);
+    await pool.query("DELETE FROM runtime_semantic_entries");
+    await pool.query("DELETE FROM lifecycle_state_definitions");
   });
 
   it("keeps PostgreSQL proof policy isolated across concurrent search paths", async () => {

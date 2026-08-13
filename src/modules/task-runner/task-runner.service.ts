@@ -41,7 +41,10 @@ import {
   reconcileSupersededTaskIncidents,
   recordExhaustedTaskIncident,
 } from "../incidents/incident.service";
-import { evaluatePostconditionContract } from "../workflow-segments/postcondition";
+import {
+  evaluatePostconditionContract,
+  postconditionContractHasClassifyingPredicate,
+} from "../workflow-segments/postcondition";
 import { shortKey } from "../workflow-segments/key-utils";
 import {
   getConfiguredRetryStats,
@@ -1652,6 +1655,27 @@ async function executeGeneratedWorkflowTask(
     }
 
     if (executableWorkflow.postconditionContract) {
+      const proofEligible = await postconditionContractHasClassifyingPredicate(
+        executableWorkflow.postconditionContract,
+        "workflow_compositions",
+        getDb(),
+      );
+      if (!proofEligible) {
+        generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "output_invalid").inc();
+        return {
+          success: false,
+          stepsCompleted: finalWorkflow.currentStep,
+          totalSteps: finalWorkflow.totalSteps ?? cached.workflow.steps.length,
+          output: finalOutput,
+          tokenUsage: zeroTokenUsage(),
+          durationMs: Date.now() - startedAt,
+          failReason: "HUMAN_WORKFLOW_POSTCONDITION_FAILED: PostgreSQL proof eligibility refused the persisted artifact",
+          generatedWorkflow: {
+            ...generatedWorkflowResult,
+            failureCode: "HUMAN_WORKFLOW_POSTCONDITION_FAILED",
+          },
+        };
+      }
       const postcondition = evaluatePostconditionContract(executableWorkflow.postconditionContract, {
         outputs: finalOutput,
         inputs: suppliedVariables?.inputs ?? {},

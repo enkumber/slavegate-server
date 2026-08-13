@@ -35,19 +35,57 @@ AS $$
   LIMIT 1;
 $$;
 
+CREATE OR REPLACE FUNCTION legacy_workflow_predicate_metadata_present()
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+  present BOOLEAN := false;
+BEGIN
+  IF to_regclass('runtime_semantic_entries') IS NULL
+     OR to_regclass('lifecycle_state_definitions') IS NULL THEN
+    RETURN false;
+  END IF;
+
+  EXECUTE $query$
+    SELECT EXISTS (
+      SELECT 1
+        FROM runtime_semantic_entries entry
+        JOIN lifecycle_state_definitions definition
+          ON definition.lifecycle_key = entry.lifecycle_key
+         AND definition.status = entry.status
+       WHERE definition.dispatchable
+         AND entry.payload ? 'workflowInterpreterPolicy'
+         AND entry.payload -> 'workflowInterpreterPolicy' ? 'predicateMetadata'
+    )
+  $query$ INTO present;
+  RETURN COALESCE(present, false);
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION resolve_postcondition_proof_eligibility(
   target_resource REGCLASS,
   predicates JSONB
 )
-RETURNS TABLE(predicate_index INTEGER, operator TEXT, admitted BOOLEAN, operand_contract JSONB)
+RETURNS TABLE(
+  predicate_index INTEGER,
+  operator TEXT,
+  admitted BOOLEAN,
+  operand_contract JSONB,
+  metadata_source REGCLASS,
+  metadata_version BIGINT
+)
 LANGUAGE sql
 STABLE
 AS $$
   WITH policy_row AS (
-    SELECT policy
+    SELECT resource_table, policy, version
       FROM resource_runtime_policies
      WHERE resource_table = target_resource
        AND COALESCE((policy ->> 'enabled')::boolean, true)
+       AND jsonb_typeof(policy -> 'predicateMetadata') = 'object'
+       AND NOT legacy_workflow_predicate_metadata_present()
      LIMIT 1
   ),
   candidate AS (
@@ -63,6 +101,8 @@ AS $$
   ),
   shaped AS (
     SELECT candidate.*,
+           policy_row.resource_table AS metadata_source,
+           policy_row.version AS metadata_version,
            metadata,
            metadata -> 'operand' AS operand,
            jsonb_typeof(candidate.right_operand) = 'object'
@@ -119,6 +159,8 @@ AS $$
              OR COALESCE(right_path, '') = ''
              OR right_path <> left_path
            ) AS admitted,
-         operand AS operand_contract
+         operand AS operand_contract,
+         metadata_source,
+         metadata_version
     FROM shaped;
 $$;

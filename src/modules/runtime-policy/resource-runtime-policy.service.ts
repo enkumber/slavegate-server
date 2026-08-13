@@ -11,6 +11,12 @@ export interface ResourceRuntimePolicyRecord {
   updatedAt: Date;
 }
 
+export interface CanonicalPredicateMetadataPolicy {
+  resourceTable: string;
+  version: number;
+  predicateMetadata: Record<string, unknown>;
+}
+
 export class ResourceRuntimePolicyUnavailableError extends Error {
   constructor(message: string) {
     super(message);
@@ -47,25 +53,51 @@ export async function getResourceRuntimePolicy(
   resourceTableValue: string,
   db: Queryable = getDb(),
 ): Promise<Record<string, unknown>> {
+  return (await getResourceRuntimePolicyRecord(resourceTableValue, db)).policy;
+}
+
+export async function getResourceRuntimePolicyRecord(
+  resourceTableValue: string,
+  db: Queryable = getDb(),
+): Promise<ResourceRuntimePolicyRecord> {
   const resourceTable = resourceName(resourceTableValue);
   const result = await db.query(
-    `SELECT policy
+    `SELECT resource_table::text, policy, version, updated_by, updated_at
        FROM resource_runtime_policies
       WHERE resource_table = to_regclass($1)`,
     [resourceTable],
   );
-  const policy = result.rows[0]?.policy;
-  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+  if (!result.rows[0]) {
     throw new ResourceRuntimePolicyUnavailableError(
       `runtime policy for resource ${resourceTable} is not configured`,
     );
   }
+  const record = rowToRecord(result.rows[0]);
+  const policy = record.policy;
   if (policy.enabled === false || policy.disabled === true) {
     throw new ResourceRuntimePolicyUnavailableError(
       `runtime policy for resource ${resourceTable} is disabled`,
     );
   }
-  return policy as Record<string, unknown>;
+  return record;
+}
+
+export async function getCanonicalPredicateMetadataPolicy(
+  resourceTableValue: string,
+  db: Queryable = getDb(),
+): Promise<CanonicalPredicateMetadataPolicy> {
+  const record = await getResourceRuntimePolicyRecord(resourceTableValue, db);
+  const metadata = record.policy.predicateMetadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new ResourceRuntimePolicyUnavailableError(
+      `predicate metadata for resource ${record.resourceTable} is not configured`,
+    );
+  }
+  return {
+    resourceTable: record.resourceTable,
+    version: record.version,
+    predicateMetadata: metadata as Record<string, unknown>,
+  };
 }
 
 export async function listResourceRuntimePolicies(

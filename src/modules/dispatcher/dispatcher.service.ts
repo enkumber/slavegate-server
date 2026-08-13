@@ -27,6 +27,7 @@ import {
   transitionJob,
   transitionJobByConfiguredStalePolicy,
 } from "./job-lifecycle.service";
+import { getCanonicalPredicateMetadataPolicy } from "../runtime-policy/resource-runtime-policy.service";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -160,7 +161,11 @@ export async function getWorkflowInterpreterPolicy(): Promise<Record<string, unk
   if (result.rows.length !== 1) {
     throw new Error("PostgreSQL workflow interpreter policy is missing or ambiguous");
   }
-  return result.rows[0].policy;
+  const policy = result.rows[0].policy;
+  if (policy.predicateMetadata !== undefined) {
+    throw new Error("PostgreSQL workflow interpreter predicate metadata must be configured in resource_runtime_policies only");
+  }
+  return policy;
 }
 
 /**
@@ -173,6 +178,7 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
   const executionStates = await getResourceLifecycleExecutionStatusContract("workflows");
   const jobExecutionStates = await getResourceLifecycleExecutionStatusContract("jobs");
   const interpreterPolicy = await getWorkflowInterpreterPolicy();
+  const canonicalPredicatePolicy = await getCanonicalPredicateMetadataPolicy("workflow_compositions");
   const runtimeDefaults = interpreterPolicy.runtimeDefaults;
   if (!runtimeDefaults || typeof runtimeDefaults !== "object" || Array.isArray(runtimeDefaults)) {
     throw new Error("PostgreSQL workflow interpreter runtimeDefaults are missing");
@@ -218,12 +224,9 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
     }
     if (typeof source.operator === "string") {
       hydrated.operatorOpcode = opcodeFrom("predicateOpcodes", source.operator);
-      const metadataCatalog = interpreterPolicy.predicateMetadata;
-      const metadata = metadataCatalog && typeof metadataCatalog === "object" && !Array.isArray(metadataCatalog)
-        ? (metadataCatalog as Record<string, unknown>)[source.operator]
-        : undefined;
+      const metadata = canonicalPredicatePolicy.predicateMetadata[source.operator];
       if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
-        throw new Error(`PostgreSQL workflow interpreter operand policy is missing for predicateMetadata.${source.operator}`);
+        throw new Error(`PostgreSQL canonical operand policy is missing for predicateMetadata.${source.operator}`);
       }
       const operandPolicy = metadata as Record<string, unknown>;
       const operand = operandPolicy.operand;
@@ -236,9 +239,11 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
         || !Number.isSafeInteger((operand as Record<string, unknown>).minLength)
         || Number((operand as Record<string, unknown>).minLength) < 0
       ) {
-        throw new Error(`PostgreSQL workflow interpreter operand policy is incomplete for predicateMetadata.${source.operator}`);
+        throw new Error(`PostgreSQL canonical operand policy is incomplete for predicateMetadata.${source.operator}`);
       }
       hydrated.operandContract = { ...(operand as Record<string, unknown>) };
+      hydrated.operandContractMetadataSource = canonicalPredicatePolicy.resourceTable;
+      hydrated.operandContractMetadataVersion = canonicalPredicatePolicy.version;
     }
     if (typeof source.regex === "string") {
       hydrated.group = source.group ?? runtimeDefault("regexGroup");

@@ -461,6 +461,57 @@ describe("task-runner generated_workflow routine", () => {
     }));
   });
 
+  it("refuses legacy persisted existence-only postconditions at runtime even when raw evaluation would pass", async () => {
+    const cached = cacheRecord();
+    cached.workflow = {
+      ...cached.workflow,
+      postconditionContract: {
+        version: "1",
+        all: [{
+          left: { path: "outputs.screenState" },
+          operator: "exists",
+          operatorOpcode: 8,
+          operandContract: { required: false, type: "any", minLength: 0 },
+        }],
+      },
+    };
+    const row = task({ requestKey: REQUEST_KEY, deviceId: DEVICE_ID });
+    mockTaskDb(row);
+    mocks.dbQuery.mockImplementation(async (sql: string) => {
+      const normalized = sql.replace(/\s+/g, " ").trim();
+      if (normalized.includes("resolve_postcondition_proof_eligibility")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (normalized.startsWith("SELECT id, account_id, device_id, routine, params, scheduled_time, status FROM tasks")) {
+        return { rows: [row], rowCount: 1 };
+      }
+      if (normalized.startsWith("SELECT platform, client_id FROM accounts")) {
+        return { rows: [{ platform: "reddit", client_id: CLIENT_ID }], rowCount: 1 };
+      }
+      if (normalized.includes("UPDATE tasks") && normalized.includes("lifecycle_transitions transition")) {
+        return { rows: [{ ...row, status: "runtime-selected" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow({
+      ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+      screenState: "not_target_application",
+    }));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({
+      success: false,
+      failReason: "HUMAN_WORKFLOW_POSTCONDITION_FAILED: PostgreSQL proof eligibility refused the persisted artifact",
+      generatedWorkflow: expect.objectContaining({
+        failureCode: "HUMAN_WORKFLOW_POSTCONDITION_FAILED",
+        output: expect.objectContaining({ screenState: "not_target_application" }),
+      }),
+    });
+    expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalled();
+  });
+
   it("fails cached dashboard human workflows that do not satisfy their PostgreSQL Goal Contract", async () => {
     const cached = cacheRecord({
       sourceMetadata: {

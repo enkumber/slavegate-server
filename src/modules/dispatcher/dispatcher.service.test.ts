@@ -74,6 +74,31 @@ import {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.dbQuery.mockImplementation(async (sql: string) => {
+    if (String(sql).includes("resource_runtime_policies")) {
+      return {
+        rows: [{
+          resource_table: "workflow_compositions",
+          policy: {
+            predicateMetadata: {
+              database_predicate: {
+                eligible: true,
+                classifying: true,
+                operand: {
+                  required: true,
+                  type: "string",
+                  minLength: 1,
+                  allowSamePath: false,
+                },
+              },
+            },
+          },
+          version: 7,
+          updated_by: "test",
+          updated_at: new Date("2026-01-01T00:00:00.000Z"),
+        }],
+        rowCount: 1,
+      };
+    }
     if (String(sql).includes("jobActionPolicy")) {
       return {
         rows: [{
@@ -247,16 +272,6 @@ describe("PostgreSQL job action catalog", () => {
             distributionOpcodes: { database_distribution: 2 },
             conditionOpcodes: { database_condition: 4 },
             predicateOpcodes: { database_predicate: 6 },
-            predicateMetadata: {
-              database_predicate: {
-                operand: {
-                  required: true,
-                  type: "string",
-                  minLength: 1,
-                  allowSamePath: false,
-                },
-              },
-            },
             failureOpcodes: { database_failure: 3, database_default: 0 },
             defaultFailureMode: "database_default",
             verificationOpcodes: { database_verification: 2 },
@@ -356,10 +371,54 @@ describe("PostgreSQL job action catalog", () => {
             minLength: 1,
             allowSamePath: false,
           },
+          operandContractMetadataSource: "workflow_compositions",
+          operandContractMetadataVersion: 7,
           group: 0,
         }),
       })],
     }));
+  });
+
+  it("fails closed when legacy interpreter predicate metadata is still present", async () => {
+    mocks.dbQuery
+      .mockResolvedValueOnce({
+        rows: [{
+          policy: {
+            actionKey: "database_action",
+            allowed: true,
+            requiresRoot: false,
+            nativeOpcode: 100,
+            verificationOpcode: 0,
+            executionPolicy: {
+              verificationStrategy: "database_local",
+              l1TimeoutMs: 11,
+              l2SettleMs: 12,
+            },
+          },
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          policy: {
+            predicateOpcodes: { database_predicate: 6 },
+            predicateMetadata: {
+              database_predicate: {
+                operand: { required: false, type: "any", minLength: 0 },
+              },
+            },
+            failureOpcodes: { database_default: 0 },
+            defaultFailureMode: "database_default",
+            verificationOpcodes: { database_verification: 2 },
+            defaultVerificationMode: "database_verification",
+            runtimeDefaults: {},
+            enginePolicy: {},
+          },
+        }],
+      });
+
+    await expect(hydrateWorkflowNativePolicies({
+      steps: [{ type: "checkpoint", id: "legacy_predicate_metadata" }],
+    })).rejects.toThrow("predicate metadata must be configured in resource_runtime_policies only");
   });
 
   function mockEdgePrimitivePolicyDefinitions(): void {

@@ -126,6 +126,26 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
         'status'
       );
 
+      CREATE TABLE IF NOT EXISTS workflow_compositions(id UUID PRIMARY KEY DEFAULT gen_random_uuid());
+      CREATE TABLE IF NOT EXISTS resource_runtime_policies (
+        resource_table REGCLASS PRIMARY KEY,
+        policy JSONB NOT NULL,
+        version BIGINT NOT NULL DEFAULT 1,
+        updated_by TEXT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      INSERT INTO resource_runtime_policies(resource_table, policy, updated_by)
+      VALUES (
+        'workflow_compositions'::regclass,
+        '{"predicateMetadata":{}}'::jsonb,
+        'phase1_fixture'
+      )
+      ON CONFLICT (resource_table) DO UPDATE
+        SET policy = EXCLUDED.policy,
+            version = resource_runtime_policies.version + 1,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = NOW();
+
       INSERT INTO runtime_semantic_entries
         (namespace, entry_key, platform, status, lifecycle_key, priority, payload)
       VALUES
