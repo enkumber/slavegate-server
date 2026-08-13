@@ -166,6 +166,21 @@ async function resolveHumanWorkflowPlatform(goal: string): Promise<string | null
   return result.rows[0]?.app_id ?? null;
 }
 
+export async function resolveCanonicalHumanWorkflowPlatformIdentifier(platform: string): Promise<string> {
+  const result = await getDb().query<{ canonical_platform: string }>(
+    "SELECT canonical_platform FROM resolve_canonical_platform_identifier($1)",
+    [platform],
+  );
+  const canonical = result.rows[0]?.canonical_platform;
+  if (!canonical) {
+    throw Object.assign(new Error("Platform identifier is not configured in PostgreSQL canonical platform policy"), {
+      status: 409,
+      code: "PLATFORM_CANONICALIZATION_REQUIRED",
+    });
+  }
+  return canonical;
+}
+
 export function isAccountlessHumanWorkflowIntent(goal: string): boolean {
   // Accept ANY intent — no account_id required
   // This allows device-only workflows like:
@@ -513,8 +528,12 @@ export class HumanWorkflowCompilerService {
     if (row.account_device_id !== row.device_id) {
       throw Object.assign(new Error("Account is not bound to selected device"), { status: 400, code: "ACCOUNT_DEVICE_MISMATCH" });
     }
+    const accountPlatform = await resolveCanonicalHumanWorkflowPlatformIdentifier(String(row.account_platform));
     const explicitPlatform = intent ? await resolveHumanWorkflowPlatform(intent) : null;
-    if (explicitPlatform && explicitPlatform !== String(row.account_platform).toLowerCase()) {
+    const canonicalExplicitPlatform = explicitPlatform
+      ? await resolveCanonicalHumanWorkflowPlatformIdentifier(explicitPlatform)
+      : null;
+    if (canonicalExplicitPlatform && canonicalExplicitPlatform !== accountPlatform) {
       throw Object.assign(new Error("Supplied account is not bound to the workflow platform resolved by PostgreSQL policy"), {
         status: 409,
         code: "ACCOUNT_PLATFORM_MISMATCH",
@@ -526,7 +545,7 @@ export class HumanWorkflowCompilerService {
       device_name: (row.device_name as string | null) ?? null,
       account_id: row.account_id as string,
       account_username: row.account_username as string,
-      account_platform: row.account_platform as string,
+      account_platform: accountPlatform,
       client_id: (row.client_id as string | null) ?? null,
     };
   }

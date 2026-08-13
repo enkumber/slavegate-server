@@ -67,6 +67,7 @@ describe("DB-authoritative AI workflow semantics migration", () => {
     for (const filename of [
       "099_db_authoritative_workflow_semantics.sql",
       "100_postgres_compiler_control_plane.sql",
+      "122_platform_identifier_aliases.sql",
     ]) {
       const migration = fs.readFileSync(
         path.join(repoRoot, "src/db/migrations", filename),
@@ -131,5 +132,56 @@ describe("DB-authoritative AI workflow semantics migration", () => {
     ]);
 
     expect((await pool.query("SELECT * FROM runtime_semantic_entries")).rows).toHaveLength(0);
+  });
+
+  it("canonicalizes platform identifiers through generic PostgreSQL mappings and fails closed", async () => {
+    await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", "100_postgres_compiler_control_plane.sql"), "utf8"));
+    await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", "122_platform_identifier_aliases.sql"), "utf8"));
+
+    await pool.query("TRUNCATE platform_identifier_aliases, app_runtime_profiles");
+    await pool.query(
+      `INSERT INTO app_runtime_profiles (app_id, app_name, package_name, metadata)
+       VALUES
+         ('canonical_app', 'Canonical App', 'org.example.canonical', '{}'::jsonb),
+         ('other_app', 'Other App', 'org.example.other', '{}'::jsonb)`,
+    );
+    await pool.query(
+      `INSERT INTO platform_identifier_aliases(alias, canonical_platform)
+       VALUES ('friendly app', 'canonical_app')`,
+    );
+
+    await expect(pool.query(
+      `INSERT INTO platform_identifier_aliases(alias, canonical_platform)
+       VALUES ('FRIENDLY APP', 'canonical_app')`,
+    )).rejects.toThrow();
+
+    await expect(pool.query(
+      `INSERT INTO platform_identifier_aliases(alias, canonical_platform)
+       VALUES ('friendly app', 'other_app')`,
+    )).rejects.toThrow();
+
+    const byAlias = await pool.query("SELECT * FROM resolve_canonical_platform_identifier($1)", [" friendly APP "]);
+    expect(byAlias.rows).toEqual([{ canonical_platform: "canonical_app" }]);
+
+    const byPackage = await pool.query("SELECT * FROM resolve_canonical_platform_identifier($1)", ["ORG.EXAMPLE.CANONICAL"]);
+    expect(byPackage.rows).toEqual([{ canonical_platform: "canonical_app" }]);
+
+    const byCanonical = await pool.query("SELECT * FROM resolve_canonical_platform_identifier($1)", ["canonical_app"]);
+    expect(byCanonical.rows).toEqual([{ canonical_platform: "canonical_app" }]);
+
+    const missing = await pool.query("SELECT * FROM resolve_canonical_platform_identifier($1)", ["missing"]);
+    expect(missing.rows).toHaveLength(0);
+
+    await pool.query(
+      `INSERT INTO platform_identifier_aliases(alias, canonical_platform)
+       VALUES ('canonical_app', 'other_app')`,
+    );
+    const ambiguous = await pool.query("SELECT * FROM resolve_canonical_platform_identifier($1)", ["canonical_app"]);
+    expect(ambiguous.rows).toHaveLength(0);
+
+    await pool.query("UPDATE platform_identifier_aliases SET active = FALSE WHERE alias = 'canonical_app'");
+    await pool.query("UPDATE app_runtime_profiles SET active = FALSE WHERE app_id = 'canonical_app'");
+    const disabled = await pool.query("SELECT * FROM resolve_canonical_platform_identifier($1)", ["canonical_app"]);
+    expect(disabled.rows).toHaveLength(0);
   });
 });
