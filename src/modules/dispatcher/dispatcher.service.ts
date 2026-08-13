@@ -27,7 +27,7 @@ import {
   transitionJob,
   transitionJobByConfiguredStalePolicy,
 } from "./job-lifecycle.service";
-import { getCanonicalPredicateMetadataPolicy } from "../runtime-policy/resource-runtime-policy.service";
+import { getCanonicalWorkflowPredicateMetadataPolicy } from "../runtime-policy/resource-runtime-policy.service";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -178,7 +178,7 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
   const executionStates = await getResourceLifecycleExecutionStatusContract("workflows");
   const jobExecutionStates = await getResourceLifecycleExecutionStatusContract("jobs");
   const interpreterPolicy = await getWorkflowInterpreterPolicy();
-  const canonicalPredicatePolicy = await getCanonicalPredicateMetadataPolicy("workflow_compositions");
+  const canonicalPredicatePolicy = await getCanonicalWorkflowPredicateMetadataPolicy();
   const runtimeDefaults = interpreterPolicy.runtimeDefaults;
   if (!runtimeDefaults || typeof runtimeDefaults !== "object" || Array.isArray(runtimeDefaults)) {
     throw new Error("PostgreSQL workflow interpreter runtimeDefaults are missing");

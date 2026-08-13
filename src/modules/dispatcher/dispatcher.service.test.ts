@@ -74,6 +74,27 @@ import {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.dbQuery.mockImplementation(async (sql: string) => {
+    if (String(sql).includes("canonical_workflow_predicate_metadata()")) {
+      return {
+        rows: [{
+          resource_table: "workflow_compositions",
+          predicate_metadata: {
+            database_predicate: {
+              eligible: true,
+              classifying: true,
+              operand: {
+                required: true,
+                type: "string",
+                minLength: 1,
+                allowSamePath: false,
+              },
+            },
+          },
+          version: 7,
+        }],
+        rowCount: 1,
+      };
+    }
     if (String(sql).includes("resource_runtime_policies")) {
       return {
         rows: [{
@@ -419,6 +440,104 @@ describe("PostgreSQL job action catalog", () => {
     await expect(hydrateWorkflowNativePolicies({
       steps: [{ type: "checkpoint", id: "legacy_predicate_metadata" }],
     })).rejects.toThrow("predicate metadata must be configured in resource_runtime_policies only");
+  });
+
+  const interpreterPolicy = {
+    predicateOpcodes: { database_predicate: 6 },
+    failureOpcodes: { database_default: 0 },
+    defaultFailureMode: "database_default",
+    verificationOpcodes: { database_verification: 2 },
+    defaultVerificationMode: "database_verification",
+    runtimeDefaults: {
+      actionRetries: 0,
+      actionRetryDelayMs: 0,
+      actionDelayAfterMs: 0,
+      actionTimeoutMs: 1000,
+      pollIntervalMs: 100,
+      pollTimeoutMs: 1000,
+      conditionProbability: 0.5,
+      regexGroup: 0,
+      recoveryAutonomy: "disabled",
+      recoveryAiEnabled: false,
+      recoveryMaxAttemptsPerStep: 0,
+      recoveryMaxAttemptsPerWorkflow: 0,
+      recoveryMaxActionsPerAttempt: 0,
+      recoveryAllowedRequests: [],
+      recoveryRequireStateVerification: false,
+      recoveryLearnFromFailure: false,
+      recoveryPlannerInstruction: "",
+      recoveryExecuteDecisionKey: "",
+      recoveryRetryDecisionKey: "",
+      recoveryAbortDecisionKey: "",
+      recoveryProbeActionKey: "",
+      recoveryProbeTimeoutMs: 0,
+      recoveryPlannerSystem: "",
+      recoveryPlannerMaxTokens: 0,
+      recoveryPlannerTimeoutMs: 0,
+    },
+    enginePolicy: {
+      maxNestedDepth: 8,
+      minActionTimeoutMs: 100,
+      captureTimeoutMs: 1000,
+      defaultSubstepTimeoutMs: 1000,
+      substepTimeoutPaddingMs: 100,
+    },
+  };
+
+  it.each([
+    "missing segment",
+    "disabled segment",
+    "malformed segment predicateMetadata",
+    "missing composition",
+    "disabled composition",
+    "malformed composition predicateMetadata",
+    "composition-segment version drift",
+    "composition-segment metadata drift",
+  ])("fails dispatcher hydration when PostgreSQL canonical workflow policy rejects %s", async () => {
+    mocks.dbQuery.mockImplementation(async (sql: string) => {
+      const query = String(sql);
+      if (query.includes("jobActionPolicy")) {
+        return {
+          rows: [{
+            policy: {
+              actionKey: "database_action",
+              allowed: true,
+              requiresRoot: false,
+              nativeOpcode: 100,
+              verificationOpcode: 0,
+              executionPolicy: {
+                verificationStrategy: "database_local",
+                l1TimeoutMs: 11,
+                l2SettleMs: 12,
+              },
+            },
+          }],
+        };
+      }
+      if (query.includes("workflowInterpreterPolicy")) {
+        return { rows: [{ policy: interpreterPolicy }] };
+      }
+      if (query.includes("canonical_workflow_predicate_metadata()")) {
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 0 };
+    });
+
+    await expect(hydrateWorkflowNativePolicies({
+      steps: [{
+        type: "action",
+        action: "database_action",
+        selectorPrimitive: {
+          primitive: true,
+          action: "database_action",
+          operator: "database_predicate",
+        },
+      }],
+    })).rejects.toThrow("canonical workflow predicate metadata is not configured");
+
+    const sqlText = mocks.dbQuery.mock.calls.map(([sql]) => String(sql)).join("\n");
+    expect(sqlText).toContain("canonical_workflow_predicate_metadata()");
+    expect(sqlText).not.toContain("FROM resource_runtime_policies");
   });
 
   function mockEdgePrimitivePolicyDefinitions(): void {

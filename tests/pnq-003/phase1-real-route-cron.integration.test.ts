@@ -127,6 +127,7 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
       );
 
       CREATE TABLE IF NOT EXISTS workflow_compositions(id UUID PRIMARY KEY DEFAULT gen_random_uuid());
+      CREATE TABLE IF NOT EXISTS workflow_segment_versions(id UUID PRIMARY KEY DEFAULT gen_random_uuid());
       CREATE TABLE IF NOT EXISTS resource_runtime_policies (
         resource_table REGCLASS PRIMARY KEY,
         policy JSONB NOT NULL,
@@ -134,15 +135,49 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
         updated_by TEXT NULL,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
-      INSERT INTO resource_runtime_policies(resource_table, policy, updated_by)
-      VALUES (
-        'workflow_compositions'::regclass,
-        '{"predicateMetadata":{}}'::jsonb,
-        'phase1_fixture'
-      )
+      INSERT INTO resource_runtime_policies(resource_table, policy, version, updated_by)
+      VALUES
+        (
+          'workflow_compositions'::regclass,
+          '{
+            "predicateMetadata": {
+              "fixture_predicate": {
+                "eligible": true,
+                "classifying": true,
+                "operand": {
+                  "required": false,
+                  "type": "any",
+                  "minLength": 0,
+                  "allowSamePath": false
+                }
+              }
+            }
+          }'::jsonb,
+          1,
+          'phase1_fixture'
+        ),
+        (
+          'workflow_segment_versions'::regclass,
+          '{
+            "predicateMetadata": {
+              "fixture_predicate": {
+                "eligible": true,
+                "classifying": true,
+                "operand": {
+                  "required": false,
+                  "type": "any",
+                  "minLength": 0,
+                  "allowSamePath": false
+                }
+              }
+            }
+          }'::jsonb,
+          1,
+          'phase1_fixture'
+        )
       ON CONFLICT (resource_table) DO UPDATE
         SET policy = EXCLUDED.policy,
-            version = resource_runtime_policies.version + 1,
+            version = EXCLUDED.version,
             updated_by = EXCLUDED.updated_by,
             updated_at = NOW();
 
@@ -254,6 +289,7 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
           }'::jsonb
         );
     `);
+    await applySql("src/db/migrations/119_runtime_policy_resolution.sql");
     await pool.query(`
       INSERT INTO workflow_runtime_contracts (
         contract_id, schema_version, allowed_actions, limits, metadata

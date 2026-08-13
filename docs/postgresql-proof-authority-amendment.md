@@ -94,48 +94,42 @@ WHERE platform = 'reddit'
 ```
 
 Proposed mutation, to run only after FORGE approval with concrete replacement
-payloads bound to the named parameters:
+payloads bound to the named parameters. The executable SQL is versioned in
+`docs/release-artifacts/p0-proof-authority-repair.sql` and is covered by the
+disposable PostgreSQL repair-atomicity test; do not hand-copy or edit an
+unversioned variant.
 
 ```sql
-BEGIN;
-
-WITH target AS (
-  SELECT ctid, composition_name, version
-  FROM workflow_compositions
-  WHERE composition_name = :composition_name
-    AND version = :legacy_version
-    AND platform = 'reddit'
-    AND postcondition_contract @> '{"version":"1"}'::jsonb
-  FOR UPDATE
-),
-deactivated AS (
-  UPDATE workflow_compositions c
-  SET lifecycle_status = :non_dispatchable_status,
-      updated_at = NOW()
-  FROM target
-  WHERE c.ctid = target.ctid
-  RETURNING c.composition_name, c.version
-)
-INSERT INTO workflow_compositions (
-  composition_name, version, composition_key, capability_key, platform,
-  input_schema, output_schema, input_resolver, postcondition_contract,
-  execution_policy, compatibility, lifecycle_status
-)
-VALUES (
-  :composition_name, :replacement_version, :replacement_composition_key,
-  :capability_key, 'reddit', :input_schema::jsonb, :output_schema::jsonb,
-  :input_resolver::jsonb, :replacement_postcondition_contract::jsonb,
-  :execution_policy::jsonb, :compatibility::jsonb, :initial_status
-);
-
-SELECT *
-FROM resolve_postcondition_proof_eligibility(
-  'workflow_compositions'::regclass,
-  :replacement_postcondition_contract::jsonb -> 'all'
-);
-
-COMMIT;
+-- Bind these psql variables before inclusion:
+-- composition_name, legacy_version, replacement_version,
+-- replacement_composition_key, capability_key, non_dispatchable_status,
+-- initial_status, platform, expected_account_id, input_schema, output_schema,
+-- input_resolver, replacement_postcondition_contract, execution_policy,
+-- compatibility, metadata.
+\i docs/release-artifacts/p0-proof-authority-repair.sql
 ```
 
-Abort if the final `SELECT` returns no admitted row, more than one candidate
-target is selected, or `legacy_workflow_predicate_metadata_present()` is true.
+The artifact is one transaction. It binds psql variables into a transaction-local
+`pg_temp.p0_proof_authority_repair_input` row before the `DO` block, so the
+block never relies on psql interpolation inside `$$` quoting. It locks
+`workflow_compositions`, `lifecycle_state_definitions`, and
+`resource_runtime_policies`; asserts no legacy predicate metadata; asserts
+exactly one canonical paired composition/segment predicate policy; asserts the
+target scope has exactly one dispatchable artifact; locks exactly one
+promoted/dispatchable defective target; requires exactly one admitted
+replacement proof; asserts deactivation row count; inserts only after all
+preconditions pass; and asserts the final replacement identity, account binding,
+bindings, version, lifecycle state, schemas, execution policy, compatibility,
+and single active promoted replacement before `COMMIT`. It also asserts that no
+dispatchable existence-only `outputs.screenState` legacy artifact remains.
+
+Rollback/recovery is the transaction boundary itself:
+
+```sql
+ROLLBACK;
+```
+
+After rollback, fix the rejected precondition, start a new transaction, and run
+the complete artifact again. Never inspect after `COMMIT` and then manually
+undo; failed invariants must raise before commit so no partial logical mutation
+is persisted.

@@ -41,6 +41,136 @@ async function upsertWorkflowPredicatePolicies(
   );
 }
 
+async function canonicalPredicateMetadataRowCount(): Promise<number> {
+  const result = await pool.query<{ count: string }>(
+    "SELECT COUNT(*)::text AS count FROM canonical_workflow_predicate_metadata()",
+  );
+  return Number(result.rows[0]?.count ?? 0);
+}
+
+async function installRepairFixtureSchema(): Promise<void> {
+  await pool.query(`
+    ALTER TABLE workflow_compositions
+      ADD COLUMN IF NOT EXISTS composition_name TEXT,
+      ADD COLUMN IF NOT EXISTS version TEXT,
+      ADD COLUMN IF NOT EXISTS composition_key TEXT,
+      ADD COLUMN IF NOT EXISTS capability_key TEXT,
+      ADD COLUMN IF NOT EXISTS platform TEXT,
+      ADD COLUMN IF NOT EXISTS lifecycle_status TEXT,
+      ADD COLUMN IF NOT EXISTS input_schema JSONB DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS output_schema JSONB DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS input_resolver JSONB DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS postcondition_contract JSONB DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS execution_policy JSONB DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS compatibility JSONB DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()
+  `);
+  await pool.query("TRUNCATE workflow_compositions");
+  await pool.query(
+    `INSERT INTO lifecycle_state_definitions(lifecycle_key, status, dispatchable)
+     VALUES
+       ('workflow_compositions', 'promoted', TRUE),
+       ('workflow_compositions', 'retired', FALSE)`,
+  );
+}
+
+const legacyExistsOnlyContract = {
+  version: "1",
+  all: [{
+    left: { path: "outputs.screenState" },
+    operator: "exists",
+  }],
+};
+
+const admittedReplacementContract = {
+  version: "1",
+  all: [{
+    left: { path: "outputs.screenState" },
+    operator: "equals",
+    right: { value: "target_application" },
+  }],
+};
+
+async function insertLegacyRepairTarget(overrides: Record<string, unknown> = {}): Promise<void> {
+  await pool.query(
+    `INSERT INTO workflow_compositions(
+       composition_name, version, composition_key, capability_key, platform,
+       lifecycle_status, input_schema, output_schema, input_resolver,
+       postcondition_contract, execution_policy, compatibility, metadata
+     )
+     VALUES (
+       $1, $2, $3, 'screen_state', 'reddit', $4,
+       '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, $5::jsonb, '{}'::jsonb, '{}'::jsonb, $6::jsonb
+     )`,
+    [
+      overrides.composition_name ?? "reddit_screen_state",
+      overrides.version ?? "1",
+      overrides.composition_key ?? "aaaaaaaaaaaaaaaaaaaaaaaa",
+      overrides.lifecycle_status ?? "promoted",
+      JSON.stringify(overrides.postcondition_contract ?? legacyExistsOnlyContract),
+      JSON.stringify(overrides.metadata ?? { accountId: "account-1" }),
+    ],
+  );
+}
+
+function sqlLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function bindPsqlVariables(script: string, values: Record<string, string>): string {
+  return script.replace(/:'([a-z_]+)'/g, (_match, name: string) => {
+    const value = values[name];
+    if (value === undefined) throw new Error(`missing test binding for ${name}`);
+    return sqlLiteral(value);
+  });
+}
+
+async function repairComposition(contract = admittedReplacementContract, key = "bbbbbbbbbbbbbbbbbbbbbbbb"): Promise<void> {
+  const script = bindPsqlVariables(
+    readFileSync("docs/release-artifacts/p0-proof-authority-repair.sql", "utf8"),
+    {
+      composition_name: "reddit_screen_state",
+      legacy_version: "1",
+      replacement_version: "2",
+      replacement_composition_key: key,
+      capability_key: "screen_state",
+      non_dispatchable_status: "retired",
+      initial_status: "promoted",
+      platform: "reddit",
+      expected_account_id: "account-1",
+      input_schema: "{}",
+      output_schema: "{}",
+      input_resolver: "{}",
+      replacement_postcondition_contract: JSON.stringify(contract),
+      execution_policy: "{}",
+      compatibility: "{}",
+      metadata: JSON.stringify({ accountId: "account-1" }),
+    },
+  );
+  await pool.query(script);
+}
+
+async function repairState(): Promise<{ legacyPromoted: number; legacyRetired: number; replacementPromoted: number }> {
+  const result = await pool.query<{
+    legacy_promoted: string;
+    legacy_retired: string;
+    replacement_promoted: string;
+  }>(`
+    SELECT
+      COUNT(*) FILTER (WHERE version = '1' AND lifecycle_status = 'promoted')::text AS legacy_promoted,
+      COUNT(*) FILTER (WHERE version = '1' AND lifecycle_status = 'retired')::text AS legacy_retired,
+      COUNT(*) FILTER (WHERE version = '2' AND lifecycle_status = 'promoted')::text AS replacement_promoted
+    FROM workflow_compositions
+    WHERE composition_name = 'reddit_screen_state'
+  `);
+  return {
+    legacyPromoted: Number(result.rows[0]?.legacy_promoted ?? 0),
+    legacyRetired: Number(result.rows[0]?.legacy_retired ?? 0),
+    replacementPromoted: Number(result.rows[0]?.replacement_promoted ?? 0),
+  };
+}
+
 describe("human workflow PostgreSQL policy", () => {
   beforeAll(async () => {
     admin = new Pool({ connectionString: postgresUrl });
@@ -275,6 +405,7 @@ describe("human workflow PostgreSQL policy", () => {
        VALUES ('workflow_compositions'::regclass, $1::jsonb, 1)`,
       [JSON.stringify(policy)],
     );
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
 
@@ -284,24 +415,50 @@ describe("human workflow PostgreSQL policy", () => {
        VALUES ('workflow_segment_versions'::regclass, $1::jsonb, 1)`,
       [JSON.stringify(policy)],
     );
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
 
     await upsertWorkflowPredicatePolicies(policy, 1, { ...policy, enabled: false }, 1);
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
 
     await upsertWorkflowPredicatePolicies(policy, 1, { predicateMetadata: [] }, 1);
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
 
     await upsertWorkflowPredicatePolicies({ ...policy, enabled: false }, 1, policy, 1);
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
 
     await upsertWorkflowPredicatePolicies({ predicateMetadata: [] }, 1, policy, 1);
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
+
+    await upsertWorkflowPredicatePolicies(policy, 1, { predicateMetadata: { truthy: [] } }, 1);
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
+
+    await upsertWorkflowPredicatePolicies({ predicateMetadata: { truthy: [] } }, 1, policy, 1);
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
+
+    await upsertWorkflowPredicatePolicies(policy, 1, { predicateMetadata: { truthy: { eligible: true } } }, 1);
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
+
+    await upsertWorkflowPredicatePolicies({ predicateMetadata: { truthy: { eligible: true } } }, 1, policy, 1);
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
+
+    await upsertWorkflowPredicatePolicies(policy, 1);
+    expect(await canonicalPredicateMetadataRowCount()).toBe(1);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(true);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(true);
   });
 
   it("fails closed when duplicate canonical predicate metadata rows exist", async () => {
@@ -324,6 +481,7 @@ describe("human workflow PostgreSQL policy", () => {
          ('workflow_segment_versions'::regclass, $1::jsonb, 1)`,
       [JSON.stringify(policy)],
     );
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
 
@@ -336,6 +494,7 @@ describe("human workflow PostgreSQL policy", () => {
          ('workflow_segment_versions'::regclass, $1::jsonb, 1)`,
       [JSON.stringify(policy)],
     );
+    expect(await canonicalPredicateMetadataRowCount()).toBe(0);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
   });
@@ -417,6 +576,99 @@ describe("human workflow PostgreSQL policy", () => {
       { value: { verified: true } },
     ]) {
       expect(await admitted({ ...base, right })).toBe(true);
+    }
+  });
+
+  it("repairs defective workflow compositions atomically and rolls back every failed invariant", async () => {
+    const policy = {
+      predicateMetadata: {
+        exists: { eligible: true, classifying: false, operand: operand(false) },
+        equals: { eligible: true, classifying: true, operand: operand(true, "any", 1) },
+      },
+    };
+    await upsertWorkflowPredicatePolicies(policy, 1);
+
+    await installRepairFixtureSchema();
+    await insertLegacyRepairTarget();
+    await repairComposition();
+    expect(await repairState()).toEqual({ legacyPromoted: 0, legacyRetired: 1, replacementPromoted: 1 });
+
+    const failureCases: Array<{
+      name: string;
+      setup: () => Promise<void>;
+      run?: () => Promise<void>;
+      expected: Awaited<ReturnType<typeof repairState>>;
+    }> = [
+      {
+        name: "zero target",
+        setup: async () => {},
+        expected: { legacyPromoted: 0, legacyRetired: 0, replacementPromoted: 0 },
+      },
+      {
+        name: "multiple targets",
+        setup: async () => {
+          await insertLegacyRepairTarget({ composition_key: "cccccccccccccccccccccccc" });
+          await insertLegacyRepairTarget({ composition_key: "dddddddddddddddddddddddd" });
+        },
+        expected: { legacyPromoted: 2, legacyRetired: 0, replacementPromoted: 0 },
+      },
+      {
+        name: "proof refused",
+        setup: async () => {
+          await insertLegacyRepairTarget();
+        },
+        run: async () => repairComposition(legacyExistsOnlyContract),
+        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 0 },
+      },
+      {
+        name: "canonical policy drift",
+        setup: async () => {
+          await insertLegacyRepairTarget();
+          await pool.query(
+            `UPDATE resource_runtime_policies
+                SET version = version + 1
+              WHERE resource_table = 'workflow_segment_versions'::regclass`,
+          );
+        },
+        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 0 },
+      },
+      {
+        name: "legacy metadata present",
+        setup: async () => {
+          await insertLegacyRepairTarget();
+          await pool.query(
+            `INSERT INTO lifecycle_state_definitions(lifecycle_key, status, dispatchable)
+             VALUES ('legacy_interpreter', 'active', TRUE)`,
+          );
+          await pool.query(
+            `INSERT INTO runtime_semantic_entries(lifecycle_key, status, payload)
+             VALUES ('legacy_interpreter', 'active', $1::jsonb)`,
+            [JSON.stringify({ workflowInterpreterPolicy: { predicateMetadata: { equals: {} } } })],
+          );
+        },
+        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 0 },
+      },
+      {
+        name: "post-insert uniqueness",
+        setup: async () => {
+          await insertLegacyRepairTarget();
+          await insertLegacyRepairTarget({
+            version: "2",
+            composition_key: "bbbbbbbbbbbbbbbbbbbbbbbb",
+            postcondition_contract: admittedReplacementContract,
+          });
+        },
+        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 1 },
+      },
+    ];
+
+    for (const failureCase of failureCases) {
+      await pool.query("TRUNCATE workflow_compositions, runtime_semantic_entries, lifecycle_state_definitions");
+      await upsertWorkflowPredicatePolicies(policy, 1);
+      await installRepairFixtureSchema();
+      await failureCase.setup();
+      await expect(failureCase.run?.() ?? repairComposition()).rejects.toThrow();
+      expect(await repairState()).toEqual(failureCase.expected);
     }
   });
 

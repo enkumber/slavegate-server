@@ -86,7 +86,11 @@ export async function getCanonicalPredicateMetadataPolicy(
   resourceTableValue: string,
   db: Queryable = getDb(),
 ): Promise<CanonicalPredicateMetadataPolicy> {
-  const record = await getResourceRuntimePolicyRecord(resourceTableValue, db);
+  const resourceTable = resourceName(resourceTableValue);
+  if (resourceTable === "workflow_compositions") {
+    return getCanonicalWorkflowPredicateMetadataPolicy(db);
+  }
+  const record = await getResourceRuntimePolicyRecord(resourceTable, db);
   const metadata = record.policy.predicateMetadata;
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
     throw new ResourceRuntimePolicyUnavailableError(
@@ -96,6 +100,35 @@ export async function getCanonicalPredicateMetadataPolicy(
   return {
     resourceTable: record.resourceTable,
     version: record.version,
+    predicateMetadata: metadata as Record<string, unknown>,
+  };
+}
+
+export async function getCanonicalWorkflowPredicateMetadataPolicy(
+  db: Queryable = getDb(),
+): Promise<CanonicalPredicateMetadataPolicy> {
+  const result = await db.query(
+    `SELECT metadata_source::text AS resource_table,
+            metadata_version AS version,
+            predicate_metadata
+       FROM canonical_workflow_predicate_metadata()
+      WHERE metadata_source = 'workflow_compositions'::regclass`,
+  );
+  if (result.rows.length !== 1) {
+    throw new ResourceRuntimePolicyUnavailableError(
+      "canonical workflow predicate metadata is not configured",
+    );
+  }
+  const row = result.rows[0] as Record<string, unknown>;
+  const metadata = row.predicate_metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new ResourceRuntimePolicyUnavailableError(
+      "canonical workflow predicate metadata is malformed",
+    );
+  }
+  return {
+    resourceTable: String(row.resource_table),
+    version: Number(row.version),
     predicateMetadata: metadata as Record<string, unknown>,
   };
 }

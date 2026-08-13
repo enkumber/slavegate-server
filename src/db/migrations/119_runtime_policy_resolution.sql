@@ -69,43 +69,73 @@ RETURNS TABLE(metadata_source REGCLASS, metadata_version BIGINT, predicate_metad
 LANGUAGE sql
 STABLE
 AS $$
-  WITH configured AS (
-    SELECT resource_table, version, policy -> 'predicateMetadata' AS predicate_metadata
+  WITH raw_policy AS (
+    SELECT resource_table, version, policy
       FROM resource_runtime_policies
      WHERE resource_table IN (
        'workflow_compositions'::regclass,
        'workflow_segment_versions'::regclass
      )
-       AND COALESCE((policy ->> 'enabled')::boolean, true)
+  ),
+  valid_policy AS (
+    SELECT resource_table, version, policy -> 'predicateMetadata' AS predicate_metadata
+      FROM raw_policy
+     WHERE COALESCE((policy ->> 'enabled')::boolean, true)
        AND jsonb_typeof(policy -> 'predicateMetadata') = 'object'
+       AND EXISTS (
+         SELECT 1
+           FROM jsonb_object_keys(policy -> 'predicateMetadata')
+       )
+       AND NOT EXISTS (
+         SELECT 1
+           FROM jsonb_each(policy -> 'predicateMetadata') AS metadata_entry(key, value)
+          WHERE jsonb_typeof(metadata_entry.value) <> 'object'
+             OR jsonb_typeof(metadata_entry.value -> 'eligible') <> 'boolean'
+             OR jsonb_typeof(metadata_entry.value -> 'classifying') <> 'boolean'
+             OR jsonb_typeof(metadata_entry.value -> 'operand') <> 'object'
+             OR jsonb_typeof(metadata_entry.value -> 'operand' -> 'required') <> 'boolean'
+             OR jsonb_typeof(metadata_entry.value -> 'operand' -> 'type') <> 'string'
+             OR jsonb_typeof(metadata_entry.value -> 'operand' -> 'minLength') <> 'number'
+             OR (
+               metadata_entry.value -> 'operand' ? 'allowSamePath'
+               AND jsonb_typeof(metadata_entry.value -> 'operand' -> 'allowSamePath') <> 'boolean'
+             )
+       )
   ),
   canonical AS (
     SELECT *
-      FROM configured
+      FROM valid_policy
      WHERE resource_table = 'workflow_compositions'::regclass
   ),
-  segment_drift AS (
-    SELECT 1
-      FROM configured segment_policy
-      CROSS JOIN canonical
-     WHERE segment_policy.resource_table = 'workflow_segment_versions'::regclass
-       AND (
-         segment_policy.version <> canonical.version
-         OR segment_policy.predicate_metadata <> canonical.predicate_metadata
-       )
+  segment_policy AS (
+    SELECT *
+      FROM valid_policy
+     WHERE resource_table = 'workflow_segment_versions'::regclass
   )
   SELECT canonical.resource_table, canonical.version, canonical.predicate_metadata
     FROM canonical
+    JOIN segment_policy
+      ON segment_policy.version = canonical.version
+     AND segment_policy.predicate_metadata = canonical.predicate_metadata
    WHERE NOT legacy_workflow_predicate_metadata_present()
-     AND NOT EXISTS (SELECT 1 FROM segment_drift)
      AND (
        SELECT COUNT(*)
-         FROM configured
+         FROM raw_policy
         WHERE resource_table = 'workflow_compositions'::regclass
      ) = 1
      AND (
        SELECT COUNT(*)
-         FROM configured
+         FROM raw_policy
+        WHERE resource_table = 'workflow_segment_versions'::regclass
+     ) = 1
+     AND (
+       SELECT COUNT(*)
+         FROM valid_policy
+        WHERE resource_table = 'workflow_compositions'::regclass
+     ) = 1
+     AND (
+       SELECT COUNT(*)
+         FROM valid_policy
         WHERE resource_table = 'workflow_segment_versions'::regclass
      ) = 1;
 $$;
