@@ -344,13 +344,6 @@ describe("DB-authoritative AI workflow semantics migration", () => {
         "open example surface",
       ],
     );
-    expect(drift.rows).toEqual([
-      expect.objectContaining({
-        canonical_account_platform: "other_app",
-        canonical_workflow_platform: "canonical_app",
-        platform_bound: false,
-        account_device_bound: true,
-      }),
-    ]);
+    expect(drift.rows).toHaveLength(0);
   });
 });

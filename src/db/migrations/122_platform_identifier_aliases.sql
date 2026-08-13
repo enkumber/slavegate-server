@@ -180,5 +180,6 @@ AS $$
     AND (SELECT COUNT(*) FROM workflow_platform) = 1
     AND (SELECT COUNT(*) FROM workflow_canonical) = 1
     AND (SELECT COUNT(*) FROM account_canonical) = 1
-    AND (SELECT COUNT(*) FROM binding) = 1;
+    AND (SELECT COUNT(*) FROM binding) = 1
+    AND binding.platform_bound;
 $$;
