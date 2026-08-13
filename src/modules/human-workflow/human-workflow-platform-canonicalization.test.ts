@@ -7,7 +7,6 @@ vi.mock("../../db/client", () => ({
 }));
 
 import {
-  computeHumanWorkflowRequestKey,
   HumanWorkflowCompilerService,
 } from "./human-workflow-compiler.service";
 
@@ -108,10 +107,16 @@ describe("human workflow platform canonicalization", () => {
       .rejects.toMatchObject({ code: "ACCOUNT_PLATFORM_MISMATCH" });
   });
 
-  it("preserves fresh-run identity independently of platform aliases", async () => {
-    const first = computeHumanWorkflowRequestKey(deviceId, accountId, "open example");
-    const second = computeHumanWorkflowRequestKey(deviceId, accountId, "open example again");
-    expect(first).not.toBe(second);
-    expect(first).toMatch(/^[a-f0-9]{24}$/);
+  it("keeps canonicalization out of account/device binding", async () => {
+    mockTargetQueries({
+      workflowPlatform: "com.example.surface",
+      accountPlatform: "example",
+      accountCanonical: "com.example.surface",
+      workflowCanonical: "com.example.surface",
+      accountDeviceId: "33333333-3333-4333-8333-333333333333",
+    });
+
+    await expect(new HumanWorkflowCompilerService().resolveTarget(deviceId, accountId, "open example"))
+      .rejects.toMatchObject({ code: "ACCOUNT_DEVICE_MISMATCH" });
   });
 });
