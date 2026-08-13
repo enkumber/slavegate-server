@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { WorkflowSegmentComposer, composeGoalContract, computeCompositionStructureKey, computeSegmentFingerprint } from "./composer";
 import { compileGeneratedWorkflowTemplate } from "../workflows/workflow-validator";
-import { evaluatePostconditionContract } from "./postcondition";
+import { evaluatePostconditionContract, postconditionContractHasClassifyingPredicate } from "./postcondition";
 import { resolveCompositionInputs } from "./input-resolver";
 import type {
   WorkflowCompositionRecord,
@@ -353,5 +353,26 @@ describe("workflow segment architecture", () => {
         observedDestination: "https://ciprianneculai.com/",
       },
     }).ok).toBe(true);
+  });
+
+  it("distinguishes classifying postcondition proof from non-null proof", () => {
+    expect(postconditionContractHasClassifyingPredicate({
+      version: "1",
+      all: [{
+        left: { path: "outputs.observedState" },
+        operator: "exists",
+        operatorOpcode: 8,
+      }],
+    })).toBe(false);
+
+    expect(postconditionContractHasClassifyingPredicate({
+      version: "1",
+      all: [{
+        left: { path: "variables.finalState" },
+        operator: "matches_regex",
+        operatorOpcode: 10,
+        right: { value: "^[a-z0-9_.-]+$" },
+      }],
+    })).toBe(true);
   });
 });

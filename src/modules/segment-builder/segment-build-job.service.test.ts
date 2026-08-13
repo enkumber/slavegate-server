@@ -821,6 +821,27 @@ describe("segment-build canary identity recovery", () => {
     expect(canaryRoute).toContain('idempotencyKey: crypto.randomBytes(12).toString("hex")');
   });
 
+  it("uses operator semantics for manual blocked transitions", () => {
+    const source = readFileSync("src/modules/segment-builder/segment-build-job.service.ts", "utf8");
+    const failMethod = source.slice(
+      source.indexOf("async fail(id: string"),
+      source.indexOf("export const segmentBuildJobService"),
+    );
+
+    expect(failMethod).toContain("transitionManualAllowed: true");
+    expect(failMethod).toContain("transitionExternalAllowed: true");
+    expect(failMethod).not.toContain("targetManual: true,\n            transitionAutomatic: true");
+  });
+
+  it("revalidates canary runtime evidence before promotion", () => {
+    const source = readFileSync("src/modules/segment-builder/segment-build-job.service.ts", "utf8");
+
+    expect(source).toContain("verifyPromotionRuntimeEvidence(postconditionContract, runtimeEvidence)");
+    expect(source).toContain("postconditionContractHasClassifyingPredicate(contract)");
+    expect(source).toContain("runtime LLM calls are not acceptable canary evidence for promotion");
+    expect(source).toContain("evaluatePostconditionContract(contract");
+  });
+
   it("recovers promoted resource identity from the durable candidate when transition result patches were lost", () => {
     expect(recoverSegmentBuildCandidateIdentity({
       result: {

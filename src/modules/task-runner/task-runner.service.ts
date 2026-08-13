@@ -114,6 +114,10 @@ interface TaskRunnerResult extends TaskResult {
     llmBudget?: GeneratedWorkflowPlanCacheRecord["compiledPlan"]["llmBudget"];
     controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
     output?: Record<string, unknown>;
+    variables?: Record<string, unknown>;
+    executionStats?: WorkflowRecord["executionStats"];
+    postconditionVerified?: boolean;
+    postconditionFailures?: string[];
     failureCode?: string;
     selfHealing?: {
       outcome: string;
@@ -645,13 +649,19 @@ async function recordGeneratedWorkflowLearning(task: TaskRow, result: TaskRunner
           transitionAutomatic: true,
         },
         {
-          postconditionVerified: result.success,
+          postconditionVerified: result.success && result.generatedWorkflow?.postconditionVerified === true,
           resultEvidence: {
             taskId: task.id,
             workflowId: result.generatedWorkflow?.workflowId ?? null,
             success: result.success,
             failureCode: result.generatedWorkflow?.failureCode ?? null,
             executionKey,
+            output: result.output ?? result.generatedWorkflow?.output ?? {},
+            variables: result.generatedWorkflow?.variables ?? {},
+            executionStats: result.generatedWorkflow?.executionStats ?? null,
+            llmBudget: result.generatedWorkflow?.llmBudget ?? null,
+            postconditionVerified: result.generatedWorkflow?.postconditionVerified === true,
+            postconditionFailures: result.generatedWorkflow?.postconditionFailures ?? [],
           },
         },
       );
@@ -1614,6 +1624,8 @@ async function executeGeneratedWorkflowTask(
       llmBudget: cached.compiledPlan.llmBudget,
       controlPlaneContext,
       output: finalOutput,
+      variables: finalVariables,
+      executionStats: finalWorkflow.executionStats,
     };
 
     if (
@@ -1651,12 +1663,16 @@ async function executeGeneratedWorkflowTask(
       };
     }
 
+    let postconditionVerified = false;
+    let postconditionFailures: string[] = [];
     if (executableWorkflow.postconditionContract) {
       const postcondition = evaluatePostconditionContract(executableWorkflow.postconditionContract, {
         outputs: finalOutput,
         inputs: suppliedVariables?.inputs ?? {},
         variables: finalVariables,
       });
+      postconditionVerified = postcondition.ok;
+      postconditionFailures = postcondition.failures;
       if (!postcondition.ok) {
         generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "output_invalid").inc();
         return {
@@ -1669,6 +1685,8 @@ async function executeGeneratedWorkflowTask(
           failReason: `HUMAN_WORKFLOW_POSTCONDITION_FAILED: ${postcondition.failures.join("; ")}`,
           generatedWorkflow: {
             ...generatedWorkflowResult,
+            postconditionVerified,
+            postconditionFailures,
             failureCode: "HUMAN_WORKFLOW_POSTCONDITION_FAILED",
           },
         };
@@ -1682,7 +1700,11 @@ async function executeGeneratedWorkflowTask(
       output: finalOutput,
       tokenUsage: zeroTokenUsage(),
       durationMs: Date.now() - startedAt,
-      generatedWorkflow: generatedWorkflowResult,
+      generatedWorkflow: {
+        ...generatedWorkflowResult,
+        postconditionVerified,
+        postconditionFailures,
+      },
     };
   } catch (err) {
     generatedWorkflowTaskRunnerDispatches?.labels(routine, source, "dispatch_failed").inc();

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "fs";
 import {
   compositionCapabilityMetadata,
   completedSegmentBuildCapabilityKey,
@@ -155,5 +156,16 @@ describe("exact canonical cache precedence", () => {
       workflow: {},
       sourceMetadata: {},
     } as any, "current-control-plane")).toBe(false);
+  });
+
+  it("refuses supplied account/platform mismatch instead of dropping account binding", () => {
+    const source = readFileSync("src/modules/human-workflow/human-workflow-compiler.service.ts", "utf8");
+    const mismatchBranch = source.slice(
+      source.indexOf("if (explicitPlatform && explicitPlatform !== String(row.account_platform).toLowerCase())"),
+      source.indexOf("return {", source.indexOf("if (explicitPlatform && explicitPlatform !== String(row.account_platform).toLowerCase())")),
+    );
+
+    expect(mismatchBranch).toContain("ACCOUNT_PLATFORM_MISMATCH");
+    expect(mismatchBranch).not.toContain("account_id: null");
   });
 });

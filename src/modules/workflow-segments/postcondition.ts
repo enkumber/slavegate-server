@@ -34,6 +34,29 @@ export interface PostconditionEvaluation {
   failures: string[];
 }
 
+export function postconditionContractHasClassifyingPredicate(contract: WorkflowPostconditionContract): boolean {
+  if (contract.version !== "1" || !Array.isArray(contract.all)) return false;
+  return contract.all.some((predicate) => {
+    if (!predicate || typeof predicate !== "object") return false;
+    const leftPath = typeof predicate.left?.path === "string" ? predicate.left.path : "";
+    if (!/^(outputs|variables)\./.test(leftPath)) return false;
+    const operator = predicate.operatorOpcode ?? predicate.operator;
+    switch (operator) {
+      case 2:
+      case 3:
+      case 10:
+      case 11:
+      case "equals":
+      case "not_equals":
+      case "matches_regex":
+      case "uri_equivalent":
+        return predicate.right !== undefined;
+      default:
+        return false;
+    }
+  });
+}
+
 export function evaluatePostconditionContract(
   contract: WorkflowPostconditionContract,
   context: Record<string, unknown>,

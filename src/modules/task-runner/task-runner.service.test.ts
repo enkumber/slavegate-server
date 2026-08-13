@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   reconcileSupersededTaskIncidents: vi.fn(),
   getResourceLifecycleState: vi.fn(),
   selectResourceLifecycleTransition: vi.fn(),
+  transitionWorkflowExecutionBinding: vi.fn(),
   hydrateWorkflowNativePolicies: vi.fn(async (template: Record<string, unknown>) => template),
 }));
 
@@ -66,6 +67,10 @@ vi.mock("../workflows/workflow.service", () => ({
 
 vi.mock("../workflows/workflow-cancellation.service", () => ({
   cancelPersistedWorkflowSafely: mocks.cancelPersistedWorkflowSafely,
+}));
+
+vi.mock("../workflow-segments/execution-lifecycle.service", () => ({
+  transitionWorkflowExecutionBinding: mocks.transitionWorkflowExecutionBinding,
 }));
 
 vi.mock("../../utils/llm", () => ({
@@ -323,6 +328,7 @@ describe("task-runner generated_workflow routine", () => {
       toStatus: "runtime-selected",
     });
     mocks.recordGeneratedPlanCacheOutcome.mockResolvedValue(null);
+    mocks.transitionWorkflowExecutionBinding.mockResolvedValue(true);
     mocks.getGeneratedPlanCacheForRepair.mockResolvedValue(null);
     mocks.saveTemplate.mockResolvedValue(undefined);
     mocks.saveGeneratedPlanCache.mockResolvedValue(undefined);
@@ -694,6 +700,57 @@ describe("task-runner generated_workflow routine", () => {
       output: finalOutput,
       generatedWorkflow: { output: finalOutput },
     });
+  });
+
+  it("persists execution binding verification only after evaluating the declared postcondition", async () => {
+    const cached = cacheRecord();
+    cached.workflow = {
+      ...cached.workflow,
+      postconditionContract: {
+        version: "1",
+        all: [{
+          left: { path: "outputs.screenState" },
+          operator: "equals",
+          operatorOpcode: 2,
+          right: { value: "classified_state" },
+        }],
+      },
+    };
+    const finalOutput = {
+      ...REDDIT_ACCOUNT_HEALTH_OUTPUT_DEFAULTS,
+      loggedIn: "true",
+      homeFeedVisible: "true",
+      searchSurfaceAvailable: "true",
+      challengeDetected: "false",
+      loginWallDetected: "false",
+      accountSwitcherVisible: "false",
+      screenState: "classified_state",
+    };
+    mockTaskDb(task({
+      requestKey: REQUEST_KEY,
+      deviceId: DEVICE_ID,
+      executionKey: "a".repeat(24),
+      executionRequestKey: "b".repeat(24),
+    }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+    mocks.getWorkflow.mockResolvedValue(completedWorkflow(finalOutput));
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({ success: true });
+    expect(mocks.transitionWorkflowExecutionBinding).toHaveBeenCalledWith(
+      "b".repeat(24),
+      expect.any(Object),
+      expect.objectContaining({
+        postconditionVerified: true,
+        resultEvidence: expect.objectContaining({
+          output: expect.objectContaining({ screenState: "classified_state" }),
+          variables: expect.objectContaining({ screenState: "classified_state" }),
+          postconditionVerified: true,
+          postconditionFailures: [],
+        }),
+      }),
+    );
   });
 
   it("does not report completed when a dashboard workflow returns null required output", async () => {

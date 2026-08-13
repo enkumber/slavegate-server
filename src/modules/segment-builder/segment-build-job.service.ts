@@ -4,6 +4,10 @@ import { getDb } from "../../db/client";
 import { workflowSegmentControlPlaneService } from "../workflow-segments/control-plane.service";
 import { composeGoalContract } from "../workflow-segments/composer";
 import { transitionWorkflowExecutionBinding } from "../workflow-segments/execution-lifecycle.service";
+import {
+  evaluatePostconditionContract,
+  postconditionContractHasClassifyingPredicate,
+} from "../workflow-segments/postcondition";
 import type {
   SegmentInputResolver,
   SegmentInputSchema,
@@ -98,6 +102,40 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+}
+
+function numberAtPath(root: Record<string, unknown>, path: string): number | null {
+  const value = path.split(".").reduce<unknown>((current, key) => {
+    if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+    return (current as Record<string, unknown>)[key];
+  }, root);
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function runtimeLlmCalls(evidence: Record<string, unknown>): number {
+  return numberAtPath(evidence, "executionStats.runtimeLlmCalls")
+    ?? numberAtPath(evidence, "executionStats.runtimeLlmCallsTotal")
+    ?? 0;
+}
+
+function verifyPromotionRuntimeEvidence(
+  contract: NonNullable<WorkflowTemplate["postconditionContract"]>,
+  evidence: Record<string, unknown>,
+): { ok: true } | { ok: false; reason: string } {
+  if (!postconditionContractHasClassifyingPredicate(contract)) {
+    return { ok: false, reason: "postcondition contract lacks classifying runtime evidence predicate" };
+  }
+  if (runtimeLlmCalls(evidence) > 0) {
+    return { ok: false, reason: "runtime LLM calls are not acceptable canary evidence for promotion" };
+  }
+  const evaluation = evaluatePostconditionContract(contract, {
+    outputs: objectValue(evidence.output),
+    inputs: objectValue(evidence.inputs),
+    variables: objectValue(evidence.variables),
+  });
+  return evaluation.ok
+    ? { ok: true }
+    : { ok: false, reason: `postcondition evidence failed: ${evaluation.failures.join("; ")}` };
 }
 
 function candidateIdentity(job: SegmentBuildJob): {
@@ -1471,9 +1509,13 @@ export class SegmentBuildJobService {
     const canaryRunId = typeof job.result.canaryRunId === "string" ? job.result.canaryRunId : "";
     const executionResult = await getDb().query(
       `SELECT binding.postcondition_verified, binding.result_evidence,
+              composition.postcondition_contract,
               run_state.terminal AS run_terminal,
               run_state.retryable AS run_retryable
        FROM workflow_execution_bindings binding
+       JOIN workflow_compositions composition
+         ON composition.composition_name = binding.composition_name
+        AND composition.version = binding.composition_version
        JOIN agency_workflow_runs run ON run.id = $2::uuid
        JOIN lifecycle_state_definitions run_state
          ON run_state.lifecycle_key = run.lifecycle_key
@@ -1485,16 +1527,27 @@ export class SegmentBuildJobService {
     );
     const execution = executionResult.rows[0] as Record<string, unknown> | undefined;
     if (!execution || execution.run_terminal !== true) return job;
-    if (execution.run_retryable === true || execution.postcondition_verified !== true) {
+    const runtimeEvidence = objectValue(execution.result_evidence);
+    const postconditionContract = execution.postcondition_contract as WorkflowTemplate["postconditionContract"] | null;
+    const runtimeEvidenceVerification = postconditionContract
+      ? verifyPromotionRuntimeEvidence(postconditionContract, runtimeEvidence)
+      : { ok: false as const, reason: "postcondition contract is missing" };
+    if (
+      execution.run_retryable === true
+      || execution.postcondition_verified !== true
+      || !runtimeEvidenceVerification.ok
+    ) {
       const failed = await transitionSegmentBuildJob(id, {
         targetTerminal: false,
         transitionAutomatic: true,
       }, {
-        error: "canary failed or postcondition was not verified",
+        error: runtimeEvidenceVerification.ok
+          ? "canary failed or postcondition was not verified"
+          : runtimeEvidenceVerification.reason,
         refreshLease: true,
         evidencePatch: {
           lastCanaryExecutionKey: executionKey,
-          lastCanaryResult: execution.result_evidence ?? {},
+          lastCanaryResult: runtimeEvidence,
         },
       });
       if (failed) {
@@ -1520,7 +1573,7 @@ export class SegmentBuildJobService {
       passed: true,
       postconditionVerified: true,
       executionKey,
-      runtimeEvidence: execution.result_evidence ?? {},
+      runtimeEvidence,
     };
     for (const ref of segmentRefs) {
       if (await resourceVersionIsSuccessful(
@@ -1602,7 +1655,8 @@ export class SegmentBuildJobService {
         ? {
             targetTerminal: false,
             targetManual: true,
-            transitionAutomatic: true,
+            transitionManualAllowed: true,
+            transitionExternalAllowed: true,
           }
         : {
             targetTerminal: true,

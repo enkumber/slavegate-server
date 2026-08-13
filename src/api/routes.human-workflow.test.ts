@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "fs";
 import {
   computeHumanWorkflowRequestKey,
   humanWorkflowArtifactMatchesIntent,
@@ -144,5 +145,22 @@ describe("dashboard human workflow integrity contract", () => {
       runtimeInputs: { target: "https://example.test" },
     });
     expect(executionKey).toMatch(/^[a-f0-9]{24}$/);
+  });
+
+  it("defaults human run dispatch to fresh identity unless the caller supplies idempotency", () => {
+    const source = readFileSync("src/api/routes.ts", "utf8");
+    const queueFunction = source.slice(
+      source.indexOf("export async function queueHumanAgencyWorkflowRun"),
+      source.indexOf("function inferGeneratedWorkflowAppId"),
+    );
+    const humanRunRoute = source.slice(
+      source.indexOf('router.post("/workflows/human/run"'),
+      source.indexOf('router.get("/workflows/:id"'),
+    );
+
+    expect(queueFunction).toContain("const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID()");
+    expect(queueFunction).not.toContain("input.idempotencyKey ?? input.executionKey ?? input.requestKey");
+    expect(humanRunRoute).toContain("accountId: camelAccountId");
+    expect(humanRunRoute).toContain("idempotencyKey: typeof idempotencyKey === \"string\"");
   });
 });
