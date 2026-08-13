@@ -249,9 +249,12 @@ describe("PostgreSQL job action catalog", () => {
             predicateOpcodes: { database_predicate: 6 },
             predicateMetadata: {
               database_predicate: {
-                rhsRequired: true,
-                rhsAllowEmpty: false,
-                rhsAllowSamePath: false,
+                operand: {
+                  required: true,
+                  type: "string",
+                  minLength: 1,
+                  allowSamePath: false,
+                },
               },
             },
             failureOpcodes: { database_failure: 3, database_default: 0 },
@@ -347,7 +350,12 @@ describe("PostgreSQL job action catalog", () => {
           l1TimeoutMs: 21,
           l2SettleMs: 22,
           operatorOpcode: 6,
-          operandConstraintOpcode: 1,
+          operandContract: {
+            required: true,
+            type: "string",
+            minLength: 1,
+            allowSamePath: false,
+          },
           group: 0,
         }),
       })],

@@ -11,6 +11,12 @@ let admin: Pool;
 let pool: Pool;
 let schema = "";
 
+const operand = (
+  required: boolean,
+  type: "any" | "string" | "number" | "boolean" | "array" | "object" = "any",
+  minLength = 0,
+) => ({ required, type, minLength, allowSamePath: false });
+
 function scopedUrl(url: string, schemaName: string): string {
   const parsed = new URL(url);
   parsed.searchParams.set("options", `-c search_path=${schemaName}`);
@@ -68,7 +74,17 @@ describe("human workflow PostgreSQL policy", () => {
     await pool.query(
       `INSERT INTO resource_runtime_policies(resource_table, policy)
        VALUES ('workflow_compositions'::regclass,
-         '{"predicateMetadata":{"exists":{"eligible":true,"classifying":false,"rhsRequired":false,"rhsAllowEmpty":false,"rhsAllowSamePath":false},"truthy":{"eligible":true,"classifying":true,"rhsRequired":false,"rhsAllowEmpty":false,"rhsAllowSamePath":false},"equals":{"eligible":true,"classifying":true,"rhsRequired":true,"rhsAllowEmpty":false,"rhsAllowSamePath":false},"contains":{"eligible":true,"classifying":true,"rhsRequired":true,"rhsAllowEmpty":false,"rhsAllowSamePath":false},"contains_ci":{"eligible":true,"classifying":true,"rhsRequired":true,"rhsAllowEmpty":false,"rhsAllowSamePath":false},"matches":{"eligible":true,"classifying":true,"rhsRequired":true,"rhsAllowEmpty":false,"rhsAllowSamePath":false}}}'::jsonb)`,
+         $1::jsonb)`,
+      [JSON.stringify({
+        predicateMetadata: {
+          exists: { eligible: true, classifying: false, operand: operand(false) },
+          truthy: { eligible: true, classifying: true, operand: operand(false) },
+          equals: { eligible: true, classifying: true, operand: operand(true, "any", 1) },
+          contains: { eligible: true, classifying: true, operand: operand(true, "string", 1) },
+          contains_ci: { eligible: true, classifying: true, operand: operand(true, "string", 1) },
+          matches: { eligible: true, classifying: true, operand: operand(true, "string", 1) },
+        },
+      })],
     );
     const contract = (operator: string) => ({
       version: "1" as const,
@@ -92,7 +108,7 @@ describe("human workflow PostgreSQL policy", () => {
             left: { path: "outputs.result" },
             operator,
             operatorOpcode,
-            operandConstraintOpcode: 1,
+            operandContract: operand(true, "string", 1),
             ...(right === undefined ? {} : { right }),
           }],
         };
@@ -118,8 +134,14 @@ describe("human workflow PostgreSQL policy", () => {
     )).toBe(true);
     await pool.query(
       `UPDATE resource_runtime_policies
-          SET policy = '{"predicateMetadata":{"exists":{"eligible":true,"classifying":true,"rhsRequired":false,"rhsAllowEmpty":false,"rhsAllowSamePath":false},"truthy":{"eligible":true,"classifying":false,"rhsRequired":false,"rhsAllowEmpty":false,"rhsAllowSamePath":false}}}'::jsonb
+          SET policy = $1::jsonb
         WHERE resource_table = 'workflow_compositions'::regclass`,
+      [JSON.stringify({
+        predicateMetadata: {
+          exists: { eligible: true, classifying: true, operand: operand(false) },
+          truthy: { eligible: true, classifying: false, operand: operand(false) },
+        },
+      })],
     );
     expect(await postconditionContractHasClassifyingPredicate(
       contract("exists") as never,

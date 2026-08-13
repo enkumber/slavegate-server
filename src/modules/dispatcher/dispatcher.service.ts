@@ -226,16 +226,19 @@ export async function hydrateWorkflowNativePolicies<T extends Record<string, unk
         throw new Error(`PostgreSQL workflow interpreter operand policy is missing for predicateMetadata.${source.operator}`);
       }
       const operandPolicy = metadata as Record<string, unknown>;
+      const operand = operandPolicy.operand;
       if (
-        typeof operandPolicy.rhsRequired !== "boolean"
-        || typeof operandPolicy.rhsAllowEmpty !== "boolean"
-        || typeof operandPolicy.rhsAllowSamePath !== "boolean"
+        !operand
+        || typeof operand !== "object"
+        || Array.isArray(operand)
+        || typeof (operand as Record<string, unknown>).required !== "boolean"
+        || typeof (operand as Record<string, unknown>).type !== "string"
+        || !Number.isSafeInteger((operand as Record<string, unknown>).minLength)
+        || Number((operand as Record<string, unknown>).minLength) < 0
       ) {
         throw new Error(`PostgreSQL workflow interpreter operand policy is incomplete for predicateMetadata.${source.operator}`);
       }
-      hydrated.operandConstraintOpcode = (operandPolicy.rhsRequired ? 1 : 0)
-        | (operandPolicy.rhsAllowEmpty ? 2 : 0)
-        | (operandPolicy.rhsAllowSamePath ? 4 : 0);
+      hydrated.operandContract = { ...(operand as Record<string, unknown>) };
     }
     if (typeof source.regex === "string") {
       hydrated.group = source.group ?? runtimeDefault("regexGroup");

@@ -114,13 +114,13 @@ describe("dashboard human workflow integrity contract", () => {
           left: { path: "outputs.navigationResult.launched" },
           operator: "truthy" as const,
           operatorOpcode: 0,
-          operandConstraintOpcode: 0,
+          operandContract: { required: false, type: "any" as const, minLength: 0 },
         },
         {
           left: { path: "outputs.navigationResult.observedUri" },
           operator: "uri_equivalent" as const,
           operatorOpcode: 11,
-          operandConstraintOpcode: 1,
+          operandContract: { required: true, type: "string" as const, minLength: 1 },
           right: { path: "inputs.target" },
         },
       ],
@@ -162,7 +162,7 @@ describe("dashboard human workflow integrity contract", () => {
         left: { path: "outputs.screenState" },
         operator: "exists" as const,
         operatorOpcode: 8,
-        operandConstraintOpcode: 0,
+        operandContract: { required: false, type: "any" as const, minLength: 0 },
       }],
     };
     expect(evaluatePostconditionContract(existenceOnly, {
@@ -171,7 +171,7 @@ describe("dashboard human workflow integrity contract", () => {
     const db = {
       query: async (_text: string, params?: unknown[]) => ({
         rows: JSON.parse(String(params?.[1])).some((item: { operator: string }) => item.operator === "truthy")
-          ? [{ key: "truthy" }]
+          ? [{ predicate_index: 0 }]
           : [],
       }),
     };
@@ -186,7 +186,7 @@ describe("dashboard human workflow integrity contract", () => {
         left: { path: "outputs.foregroundVerified" },
         operator: "truthy",
         operatorOpcode: 0,
-        operandConstraintOpcode: 0,
+        operandContract: { required: false, type: "any", minLength: 0 },
       }],
     }, "workflow_compositions", db)).toBe(true);
   });
