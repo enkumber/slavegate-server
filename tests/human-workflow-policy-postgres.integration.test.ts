@@ -154,4 +154,54 @@ describe("human workflow PostgreSQL policy", () => {
       pool,
     )).toBe(false);
   });
+
+  it("keeps PostgreSQL proof policy isolated across concurrent search paths", async () => {
+    const otherSchema = `${schema}_other`;
+    await admin.query(`CREATE SCHEMA "${otherSchema}"`);
+    const otherPool = new Pool({ connectionString: scopedUrl(postgresUrl, otherSchema), max: 4 });
+    try {
+      await otherPool.query("CREATE TABLE workflow_compositions(id uuid)");
+      await otherPool.query(
+        `CREATE TABLE resource_runtime_policies (
+           resource_table REGCLASS PRIMARY KEY,
+           policy JSONB NOT NULL,
+           version BIGINT NOT NULL DEFAULT 1,
+           updated_by TEXT,
+           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         )`,
+      );
+      await otherPool.query(readFileSync("src/db/migrations/119_runtime_policy_resolution.sql", "utf8"));
+      await pool.query(
+        `UPDATE resource_runtime_policies SET policy = $1::jsonb
+          WHERE resource_table = 'workflow_compositions'::regclass`,
+        [JSON.stringify({ predicateMetadata: { truthy: {
+          eligible: true, classifying: true, operand: operand(false),
+        } } })],
+      );
+      await otherPool.query(
+        `INSERT INTO resource_runtime_policies(resource_table, policy)
+         VALUES ('workflow_compositions'::regclass, $1::jsonb)`,
+        [JSON.stringify({ predicateMetadata: { truthy: {
+          eligible: true, classifying: false, operand: operand(false),
+        } } })],
+      );
+      const contract = {
+        version: "1" as const,
+        all: [{ left: { path: "outputs.result" }, operator: "truthy" }],
+      };
+      const probes = Array.from({ length: 20 }, async (_, index) => {
+        const selectedPool = index % 2 === 0 ? pool : otherPool;
+        const admitted = await postconditionContractHasClassifyingPredicate(
+          contract as never,
+          "workflow_compositions",
+          selectedPool,
+        );
+        expect(admitted).toBe(index % 2 === 0);
+      });
+      await Promise.all(probes);
+    } finally {
+      await otherPool.end();
+      await admin.query(`DROP SCHEMA IF EXISTS "${otherSchema}" CASCADE`);
+    }
+  });
 });
