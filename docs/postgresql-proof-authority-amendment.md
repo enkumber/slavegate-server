@@ -120,8 +120,13 @@ promoted/dispatchable defective target; requires exactly one admitted
 replacement proof; asserts deactivation row count; inserts only after all
 preconditions pass; and asserts the final replacement identity, account binding,
 bindings, version, lifecycle state, schemas, execution policy, compatibility,
-and single active promoted replacement before `COMMIT`. It also asserts that no
-dispatchable existence-only `outputs.screenState` legacy artifact remains.
+and single active promoted replacement before `COMMIT`. Its final scope check is
+over every dispatchable artifact for the target `(composition_name, platform)`,
+not only the replacement version; the sole surviving dispatchable row must be the
+exact replacement identity and payload. It also asserts that no dispatchable
+existence-only `outputs.screenState` legacy artifact remains. The artifact uses
+only a transaction-local temp input row and `DO` block, and leaves no semantic
+repair helper function installed after success or rollback.
 
 Rollback/recovery is the transaction boundary itself:
 

@@ -30,6 +30,7 @@ DECLARE
   v_active_replacement_count INTEGER;
   v_active_legacy_count INTEGER;
   v_scope_dispatchable_count INTEGER;
+  v_scope_exact_replacement_count INTEGER;
   v_target_ctid TID;
   v_target_ctids TID[];
 BEGIN
@@ -180,6 +181,30 @@ BEGIN
      AND c.platform = v_input.platform;
   IF v_scope_dispatchable_count <> 1 THEN
     RAISE EXCEPTION 'expected exactly one dispatchable artifact in target scope after repair, found %', v_scope_dispatchable_count;
+  END IF;
+
+  SELECT COUNT(*)
+    INTO v_scope_exact_replacement_count
+    FROM workflow_compositions c
+    JOIN lifecycle_state_definitions state
+      ON state.lifecycle_key = 'workflow_compositions'
+     AND state.status = c.lifecycle_status
+     AND state.dispatchable
+   WHERE c.composition_name = v_input.composition_name
+     AND c.platform = v_input.platform
+     AND c.version = v_input.replacement_version
+     AND c.composition_key = v_input.replacement_composition_key
+     AND c.capability_key = v_input.capability_key
+     AND c.lifecycle_status = v_input.initial_status
+     AND COALESCE(c.metadata ->> 'accountId', '') = COALESCE(v_input.expected_account_id, '')
+     AND c.input_schema = v_input.input_schema
+     AND c.output_schema = v_input.output_schema
+     AND c.input_resolver = v_input.input_resolver
+     AND c.postcondition_contract = v_input.replacement_postcondition_contract
+     AND c.execution_policy = v_input.execution_policy
+     AND c.compatibility = v_input.compatibility;
+  IF v_scope_exact_replacement_count <> 1 THEN
+    RAISE EXCEPTION 'sole dispatchable artifact is not the expected replacement identity, found %', v_scope_exact_replacement_count;
   END IF;
 
   SELECT COUNT(*)

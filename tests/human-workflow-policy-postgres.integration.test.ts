@@ -127,8 +127,10 @@ function bindPsqlVariables(script: string, values: Record<string, string>): stri
 }
 
 async function repairComposition(contract = admittedReplacementContract, key = "bbbbbbbbbbbbbbbbbbbbbbbb"): Promise<void> {
+  const repairSql = readFileSync("docs/release-artifacts/p0-proof-authority-repair.sql", "utf8");
+  expect(repairSql).not.toMatch(/CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION/i);
   const script = bindPsqlVariables(
-    readFileSync("docs/release-artifacts/p0-proof-authority-repair.sql", "utf8"),
+    repairSql,
     {
       composition_name: "reddit_screen_state",
       legacy_version: "1",
@@ -151,24 +153,43 @@ async function repairComposition(contract = admittedReplacementContract, key = "
   await pool.query(script);
 }
 
-async function repairState(): Promise<{ legacyPromoted: number; legacyRetired: number; replacementPromoted: number }> {
+async function repairState(): Promise<{
+  legacyPromoted: number;
+  legacyRetired: number;
+  replacementPromoted: number;
+  scopeDispatchable: number;
+}> {
   const result = await pool.query<{
     legacy_promoted: string;
     legacy_retired: string;
     replacement_promoted: string;
+    scope_dispatchable: string;
   }>(`
     SELECT
       COUNT(*) FILTER (WHERE version = '1' AND lifecycle_status = 'promoted')::text AS legacy_promoted,
       COUNT(*) FILTER (WHERE version = '1' AND lifecycle_status = 'retired')::text AS legacy_retired,
-      COUNT(*) FILTER (WHERE version = '2' AND lifecycle_status = 'promoted')::text AS replacement_promoted
+      COUNT(*) FILTER (WHERE version = '2' AND lifecycle_status = 'promoted')::text AS replacement_promoted,
+      COUNT(*) FILTER (WHERE lifecycle_status = 'promoted')::text AS scope_dispatchable
     FROM workflow_compositions
     WHERE composition_name = 'reddit_screen_state'
+      AND platform = 'reddit'
   `);
   return {
     legacyPromoted: Number(result.rows[0]?.legacy_promoted ?? 0),
     legacyRetired: Number(result.rows[0]?.legacy_retired ?? 0),
     replacementPromoted: Number(result.rows[0]?.replacement_promoted ?? 0),
+    scopeDispatchable: Number(result.rows[0]?.scope_dispatchable ?? 0),
   };
+}
+
+async function repairHelperCount(): Promise<number> {
+  const result = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count
+       FROM pg_proc
+      WHERE pronamespace = current_schema()::regnamespace
+        AND proname LIKE 'p0_proof_authority%'`,
+  );
+  return Number(result.rows[0]?.count ?? 0);
 }
 
 describe("human workflow PostgreSQL policy", () => {
@@ -591,7 +612,13 @@ describe("human workflow PostgreSQL policy", () => {
     await installRepairFixtureSchema();
     await insertLegacyRepairTarget();
     await repairComposition();
-    expect(await repairState()).toEqual({ legacyPromoted: 0, legacyRetired: 1, replacementPromoted: 1 });
+    expect(await repairState()).toEqual({
+      legacyPromoted: 0,
+      legacyRetired: 1,
+      replacementPromoted: 1,
+      scopeDispatchable: 1,
+    });
+    expect(await repairHelperCount()).toBe(0);
 
     const failureCases: Array<{
       name: string;
@@ -602,7 +629,7 @@ describe("human workflow PostgreSQL policy", () => {
       {
         name: "zero target",
         setup: async () => {},
-        expected: { legacyPromoted: 0, legacyRetired: 0, replacementPromoted: 0 },
+        expected: { legacyPromoted: 0, legacyRetired: 0, replacementPromoted: 0, scopeDispatchable: 0 },
       },
       {
         name: "multiple targets",
@@ -610,7 +637,7 @@ describe("human workflow PostgreSQL policy", () => {
           await insertLegacyRepairTarget({ composition_key: "cccccccccccccccccccccccc" });
           await insertLegacyRepairTarget({ composition_key: "dddddddddddddddddddddddd" });
         },
-        expected: { legacyPromoted: 2, legacyRetired: 0, replacementPromoted: 0 },
+        expected: { legacyPromoted: 2, legacyRetired: 0, replacementPromoted: 0, scopeDispatchable: 2 },
       },
       {
         name: "proof refused",
@@ -618,7 +645,7 @@ describe("human workflow PostgreSQL policy", () => {
           await insertLegacyRepairTarget();
         },
         run: async () => repairComposition(legacyExistsOnlyContract),
-        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 0 },
+        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 0, scopeDispatchable: 1 },
       },
       {
         name: "canonical policy drift",
@@ -630,7 +657,7 @@ describe("human workflow PostgreSQL policy", () => {
               WHERE resource_table = 'workflow_segment_versions'::regclass`,
           );
         },
-        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 0 },
+        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 0, scopeDispatchable: 1 },
       },
       {
         name: "legacy metadata present",
@@ -646,7 +673,7 @@ describe("human workflow PostgreSQL policy", () => {
             [JSON.stringify({ workflowInterpreterPolicy: { predicateMetadata: { equals: {} } } })],
           );
         },
-        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 0 },
+        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 0, scopeDispatchable: 1 },
       },
       {
         name: "post-insert uniqueness",
@@ -658,7 +685,19 @@ describe("human workflow PostgreSQL policy", () => {
             postcondition_contract: admittedReplacementContract,
           });
         },
-        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 1 },
+        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 1, scopeDispatchable: 2 },
+      },
+      {
+        name: "extra dispatchable classifying version",
+        setup: async () => {
+          await insertLegacyRepairTarget();
+          await insertLegacyRepairTarget({
+            version: "3",
+            composition_key: "eeeeeeeeeeeeeeeeeeeeeeee",
+            postcondition_contract: admittedReplacementContract,
+          });
+        },
+        expected: { legacyPromoted: 1, legacyRetired: 0, replacementPromoted: 0, scopeDispatchable: 2 },
       },
     ];
 
@@ -669,6 +708,7 @@ describe("human workflow PostgreSQL policy", () => {
       await failureCase.setup();
       await expect(failureCase.run?.() ?? repairComposition()).rejects.toThrow();
       expect(await repairState()).toEqual(failureCase.expected);
+      expect(await repairHelperCount()).toBe(0);
     }
   });
 
