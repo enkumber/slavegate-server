@@ -219,6 +219,55 @@ describe("human workflow PostgreSQL policy", () => {
     await pool.query("DELETE FROM lifecycle_state_definitions");
   });
 
+  it("rejects present-but-empty RHS in PostgreSQL even when metadata minLength is zero", async () => {
+    await pool.query(
+      `INSERT INTO resource_runtime_policies(resource_table, policy)
+       VALUES ('workflow_compositions'::regclass, $1::jsonb)
+       ON CONFLICT (resource_table) DO UPDATE
+         SET policy = EXCLUDED.policy,
+             version = resource_runtime_policies.version + 1,
+             updated_at = NOW()`,
+      [JSON.stringify({ predicateMetadata: { proof_any: {
+        eligible: true,
+        classifying: true,
+        operand: operand(true, "any", 0),
+      } } })],
+    );
+    const admitted = async (predicate: Record<string, unknown>): Promise<boolean> => {
+      const result = await pool.query<{ admitted: boolean }>(
+        `SELECT admitted
+           FROM resolve_postcondition_proof_eligibility(
+             'workflow_compositions'::regclass,
+             $1::jsonb
+           )`,
+        [JSON.stringify([predicate])],
+      );
+      return result.rows[0]?.admitted === true;
+    };
+    const base = { left: { path: "outputs.result" }, operator: "proof_any" };
+
+    for (const right of [
+      undefined,
+      { value: null },
+      { value: "" },
+      { value: [] },
+      { value: {} },
+    ]) {
+      expect(await admitted({
+        ...base,
+        ...(right === undefined ? {} : { right }),
+      })).toBe(false);
+    }
+
+    for (const right of [
+      { value: "verified" },
+      { value: ["verified"] },
+      { value: { verified: true } },
+    ]) {
+      expect(await admitted({ ...base, right })).toBe(true);
+    }
+  });
+
   it("keeps PostgreSQL proof policy isolated across concurrent search paths", async () => {
     const otherSchema = `${schema}_other`;
     await admin.query(`CREATE SCHEMA "${otherSchema}"`);

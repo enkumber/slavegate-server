@@ -136,6 +136,25 @@ AS $$
            AND (
              right_present = false
              OR right_literal IS NULL
+             OR (
+               right_literal <> 'null'::jsonb
+               AND NOT (
+                 jsonb_typeof(right_literal) = 'string'
+                 AND length(right_literal #>> '{}') = 0
+               )
+               AND NOT (
+                 jsonb_typeof(right_literal) = 'array'
+                 AND jsonb_array_length(right_literal) = 0
+               )
+               AND NOT (
+                 jsonb_typeof(right_literal) = 'object'
+                 AND (SELECT count(*) FROM jsonb_object_keys(right_literal)) = 0
+               )
+             )
+           )
+           AND (
+             right_present = false
+             OR right_literal IS NULL
              OR operand ->> 'type' = 'any'
              OR jsonb_typeof(right_literal) = operand ->> 'type'
            )
@@ -148,11 +167,6 @@ AS $$
                   WHEN 'object' THEN (SELECT count(*) FROM jsonb_object_keys(right_literal))
                   ELSE 1
                 END >= COALESCE((operand ->> 'minLength')::integer, 0)
-           )
-           AND (
-             right_present = false
-             OR right_literal IS NULL
-             OR right_literal <> 'null'::jsonb
            )
            AND (
              COALESCE((operand ->> 'allowSamePath')::boolean, false)
