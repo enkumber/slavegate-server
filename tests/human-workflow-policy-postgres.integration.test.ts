@@ -86,6 +86,20 @@ describe("human workflow PostgreSQL policy", () => {
 
   beforeEach(async () => {
     await pool.query("TRUNCATE resource_runtime_policies, runtime_semantic_entries, lifecycle_state_definitions");
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conname = 'resource_runtime_policies_pkey'
+            AND conrelid = 'resource_runtime_policies'::regclass
+        ) THEN
+          ALTER TABLE resource_runtime_policies
+            ADD CONSTRAINT resource_runtime_policies_pkey PRIMARY KEY (resource_table);
+        END IF;
+      END $$;
+    `);
   });
 
   it("lets PostgreSQL select fresh, replay and refusal identity behavior", async () => {
@@ -262,6 +276,7 @@ describe("human workflow PostgreSQL policy", () => {
       [JSON.stringify(policy)],
     );
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
 
     await pool.query("DELETE FROM resource_runtime_policies");
     await pool.query(
@@ -269,13 +284,60 @@ describe("human workflow PostgreSQL policy", () => {
        VALUES ('workflow_segment_versions'::regclass, $1::jsonb, 1)`,
       [JSON.stringify(policy)],
     );
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
 
     await upsertWorkflowPredicatePolicies(policy, 1, { ...policy, enabled: false }, 1);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
 
     await upsertWorkflowPredicatePolicies(policy, 1, { predicateMetadata: [] }, 1);
     expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
+
+    await upsertWorkflowPredicatePolicies({ ...policy, enabled: false }, 1, policy, 1);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
+
+    await upsertWorkflowPredicatePolicies({ predicateMetadata: [] }, 1, policy, 1);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
+  });
+
+  it("fails closed when duplicate canonical predicate metadata rows exist", async () => {
+    const contract = {
+      version: "1" as const,
+      all: [{ left: { path: "outputs.result" }, operator: "truthy" }],
+    };
+    const policy = {
+      predicateMetadata: {
+        truthy: { eligible: true, classifying: true, operand: operand(false) },
+      },
+    };
+
+    await pool.query("ALTER TABLE resource_runtime_policies DROP CONSTRAINT resource_runtime_policies_pkey");
+    await pool.query(
+      `INSERT INTO resource_runtime_policies(resource_table, policy, version)
+       VALUES
+         ('workflow_compositions'::regclass, $1::jsonb, 1),
+         ('workflow_compositions'::regclass, $1::jsonb, 1),
+         ('workflow_segment_versions'::regclass, $1::jsonb, 1)`,
+      [JSON.stringify(policy)],
+    );
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
+
+    await pool.query("TRUNCATE resource_runtime_policies");
+    await pool.query(
+      `INSERT INTO resource_runtime_policies(resource_table, policy, version)
+       VALUES
+         ('workflow_compositions'::regclass, $1::jsonb, 1),
+         ('workflow_segment_versions'::regclass, $1::jsonb, 1),
+         ('workflow_segment_versions'::regclass, $1::jsonb, 1)`,
+      [JSON.stringify(policy)],
+    );
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_compositions", pool)).toBe(false);
+    expect(await postconditionContractHasClassifyingPredicate(contract as never, "workflow_segment_versions", pool)).toBe(false);
   });
 
   it("fails closed when canonical predicate metadata is missing or split across legacy interpreter policy", async () => {
