@@ -811,6 +811,14 @@ describe("SegmentBuildJobService dispatch", () => {
 });
 
 describe("segment-build canary identity recovery", () => {
+  it("uses PostgreSQL-admitted manual and external transitions for agent failure reports", () => {
+    const source = readFileSync("src/modules/segment-builder/segment-build-job.service.ts", "utf8");
+    const failMethod = source.slice(source.indexOf("async fail("), source.indexOf("\n  }\n}", source.indexOf("async fail(")));
+    expect(failMethod).toContain("transitionManualAllowed: true");
+    expect(failMethod).toContain("transitionExternalAllowed: true");
+    expect(failMethod).not.toContain("transitionAutomatic: true");
+  });
+
   it("gives every queued segment-build canary a fresh idempotency identity", () => {
     const source = readFileSync("src/modules/segment-builder/routes.ts", "utf8");
     const canaryRoute = source.slice(

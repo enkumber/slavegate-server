@@ -282,8 +282,13 @@ router.post("/jobs/:id/fail", asyncRoute(async (req, res) => {
   const agentId = await requestedAgentId(req, res);
   if (!agentId) return;
   const error = typeof req.body?.error === "string" ? req.body.error : "segment builder failed";
-  const job = await segmentBuildJobService.fail(req.params.id, agentId, error, req.body?.blocked === true);
-  if (!job) return res.status(409).json({ ok: false, error: "job cannot be failed" });
+  const blocked = req.body?.blocked === true;
+  const job = await segmentBuildJobService.fail(req.params.id, agentId, error, blocked);
+  if (!job) return res.status(409).json({
+    ok: false,
+    code: blocked ? "SEGMENT_BUILD_MANUAL_TRANSITION_NOT_ADMITTED" : "SEGMENT_BUILD_FAILURE_TRANSITION_NOT_ADMITTED",
+    error: "PostgreSQL lifecycle policy does not admit the requested transition from the current state",
+  });
   res.json({ ok: true, data: job });
 }));
 

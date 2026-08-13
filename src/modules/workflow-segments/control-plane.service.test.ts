@@ -48,6 +48,37 @@ describe("workflow segment control plane", () => {
     )).rejects.toMatchObject({ code: "CONTROL_PLANE_CANARY_EVIDENCE_INVALID" });
   });
 
+  it("rejects existence-only composition postconditions before persistence", async () => {
+    const service = new WorkflowSegmentControlPlaneService();
+    await expect(service.createCompositionVersion({
+      compositionName: "generic_state_scan",
+      version: "1.0.0",
+      capabilityKey: "generic_state_scan",
+      platform: "sample",
+      inputSchema: { type: "object", required: [], properties: {} },
+      outputSchema: { required: ["screenState"], properties: { screenState: { type: "string" } } },
+      inputResolver: { version: "1", fields: {} },
+      postconditionContract: {
+        version: "1",
+        all: [{ left: { path: "outputs.screenState" }, operator: "exists", operatorOpcode: 8 }],
+      },
+      executionPolicy: {
+        defaultVerificationStrategy: "local_only",
+        dataRetentionDays: 1,
+        runtimeContract: "edge-workflow/v2",
+      },
+      nodes: [{
+        nodeKey: "scan",
+        ordinal: 0,
+        segmentKey: "generic_scan",
+        segmentVersion: "1.0.0",
+        inputBindings: {},
+        outputBindings: {},
+        dependsOn: [],
+      }],
+    })).rejects.toMatchObject({ code: "WORKFLOW_COMPOSITION_CONTRACT_INVALID" });
+  });
+
   it("rejects a composition resolver that cannot produce every required input before touching PostgreSQL", async () => {
     const service = new WorkflowSegmentControlPlaneService();
     await expect(service.createCompositionVersion({

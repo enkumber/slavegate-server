@@ -34,6 +34,20 @@ export interface PostconditionEvaluation {
   failures: string[];
 }
 
+export function postconditionContractHasClassifyingPredicate(contract: WorkflowPostconditionContract): boolean {
+  if (contract.version !== "1" || !Array.isArray(contract.all)) return false;
+  return contract.all.some((predicate) => {
+    if (!predicate || typeof predicate !== "object") return false;
+    const path = typeof predicate.left?.path === "string" ? predicate.left.path : "";
+    if (!/^(outputs|variables)\./.test(path)) return false;
+    // Existence alone cannot prove a business outcome. The operator opcode is
+    // resolved from PostgreSQL; this check only requires a value-classifying
+    // predicate rather than encoding any application state or value here.
+    const operator = predicate.operatorOpcode ?? predicate.operator;
+    return ![8, 9, "exists", "not_exists"].includes(operator as never);
+  });
+}
+
 export function evaluatePostconditionContract(
   contract: WorkflowPostconditionContract,
   context: Record<string, unknown>,

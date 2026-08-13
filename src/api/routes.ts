@@ -319,7 +319,9 @@ export async function queueHumanAgencyWorkflowRun(input: {
         code: "HUMAN_WORKFLOW_INTENT_MISMATCH",
       });
     }
-    const idempotencyKey = input.idempotencyKey ?? input.executionKey ?? input.requestKey;
+    // A human "run" is fresh unless the caller explicitly supplies a replay key.
+    // requestKey/executionKey identify compiled artifacts, not execution attempts.
+    const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
     const findExistingRun = async (): Promise<{
       id: string;
       task_id: string | null;
@@ -1668,13 +1670,15 @@ router.post("/workflows/human/compile-jobs/:id/retry", requireAdminAuth, async (
 
 router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
   try {
-    const { device_id, account_id, intent, requestKey, cacheKey, compileJobId } = req.body as {
+    const { device_id, account_id, accountId: camelAccountId, intent, requestKey, cacheKey, compileJobId, idempotencyKey } = req.body as {
       device_id?: unknown;
       account_id?: unknown;
+      accountId?: unknown;
       intent?: unknown;
       requestKey?: unknown;
       cacheKey?: unknown;
       compileJobId?: unknown;
+      idempotencyKey?: unknown;
     };
     if (typeof device_id !== "string" || !UUID_RE.test(device_id)) {
       return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "device_id must be a UUID" });
@@ -1694,9 +1698,16 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
     if (compileJobId !== undefined && (typeof compileJobId !== "string" || !UUID_RE.test(compileJobId))) {
       return res.status(400).json({ ok: false, code: "COMPILE_JOB_ID_INVALID", error: "compileJobId must be a UUID" });
     }
-    const accountId = typeof account_id === "string" && UUID_RE.test(account_id) ? account_id : null;
-    if (account_id !== undefined && account_id !== null && !accountId) {
+    if (account_id !== undefined && camelAccountId !== undefined && account_id !== camelAccountId) {
+      return res.status(400).json({ ok: false, code: "ACCOUNT_ID_CONFLICT", error: "account_id and accountId must match when both are supplied" });
+    }
+    const suppliedAccountId = account_id ?? camelAccountId;
+    const accountId = typeof suppliedAccountId === "string" && UUID_RE.test(suppliedAccountId) ? suppliedAccountId : null;
+    if (suppliedAccountId !== undefined && suppliedAccountId !== null && !accountId) {
       return res.status(400).json({ ok: false, code: "ACCOUNT_ID_INVALID", error: "account_id must be a UUID when provided" });
+    }
+    if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || idempotencyKey.trim().length === 0 || idempotencyKey.length > 200)) {
+      return res.status(400).json({ ok: false, code: "IDEMPOTENCY_KEY_INVALID", error: "idempotencyKey must be a non-empty string at most 200 characters" });
     }
     if (!accountId && !isAccountlessHumanWorkflowIntent(intent)) {
       return res.status(400).json({
@@ -1781,6 +1792,7 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
       segmentKeys: compiled.segmentKeys,
       segmentRefs: compiled.segmentRefs,
       runtimeInputs: compiled.runtimeInputs,
+      idempotencyKey: typeof idempotencyKey === "string" ? idempotencyKey.trim() : undefined,
     });
     res.status(201).json({ ok: true, data: run });
   } catch (err) {

@@ -1602,13 +1602,13 @@ export class SegmentBuildJobService {
         ? {
             targetTerminal: false,
             targetManual: true,
-            transitionAutomatic: true,
+            transitionManualAllowed: true,
           }
         : {
             targetTerminal: true,
             targetRetryable: true,
             targetAdministrative: false,
-            transitionAutomatic: true,
+            transitionExternalAllowed: true,
           },
       { error: error.slice(0, 2000) },
       "assigned_agent = $2",

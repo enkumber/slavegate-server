@@ -10,6 +10,7 @@ import {
   workflowOutputSchemaErrors,
   workflowPostconditionContractErrors,
 } from "../workflows/workflow-validator";
+import { postconditionContractHasClassifyingPredicate } from "./postcondition";
 import {
   computeCompositionStructureKey,
   computeSegmentFingerprint,
@@ -209,6 +210,9 @@ export class WorkflowSegmentControlPlaneService {
       ...(input.outputSchema ? workflowOutputSchemaErrors(input.outputSchema) : []),
       ...(input.postconditionContract ? workflowPostconditionContractErrors(input.postconditionContract) : []),
     ];
+    if (input.postconditionContract && !postconditionContractHasClassifyingPredicate(input.postconditionContract)) {
+      contractErrors.push("postconditionContract must include a value-classifying output or variable predicate");
+    }
     if (contractErrors.length > 0) {
       throw Object.assign(new Error(`segment contract failed validation: ${contractErrors.join("; ")}`), {
         status: 422,
@@ -307,6 +311,9 @@ export class WorkflowSegmentControlPlaneService {
       ...workflowOutputSchemaErrors(input.outputSchema),
       ...workflowPostconditionContractErrors(input.postconditionContract),
     ];
+    if (!postconditionContractHasClassifyingPredicate(input.postconditionContract)) {
+      contractErrors.push("postconditionContract must include a value-classifying output or variable predicate");
+    }
     if (contractErrors.length > 0) {
       throw Object.assign(new Error(`composition contract failed validation: ${contractErrors.join("; ")}`), {
         status: 422,
