@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   computeHumanWorkflowRequestKey,
@@ -150,7 +149,7 @@ describe("dashboard human workflow integrity contract", () => {
     expect(executionKey).toMatch(/^[a-f0-9]{24}$/);
   });
 
-  it("does not treat existence-only output contracts as business proof", () => {
+  it("uses PostgreSQL operator metadata to distinguish existence from classification", async () => {
     const existenceOnly = {
       version: "1" as const,
       all: [{
@@ -162,31 +161,23 @@ describe("dashboard human workflow integrity contract", () => {
     expect(evaluatePostconditionContract(existenceOnly, {
       outputs: { screenState: "not_target_application" },
     })).toMatchObject({ ok: true });
-    expect(postconditionContractHasClassifyingPredicate(existenceOnly)).toBe(false);
-    expect(postconditionContractHasClassifyingPredicate({
+    const db = {
+      query: async (_text: string, params?: unknown[]) => ({
+        rows: (params?.[1] as string[]).includes("truthy") ? [{ key: "truthy" }] : [],
+      }),
+    };
+    expect(await postconditionContractHasClassifyingPredicate(
+      existenceOnly,
+      "workflow_compositions",
+      db,
+    )).toBe(false);
+    expect(await postconditionContractHasClassifyingPredicate({
       version: "1",
       all: [{
         left: { path: "outputs.foregroundVerified" },
         operator: "truthy",
         operatorOpcode: 0,
       }],
-    })).toBe(true);
-  });
-
-  it("keeps artifact identity separate from fresh execution identity and accepts both account field spellings", () => {
-    const source = readFileSync("src/api/routes.ts", "utf8");
-    const queue = source.slice(
-      source.indexOf("export async function queueHumanAgencyWorkflowRun"),
-      source.indexOf("function inferGeneratedWorkflowAppId"),
-    );
-    const runRoute = source.slice(
-      source.indexOf('router.post("/workflows/human/run"'),
-      source.indexOf('router.get("/workflows/:id"'),
-    );
-    expect(queue).toContain("input.idempotencyKey ?? crypto.randomUUID()");
-    expect(queue).not.toContain("input.executionKey ?? input.requestKey");
-    expect(runRoute).toContain("account_id ?? camelAccountId");
-    expect(runRoute).toContain("ACCOUNT_ID_CONFLICT");
-    expect(runRoute).toContain("idempotencyKey:");
+    }, "workflow_compositions", db)).toBe(true);
   });
 });

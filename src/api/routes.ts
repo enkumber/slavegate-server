@@ -135,6 +135,7 @@ import {
   listResourceRuntimePolicies,
   upsertResourceRuntimePolicy,
 } from "../modules/runtime-policy/resource-runtime-policy.service";
+import { resolveHumanWorkflowRunIdentity } from "../modules/human-workflow/run-identity.service";
 import {
   describeWorkflowQueueRuntimePolicy,
   initializeWorkflowQueueRuntimePolicy,
@@ -319,9 +320,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
         code: "HUMAN_WORKFLOW_INTENT_MISMATCH",
       });
     }
-    // A human "run" is fresh unless the caller explicitly supplies a replay key.
-    // requestKey/executionKey identify compiled artifacts, not execution attempts.
-    const idempotencyKey = input.idempotencyKey ?? crypto.randomUUID();
+    const idempotencyKey = await resolveHumanWorkflowRunIdentity(input.idempotencyKey, client);
     const findExistingRun = async (): Promise<{
       id: string;
       task_id: string | null;

@@ -1,7 +1,15 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WorkflowSegmentControlPlaneService } from "./control-plane.service";
+
+vi.mock("../../db/client", () => ({
+  getDb: () => ({
+    query: vi.fn(async (text: string) => ({
+      rows: text.includes("jsonb_each") ? [] : [],
+    })),
+  }),
+}));
 
 describe("workflow segment control plane", () => {
   it("resolves version lifecycles exclusively through the configured resource binding", () => {

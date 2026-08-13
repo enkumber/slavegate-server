@@ -34,18 +34,35 @@ export interface PostconditionEvaluation {
   failures: string[];
 }
 
-export function postconditionContractHasClassifyingPredicate(contract: WorkflowPostconditionContract): boolean {
+type Queryable = {
+  query: (text: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
+};
+
+export async function postconditionContractHasClassifyingPredicate(
+  contract: WorkflowPostconditionContract,
+  resourceTable: string,
+  db: Queryable,
+): Promise<boolean> {
   if (contract.version !== "1" || !Array.isArray(contract.all)) return false;
-  return contract.all.some((predicate) => {
-    if (!predicate || typeof predicate !== "object") return false;
+  const operators = contract.all.flatMap((predicate) => {
+    if (!predicate || typeof predicate !== "object") return [];
     const path = typeof predicate.left?.path === "string" ? predicate.left.path : "";
-    if (!/^(outputs|variables)\./.test(path)) return false;
-    // Existence alone cannot prove a business outcome. The operator opcode is
-    // resolved from PostgreSQL; this check only requires a value-classifying
-    // predicate rather than encoding any application state or value here.
-    const operator = predicate.operatorOpcode ?? predicate.operator;
-    return ![8, 9, "exists", "not_exists"].includes(operator as never);
+    return /^(outputs|variables)\./.test(path) && typeof predicate.operator === "string"
+      ? [predicate.operator]
+      : [];
   });
+  if (operators.length === 0) return false;
+  const result = await db.query(
+    `SELECT operator.key
+       FROM resource_runtime_policies policy
+       CROSS JOIN LATERAL jsonb_each(policy.policy -> 'predicateMetadata') operator(key, metadata)
+      WHERE policy.resource_table = to_regclass($1)
+        AND operator.key = ANY($2::text[])
+        AND (operator.metadata ->> 'classifying')::boolean
+      LIMIT 1`,
+    [resourceTable, operators],
+  );
+  return result.rows.length === 1;
 }
 
 export function evaluatePostconditionContract(

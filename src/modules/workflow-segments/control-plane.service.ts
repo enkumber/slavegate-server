@@ -210,7 +210,11 @@ export class WorkflowSegmentControlPlaneService {
       ...(input.outputSchema ? workflowOutputSchemaErrors(input.outputSchema) : []),
       ...(input.postconditionContract ? workflowPostconditionContractErrors(input.postconditionContract) : []),
     ];
-    if (input.postconditionContract && !postconditionContractHasClassifyingPredicate(input.postconditionContract)) {
+    if (input.postconditionContract && !await postconditionContractHasClassifyingPredicate(
+      input.postconditionContract,
+      "workflow_segment_versions",
+      getDb(),
+    )) {
       contractErrors.push("postconditionContract must include a value-classifying output or variable predicate");
     }
     if (contractErrors.length > 0) {
@@ -311,7 +315,12 @@ export class WorkflowSegmentControlPlaneService {
       ...workflowOutputSchemaErrors(input.outputSchema),
       ...workflowPostconditionContractErrors(input.postconditionContract),
     ];
-    if (!postconditionContractHasClassifyingPredicate(input.postconditionContract)) {
+    validateInputResolver(input.inputResolver, input.inputSchema);
+    if (!await postconditionContractHasClassifyingPredicate(
+      input.postconditionContract,
+      "workflow_compositions",
+      getDb(),
+    )) {
       contractErrors.push("postconditionContract must include a value-classifying output or variable predicate");
     }
     if (contractErrors.length > 0) {
@@ -321,7 +330,6 @@ export class WorkflowSegmentControlPlaneService {
         validationErrors: contractErrors,
       });
     }
-    validateInputResolver(input.inputResolver, input.inputSchema);
     assertExecutionPolicy(input.executionPolicy);
     if (!Array.isArray(input.nodes) || input.nodes.length === 0) {
       throw Object.assign(new Error("composition requires at least one node"), { status: 422, code: "COMPOSITION_NODES_REQUIRED" });
