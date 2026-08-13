@@ -64,6 +64,52 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION canonical_workflow_predicate_metadata()
+RETURNS TABLE(metadata_source REGCLASS, metadata_version BIGINT, predicate_metadata JSONB)
+LANGUAGE sql
+STABLE
+AS $$
+  WITH configured AS (
+    SELECT resource_table, version, policy -> 'predicateMetadata' AS predicate_metadata
+      FROM resource_runtime_policies
+     WHERE resource_table IN (
+       'workflow_compositions'::regclass,
+       'workflow_segment_versions'::regclass
+     )
+       AND COALESCE((policy ->> 'enabled')::boolean, true)
+       AND jsonb_typeof(policy -> 'predicateMetadata') = 'object'
+  ),
+  canonical AS (
+    SELECT *
+      FROM configured
+     WHERE resource_table = 'workflow_compositions'::regclass
+  ),
+  segment_drift AS (
+    SELECT 1
+      FROM configured segment_policy
+      CROSS JOIN canonical
+     WHERE segment_policy.resource_table = 'workflow_segment_versions'::regclass
+       AND (
+         segment_policy.version <> canonical.version
+         OR segment_policy.predicate_metadata <> canonical.predicate_metadata
+       )
+  )
+  SELECT canonical.resource_table, canonical.version, canonical.predicate_metadata
+    FROM canonical
+   WHERE NOT legacy_workflow_predicate_metadata_present()
+     AND NOT EXISTS (SELECT 1 FROM segment_drift)
+     AND (
+       SELECT COUNT(*)
+         FROM configured
+        WHERE resource_table = 'workflow_compositions'::regclass
+     ) = 1
+     AND (
+       SELECT COUNT(*)
+         FROM configured
+        WHERE resource_table = 'workflow_segment_versions'::regclass
+     ) = 1;
+$$;
+
 CREATE OR REPLACE FUNCTION resolve_postcondition_proof_eligibility(
   target_resource REGCLASS,
   predicates JSONB
@@ -80,12 +126,15 @@ LANGUAGE sql
 STABLE
 AS $$
   WITH policy_row AS (
-    SELECT resource_table, policy, version
-      FROM resource_runtime_policies
-     WHERE resource_table = target_resource
-       AND COALESCE((policy ->> 'enabled')::boolean, true)
-       AND jsonb_typeof(policy -> 'predicateMetadata') = 'object'
-       AND NOT legacy_workflow_predicate_metadata_present()
+    SELECT target_resource AS resource_table,
+           predicate_metadata,
+           metadata_source,
+           metadata_version
+      FROM canonical_workflow_predicate_metadata()
+     WHERE target_resource IN (
+       'workflow_compositions'::regclass,
+       'workflow_segment_versions'::regclass
+     )
      LIMIT 1
   ),
   candidate AS (
@@ -101,8 +150,8 @@ AS $$
   ),
   shaped AS (
     SELECT candidate.*,
-           policy_row.resource_table AS metadata_source,
-           policy_row.version AS metadata_version,
+           policy_row.metadata_source,
+           policy_row.metadata_version,
            metadata,
            metadata -> 'operand' AS operand,
            jsonb_typeof(candidate.right_operand) = 'object'
@@ -117,7 +166,7 @@ AS $$
            END AS right_literal
       FROM candidate
       CROSS JOIN policy_row
-      LEFT JOIN LATERAL jsonb_each(policy_row.policy -> 'predicateMetadata') metadata_entry(key, metadata)
+      LEFT JOIN LATERAL jsonb_each(policy_row.predicate_metadata) metadata_entry(key, metadata)
         ON metadata_entry.key = candidate.operator
   )
   SELECT predicate_index,
