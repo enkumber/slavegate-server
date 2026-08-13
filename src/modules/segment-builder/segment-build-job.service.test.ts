@@ -194,6 +194,12 @@ vi.mock("../../db/client", () => {
           && current === "building"
         ) {
           target = "candidate_ready";
+        } else if (
+          selector.targetManual === true
+          && selector.transitionManualAllowed === true
+          && current === "building"
+        ) {
+          target = "blocked";
         }
         if (!target) return { rows: [] };
         state.row = {
@@ -222,7 +228,9 @@ vi.mock("../../db/client", () => {
             ...((state.row.evidence as Record<string, unknown> | undefined) ?? {}),
             ...((patch.evidencePatch as Record<string, unknown> | undefined) ?? {}),
           },
-          error: patch.error === null ? null : state.row.error,
+          error: Object.prototype.hasOwnProperty.call(patch, "error")
+            ? patch.error
+            : state.row.error,
         };
         return { rows: [{ ...state.row }] };
       }
@@ -605,6 +613,42 @@ describe("SegmentBuildJobService dispatch", () => {
     expect(result).toBeNull();
     expect(state.row.status).toBe("blocked");
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("admits blocked callbacks through a PostgreSQL manual transition from an in-progress state", async () => {
+    state.row.status = "building";
+
+    const result = await new SegmentBuildJobService().fail(
+      buildJob().id,
+      TEST_AGENT_ID,
+      "policy requires operator review",
+      true,
+    );
+
+    expect(result?.status).toBe("blocked");
+    expect(state.row.error).toBe("policy requires operator review");
+    expect(state.queries.some((query) => query.includes("lifecycle_transitions"))).toBe(true);
+    const transitionQuery = state.queries.find((query) =>
+      query.includes("WITH locked AS (")
+      && query.includes("UPDATE segment_build_jobs job")
+      && query.includes("lifecycle_transitions")
+    );
+    expect(transitionQuery).toBeDefined();
+  });
+
+  it("does not invent a blocked state when PostgreSQL exposes no manual transition", async () => {
+    state.row.status = "pending_agent";
+
+    const result = await new SegmentBuildJobService().fail(
+      buildJob().id,
+      TEST_AGENT_ID,
+      "policy requires operator review",
+      true,
+    );
+
+    expect(result).toBeNull();
+    expect(state.row.status).toBe("pending_agent");
+    expect(state.row.error).toBeNull();
   });
 
   it("atomically expires an offline queued canary and its task", async () => {

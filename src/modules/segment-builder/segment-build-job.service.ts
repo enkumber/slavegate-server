@@ -1600,9 +1600,8 @@ export class SegmentBuildJobService {
       id,
       blocked
         ? {
-            targetTerminal: false,
             targetManual: true,
-            transitionAutomatic: true,
+            transitionManualAllowed: true,
           }
         : {
             targetTerminal: true,

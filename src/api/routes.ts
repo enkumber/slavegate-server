@@ -136,6 +136,10 @@ import {
   upsertResourceRuntimePolicy,
 } from "../modules/runtime-policy/resource-runtime-policy.service";
 import {
+  requireHumanRunIdempotencyKey,
+  resolveHumanRunIdempotencyKey,
+} from "../modules/human-workflow/run-idempotency-policy";
+import {
   describeWorkflowQueueRuntimePolicy,
   initializeWorkflowQueueRuntimePolicy,
 } from "../modules/workflows/workflow-runtime-config";
@@ -319,7 +323,11 @@ export async function queueHumanAgencyWorkflowRun(input: {
         code: "HUMAN_WORKFLOW_INTENT_MISMATCH",
       });
     }
-    const idempotencyKey = input.idempotencyKey ?? input.executionKey ?? input.requestKey;
+    const idempotencyKey = await resolveHumanRunIdempotencyKey({
+      explicitIdempotencyKey: input.idempotencyKey ?? null,
+      generatedFreshKey: crypto.randomBytes(12).toString("hex"),
+      db: client,
+    });
     const findExistingRun = async (): Promise<{
       id: string;
       task_id: string | null;
@@ -476,6 +484,7 @@ export async function queueHumanAgencyWorkflowRun(input: {
     const taskParams: Record<string, unknown> = {
       cacheKey: cached.cache_key,
       clientId: input.target.client_id,
+      accountId: input.target.account_id,
       platform: input.target.account_platform,
       agencyWorkflowRunId: runId,
       workflowRunId: runId,
@@ -1668,13 +1677,14 @@ router.post("/workflows/human/compile-jobs/:id/retry", requireAdminAuth, async (
 
 router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
   try {
-    const { device_id, account_id, intent, requestKey, cacheKey, compileJobId } = req.body as {
+    const { device_id, account_id, intent, requestKey, cacheKey, compileJobId, idempotencyKey } = req.body as {
       device_id?: unknown;
       account_id?: unknown;
       intent?: unknown;
       requestKey?: unknown;
       cacheKey?: unknown;
       compileJobId?: unknown;
+      idempotencyKey?: unknown;
     };
     if (typeof device_id !== "string" || !UUID_RE.test(device_id)) {
       return res.status(400).json({ ok: false, code: "DEVICE_ID_REQUIRED", error: "device_id must be a UUID" });
@@ -1694,6 +1704,7 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
     if (compileJobId !== undefined && (typeof compileJobId !== "string" || !UUID_RE.test(compileJobId))) {
       return res.status(400).json({ ok: false, code: "COMPILE_JOB_ID_INVALID", error: "compileJobId must be a UUID" });
     }
+    const explicitIdempotencyKey = requireHumanRunIdempotencyKey(idempotencyKey);
     const accountId = typeof account_id === "string" && UUID_RE.test(account_id) ? account_id : null;
     if (account_id !== undefined && account_id !== null && !accountId) {
       return res.status(400).json({ ok: false, code: "ACCOUNT_ID_INVALID", error: "account_id must be a UUID when provided" });
@@ -1761,6 +1772,13 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
       compiled = ready;
     }
 
+    if (accountId && compiled.target.account_id !== accountId) {
+      return res.status(409).json({
+        ok: false,
+        code: "ACCOUNT_BINDING_REQUIRED",
+        error: "compiled workflow target is not bound to the supplied account_id",
+      });
+    }
     if (typeof cacheKey === "string" && cacheKey !== compiled.cacheKey) {
       return res.status(400).json({
         ok: false,
@@ -1781,6 +1799,7 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
       segmentKeys: compiled.segmentKeys,
       segmentRefs: compiled.segmentRefs,
       runtimeInputs: compiled.runtimeInputs,
+      idempotencyKey: explicitIdempotencyKey ?? undefined,
     });
     res.status(201).json({ ok: true, data: run });
   } catch (err) {

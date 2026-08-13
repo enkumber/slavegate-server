@@ -515,15 +515,10 @@ export class HumanWorkflowCompilerService {
     }
     const explicitPlatform = intent ? await resolveHumanWorkflowPlatform(intent) : null;
     if (explicitPlatform && explicitPlatform !== String(row.account_platform).toLowerCase()) {
-      return {
-        device_id: row.device_id as string,
-        device_model: (row.device_model as string | null) ?? null,
-        device_name: (row.device_name as string | null) ?? null,
-        account_id: null,
-        account_username: null,
-        account_platform: explicitPlatform,
-        client_id: null,
-      };
+      throw Object.assign(new Error("Supplied account does not match the PostgreSQL-resolved workflow platform"), {
+        status: 409,
+        code: "ACCOUNT_BINDING_PLATFORM_MISMATCH",
+      });
     }
     return {
       device_id: row.device_id as string,

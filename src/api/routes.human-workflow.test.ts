@@ -9,6 +9,10 @@ import {
 } from "../modules/workflow-segments/input-resolver";
 import { computeExecutionKey } from "../modules/workflow-segments/key-utils";
 import { evaluatePostconditionContract } from "../modules/workflow-segments/postcondition";
+import {
+  requireHumanRunIdempotencyKey,
+  resolveHumanRunIdempotencyKey,
+} from "../modules/human-workflow/run-idempotency-policy";
 
 const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
 const ACCOUNT_ID = "22222222-2222-4222-8222-222222222222";
@@ -134,6 +138,67 @@ describe("dashboard human workflow integrity contract", () => {
       },
       inputs: { target: "https://example.test" },
     })).toMatchObject({ ok: false });
+  });
+
+  it("rejects structural presence-only postconditions as business proof", () => {
+    const contract = {
+      version: "1" as const,
+      all: [
+        { left: { path: "outputs.loggedIn" }, operator: "present" as const, operatorOpcode: 8 },
+        { left: { path: "outputs.screenState" }, operator: "present" as const, operatorOpcode: 8 },
+      ],
+    };
+
+    expect(evaluatePostconditionContract(contract, {
+      outputs: {
+        loggedIn: false,
+        homeFeedVisible: false,
+        searchSurfaceAvailable: false,
+        screenState: "not_reddit",
+      },
+    })).toMatchObject({
+      ok: false,
+      failures: expect.arrayContaining(["postcondition contract contains no positive business proof"]),
+    });
+  });
+
+  it("uses PostgreSQL policy to choose fresh human run idempotency", async () => {
+    const db = {
+      query: async () => ({
+        rows: [{
+          policy: {
+            humanWorkflowRun: {
+              freshRunIdempotencyByDefault: true,
+            },
+          },
+        }],
+      }),
+    };
+
+    await expect(resolveHumanRunIdempotencyKey({
+      generatedFreshKey: "fresh-key",
+      db: db as never,
+    })).resolves.toBe("fresh-key");
+    expect(requireHumanRunIdempotencyKey("caller-key")).toBe("caller-key");
+  });
+
+  it("refuses replay-only human runs before dispatch when policy requires explicit identity", async () => {
+    const db = {
+      query: async () => ({
+        rows: [{
+          policy: {
+            humanWorkflowRun: {
+              replayOnlyWithoutIdempotencyKey: true,
+            },
+          },
+        }],
+      }),
+    };
+
+    await expect(resolveHumanRunIdempotencyKey({
+      generatedFreshKey: "fresh-key",
+      db: db as never,
+    })).rejects.toMatchObject({ code: "WORKFLOW_IDEMPOTENCY_REPLAY_ONLY" });
   });
 
   it("documents the structural execution-key boundary independently of request text hashing", () => {

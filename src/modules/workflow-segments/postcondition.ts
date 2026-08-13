@@ -34,6 +34,26 @@ export interface PostconditionEvaluation {
   failures: string[];
 }
 
+function isPositiveBusinessProof(
+  operatorOpcode: number | undefined,
+  left: unknown,
+  right: unknown,
+): boolean {
+  switch (operatorOpcode) {
+    case 0:
+      return left === true;
+    case 2:
+      return right !== false && right !== null && right !== undefined && Object.is(left, right);
+    case 4:
+    case 5:
+    case 10:
+    case 11:
+      return true;
+    default:
+      return false;
+  }
+}
+
 export function evaluatePostconditionContract(
   contract: WorkflowPostconditionContract,
   context: Record<string, unknown>,
@@ -42,6 +62,7 @@ export function evaluatePostconditionContract(
     return { ok: false, failures: ["postcondition contract is empty or unsupported"] };
   }
   const failures: string[] = [];
+  let hasPositiveBusinessProof = false;
   contract.all.forEach((predicate, index) => {
     const left = resolveValue(context, predicate.left);
     const right = resolveValue(context, predicate.right);
@@ -79,6 +100,12 @@ export function evaluatePostconditionContract(
         return;
     }
     if (!passed) failures.push(`predicate ${index} failed (${predicate.operator})`);
+    if (passed && isPositiveBusinessProof(predicate.operatorOpcode, left, right)) {
+      hasPositiveBusinessProof = true;
+    }
   });
+  if (failures.length === 0 && !hasPositiveBusinessProof) {
+    failures.push("postcondition contract contains no positive business proof");
+  }
   return { ok: failures.length === 0, failures };
 }
