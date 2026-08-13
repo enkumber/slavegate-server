@@ -184,4 +184,61 @@ describe("DB-authoritative AI workflow semantics migration", () => {
     const disabled = await pool.query("SELECT * FROM resolve_canonical_platform_identifier($1)", ["canonical_app"]);
     expect(disabled.rows).toHaveLength(0);
   });
+
+  it("resolves workflow/account platform binding through one PostgreSQL authority snapshot", async () => {
+    await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", "100_postgres_compiler_control_plane.sql"), "utf8"));
+    await pool.query(fs.readFileSync(path.join(repoRoot, "src/db/migrations", "122_platform_identifier_aliases.sql"), "utf8"));
+
+    await pool.query("TRUNCATE platform_identifier_aliases, app_runtime_profiles");
+    await pool.query(
+      `INSERT INTO app_runtime_profiles (app_id, app_name, package_name, metadata)
+       VALUES
+         ('canonical_app', 'Example Surface', 'org.example.surface', '{"compilerAliases":["example surface"]}'::jsonb),
+         ('other_app', 'Other Surface', 'org.example.other', '{"compilerAliases":["other surface"]}'::jsonb)`,
+    );
+    await pool.query(
+      `INSERT INTO platform_identifier_aliases(alias, canonical_platform)
+       VALUES ('friendly account', 'canonical_app')`,
+    );
+
+    const admitted = await pool.query(
+      "SELECT * FROM resolve_human_workflow_platform_binding($1, $2)",
+      ["open example surface", "friendly account"],
+    );
+    expect(admitted.rows).toEqual([{ canonical_platform: "canonical_app" }]);
+
+    const missingAccountMap = await pool.query(
+      "SELECT * FROM resolve_human_workflow_platform_binding($1, $2)",
+      ["open example surface", "missing account"],
+    );
+    expect(missingAccountMap.rows).toHaveLength(0);
+
+    await pool.query(
+      `INSERT INTO platform_identifier_aliases(alias, canonical_platform)
+       VALUES ('canonical_app', 'other_app')`,
+    );
+    const canonicalIdCollision = await pool.query(
+      "SELECT * FROM resolve_human_workflow_platform_binding($1, $2)",
+      ["open example surface", "canonical_app"],
+    );
+    expect(canonicalIdCollision.rows).toHaveLength(0);
+
+    await pool.query("DELETE FROM platform_identifier_aliases WHERE alias = 'canonical_app'");
+    await pool.query(
+      `INSERT INTO platform_identifier_aliases(alias, canonical_platform)
+       VALUES ('drift account', 'other_app')`,
+    );
+    const drift = await pool.query(
+      "SELECT * FROM resolve_human_workflow_platform_binding($1, $2)",
+      ["open example surface", "drift account"],
+    );
+    expect(drift.rows).toHaveLength(0);
+
+    await pool.query("UPDATE platform_identifier_aliases SET active = FALSE WHERE alias = 'friendly account'");
+    const disabled = await pool.query(
+      "SELECT * FROM resolve_human_workflow_platform_binding($1, $2)",
+      ["open example surface", "friendly account"],
+    );
+    expect(disabled.rows).toHaveLength(0);
+  });
 });

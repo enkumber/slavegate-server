@@ -181,6 +181,21 @@ export async function resolveCanonicalHumanWorkflowPlatformIdentifier(platform: 
   return canonical;
 }
 
+async function resolveCanonicalHumanWorkflowPlatformBinding(intent: string, accountPlatform: string): Promise<string> {
+  const result = await getDb().query<{ canonical_platform: string }>(
+    "SELECT canonical_platform FROM resolve_human_workflow_platform_binding($1, $2)",
+    [intent, accountPlatform],
+  );
+  const canonical = result.rows[0]?.canonical_platform;
+  if (!canonical) {
+    throw Object.assign(new Error("Supplied account is not bound to the workflow platform resolved by PostgreSQL policy"), {
+      status: 409,
+      code: "ACCOUNT_PLATFORM_MISMATCH",
+    });
+  }
+  return canonical;
+}
+
 export function isAccountlessHumanWorkflowIntent(goal: string): boolean {
   // Accept ANY intent — no account_id required
   // This allows device-only workflows like:
@@ -528,17 +543,9 @@ export class HumanWorkflowCompilerService {
     if (row.account_device_id !== row.device_id) {
       throw Object.assign(new Error("Account is not bound to selected device"), { status: 400, code: "ACCOUNT_DEVICE_MISMATCH" });
     }
-    const accountPlatform = await resolveCanonicalHumanWorkflowPlatformIdentifier(String(row.account_platform));
-    const explicitPlatform = intent ? await resolveHumanWorkflowPlatform(intent) : null;
-    const canonicalExplicitPlatform = explicitPlatform
-      ? await resolveCanonicalHumanWorkflowPlatformIdentifier(explicitPlatform)
-      : null;
-    if (canonicalExplicitPlatform && canonicalExplicitPlatform !== accountPlatform) {
-      throw Object.assign(new Error("Supplied account is not bound to the workflow platform resolved by PostgreSQL policy"), {
-        status: 409,
-        code: "ACCOUNT_PLATFORM_MISMATCH",
-      });
-    }
+    const accountPlatform = intent
+      ? await resolveCanonicalHumanWorkflowPlatformBinding(intent, String(row.account_platform))
+      : await resolveCanonicalHumanWorkflowPlatformIdentifier(String(row.account_platform));
     return {
       device_id: row.device_id as string,
       device_model: (row.device_model as string | null) ?? null,

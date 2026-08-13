@@ -14,32 +14,17 @@ const deviceId = "11111111-1111-4111-8111-111111111111";
 const accountId = "22222222-2222-4222-8222-222222222222";
 
 function mockTargetQueries(options: {
-  workflowPlatform?: string | null;
   accountPlatform?: string;
-  accountCanonical?: string | null;
-  workflowCanonical?: string | null;
+  bindingCanonical?: string | null;
   accountDeviceId?: string;
 }): void {
   query.mockImplementation(async (sql: string, params?: unknown[]) => {
     const text = String(sql);
-    if (text.includes("resolve_human_workflow_platform")) {
-      return options.workflowPlatform === null
+    if (text.includes("resolve_human_workflow_platform_binding")) {
+      expect(params).toEqual(["open example", options.accountPlatform ?? "example"]);
+      return options.bindingCanonical === null
         ? { rows: [] }
-        : { rows: [{ app_id: options.workflowPlatform ?? "com.example.surface" }] };
-    }
-    if (text.includes("resolve_canonical_platform_identifier")) {
-      const value = String(params?.[0] ?? "");
-      if (value === (options.accountPlatform ?? "example")) {
-        return options.accountCanonical === null
-          ? { rows: [] }
-          : { rows: [{ canonical_platform: options.accountCanonical ?? "com.example.surface" }] };
-      }
-      if (value === (options.workflowPlatform ?? "com.example.surface")) {
-        return options.workflowCanonical === null
-          ? { rows: [] }
-          : { rows: [{ canonical_platform: options.workflowCanonical ?? "com.example.surface" }] };
-      }
-      return { rows: [] };
+        : { rows: [{ canonical_platform: options.bindingCanonical ?? "com.example.surface" }] };
     }
     if (text.includes("FROM devices d")) {
       return {
@@ -66,10 +51,8 @@ describe("human workflow platform canonicalization", () => {
 
   it("resolves platform aliases through PostgreSQL before account comparison", async () => {
     mockTargetQueries({
-      workflowPlatform: "com.example.surface",
       accountPlatform: "example",
-      accountCanonical: "com.example.surface",
-      workflowCanonical: "com.example.surface",
+      bindingCanonical: "com.example.surface",
     });
 
     const target = await new HumanWorkflowCompilerService().resolveTarget(deviceId, accountId, "open example");
@@ -80,27 +63,14 @@ describe("human workflow platform canonicalization", () => {
       client_id: "client-1",
     });
     const sqlText = query.mock.calls.map(([sql]) => String(sql)).join("\n");
-    expect(sqlText).toContain("resolve_human_workflow_platform");
-    expect(sqlText).toContain("resolve_canonical_platform_identifier");
+    expect(sqlText).toContain("resolve_human_workflow_platform_binding");
+    expect(sqlText).not.toContain("resolve_canonical_platform_identifier");
   });
 
-  it("fails closed when the account platform has no canonical PostgreSQL mapping", async () => {
+  it("fails closed when PostgreSQL does not admit a platform binding", async () => {
     mockTargetQueries({
-      workflowPlatform: "com.example.surface",
       accountPlatform: "example",
-      accountCanonical: null,
-    });
-
-    await expect(new HumanWorkflowCompilerService().resolveTarget(deviceId, accountId, "open example"))
-      .rejects.toMatchObject({ code: "PLATFORM_CANONICALIZATION_REQUIRED" });
-  });
-
-  it("fails closed when canonical workflow and account platforms still mismatch", async () => {
-    mockTargetQueries({
-      workflowPlatform: "com.example.surface",
-      accountPlatform: "example",
-      accountCanonical: "com.example.other",
-      workflowCanonical: "com.example.surface",
+      bindingCanonical: null,
     });
 
     await expect(new HumanWorkflowCompilerService().resolveTarget(deviceId, accountId, "open example"))
@@ -109,10 +79,8 @@ describe("human workflow platform canonicalization", () => {
 
   it("keeps canonicalization out of account/device binding", async () => {
     mockTargetQueries({
-      workflowPlatform: "com.example.surface",
       accountPlatform: "example",
-      accountCanonical: "com.example.surface",
-      workflowCanonical: "com.example.surface",
+      bindingCanonical: "com.example.surface",
       accountDeviceId: "33333333-3333-4333-8333-333333333333",
     });
 

@@ -61,3 +61,39 @@ AS $$
     FROM distinct_candidates
    WHERE (SELECT COUNT(*) FROM distinct_candidates) = 1;
 $$;
+
+CREATE OR REPLACE FUNCTION resolve_human_workflow_platform_binding(
+  p_intent TEXT,
+  p_account_platform TEXT
+)
+RETURNS TABLE(canonical_platform TEXT)
+LANGUAGE sql
+STABLE
+AS $$
+  WITH workflow_platform AS (
+    SELECT app_id
+      FROM resolve_human_workflow_platform(p_intent)
+  ),
+  workflow_canonical AS (
+    SELECT resolved.canonical_platform
+      FROM workflow_platform
+      JOIN LATERAL resolve_canonical_platform_identifier(workflow_platform.app_id) resolved
+        ON TRUE
+  ),
+  account_canonical AS (
+    SELECT canonical_platform
+      FROM resolve_canonical_platform_identifier(p_account_platform)
+  ),
+  binding AS (
+    SELECT account_canonical.canonical_platform
+      FROM workflow_canonical
+      JOIN account_canonical
+        ON account_canonical.canonical_platform = workflow_canonical.canonical_platform
+  )
+  SELECT canonical_platform
+    FROM binding
+   WHERE (SELECT COUNT(*) FROM workflow_platform) = 1
+     AND (SELECT COUNT(*) FROM workflow_canonical) = 1
+     AND (SELECT COUNT(*) FROM account_canonical) = 1
+     AND (SELECT COUNT(*) FROM binding) = 1;
+$$;
