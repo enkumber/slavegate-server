@@ -83,19 +83,23 @@ export async function getResourceRuntimePolicyRecord(
 }
 
 export async function getCanonicalPredicateMetadataPolicy(
-  resourceTableValue: string,
+  _resourceTableValue: string,
   db: Queryable = getDb(),
 ): Promise<CanonicalPredicateMetadataPolicy> {
-  const record = await getResourceRuntimePolicyRecord(resourceTableValue, db);
-  const metadata = record.policy.predicateMetadata;
-  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+  const result = await db.query(
+    `SELECT metadata_source::text AS resource_table, metadata_version AS version, predicate_metadata
+       FROM canonical_workflow_predicate_metadata()`,
+  );
+  const row = result.rows[0];
+  const metadata = row?.predicate_metadata;
+  if (!row || !metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
     throw new ResourceRuntimePolicyUnavailableError(
-      `predicate metadata for resource ${record.resourceTable} is not configured`,
+      "canonical predicate metadata is not configured or has drift",
     );
   }
   return {
-    resourceTable: record.resourceTable,
-    version: record.version,
+    resourceTable: String(row.resource_table),
+    version: Number(row.version),
     predicateMetadata: metadata as Record<string, unknown>,
   };
 }

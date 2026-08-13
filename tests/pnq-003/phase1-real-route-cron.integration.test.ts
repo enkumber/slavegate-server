@@ -127,6 +127,7 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
       );
 
       CREATE TABLE IF NOT EXISTS workflow_compositions(id UUID PRIMARY KEY DEFAULT gen_random_uuid());
+      CREATE TABLE IF NOT EXISTS workflow_segment_versions(id UUID PRIMARY KEY DEFAULT gen_random_uuid());
       CREATE TABLE IF NOT EXISTS resource_runtime_policies (
         resource_table REGCLASS PRIMARY KEY,
         policy JSONB NOT NULL,
@@ -254,6 +255,7 @@ describePostgres("PNQ-003 Phase 1 real route and cron/task-runner overlap", () =
           }'::jsonb
         );
     `);
+    await applySql("src/db/migrations/119_runtime_policy_resolution.sql");
     await pool.query(`
       INSERT INTO workflow_runtime_contracts (
         contract_id, schema_version, allowed_actions, limits, metadata

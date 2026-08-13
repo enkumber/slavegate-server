@@ -74,6 +74,27 @@ import {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.dbQuery.mockImplementation(async (sql: string) => {
+    if (String(sql).includes("canonical_workflow_predicate_metadata")) {
+      return {
+        rows: [{
+          resource_table: "workflow_compositions",
+          predicate_metadata: {
+            database_predicate: {
+              eligible: true,
+              classifying: true,
+              operand: {
+                required: true,
+                type: "string",
+                minLength: 1,
+                allowSamePath: false,
+              },
+            },
+          },
+          version: 7,
+        }],
+        rowCount: 1,
+      };
+    }
     if (String(sql).includes("resource_runtime_policies")) {
       return {
         rows: [{

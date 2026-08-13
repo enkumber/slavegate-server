@@ -31,6 +31,7 @@ describe("human workflow PostgreSQL policy", () => {
     pool = new Pool({ connectionString: scopedUrl(postgresUrl, schema) });
     await pool.query("CREATE TABLE agency_workflow_runs(id uuid)");
     await pool.query("CREATE TABLE workflow_compositions(id uuid)");
+    await pool.query("CREATE TABLE workflow_segment_versions(id uuid)");
     await pool.query(
       `CREATE TABLE lifecycle_state_definitions (
          lifecycle_key TEXT NOT NULL,
@@ -116,6 +117,11 @@ describe("human workflow PostgreSQL policy", () => {
       "workflow_compositions",
       pool,
     )).toBe(true);
+    expect(await postconditionContractHasClassifyingPredicate(
+      contract("truthy") as never,
+      "workflow_segment_versions",
+      pool,
+    )).toBe(true);
     for (const [operator, operatorOpcode] of [["contains", 4], ["contains_ci", 5], ["matches", 10]] as const) {
       for (const right of [undefined, { value: null }, { value: "" }]) {
         const candidate = {
@@ -169,6 +175,72 @@ describe("human workflow PostgreSQL policy", () => {
       "workflow_compositions",
       pool,
     )).toBe(false);
+  });
+
+  it("fails closed when segment and composition predicate metadata versions diverge", async () => {
+    const contract = {
+      version: "1" as const,
+      all: [{ left: { path: "outputs.result" }, operator: "truthy" }],
+    };
+    const canonicalPolicy = {
+      predicateMetadata: {
+        truthy: { eligible: true, classifying: true, operand: operand(false) },
+      },
+    };
+    await pool.query(
+      `INSERT INTO resource_runtime_policies(resource_table, policy, version)
+       VALUES ('workflow_compositions'::regclass, $1::jsonb, 10)
+       ON CONFLICT (resource_table) DO UPDATE
+         SET policy = EXCLUDED.policy,
+             version = EXCLUDED.version`,
+      [JSON.stringify(canonicalPolicy)],
+    );
+    await pool.query(
+      `INSERT INTO resource_runtime_policies(resource_table, policy, version)
+       VALUES ('workflow_segment_versions'::regclass, $1::jsonb, 11)
+       ON CONFLICT (resource_table) DO UPDATE
+         SET policy = EXCLUDED.policy,
+             version = EXCLUDED.version`,
+      [JSON.stringify(canonicalPolicy)],
+    );
+    expect(await postconditionContractHasClassifyingPredicate(
+      contract as never,
+      "workflow_compositions",
+      pool,
+    )).toBe(false);
+    expect(await postconditionContractHasClassifyingPredicate(
+      contract as never,
+      "workflow_segment_versions",
+      pool,
+    )).toBe(false);
+
+    await pool.query(
+      `UPDATE resource_runtime_policies
+          SET version = 10
+        WHERE resource_table = 'workflow_segment_versions'::regclass`,
+    );
+    expect(await postconditionContractHasClassifyingPredicate(
+      contract as never,
+      "workflow_segment_versions",
+      pool,
+    )).toBe(true);
+
+    await pool.query(
+      `UPDATE resource_runtime_policies
+          SET policy = $1::jsonb
+        WHERE resource_table = 'workflow_segment_versions'::regclass`,
+      [JSON.stringify({
+        predicateMetadata: {
+          truthy: { eligible: true, classifying: false, operand: operand(false) },
+        },
+      })],
+    );
+    expect(await postconditionContractHasClassifyingPredicate(
+      contract as never,
+      "workflow_compositions",
+      pool,
+    )).toBe(false);
+    await pool.query("DELETE FROM resource_runtime_policies WHERE resource_table = 'workflow_segment_versions'::regclass");
   });
 
   it("fails closed when canonical predicate metadata is missing or split across legacy interpreter policy", async () => {
@@ -274,6 +346,7 @@ describe("human workflow PostgreSQL policy", () => {
     const otherPool = new Pool({ connectionString: scopedUrl(postgresUrl, otherSchema), max: 4 });
     try {
       await otherPool.query("CREATE TABLE workflow_compositions(id uuid)");
+      await otherPool.query("CREATE TABLE workflow_segment_versions(id uuid)");
       await otherPool.query(
         `CREATE TABLE resource_runtime_policies (
            resource_table REGCLASS PRIMARY KEY,
