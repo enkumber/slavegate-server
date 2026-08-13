@@ -110,11 +110,17 @@ describe("dashboard human workflow integrity contract", () => {
     const contract = {
       version: "1" as const,
       all: [
-        { left: { path: "outputs.navigationResult.launched" }, operator: "truthy" as const, operatorOpcode: 0 },
+        {
+          left: { path: "outputs.navigationResult.launched" },
+          operator: "truthy" as const,
+          operatorOpcode: 0,
+          operandConstraintOpcode: 0,
+        },
         {
           left: { path: "outputs.navigationResult.observedUri" },
           operator: "uri_equivalent" as const,
           operatorOpcode: 11,
+          operandConstraintOpcode: 1,
           right: { path: "inputs.target" },
         },
       ],
@@ -156,6 +162,7 @@ describe("dashboard human workflow integrity contract", () => {
         left: { path: "outputs.screenState" },
         operator: "exists" as const,
         operatorOpcode: 8,
+        operandConstraintOpcode: 0,
       }],
     };
     expect(evaluatePostconditionContract(existenceOnly, {
@@ -163,7 +170,9 @@ describe("dashboard human workflow integrity contract", () => {
     })).toMatchObject({ ok: true });
     const db = {
       query: async (_text: string, params?: unknown[]) => ({
-        rows: (params?.[1] as string[]).includes("truthy") ? [{ key: "truthy" }] : [],
+        rows: JSON.parse(String(params?.[1])).some((item: { operator: string }) => item.operator === "truthy")
+          ? [{ key: "truthy" }]
+          : [],
       }),
     };
     expect(await postconditionContractHasClassifyingPredicate(
@@ -177,6 +186,7 @@ describe("dashboard human workflow integrity contract", () => {
         left: { path: "outputs.foregroundVerified" },
         operator: "truthy",
         operatorOpcode: 0,
+        operandConstraintOpcode: 0,
       }],
     }, "workflow_compositions", db)).toBe(true);
   });

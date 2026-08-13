@@ -247,6 +247,13 @@ describe("PostgreSQL job action catalog", () => {
             distributionOpcodes: { database_distribution: 2 },
             conditionOpcodes: { database_condition: 4 },
             predicateOpcodes: { database_predicate: 6 },
+            predicateMetadata: {
+              database_predicate: {
+                rhsRequired: true,
+                rhsAllowEmpty: false,
+                rhsAllowSamePath: false,
+              },
+            },
             failureOpcodes: { database_failure: 3, database_default: 0 },
             defaultFailureMode: "database_default",
             verificationOpcodes: { database_verification: 2 },
@@ -340,6 +347,7 @@ describe("PostgreSQL job action catalog", () => {
           l1TimeoutMs: 21,
           l2SettleMs: 22,
           operatorOpcode: 6,
+          operandConstraintOpcode: 1,
           group: 0,
         }),
       })],

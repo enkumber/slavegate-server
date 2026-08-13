@@ -16,6 +16,26 @@ function resolveValue(root: Record<string, unknown>, ref: WorkflowPostconditionV
   return typeof ref.path === "string" ? readPath(root, ref.path) : undefined;
 }
 
+function isEmptyOperand(value: unknown): boolean {
+  return value === undefined
+    || value === null
+    || value === ""
+    || (Array.isArray(value) && value.length === 0)
+    || (!!value && typeof value === "object" && Object.keys(value as object).length === 0);
+}
+
+function operandType(value: unknown): string {
+  if (Array.isArray(value)) return "array";
+  if (value === null) return "null";
+  return typeof value;
+}
+
+function operandLength(value: unknown): number {
+  if (typeof value === "string" || Array.isArray(value)) return value.length;
+  if (value && typeof value === "object") return Object.keys(value as object).length;
+  return 1;
+}
+
 function normalizedUri(value: unknown, options: { ignoreFragment?: boolean; ignoreTrailingSlash?: boolean } = {}): string | null {
   if (typeof value !== "string") return null;
   try {
@@ -44,23 +64,12 @@ export async function postconditionContractHasClassifyingPredicate(
   db: Queryable,
 ): Promise<boolean> {
   if (contract.version !== "1" || !Array.isArray(contract.all)) return false;
-  const operators = contract.all.flatMap((predicate) => {
-    if (!predicate || typeof predicate !== "object") return [];
-    const path = typeof predicate.left?.path === "string" ? predicate.left.path : "";
-    return /^(outputs|variables)\./.test(path) && typeof predicate.operator === "string"
-      ? [predicate.operator]
-      : [];
-  });
-  if (operators.length === 0) return false;
   const result = await db.query(
-    `SELECT operator.key
-       FROM resource_runtime_policies policy
-       CROSS JOIN LATERAL jsonb_each(policy.policy -> 'predicateMetadata') operator(key, metadata)
-      WHERE policy.resource_table = to_regclass($1)
-        AND operator.key = ANY($2::text[])
-        AND (operator.metadata ->> 'classifying')::boolean
+    `SELECT predicate_index
+       FROM resolve_postcondition_proof_eligibility(to_regclass($1), $2::jsonb)
+      WHERE admitted
       LIMIT 1`,
-    [resourceTable, operators],
+    [resourceTable, JSON.stringify(contract.all)],
   );
   return result.rows.length === 1;
 }
@@ -76,6 +85,49 @@ export function evaluatePostconditionContract(
   contract.all.forEach((predicate, index) => {
     const left = resolveValue(context, predicate.left);
     const right = resolveValue(context, predicate.right);
+    const operandContract = predicate.operandContract;
+    if (
+      !operandContract
+      || typeof operandContract !== "object"
+      || typeof operandContract.required !== "boolean"
+      || typeof operandContract.type !== "string"
+      || !Number.isSafeInteger(operandContract.minLength)
+      || operandContract.minLength < 0
+    ) {
+      failures.push(`predicate ${index} has no PostgreSQL-resolved operand contract`);
+      return;
+    }
+    const rightPresent = !!predicate.right
+      && (Object.prototype.hasOwnProperty.call(predicate.right, "value") || typeof predicate.right.path === "string");
+    if (operandContract.required && !rightPresent) {
+      failures.push(`predicate ${index} requires a right operand`);
+      return;
+    }
+    if (rightPresent && isEmptyOperand(right)) {
+      failures.push(`predicate ${index} does not admit an absent, null, or empty right operand`);
+      return;
+    }
+    if (
+      rightPresent
+      && operandContract.type !== "any"
+      && operandType(right) !== operandContract.type
+    ) {
+      failures.push(`predicate ${index} right operand does not match the PostgreSQL-resolved type`);
+      return;
+    }
+    if (rightPresent && operandLength(right) < operandContract.minLength) {
+      failures.push(`predicate ${index} right operand is shorter than the PostgreSQL-resolved minimum`);
+      return;
+    }
+    if (
+      rightPresent
+      && operandContract.allowSamePath !== true
+      && predicate.right?.path
+      && predicate.right.path === predicate.left?.path
+    ) {
+      failures.push(`predicate ${index} does not admit the same path on both operands`);
+      return;
+    }
     let passed = false;
     switch (predicate.operatorOpcode) {
       case 0: passed = Boolean(left); break;

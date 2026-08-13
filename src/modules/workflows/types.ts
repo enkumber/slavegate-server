@@ -270,6 +270,12 @@ export interface WorkflowPostconditionPredicate {
   left: WorkflowPostconditionValue;
   operator: WorkflowPostconditionOperator;
   operatorOpcode?: number;
+  operandContract?: {
+    required: boolean;
+    type: "any" | "string" | "number" | "boolean" | "array" | "object";
+    minLength: number;
+    allowSamePath?: boolean;
+  };
   right?: WorkflowPostconditionValue;
   options?: {
     acceptedRedirects?: string[];
