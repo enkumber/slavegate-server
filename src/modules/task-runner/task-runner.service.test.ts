@@ -317,6 +317,7 @@ describe("task-runner generated_workflow routine", () => {
           campaignId: CAMPAIGN_ID,
           deviceId: DEVICE_ID,
           platform: "reddit",
+          maxSelfHealingAttempts: 0,
         },
       },
     });
@@ -350,6 +351,7 @@ describe("task-runner generated_workflow routine", () => {
         campaignId: CAMPAIGN_ID,
         deviceId: DEVICE_ID,
         platform: "reddit",
+        maxSelfHealingAttempts: 0,
       },
     }));
     expect(mocks.cacheLookupLabels).toHaveBeenCalledWith("task_runner", "canonical_hit");

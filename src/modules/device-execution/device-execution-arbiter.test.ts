@@ -777,7 +777,50 @@ describe("DeviceExecutionArbiter observe mode", () => {
     expect(client.events.map((event) => event.event_type)).toEqual(["job_result_accepted"]);
   });
 
-  it("rejects duplicate, late, or wrong-device job results without mutating root and operation ledgers", async () => {
+  it("accepts duplicate terminal job results idempotently for device retry ACKs", async () => {
+    const client = new FakeClient();
+    client.roots.push(root({
+      id: "root-duplicate",
+      device_id: DEVICE_A,
+      external_id: "job-duplicate",
+      state: "completed",
+      owner_generation: 2,
+    }));
+    client.operations.push(operation({
+      root_id: "root-duplicate",
+      device_id: DEVICE_A,
+      operation_id: "job-duplicate",
+      state: "completed",
+      owner_generation: 2,
+    }));
+
+    const before = JSON.stringify({ roots: client.roots, operations: client.operations });
+    const result = await arbiterFor(client).acceptJobResult({
+      deviceId: DEVICE_A,
+      jobId: "job-duplicate",
+      reportedHandle: {
+        rootId: "root-duplicate",
+        deviceId: DEVICE_A,
+        rootKind: "job",
+        ownerGeneration: 2,
+        operationKind: "job",
+        operationId: "job-duplicate",
+      },
+      status: "completed",
+      actor: "test",
+    });
+    const after = JSON.stringify({ roots: client.roots, operations: client.operations });
+
+    expect(result).toMatchObject({
+      accepted: true,
+      decision: "duplicate",
+      reason: "job_result_already_terminal",
+    });
+    expect(after).toBe(before);
+    expect(client.events.map((event) => event.event_type)).toEqual(["job_result_duplicate_accepted"]);
+  });
+
+  it("rejects late or wrong-device job results without mutating root and operation ledgers", async () => {
     const client = new FakeClient();
     client.roots.push(root({
       id: "root-late",

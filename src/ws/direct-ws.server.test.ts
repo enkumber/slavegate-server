@@ -119,6 +119,97 @@ describe("DirectWS Android result handle compatibility", () => {
 });
 
 describe("PNQ v2 shadow DirectWS side effects", () => {
+  it("ACKs accepted JOB_RESULT only after durable dispatcher receipt", async () => {
+    setPnqV2RuntimeConfigForTest({ mode: "disabled", sweepIntervalMs: 30_000 });
+    setDeviceExecutionAuthorityForTest("enforced");
+    const server = new DirectWsServer();
+    const send = vi.fn();
+    const conn = {
+      ws: { readyState: 1, send },
+      deviceId: expectedHandle.deviceId,
+      connectedAt: Date.now(),
+      lastSeenAt: Date.now(),
+      lastPongAt: Date.now(),
+      msgCount: 0,
+      windowStart: Date.now(),
+      agentVersion: "4.0.27",
+    };
+    vi.spyOn(deviceExecutionArbiter, "acceptJobResult").mockResolvedValue({
+      accepted: true,
+      decision: "terminal",
+      root: null,
+      handle: expectedHandle,
+    } as never);
+    setWorkflowJobResultResolverForTest(vi.fn(() => true));
+    let resolveReceipt!: () => void;
+    vi.spyOn(dispatcherService, "handleJobResult").mockReturnValue(new Promise<void>((resolve) => {
+      resolveReceipt = resolve;
+    }) as never);
+
+    const handling = (server as unknown as {
+      _handleJobResult: (connection: typeof conn, msg: Record<string, unknown>) => Promise<void>;
+    })._handleJobResult(conn, {
+      type: "JOB_RESULT",
+      jobId: expectedHandle.operationId,
+      success: true,
+      output: { ok: true },
+      durationMs: 5,
+      pnqHandle: wireHandle,
+    });
+
+    await Promise.resolve();
+    expect(send).not.toHaveBeenCalledWith(expect.stringContaining("\"ACK\""));
+    resolveReceipt();
+    await expect(handling).resolves.toBeUndefined();
+    expect(dispatcherService.handleJobResult).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: expectedHandle.operationId,
+      status: "completed",
+    }));
+    expect(send).toHaveBeenCalledWith(expect.stringContaining("\"ACK\""));
+  });
+
+  it("ACKs duplicate JOB_RESULT without resolving a second waiter", async () => {
+    setPnqV2RuntimeConfigForTest({ mode: "disabled", sweepIntervalMs: 30_000 });
+    setDeviceExecutionAuthorityForTest("enforced");
+    const server = new DirectWsServer();
+    const send = vi.fn();
+    const conn = {
+      ws: { readyState: 1, send },
+      deviceId: expectedHandle.deviceId,
+      connectedAt: Date.now(),
+      lastSeenAt: Date.now(),
+      lastPongAt: Date.now(),
+      msgCount: 0,
+      windowStart: Date.now(),
+      agentVersion: "4.0.27",
+    };
+    const resolveWorkflowResult = vi.fn(() => true);
+    setWorkflowJobResultResolverForTest(resolveWorkflowResult);
+    vi.spyOn(deviceExecutionArbiter, "acceptJobResult").mockResolvedValue({
+      accepted: true,
+      decision: "duplicate",
+      root: null,
+      handle: expectedHandle,
+      reason: "job_result_already_terminal",
+    } as never);
+    vi.spyOn(dispatcherService, "handleJobResult").mockResolvedValue(undefined as never);
+
+    await expect((server as unknown as {
+      _handleJobResult: (connection: typeof conn, msg: Record<string, unknown>) => Promise<void>;
+    })._handleJobResult(conn, {
+      type: "JOB_RESULT",
+      jobId: expectedHandle.operationId,
+      success: true,
+      output: { ok: true },
+      durationMs: 5,
+      pnqHandle: wireHandle,
+    })).resolves.toBeUndefined();
+
+    expect(resolveWorkflowResult).not.toHaveBeenCalled();
+    expect(dispatcherService.handleJobResult).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith(expect.stringContaining("\"ACK\""));
+  });
+
   it("does not await shadow result bookkeeping before legacy result admission", async () => {
     setPnqV2RuntimeConfigForTest({ mode: "shadow", sweepIntervalMs: 30_000 });
     setDeviceExecutionAuthorityForTest("enforced");

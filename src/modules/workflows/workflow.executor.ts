@@ -196,7 +196,44 @@ function setGeneratedWorkflowRecoveryTotalAttempts(checkpoint: WorkflowCheckpoin
   checkpoint.variables[GENERATED_WORKFLOW_RECOVERY_TOTAL_ATTEMPTS_KEY] = attempts;
 }
 
-function generatedWorkflowRuntimeRecoveryPolicy(template: WorkflowTemplate): GeneratedWorkflowRuntimeRecoveryPolicy {
+function checkpointMaxSelfHealingAttempts(checkpoint: WorkflowCheckpoint): number | null {
+  const fromCheckpoint = checkpoint.controlPlane?.maxSelfHealingAttempts;
+  if (typeof fromCheckpoint === "number" && Number.isFinite(fromCheckpoint)) {
+    return Math.max(0, Math.floor(fromCheckpoint));
+  }
+
+  const variables = checkpoint.variables as Record<string, unknown>;
+  const context = variables.controlPlaneContext;
+  const fromContext = context && typeof context === "object" && !Array.isArray(context)
+    ? (context as Record<string, unknown>).maxSelfHealingAttempts
+    : undefined;
+  if (typeof fromContext === "number" && Number.isFinite(fromContext)) {
+    return Math.max(0, Math.floor(fromContext));
+  }
+
+  const fromVariables = variables.maxSelfHealingAttempts;
+  return typeof fromVariables === "number" && Number.isFinite(fromVariables)
+    ? Math.max(0, Math.floor(fromVariables))
+    : null;
+}
+
+function generatedWorkflowRuntimeRecoveryPolicy(
+  template: WorkflowTemplate,
+  checkpoint?: WorkflowCheckpoint,
+): GeneratedWorkflowRuntimeRecoveryPolicy {
+  const maxSelfHealingAttempts = checkpoint ? checkpointMaxSelfHealingAttempts(checkpoint) : null;
+  if (maxSelfHealingAttempts === 0) {
+    return {
+      autonomy: "bounded",
+      maxAttemptsPerStep: 0,
+      maxAttemptsPerWorkflow: 0,
+      maxRecoveryActionsPerAttempt: 1,
+      allowedRecoveryRequests: [],
+      requireStateVerification: false,
+      learnFromFailure: false,
+    };
+  }
+
   const explicit = template.recoveryPolicy;
   const safetyClass = template.safetyClass ?? "standard";
   const stepCount = Math.max(template.steps.length, 1);
@@ -267,7 +304,7 @@ function recordGeneratedWorkflowRecoveryFailure(
   if (!isGeneratedWorkflowTemplate(template)) return null;
 
   const stats = executionStats(checkpoint);
-  const policy = generatedWorkflowRuntimeRecoveryPolicy(template);
+  const policy = generatedWorkflowRuntimeRecoveryPolicy(template, checkpoint);
   const attemptsByStep = generatedWorkflowRecoveryAttemptsByStep(checkpoint);
   const key = String(stepIndex);
   const priorAttempts = attemptsByStep[key] ?? 0;
@@ -446,7 +483,7 @@ async function attemptGeneratedWorkflowAiRecovery(
   err: unknown,
   job?: import("bullmq").Job,
 ): Promise<boolean> {
-  const policy = generatedWorkflowRuntimeRecoveryPolicy(template);
+  const policy = generatedWorkflowRuntimeRecoveryPolicy(template, checkpoint);
   if (policy.autonomy !== "ai_autopilot" || !policy.allowedRecoveryRequests.includes("ai_recovery_workflow")) {
     return true;
   }

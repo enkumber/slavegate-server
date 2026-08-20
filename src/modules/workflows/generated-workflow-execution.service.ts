@@ -35,8 +35,10 @@ export function resolveGeneratedWorkflowDeviceId(deviceId: string): string {
 function createGeneratedWorkflowCheckpoint(
   variables: Record<string, unknown> | undefined,
   hbeSession: Record<string, unknown>,
-  mode: "edge" | "server"
+  mode: "edge" | "server",
+  controlPlaneContext?: GeneratedWorkflowControlPlaneContext,
 ): WorkflowCheckpoint {
+  const maxSelfHealingAttempts = controlPlaneContext?.maxSelfHealingAttempts;
   return {
     stepIndex: 0,
     loopStack: [],
@@ -56,6 +58,9 @@ function createGeneratedWorkflowCheckpoint(
       recoveryBudgetExhausted: 0,
       mode,
     },
+    ...(typeof maxSelfHealingAttempts === "number"
+      ? { controlPlane: { maxSelfHealingAttempts } }
+      : {}),
     checkpointAt: new Date().toISOString(),
   };
 }
@@ -81,6 +86,7 @@ export interface GeneratedWorkflowControlPlaneContext {
   agencyWorkflowRunId?: string;
   platform?: string;
   routine?: string;
+  maxSelfHealingAttempts?: number;
   source: "api" | "task_runner";
 }
 
@@ -151,7 +157,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
       accountId,
       totalSteps: template.steps.length,
       hbeParams: hbeSession,
-      checkpoint: createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "edge"),
+      checkpoint: createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "edge", controlPlaneContext),
     });
     const dispatch = await sendEdgeWorkflowToDeviceEnforced(
       deviceId,
@@ -219,7 +225,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     console.log(`[${logPrefix}] semantic resolution required — using server execution`);
   }
 
-  const checkpoint = createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "server");
+  const checkpoint = createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "server", controlPlaneContext);
   const wf = await workflowService.create({
     templateId,
     deviceId,

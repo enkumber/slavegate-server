@@ -233,8 +233,14 @@ export interface WorkflowCheckpoint {
   hbeParams:    Record<string, unknown>;
   /** Runtime cost counters for proving deterministic vs AI-assisted execution */
   executionStats?: WorkflowExecutionStats;
+  /** Control-plane execution limits that must survive queue/retry/checkpoint boundaries. */
+  controlPlane?: WorkflowCheckpointControlPlane;
   /** Timestamp of last checkpoint */
   checkpointAt: string;  // ISO 8601
+}
+
+export interface WorkflowCheckpointControlPlane {
+  maxSelfHealingAttempts?: number;
 }
 
 export interface WorkflowExecutionStats {

@@ -24,6 +24,12 @@
     "classification": "dashboard-event-websocket-egress"
   },
   {
+    "file": "src/modules/workflows/workflow-cancellation.service.ts",
+    "kind": "directWsServer.sendWorkflowCancel",
+    "count": 1,
+    "classification": "audited-in-flight-workflow-cancel-egress"
+  },
+  {
     "file": "src/transport/transport.ts",
     "kind": "directWsServer.sendBatch",
     "count": 1,

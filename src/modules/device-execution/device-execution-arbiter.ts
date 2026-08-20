@@ -2238,6 +2238,39 @@ export class DeviceExecutionArbiter {
         };
       }
 
+      if (
+        root.device_id === input.deviceId &&
+        operation.device_id === input.deviceId &&
+        toNumber(root.owner_generation) === expectedGeneration &&
+        toNumber(operation.owner_generation) === expectedGeneration &&
+        isTerminalState(root.state) &&
+        isTerminalOperationState(operation.state)
+      ) {
+        await insertEvent(client, {
+          rootId: root.id,
+          deviceId: input.deviceId,
+          eventType: "job_result_duplicate_accepted",
+          previousState: root.state,
+          newState: root.state,
+          actor: input.actor ?? "transport",
+          reason: "job_result_already_terminal",
+          metadata: {
+            jobId: input.jobId,
+            expectedHandle: encodeDeviceExecutionHandle(handle),
+            reportedHandle: input.reportedHandle ? encodeDeviceExecutionHandle(input.reportedHandle) : null,
+            ...(input.metadata ?? {}),
+          },
+        });
+        return {
+          accepted: true,
+          decision: "duplicate",
+          root: rowToRoot(root),
+          operation: rowToOperation(operation),
+          handle,
+          reason: "job_result_already_terminal",
+        };
+      }
+
       const isCurrentDispatchOwner =
         operation.operation_id === input.jobId &&
         operation.operation_kind === "job" &&
@@ -2784,6 +2817,55 @@ export class DeviceExecutionArbiter {
         root: terminalRoot ? rowToRoot(terminalRoot) : null,
         operation: terminalOperation ? rowToOperation(terminalOperation) : undefined,
       };
+    });
+  }
+
+  /** Atomically terminalize an active persisted workflow, its root/operations, task and agency run. */
+  async cancelPersistedWorkflow(input: {
+    deviceId: string;
+    workflowId: string;
+    actor?: string;
+    reason?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<DeviceExecutionTransitionResult> {
+    return this.withTransaction(async (client) => {
+      await lockDevice(client, input.deviceId);
+      const result = await client.query<{
+        id: string; device_id: string | null; status: string; task_id: string | null; agency_workflow_run_id: string | null;
+      }>(`SELECT id, device_id, status, task_id, agency_workflow_run_id FROM workflows WHERE id = $1 FOR UPDATE`, [input.workflowId]);
+      const workflow = result.rows[0];
+      if (!workflow) return { decision: "missing", root: null, reason: "workflow_record_not_found" };
+      if (workflow.device_id !== input.deviceId) return { decision: "rejected", root: null, reason: "workflow_owned_by_different_device" };
+      if (!["queued", "running", "paused"].includes(workflow.status)) {
+        const existing = await selectRootByExternalId(client, "server_workflow", input.workflowId, true);
+        return { decision: workflow.status === "cancelled" ? "terminal" : "rejected", root: existing ? rowToRoot(existing) : null, reason: "workflow_already_terminal" };
+      }
+
+      const root = await selectRootByExternalId(client, "server_workflow", input.workflowId, true);
+      let terminalRoot = root;
+      if (root && !["completed", "failed", "cancelled"].includes(root.state)) {
+        terminalRoot = await updateRootTerminal(client, {
+          rootId: root.id, deviceId: input.deviceId, ownerGeneration: toNumber(root.owner_generation),
+          toState: "cancelled", reason: input.reason ?? "workflow_cancelled", metadata: input.metadata,
+        });
+        await client.query(
+          `UPDATE device_execution_operations SET state = 'cancelled', terminal_at = NOW(), updated_at = NOW(), metadata = metadata || $2::jsonb WHERE root_id = $1 AND state NOT IN (${TERMINAL_STATE_SQL})`,
+          [root.id, JSON.stringify(input.metadata ?? {})],
+        );
+      }
+      await client.query(`UPDATE workflows SET status = 'cancelled', completed_at = COALESCE(completed_at, NOW()) WHERE id = $1`, [input.workflowId]);
+      if (workflow.task_id) {
+        await client.query(`UPDATE tasks SET status = 'cancelled', completed_at = COALESCE(completed_at, NOW()), error = COALESCE(error, $2) WHERE id = $1 AND status IN ('pending','running')`, [workflow.task_id, input.reason ?? "workflow_cancelled"]);
+      }
+      if (workflow.agency_workflow_run_id) {
+        await client.query(`UPDATE agency_workflow_runs SET status = 'cancelled', completed_at = COALESCE(completed_at, NOW()), error = COALESCE(error, $2) WHERE id = $1 AND status IN ('queued','running')`, [workflow.agency_workflow_run_id, input.reason ?? "workflow_cancelled"]);
+      }
+      await insertEvent(client, {
+        rootId: terminalRoot?.id, deviceId: input.deviceId, eventType: "persisted_workflow_cancelled",
+        newState: "cancelled", actor: input.actor ?? "workflow_api.cancel",
+        reason: input.reason ?? "workflow_cancelled", metadata: { workflowId: input.workflowId, workflowStatus: workflow.status, ...(input.metadata ?? {}) },
+      });
+      return { decision: "terminal", root: terminalRoot ? rowToRoot(terminalRoot) : null };
     });
   }
 

@@ -2,8 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
-  cancelQueuedPersistedWorkflow: vi.fn(),
+  cancelPersistedWorkflow: vi.fn(),
   recordRejectedEgress: vi.fn(),
+  sendWorkflowCancel: vi.fn(),
 }));
 
 vi.mock("./workflow.service", () => ({
@@ -14,8 +15,14 @@ vi.mock("./workflow.service", () => ({
 
 vi.mock("../device-execution", () => ({
   deviceExecutionArbiter: {
-    cancelQueuedPersistedWorkflow: mocks.cancelQueuedPersistedWorkflow,
+    cancelPersistedWorkflow: mocks.cancelPersistedWorkflow,
     recordRejectedEgress: mocks.recordRejectedEgress,
+  },
+}));
+
+vi.mock("../../ws/direct-ws.server", () => ({
+  directWsServer: {
+    sendWorkflowCancel: mocks.sendWorkflowCancel,
   },
 }));
 
@@ -31,7 +38,7 @@ describe("persisted workflow cancellation safety", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.get.mockResolvedValue(workflow);
-    mocks.cancelQueuedPersistedWorkflow.mockResolvedValue({ decision: "terminal", root: null });
+    mocks.cancelPersistedWorkflow.mockResolvedValue({ decision: "terminal", root: null });
     mocks.recordRejectedEgress.mockResolvedValue(undefined);
   });
 
@@ -40,14 +47,15 @@ describe("persisted workflow cancellation safety", () => {
       workflowId: workflow.id,
       status: "cancelled",
     });
-    expect(mocks.cancelQueuedPersistedWorkflow).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mocks.cancelPersistedWorkflow).toHaveBeenCalledWith(expect.objectContaining({
       deviceId: workflow.deviceId,
       workflowId: workflow.id,
     }));
+    expect(mocks.sendWorkflowCancel).not.toHaveBeenCalled();
   });
 
-  it("never releases PNQ ownership when the worker wins queued-to-running", async () => {
-    mocks.cancelQueuedPersistedWorkflow.mockResolvedValue({
+  it("does not send device cancel when the queued CAS loses before in-flight ownership is observed", async () => {
+    mocks.cancelPersistedWorkflow.mockResolvedValue({
       decision: "rejected",
       root: { state: "dispatched" },
       reason: "root_not_queued",
@@ -57,26 +65,25 @@ describe("persisted workflow cancellation safety", () => {
       code: "CANCELLATION_UNSUPPORTED_IN_FLIGHT",
       status: 409,
     });
-    expect(mocks.recordRejectedEgress).toHaveBeenCalledWith(expect.objectContaining({
-      deviceId: workflow.deviceId,
-      operationId: workflow.id,
-      reason: "workflow_inflight_cancellation_unsupported",
-    }));
+    expect(mocks.sendWorkflowCancel).not.toHaveBeenCalled();
   });
 
   it("accepts cancellation before a PNQ root has been admitted", async () => {
-    mocks.cancelQueuedPersistedWorkflow.mockResolvedValue({ decision: "terminal", root: null });
+    mocks.cancelPersistedWorkflow.mockResolvedValue({ decision: "terminal", root: null });
 
     await expect(cancelPersistedWorkflowSafely(workflow.id)).resolves.toMatchObject({ status: "cancelled" });
   });
 
-  it("rejects running cancellation without changing workflow or PNQ state", async () => {
+  it("cancels running workflows atomically and sends in-flight device cancellation", async () => {
     mocks.get.mockResolvedValue({ ...workflow, status: "running" });
 
-    await expect(cancelPersistedWorkflowSafely(workflow.id)).rejects.toMatchObject({
-      code: "CANCELLATION_UNSUPPORTED_IN_FLIGHT",
-      status: 409,
+    await expect(cancelPersistedWorkflowSafely(workflow.id)).resolves.toEqual({
+      workflowId: workflow.id,
+      status: "cancelled",
     });
-    expect(mocks.cancelQueuedPersistedWorkflow).not.toHaveBeenCalled();
+    expect(mocks.cancelPersistedWorkflow).toHaveBeenCalledWith(expect.objectContaining({
+      reason: "api_cancelled_in_flight",
+    }));
+    expect(mocks.sendWorkflowCancel).toHaveBeenCalledWith(workflow.deviceId, workflow.id);
   });
 });

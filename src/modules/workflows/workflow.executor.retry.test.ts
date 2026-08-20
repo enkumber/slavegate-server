@@ -3,12 +3,14 @@ import type { Job } from "bullmq";
 import { deviceExecutionArbiter } from "../device-execution";
 import { dispatcherService } from "../dispatcher/dispatcher.service";
 import { hbeService } from "../hbe/hbe.service";
+import { llmJson } from "../../utils/llm";
 import * as transport from "../../transport/transport";
 import { workflowService, type WorkflowRecord } from "./workflow.service";
 import {
   awaitGeneratedChildJobResult,
   generatedChildResultTimeoutMs,
   prepareGeneratedChildJobResult,
+  RECOVERY_BUDGET_EXCEEDED,
   resolveJobResult,
   runWorkflow,
   shouldContinueAfterMissingJobResult,
@@ -27,6 +29,10 @@ vi.mock("../../transport/transport", async (importOriginal) => {
 
 vi.mock("../../db/client", () => ({
   getDb: vi.fn(() => ({ query: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }) })),
+}));
+
+vi.mock("../../utils/llm", () => ({
+  llmJson: vi.fn(),
 }));
 
 const WORKFLOW_ID = "11111111-1111-4111-8111-111111111111";
@@ -238,6 +244,94 @@ describe("workflow BullMQ retry semantics", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("hard-disables AI recovery when checkpoint control plane has maxSelfHealingAttempts=0", async () => {
+    const zeroRecoveryTemplate: WorkflowTemplate = {
+      id: TEMPLATE_ID,
+      name: "Zero recovery budget generated workflow",
+      platform: "android",
+      description: "Fails one generated observation without invoking recovery LLM",
+      version: "1.0.0",
+      intent: "prove zero runtime recovery budget",
+      safetyClass: "read_only",
+      recoveryPolicy: {
+        autonomy: "ai_autopilot",
+        maxAttemptsPerStep: 3,
+        maxAttemptsPerWorkflow: 6,
+        allowedRecoveryRequests: ["ai_recovery_workflow"],
+      },
+      steps: [
+        { type: "action", id: "tree", action: "ui_tree_dump", params: { outputVariable: "_tree" } },
+      ],
+      defaultVerificationStrategy: "local_only",
+      dataRetentionDays: 1,
+    };
+    const running = {
+      ...workflow("running"),
+      checkpoint: {
+        ...workflow("running").checkpoint,
+        controlPlane: { maxSelfHealingAttempts: 0 },
+        variables: {
+          controlPlaneContext: {
+            source: "task_runner",
+            taskId: "task-zero-recovery",
+            maxSelfHealingAttempts: 0,
+          },
+        },
+      },
+    };
+
+    vi.spyOn(workflowService, "get").mockResolvedValue(running);
+    vi.spyOn(workflowService, "getTemplate").mockResolvedValue(zeroRecoveryTemplate);
+    const saveCheckpoint = vi.spyOn(workflowService, "saveCheckpoint").mockResolvedValue(true);
+    vi.spyOn(dispatcherService, "dispatchLegacyGeneratedWorkflow").mockResolvedValue({
+      jobId: "job-zero-recovery",
+      timeoutMs: 1,
+    });
+    vi.spyOn(hbeService, "getActionParams").mockReturnValue({
+      action: { preActionDelayMs: 0, postActionDelayMs: 0, simulateError: false },
+      verificationStrategy: "local_only",
+      l1TimeoutMs: 1,
+      l2SettleMs: 0,
+    } as ReturnType<typeof hbeService.getActionParams>);
+    vi.mocked(transport.sendLegacyGeneratedWorkflowJobToDevice).mockResolvedValue({
+      decision: "dispatched",
+      root: null,
+      operation: undefined,
+      handle: undefined,
+      sent: true,
+      queued: false,
+      resultPromise: Promise.resolve({
+        status: "failed",
+        error: "device observation failed",
+        durationMs: 1,
+      }),
+    });
+
+    await expect(runWorkflow(WORKFLOW_ID, job())).rejects.toThrow(RECOVERY_BUDGET_EXCEEDED);
+    expect(llmJson).not.toHaveBeenCalled();
+    expect(saveCheckpoint).toHaveBeenCalledWith(
+      WORKFLOW_ID,
+      expect.objectContaining({
+        executionStats: expect.objectContaining({
+          failedSteps: 1,
+          recoveryAttempts: 0,
+          recoveryLlmCalls: 0,
+          runtimeLlmCalls: 0,
+          recoveryBudgetExhausted: 1,
+        }),
+      }),
+      0,
+      0,
+    );
+    expect((saveCheckpoint.mock.calls[0][1]).executionStats).toMatchObject({
+      failedSteps: 1,
+      recoveryAttempts: 0,
+      recoveryLlmCalls: 0,
+      runtimeLlmCalls: 0,
+      recoveryBudgetExhausted: 1,
+    });
   });
 
   it("still rejects a server child that PNQ did not send or queue", () => {

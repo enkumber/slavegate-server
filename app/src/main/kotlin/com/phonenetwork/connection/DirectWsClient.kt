@@ -12,6 +12,8 @@ import com.phonenetwork.executor.BatchExecutor
 import com.phonenetwork.executor.JobExecutor
 import com.phonenetwork.workflow.WorkflowEngine
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.*
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -122,6 +124,7 @@ class DirectWsClient(
         private const val PREF_DEVICE_ID = "direct_ws_device_id"
         private const val PREF_ENABLED = "direct_ws_enabled"
         private const val PREF_PENDING_JOB_RESULTS = "pending_job_results"
+        private const val MAX_PENDING_JOB_RESULTS = 128
 
         private const val PING_INTERVAL_MS      = 15_000L
         private const val PONG_TIMEOUT_MS       = 10_000L   // 10s timeout per spec
@@ -150,6 +153,7 @@ class DirectWsClient(
     private var pingJob: Job? = null
     private var reconnectJob: Job? = null
     private var jobResultRetryJob: Job? = null
+    private val pendingJobResultsMutex = Mutex()
 
     @Volatile private var lastPongAt = 0L
     @Volatile private var lastPingSentAt = 0L
@@ -363,6 +367,18 @@ class DirectWsClient(
             "WORKFLOW_START" -> {
                 Log.i(TAG, "WORKFLOW_START received: ${msg.optString("id")}")
                 executeWorkflow(msg)
+            }
+
+            "WORKFLOW_CANCEL" -> {
+                val workflowId = msg.optString("workflowId")
+                Log.w(TAG, "WORKFLOW_CANCEL received: $workflowId")
+                workflowEngine?.cancel()
+                sendRaw(webSocket, JSONObject().apply {
+                    put("type", "WORKFLOW_STATUS")
+                    put("workflowId", workflowId)
+                    put("status", "cancelled")
+                    put("reason", "server_cancel")
+                })
             }
 
             "LLM_RESULT" -> {
@@ -704,12 +720,17 @@ class DirectWsClient(
         }
     }
 
-    private fun queueJobResult(payload: JSONObject) {
+    private suspend fun queueJobResult(payload: JSONObject) = pendingJobResultsMutex.withLock {
         val jobId = payload.optString("jobId")
         if (jobId.isBlank()) return
         try {
             val pending = loadPendingJobResults().apply {
                 put(jobId, payload)
+            }
+            while (pending.length() > MAX_PENDING_JOB_RESULTS) {
+                val oldest = pending.keys().asSequence().firstOrNull() ?: break
+                pending.remove(oldest)
+                Log.w(TAG, "Pending JOB_RESULT queue full; evicted oldest result $oldest")
             }
             prefs.edit().putString(PREF_PENDING_JOB_RESULTS, pending.toString()).apply()
         } catch (e: Exception) {
@@ -717,7 +738,7 @@ class DirectWsClient(
         }
     }
 
-    private fun removePendingJobResult(jobId: String) {
+    private suspend fun removePendingJobResult(jobId: String) = pendingJobResultsMutex.withLock {
         try {
             val pending = loadPendingJobResults()
             if (!pending.has(jobId)) return
@@ -729,7 +750,7 @@ class DirectWsClient(
         }
     }
 
-    private fun flushPendingJobResults(webSocket: WebSocket) {
+    private suspend fun flushPendingJobResults(webSocket: WebSocket) = pendingJobResultsMutex.withLock {
         val pending = loadPendingJobResults()
         val keys = pending.keys()
         while (keys.hasNext()) {

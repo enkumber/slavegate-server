@@ -1345,6 +1345,7 @@ async function executeGeneratedWorkflowTask(
       source: "task_runner",
       routine,
       taskId: task.id,
+      maxSelfHealingAttempts: generatedWorkflowSelfHealingLimit(task),
       ...(task.account_id ? { accountId: task.account_id } : {}),
       deviceId: task.device_id,
       platform,

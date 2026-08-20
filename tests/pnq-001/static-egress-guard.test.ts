@@ -58,6 +58,7 @@ const reviewedRawImportBoundaries = new Set([
   "src/api/routes.ts\tdirectWsServer\tdirect-ws",
   "src/index.ts\tdirectWsServer\tdirect-ws",
   "src/modules/workflows/generated-workflow-execution.service.ts\tdirectWsServer\tdirect-ws",
+  "src/modules/workflows/workflow-cancellation.service.ts\tdirectWsServer\tdirect-ws",
   "src/transport/transport.ts\tdirectWsServer\tdirect-ws",
 ]);
 

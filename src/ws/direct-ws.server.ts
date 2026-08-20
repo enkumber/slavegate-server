@@ -30,6 +30,7 @@ import {
   decodeDeviceExecutionHandle,
   encodeDeviceExecutionHandle,
   deviceExecutionArbiter,
+  type DeviceExecutionAcceptedJobResult,
   type DeviceExecutionJobDispatchPermit,
   type DeviceExecutionHandle,
   type DeviceExecutionRootKind,
@@ -1408,6 +1409,7 @@ export class DirectWsServer {
       ? resolveDirectWsResultHandle(pending.permit.handle, msg)
       : null;
     const reportedHandle = handleResolution?.reportedHandle ?? decodeDeviceExecutionHandle(wireHandle);
+    let pnqAccepted: DeviceExecutionAcceptedJobResult | null = null;
 
     try {
       if (isLegacyGeneratedWorkflowResult) {
@@ -1434,6 +1436,7 @@ export class DirectWsServer {
           handleCompatibility: handleResolution?.compatibility ?? "no_pending_handle",
         },
       });
+      pnqAccepted = accepted;
       if (!accepted.accepted) {
         console.warn(
           `[direct-ws] JOB_RESULT rejected by PNQ ingress: jobId=${jobId.slice(0,8)} decision=${accepted.decision} reason=${accepted.reason ?? "none"}`
@@ -1447,7 +1450,8 @@ export class DirectWsServer {
       return;
     }
 
-    if (pending) {
+    const duplicateResult = pnqAccepted?.decision === "duplicate";
+    if (pending && !duplicateResult) {
       clearTimeout(pending.timer);
       this.pendingJobs.delete(jobId);
       pending.resolve({
@@ -1463,18 +1467,21 @@ export class DirectWsServer {
     // Keep the legacy waiter resolution synchronous with JOB_RESULT handling.
     // A dynamic import here defers the critical workflow wake-up and caused
     // generated workflows to remain pending even after the device replied.
-    const resolved = resolveWorkflowExecutorJobResult(jobId, {
-      status,
-      output:     msg.output,
-      error:      msg.error as string | undefined,
-      durationMs,
-    });
-    if (resolved) {
-      console.log(`[direct-ws] JOB_RESULT resolved for workflow executor: jobId=${jobId.slice(0,8)}`);
+    if (!duplicateResult) {
+      const resolved = resolveWorkflowExecutorJobResult(jobId, {
+        status,
+        output:     msg.output,
+        error:      msg.error as string | undefined,
+        durationMs,
+      });
+      if (resolved) {
+        console.log(`[direct-ws] JOB_RESULT resolved for workflow executor: jobId=${jobId.slice(0,8)}`);
+      }
     }
 
     // Forward to dispatcherService for DB update + metrics
-    dispatcherService.handleJobResult({
+    try {
+      await dispatcherService.handleJobResult({
       jobId,
       deviceId:   conn.deviceId,
       status,
@@ -1482,9 +1489,13 @@ export class DirectWsServer {
       error:      msg.error as string | undefined,
       durationMs,
       authority: isLegacyGeneratedWorkflowResult ? "legacy_generated_workflow" : undefined,
-    }).catch(err => console.error("[direct-ws] handleJobResult error:", err.message));
+      });
+    } catch (err) {
+      console.error("[direct-ws] handleJobResult error:", (err as Error).message);
+      return;
+    }
 
-    // ACK
+    // ACK only after the server has durably accepted/recorded the result.
     this._send(conn.ws, { type: "ACK", ref: jobId });
     if (!isLegacyGeneratedWorkflowResult) {
       void import("../transport/transport")

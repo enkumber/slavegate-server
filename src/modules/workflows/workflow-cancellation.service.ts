@@ -1,6 +1,7 @@
 import { deviceExecutionArbiter } from "../device-execution";
 import { isDeviceExecutionEnforced } from "../device-execution/device-execution-authority";
 import { workflowService } from "./workflow.service";
+import { directWsServer } from "../../ws/direct-ws.server";
 
 function cancellationError(code: string, message: string, status: number): Error & { code: string; status: number } {
   return Object.assign(new Error(message), { code, status });
@@ -36,11 +37,11 @@ export async function cancelPersistedWorkflowSafely(workflowId: string): Promise
   if (!workflow) throw cancellationError("NOT_FOUND", "Workflow not found", 404);
   if (!workflow.deviceId) throw cancellationError("CANCELLATION_REJECTED", "Workflow has no device", 409);
 
-  if (workflow.status !== "queued") {
+  if (!(["queued", "running", "paused"] as string[]).includes(workflow.status)) {
     await auditUnsupportedInFlight(workflowId, workflow.deviceId, workflow.status);
     throw cancellationError(
       "CANCELLATION_UNSUPPORTED_IN_FLIGHT",
-      "Cancellation is supported only before workflow dispatch; execution ownership remains active",
+      "Workflow is already terminal and cannot be cancelled",
       409,
     );
   }
@@ -62,11 +63,11 @@ export async function cancelPersistedWorkflowSafely(workflowId: string): Promise
     return { workflowId, status: "cancelled" };
   }
 
-  const pnq = await deviceExecutionArbiter.cancelQueuedPersistedWorkflow({
+  const pnq = await deviceExecutionArbiter.cancelPersistedWorkflow({
     deviceId: workflow.deviceId,
     workflowId,
     actor: "workflow_api.cancel",
-    reason: "api_cancelled_before_dispatch",
+    reason: workflow.status === "queued" ? "api_cancelled_before_dispatch" : "api_cancelled_in_flight",
     metadata: { workflowStatus: workflow.status },
   });
   if (pnq.decision !== "terminal") {
@@ -76,6 +77,9 @@ export async function cancelPersistedWorkflowSafely(workflowId: string): Promise
       "Workflow became active before cancellation; execution ownership remains active",
       409,
     );
+  }
+  if (workflow.status !== "queued") {
+    directWsServer.sendWorkflowCancel(workflow.deviceId, workflowId);
   }
   return { workflowId, status: "cancelled" };
 }
