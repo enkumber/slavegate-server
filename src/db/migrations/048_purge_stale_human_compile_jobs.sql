@@ -1,3 +1,0 @@
--- Historical product-data cleanup removed.
--- Lifecycle-aware cleanup is an operator action driven by PostgreSQL policy,
--- not release-packaged migration semantics.

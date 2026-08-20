@@ -1,2 +1,0 @@
--- Reserved migration number. Goal contracts are operator-managed PostgreSQL
--- data and are never packaged in a release.
