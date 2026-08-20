@@ -1,3 +1,0 @@
--- Historical product-policy bootstrap removed.
--- Auto-use gates, lifecycle transitions, promotion policy, and workflow
--- definition enablement are operator-managed PostgreSQL data.

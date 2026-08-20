@@ -1,3 +1,0 @@
--- Historical data repair retired.
--- Stale execution handling is configured through lifecycle state properties
--- and transitions stored in PostgreSQL, not through release-time data mutation.
