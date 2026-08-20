@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
     writeFile: vi.fn(),
     readFile: vi.fn(),
   },
+  loadRuntimeProfile: vi.fn(),
 }));
 
 vi.mock("../../db/client", () => ({
@@ -30,6 +31,11 @@ vi.mock("../dispatcher/dispatcher.service", () => ({
   dispatcherService: {
     dispatch: vi.fn(),
   },
+}));
+
+vi.mock("./runtime-profile", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./runtime-profile")>()),
+  loadRuntimeProfile: mocks.loadRuntimeProfile,
 }));
 
 const seedMap: AppMap = {
@@ -67,6 +73,7 @@ const seedMap: AppMap = {
 describe("app-mapping recorder persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.loadRuntimeProfile.mockResolvedValue(null);
   });
 
   it("imports seed fallback maps into DB before returning them", async () => {
@@ -107,5 +114,27 @@ describe("app-mapping recorder persistence", () => {
     const loaded = await loadMap(seedMap.appId);
 
     expect(loaded).toBeNull();
+  });
+
+  it("applies runtime detection overrides after importing a seed fallback", async () => {
+    const { loadMap } = await import("./recorder.service");
+    mocks.db.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+    mocks.fs.readFile.mockResolvedValueOnce(JSON.stringify(seedMap));
+    mocks.fs.mkdir.mockResolvedValueOnce(undefined);
+    mocks.fs.writeFile.mockResolvedValueOnce(undefined);
+    mocks.loadRuntimeProfile.mockResolvedValueOnce({
+      metadata: {
+        stateDetectionOverrides: {
+          page_0: { forbiddenAnchors: ["text:Results"] },
+        },
+      },
+    });
+
+    const loaded = await loadMap(seedMap.appId);
+
+    expect(loaded?.pages.page_0.detection.forbiddenAnchors).toEqual(["text:Results"]);
+    expect(seedMap.pages.page_0.detection.forbiddenAnchors).toBeUndefined();
   });
 });

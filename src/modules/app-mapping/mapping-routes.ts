@@ -30,6 +30,7 @@ import {
   type AppRuntimeProfile,
   type RuntimeRecipeStep,
 } from "./runtime-profile";
+import { materializeStoredAppMap } from "../ui-graph/materializer";
 
 const router = Router();
 
@@ -303,6 +304,7 @@ router.put("/runtime-profiles/:appId", async (req: Request, res: Response) => {
   }
   try {
     const saved = await saveRuntimeProfile({ ...req.body, appId: req.params.appId });
+    const materialized = await materializeStoredAppMap(req.params.appId);
     res.json({
       ok: true,
       profile: {
@@ -313,6 +315,7 @@ router.put("/runtime-profiles/:appId", async (req: Request, res: Response) => {
         defaultDeviceId: saved.defaultDeviceId ?? null,
         source: "postgresql",
       },
+      materialized,
     });
   } catch (err) {
     res.status(422).json({ ok: false, error: (err as Error).message });
@@ -322,6 +325,19 @@ router.put("/runtime-profiles/:appId", async (req: Request, res: Response) => {
 router.post("/refresh/:appId", async (req: Request, res: Response) => {
   if (!requireMappingRefreshAuth(req, res)) return;
 
+  // A refresh is a multi-step device operation. Running the individual steps
+  // from this HTTP request would release the per-device PNQ root between
+  // steps and allow cron/agency work to interleave with the capture recipe.
+  // Keep the legacy implementation unreachable until refresh is represented
+  // by one canonical queued root for its complete lifetime.
+  return res.status(409).json({
+    ok: false,
+    error: "Device-backed mapping refresh requires the canonical tasks queue and per-device lock",
+    code: "MAPPING_REFRESH_QUEUE_REQUIRED",
+  });
+
+  /* Legacy inline refresh implementation intentionally retained as inert
+     migration reference until the queued refresh worker replaces it.
   const startedAt = new Date();
   const failures: string[] = [];
   const screenshotPaths: string[] = [];
@@ -521,6 +537,7 @@ router.post("/refresh/:appId", async (req: Request, res: Response) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: (err as Error).message, failures });
   }
+  */
 });
 
 // ─── POST /start — Start mapping an app on a device ──────────────────────────

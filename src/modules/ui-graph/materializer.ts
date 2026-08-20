@@ -1,6 +1,10 @@
 import { getDb } from "../../db/client";
 import type { AppMap } from "../app-mapping/schema";
-import { applyRuntimeStateDetectionOverrides, loadRuntimeProfile } from "../app-mapping/runtime-profile";
+import {
+  applyRuntimeStateDetectionOverrides,
+  loadRuntimeProfile,
+  runtimeStateDetectionOverrides,
+} from "../app-mapping/runtime-profile";
 import { projectLegacyAppMap } from "./legacy-adapter";
 
 function parseMap(value: unknown): AppMap | null {
@@ -20,7 +24,28 @@ export interface MaterializationSummary {
   errors: string[];
 }
 
-export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<MaterializationSummary, "apps" | "errors">> {
+export interface RuntimeProfileMaterializationProvenance {
+  source: "postgresql";
+  profileVersion: number;
+  overrideKeys: string[];
+}
+
+function legacyMetadata(map: AppMap, runtimeProfile?: RuntimeProfileMaterializationProvenance) {
+  return {
+    source: "legacy_app_map",
+    appMapVersion: map.version,
+    ...(runtimeProfile ? {
+      runtimeProfileSource: runtimeProfile.source,
+      runtimeProfileVersion: runtimeProfile.profileVersion,
+      runtimeStateDetectionOverrideKeys: runtimeProfile.overrideKeys,
+    } : {}),
+  };
+}
+
+export async function materializeLegacyAppMap(
+  map: AppMap,
+  runtimeProfile?: RuntimeProfileMaterializationProvenance,
+): Promise<Omit<MaterializationSummary, "apps" | "errors">> {
   const projection = projectLegacyAppMap(map);
   const client = await getDb().connect();
   let variantCount = 0;
@@ -47,7 +72,7 @@ export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<Materia
          ON CONFLICT (app_id, state_key) DO UPDATE SET
            name=EXCLUDED.name, metadata=ui_graph_states.metadata || EXCLUDED.metadata, active=TRUE, updated_at=NOW()
          RETURNING id`,
-        [map.appId, state.key, state.name, state.kind, state.safetyClass, JSON.stringify({ source: "legacy_app_map", appMapVersion: map.version })],
+        [map.appId, state.key, state.name, state.kind, state.safetyClass, JSON.stringify(legacyMetadata(map, runtimeProfile))],
       );
       const canonicalStateId = inserted.rows[0].id as string;
       stateIds.set(state.id, canonicalStateId);
@@ -66,7 +91,7 @@ export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<Materia
           [canonicalStateId, variant.key, variant.signatureHash ?? null, JSON.stringify(variant.requiredAnchors),
             JSON.stringify(variant.optionalAnchors), JSON.stringify(variant.forbiddenAnchors), variant.appVersionPattern ?? null,
             variant.localePattern ?? null, variant.deviceClass ?? null, variant.confidenceThreshold ?? 0.72,
-            JSON.stringify({ source: "legacy_app_map", legacyVariantId: variant.id })],
+            JSON.stringify({ ...legacyMetadata(map, runtimeProfile), legacyVariantId: variant.id })],
         );
         variantIds.set(variant.id, saved.rows[0].id as string);
         variantCount++;
@@ -93,7 +118,7 @@ export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<Materia
          RETURNING id`,
         [canonicalStateId, selector.elementKey, selector.strategy, JSON.stringify(selectorValue), selector.priority,
           selector.dynamic, selector.confidence, selector.appVersionPattern ?? null, selector.deviceClass ?? null,
-          JSON.stringify({ source: "legacy_app_map", variantId: selector.variantId ? variantIds.get(selector.variantId) ?? null : null })],
+          JSON.stringify({ ...legacyMetadata(map, runtimeProfile), variantId: selector.variantId ? variantIds.get(selector.variantId) ?? null : null })],
       );
       selectorCount++;
     }
@@ -113,7 +138,7 @@ export async function materializeLegacyAppMap(map: AppMap): Promise<Omit<Materia
            metadata=ui_graph_transitions.metadata || EXCLUDED.metadata, updated_at=NOW()`,
         [map.appId, transition.key, sourceStateId, targetStateId, transition.elementKey ?? null,
           JSON.stringify(transition.action), JSON.stringify(transition.preconditions ?? {}), JSON.stringify(transition.postconditions ?? {}),
-          transition.cost, transition.safetyClass, transition.confidence, JSON.stringify({ source: "legacy_app_map", appMapVersion: map.version })],
+          transition.cost, transition.safetyClass, transition.confidence, JSON.stringify(legacyMetadata(map, runtimeProfile))],
       );
       transitionCount++;
     }
@@ -142,7 +167,12 @@ export async function materializeAllLegacyAppMaps(): Promise<MaterializationSumm
       const mapForMaterialization = profile
         ? applyRuntimeStateDetectionOverrides(map, profile.metadata ?? {})
         : map;
-      const result = await materializeLegacyAppMap(mapForMaterialization);
+      const provenance = profile ? {
+        source: "postgresql" as const,
+        profileVersion: profile.profileVersion,
+        overrideKeys: Object.keys(runtimeStateDetectionOverrides(profile.metadata ?? {})).sort(),
+      } : undefined;
+      const result = await materializeLegacyAppMap(mapForMaterialization, provenance);
       summary.apps++;
       summary.states += result.states;
       summary.variants += result.variants;
@@ -153,4 +183,23 @@ export async function materializeAllLegacyAppMaps(): Promise<MaterializationSumm
     }
   }
   return summary;
+}
+
+export async function materializeStoredAppMap(
+  appId: string,
+): Promise<Omit<MaterializationSummary, "apps" | "errors"> | null> {
+  const row = await getDb().query(`SELECT map_data FROM app_maps WHERE app_id = $1`, [appId]);
+  if (!row.rows[0]) return null;
+  const map = parseMap(row.rows[0].map_data);
+  if (!map) throw new Error(`${appId}: invalid map_data`);
+  const profile = await loadRuntimeProfile(appId);
+  const mapForMaterialization = profile
+    ? applyRuntimeStateDetectionOverrides(map, profile.metadata ?? {})
+    : map;
+  const provenance = profile ? {
+    source: "postgresql" as const,
+    profileVersion: profile.profileVersion,
+    overrideKeys: Object.keys(runtimeStateDetectionOverrides(profile.metadata ?? {})).sort(),
+  } : undefined;
+  return materializeLegacyAppMap(mapForMaterialization, provenance);
 }

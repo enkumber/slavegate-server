@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   loadRuntimeProfile: vi.fn(),
   listRuntimeProfiles: vi.fn(),
   saveRuntimeProfile: vi.fn(),
+  materializeStoredAppMap: vi.fn(),
   dispatch: vi.fn(),
   waitForResult: vi.fn(),
 }));
@@ -41,6 +42,10 @@ vi.mock("../../transport/transport", () => ({
   waitForResult: mocks.waitForResult,
 }));
 
+vi.mock("../ui-graph/materializer", () => ({
+  materializeStoredAppMap: mocks.materializeStoredAppMap,
+}));
+
 async function app() {
   const app = express();
   app.use(express.json());
@@ -69,10 +74,64 @@ async function postJson(server: express.Express, path: string, body: Record<stri
   });
 }
 
+async function putJson(server: express.Express, path: string, body: Record<string, unknown>) {
+  return new Promise<{ status: number; body: any }>((resolve, reject) => {
+    const listener = server.listen(0, async () => {
+      try {
+        const address = listener.address();
+        if (!address || typeof address === "string") throw new Error("no address");
+        const res = await fetch(`http://127.0.0.1:${address.port}${path}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json", "x-api-key": process.env.API_KEY ?? "" },
+          body: JSON.stringify(body),
+        });
+        const json = await res.json();
+        listener.close(() => resolve({ status: res.status, body: json }));
+      } catch (err) {
+        listener.close(() => reject(err));
+      }
+    });
+  });
+}
+
 describe("reddit app-map refresh helpers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.API_KEY = "test-api-key";
+    mocks.materializeStoredAppMap.mockResolvedValue({ states: 1, variants: 1, selectors: 0, transitions: 0 });
+  });
+
+  it("fails closed before dispatch when device-backed refresh is not represented by one queued root", async () => {
+    const result = await postJson(await app(), "/mapping/refresh/com.reddit.frontpage", {
+      deviceId: "11111111-1111-4111-8111-111111111111",
+    });
+
+    expect(result).toMatchObject({
+      status: 409,
+      body: { ok: false, code: "MAPPING_REFRESH_QUEUE_REQUIRED" },
+    });
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.waitForResult).not.toHaveBeenCalled();
+  });
+
+  it("rematerializes the stored graph immediately after a runtime profile update", async () => {
+    mocks.saveRuntimeProfile.mockResolvedValue({
+      appId: "com.example.app",
+      appName: "Example",
+      packageName: "com.example.app",
+      profileVersion: 3,
+      defaultDeviceId: null,
+    });
+
+    const result = await putJson(await app(), "/mapping/runtime-profiles/com.example.app", {
+      appId: "com.example.app",
+      appName: "Example",
+      packageName: "com.example.app",
+    });
+
+    expect(result.status).toBe(200);
+    expect(mocks.materializeStoredAppMap).toHaveBeenCalledWith("com.example.app");
+    expect(result.body.materialized).toMatchObject({ states: 1, variants: 1 });
   });
 
   it("accepts a selector transition only when the agent actually found the element", () => {
@@ -349,7 +408,7 @@ describe("reddit app-map refresh helpers", () => {
     expect(mocks.saveMap).not.toHaveBeenCalled();
   });
 
-  it("executes a generic DB-owned runtime profile without app constants in the route", async () => {
+  it("does not execute the legacy generic runtime profile inline", async () => {
     mocks.loadRuntimeProfile.mockResolvedValue({
       appId: "com.example.app",
       appName: "Example",
@@ -406,19 +465,16 @@ describe("reddit app-map refresh helpers", () => {
     const server = await app();
     const response = await postJson(server, "/mapping/refresh/com.example.app", {});
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(409);
     expect(response.body).toMatchObject({
-      ok: true,
-      runtimeProfile: { appId: "com.example.app", version: 7, source: "postgresql" },
+      ok: false,
+      code: "MAPPING_REFRESH_QUEUE_REQUIRED",
     });
-    expect(mocks.saveMap).toHaveBeenCalledWith(expect.objectContaining({
-      appId: "com.example.app",
-      appName: "Example",
-      recordedOn: "11111111-1111-4111-8111-111111111111",
-    }));
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.saveMap).not.toHaveBeenCalled();
   });
 
-  it("uses the UI tree as package proof when the foreground probe has no active window", async () => {
+  it("does not probe foreground or UI tree outside one queued refresh root", async () => {
     mocks.loadRuntimeProfile.mockResolvedValue({
       appId: "com.example.app",
       appName: "Example",
@@ -476,8 +532,10 @@ describe("reddit app-map refresh helpers", () => {
     const server = await app();
     const response = await postJson(server, "/mapping/refresh/com.example.app", {});
 
-    expect(response.status).toBe(200);
-    expect(response.body.ok).toBe(true);
-    expect(mocks.saveMap).toHaveBeenCalledWith(expect.objectContaining({ appId: "com.example.app" }));
+    expect(response.status).toBe(409);
+    expect(response.body).toMatchObject({ ok: false, code: "MAPPING_REFRESH_QUEUE_REQUIRED" });
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+    expect(mocks.waitForResult).not.toHaveBeenCalled();
+    expect(mocks.saveMap).not.toHaveBeenCalled();
   });
 });

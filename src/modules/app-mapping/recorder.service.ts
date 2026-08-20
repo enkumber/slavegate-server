@@ -453,15 +453,16 @@ export async function loadMap(appId: string): Promise<AppMap | null> {
     [appId],
   );
   if (rows.length > 0) {
+    let map: AppMap;
     try {
-      const map = typeof rows[0].map_data === "string"
+      map = typeof rows[0].map_data === "string"
         ? JSON.parse(rows[0].map_data)
         : (rows[0].map_data as AppMap);
-      const profile = await loadRuntimeProfile(appId);
-      return profile ? applyRuntimeStateDetectionOverrides(map, profile.metadata ?? {}) : map;
     } catch {
       return null;
     }
+    const profile = await loadRuntimeProfile(appId);
+    return profile ? applyRuntimeStateDetectionOverrides(map, profile.metadata ?? {}) : map;
   }
   const seedMap = await loadSeedMap(appId);
   if (!seedMap) return null;
@@ -472,7 +473,8 @@ export async function loadMap(appId: string): Promise<AppMap | null> {
     console.warn(`[app-mapping] Could not import seeds/app-maps/${appId}.json to database: ${(err as Error).message}`);
     return null;
   }
-  return seedMap;
+  const profile = await loadRuntimeProfile(appId);
+  return profile ? applyRuntimeStateDetectionOverrides(seedMap, profile.metadata ?? {}) : seedMap;
 }
 
 export async function deleteMap(appId: string): Promise<boolean> {
