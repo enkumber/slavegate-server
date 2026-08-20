@@ -1,2 +1,0 @@
--- Historical lifecycle-specific cleanup removed.
--- Operators perform cleanup through capability-driven control-plane queries.

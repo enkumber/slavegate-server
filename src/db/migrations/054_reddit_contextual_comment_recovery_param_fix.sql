@@ -1,2 +1,0 @@
--- Historical one-off data repair retired.
--- No lifecycle mutation is performed by application migrations.

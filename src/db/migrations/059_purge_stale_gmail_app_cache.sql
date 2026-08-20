@@ -1,2 +1,0 @@
--- Historical product-data cleanup removed.
--- Cache invalidation policy is maintained in PostgreSQL outside migrations.
