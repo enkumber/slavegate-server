@@ -186,6 +186,81 @@ describePostgres("PNQ-001 device execution arbiter with real PostgreSQL", () => 
     expect(await eventTypes(pool)).toEqual(["implicit_admission", "root_dispatching", "root_dispatched"]);
   });
 
+  it("automatically drains one queued successor after the active root terminates", async () => {
+    await insertDevice(pool, DEVICE_A, "pnq-auto-drain-a");
+    const wire: string[] = [];
+
+    const active = await arbiter.runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "auto-drain-active",
+      requestKey: "auto-drain-active",
+      registerWaiter: () => undefined,
+      wireDispatch: (permit) => {
+        wire.push(permit.handle.operationId);
+        return true;
+      },
+    });
+    expect(active).toMatchObject({ decision: "dispatched", sent: true });
+
+    const successor = await arbiter.runStandaloneJobEgress({
+      deviceId: DEVICE_A,
+      jobId: "auto-drain-successor",
+      requestKey: "auto-drain-successor",
+      registerWaiter: () => undefined,
+      wireDispatch: (permit) => {
+        wire.push(permit.handle.operationId);
+        return true;
+      },
+    });
+    expect(successor).toMatchObject({ decision: "would_wait", sent: false });
+
+    const terminal = await arbiter.observeTerminal({
+      deviceId: DEVICE_A,
+      handle: active.handle!,
+      status: "completed",
+      actor: "pnq-auto-drain-test",
+    });
+    expect(terminal.decision).toBe("terminal");
+
+    await expect.poll(() => wire, { timeout: 1_000 }).toEqual([
+      "auto-drain-active",
+      "auto-drain-successor",
+    ]);
+    expect(await rootForExternalId(pool, "auto-drain-successor")).toMatchObject({ state: "dispatched" });
+  });
+
+  it("permits exactly one wire send for concurrent egress of the same job", async () => {
+    await insertDevice(pool, DEVICE_A, "pnq-same-job-race-a");
+    const wire: string[] = [];
+    let releaseFirstWire!: () => void;
+    const firstWireEntered = new Promise<void>((resolve) => {
+      releaseFirstWire = resolve;
+    });
+
+    const input = {
+      deviceId: DEVICE_A,
+      jobId: "same-job-race",
+      requestKey: "same-job-race",
+      registerWaiter: () => undefined,
+      wireDispatch: async (permit: DeviceExecutionJobDispatchPermit) => {
+        wire.push(permit.handle.operationId);
+        if (wire.length === 1) await firstWireEntered;
+        return true;
+      },
+    };
+
+    const first = arbiter.runStandaloneJobEgress(input);
+    await expect.poll(() => wire.length).toBe(1);
+    const second = arbiter.runStandaloneJobEgress(input);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    releaseFirstWire();
+    const results = await Promise.all([first, second]);
+
+    expect(wire).toHaveLength(1);
+    expect(results.filter((result) => result.sent)).toHaveLength(1);
+    expect(results.filter((result) => !result.sent)).toHaveLength(1);
+  });
+
   it("uses canonical DB/wire handles for BATCH and WORKFLOW roots", async () => {
     await insertDevice(pool, DEVICE_A, "pnq-boundary-a");
     const observed: Array<{ kind: "waiter" | "wire"; operationId: string; handle: unknown }> = [];
