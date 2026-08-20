@@ -249,7 +249,7 @@ export interface WorkflowExecutionStats {
   retriedSteps: number;
   recoveryAttempts: number;
   recoveryBudgetExhausted: number;
-  mode?: "edge" | "server";
+  mode?: "device_bundle" | "edge" | "server";
 }
 
 export type WorkflowStatus =

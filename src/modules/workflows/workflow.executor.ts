@@ -56,12 +56,13 @@ import { llmJson } from "../../utils/llm";
 import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 import { workflowQueueService, type WorkflowQueueRecord } from "./workflow-queue.service";
 import { workflowEvents } from "../workflow-events";
+import { compileDeviceWorkflowBundle } from "./workflow-bundle.compiler";
 
 // ─── Queue name ───────────────────────────────────────────────────────────────
 
 export const WORKFLOW_QUEUE = scalabilityConfig.workflowQueueName;
 
-function defaultExecutionStats(mode: "edge" | "server" = "server"): WorkflowExecutionStats {
+function defaultExecutionStats(mode: "device_bundle" | "edge" | "server" = "server"): WorkflowExecutionStats {
   return {
     compileLlmCalls: 0,
     recoveryLlmCalls: 0,
@@ -1829,21 +1830,32 @@ async function dispatchClaimedWorkflow(record: WorkflowQueueRecord): Promise<voi
   }
 
   const requestedMode = workflow.checkpoint.executionStats?.mode ?? "server";
-  if (requestedMode === "edge" && directWsServer.supportsEdgeExecution(record.deviceId)) {
+  if ((requestedMode === "device_bundle" || requestedMode === "edge") && directWsServer.supportsEdgeExecution(record.deviceId)) {
     if (!workflow.templateId) throw new Error(`Workflow ${record.workflowId} has no template`);
     const template = await workflowService.getTemplate(workflow.templateId);
     if (!template) throw new Error(`Template ${workflow.templateId} not found`);
 
     await workflowService.markRunning(record.workflowId);
-    const sent = directWsServer.sendWorkflowStart(
-      record.deviceId,
-      template as unknown as Record<string, unknown>,
-      workflow.checkpoint.variables,
-      record.workflowId,
-    );
+    const sent = requestedMode === "device_bundle"
+      ? directWsServer.sendWorkflowBundleStart(
+          record.deviceId,
+          compileDeviceWorkflowBundle(template, {
+            workflowId: record.workflowId,
+            browserSocialHbeOptIn: Boolean(
+              (workflow.checkpoint.variables as Record<string, unknown> | undefined)?.browserSocialHbeOptIn,
+            ),
+          }) as unknown as Record<string, unknown>,
+          workflow.checkpoint.variables,
+        )
+      : directWsServer.sendWorkflowStart(
+          record.deviceId,
+          template as unknown as Record<string, unknown>,
+          workflow.checkpoint.variables,
+          record.workflowId,
+        );
     if (sent) {
       scheduleQueuedEdgeWorkflowAckWatchdog(record);
-      console.log(`[workflow-queue] ${record.workflowId} started on ${record.deviceId} in edge mode`);
+      console.log(`[workflow-queue] ${record.workflowId} started on ${record.deviceId} in ${requestedMode} mode`);
       return;
     }
 

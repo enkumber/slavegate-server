@@ -5,6 +5,7 @@ import { workflowService } from "./workflow.service";
 import type { WorkflowCheckpoint, WorkflowTemplate } from "./types";
 import { validateGeneratedWorkflowTemplate } from "./workflow-validator";
 import { workflowEvents } from "../workflow-events";
+import { canCompileDeviceBundle } from "./workflow-bundle.compiler";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{12}$/i;
 export function resolveGeneratedWorkflowDeviceId(deviceId: string): string {
@@ -31,7 +32,7 @@ export function resolveGeneratedWorkflowDeviceId(deviceId: string): string {
 function createGeneratedWorkflowCheckpoint(
   variables: Record<string, unknown> | undefined,
   hbeSession: Record<string, unknown>,
-  mode: "edge" | "server"
+  mode: "device_bundle" | "edge" | "server"
 ): WorkflowCheckpoint {
   return {
     stepIndex: 0,
@@ -56,18 +57,6 @@ function createGeneratedWorkflowCheckpoint(
   };
 }
 
-function requiresServerSemanticResolution(template: WorkflowTemplate): boolean {
-  const visit = (steps: WorkflowTemplate["steps"]): boolean => steps.some((step) => {
-    if (step.type === "action" && step.action === "semantic_tap") return true;
-    if (step.type === "action" && step.action === "ui_tree_dump") return true;
-    if (step.type === "action" && step.params && typeof step.params.outputVariable === "string") return true;
-    if (step.type === "condition") return visit(step.if_true) || visit(step.if_false ?? []);
-    if (step.type === "loop") return visit(step.steps);
-    return false;
-  });
-  return visit(template.steps);
-}
-
 export interface GeneratedWorkflowControlPlaneContext {
   accountId?: string;
   clientId?: string;
@@ -88,7 +77,7 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
   variables?: Record<string, unknown>;
   controlPlaneContext?: GeneratedWorkflowControlPlaneContext;
   logPrefix?: string;
-}): Promise<{ workflowId: string; status: "queued" | "running"; mode: "edge" | "server"; templateId: string; controlPlaneContext?: GeneratedWorkflowControlPlaneContext }> {
+}): Promise<{ workflowId: string; status: "queued" | "running"; mode: "device_bundle" | "edge" | "server"; templateId: string; controlPlaneContext?: GeneratedWorkflowControlPlaneContext }> {
   const { templateId, template, deviceId, accountId, variables, controlPlaneContext, logPrefix = "workflow" } = input;
   const validation = validateGeneratedWorkflowTemplate(template);
   if (!validation.template) {
@@ -123,15 +112,15 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
     ? { ...(variables ?? {}), controlPlaneContext }
     : variables;
 
-  const requiresServerMode = requiresServerSemanticResolution(template);
-  if (directWsServer.supportsEdgeExecution(deviceId) && !requiresServerMode) {
+  const supportsDeviceBundle = canCompileDeviceBundle(template);
+  if (directWsServer.supportsEdgeExecution(deviceId) && supportsDeviceBundle) {
     const wf = await workflowService.create({
       templateId,
       deviceId,
       accountId,
       totalSteps: template.steps.length,
       hbeParams: hbeSession,
-      checkpoint: createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "edge"),
+      checkpoint: createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "device_bundle"),
     });
     startWorkflow(wf.id).catch(err => {
       console.error(`[${logPrefix}] Failed to queue edge workflow ${wf.id}: ${err.message}`);
@@ -148,11 +137,11 @@ export async function dispatchGeneratedWorkflowTemplate(input: {
       mode: "edge",
       status: "queued",
       totalSteps: template.steps.length,
-      details: { mode: "edge", templateId, accountId, controlPlaneContext },
+      details: { mode: "device_bundle", templateId, accountId, controlPlaneContext },
     });
-    return { workflowId: wf.id, status: "queued", mode: "edge", templateId, controlPlaneContext };
-  } else if (requiresServerMode) {
-    console.log(`[${logPrefix}] semantic resolution required — using server execution`);
+    return { workflowId: wf.id, status: "queued", mode: "device_bundle", templateId, controlPlaneContext };
+  } else if (!supportsDeviceBundle) {
+    console.log(`[${logPrefix}] adaptive/unsupported steps require server execution`);
   }
 
   const checkpoint = createGeneratedWorkflowCheckpoint(dispatchVariables, hbeSession, "server");

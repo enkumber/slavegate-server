@@ -262,6 +262,25 @@ export class DirectWsServer {
     return true;
   }
 
+  sendWorkflowBundleStart(
+    deviceId: string,
+    bundle: Record<string, unknown>,
+    variables?: Record<string, unknown>,
+  ): boolean {
+    const conn = this.connections.get(deviceId);
+    if (!conn || conn.ws.readyState !== WebSocket.OPEN) return false;
+
+    this._send(conn.ws, {
+      type: "WORKFLOW_BUNDLE_START",
+      bundle,
+      variables: variables ?? {},
+    });
+    const workflowId = typeof bundle.workflowId === "string" ? bundle.workflowId : "unknown";
+    const steps = Array.isArray(bundle.steps) ? bundle.steps.length : 0;
+    console.log(`[direct-ws] sendWorkflowBundleStart: device=${deviceId.slice(0,8)} workflow=${workflowId.slice(0,8)} steps=${steps}`);
+    return true;
+  }
+
   /**
    * Send WORKFLOW_CANCEL to a device for local edge cancellation.
    */
@@ -444,7 +463,7 @@ export class DirectWsServer {
         case "PING":            this._send(ws, { type: "PONG" });          break;
         case "PONG":            deviceConn.lastPongAt = Date.now();         break;
         // ── Edge Workflow Execution (ADR-001) ──
-        case "WORKFLOW_STATUS": this._handleWorkflowStatus(deviceConn, msg); break;
+        case "WORKFLOW_STATUS": await this._handleWorkflowStatus(deviceConn, msg); break;
         case "LLM_REQUEST":    this._handleLlmRequest(deviceConn, ws, msg); break;
         case "OTA_RESULT":     this._handleOtaResult(deviceConn, msg); break;
         default:                console.warn(`[direct-ws] Unknown message type: ${type}`); break;
@@ -796,14 +815,16 @@ export class DirectWsServer {
 
   /**
    * Handle WORKFLOW_STATUS from device.
-   * Fire-and-forget: log + update DB. No response needed.
+   * Persist first, then ACK. Android retains and replays the exact payload
+   * until this durable acknowledgement is received.
    */
-  private _handleWorkflowStatus(conn: ConnectedDevice, msg: Record<string, unknown>): void {
+  private async _handleWorkflowStatus(conn: ConnectedDevice, msg: Record<string, unknown>): Promise<void> {
     const workflowId = msg.workflowId as string;
     const status     = msg.status as string;
     const step       = msg.currentStep as number;
     const total      = msg.totalSteps as number;
     const error      = msg.error as string | undefined;
+    const statusId   = typeof msg.statusId === "string" ? msg.statusId : undefined;
     const variables  = msg.variables as Record<string, unknown> | undefined;
     const controlPlaneContext = variables?.controlPlaneContext &&
       typeof variables.controlPlaneContext === "object" &&
@@ -844,9 +865,18 @@ export class DirectWsServer {
       });
     }
 
-    // Update DB (fire-and-forget)
-    this._persistWorkflowStatus(conn.deviceId, workflowId, status, step, total, error, variables)
-      .catch(err => console.error(`[direct-ws] Failed to persist workflow status: ${err.message}`));
+    try {
+      await this._persistWorkflowStatus(
+        conn.deviceId, workflowId, status, step, total, error, variables, statusId,
+      );
+      this._send(conn.ws, {
+        type: "WORKFLOW_STATUS_ACK",
+        workflowId,
+        statusId: statusId ?? `${workflowId}:${step}:${status}`,
+      });
+    } catch (err) {
+      console.error(`[direct-ws] Failed to persist workflow status: ${(err as Error).message}`);
+    }
   }
 
   private async _persistWorkflowStatus(
@@ -857,6 +887,7 @@ export class DirectWsServer {
     total: number,
     error: string | undefined,
     variables: Record<string, unknown> | undefined,
+    statusId?: string,
   ): Promise<void> {
     if (!workflowId) return;
     const { getDb } = require("../db/client");
@@ -865,7 +896,9 @@ export class DirectWsServer {
       "SELECT checkpoint FROM workflows WHERE id = $1",
       [workflowId]
     );
-    const mergedVariables = mergeWorkflowStatusVariables(existing.rows[0]?.checkpoint, variables);
+    const existingCheckpoint = existing.rows[0]?.checkpoint as Record<string, unknown> | undefined;
+    if (statusId && existingCheckpoint?.lastStatusId === statusId) return;
+    const mergedVariables = mergeWorkflowStatusVariables(existingCheckpoint, variables);
 
     const checkpoint = {
       stepIndex: step,
@@ -889,13 +922,14 @@ export class DirectWsServer {
       source: 'edge',
       totalSteps: total,
       error: error ?? null,
+      lastStatusId: statusId ?? null,
     };
 
     if (status === 'completed') {
       await db.query(
         `UPDATE workflows
          SET status = 'completed',
-             current_step = $1,
+             current_step = GREATEST(current_step, $1),
              total_steps = COALESCE($2, total_steps),
              checkpoint = $3,
              completed_at = NOW()
@@ -906,7 +940,7 @@ export class DirectWsServer {
       await db.query(
         `UPDATE workflows
          SET status = 'failed',
-             current_step = COALESCE($1, current_step),
+             current_step = GREATEST(current_step, COALESCE($1, current_step)),
              total_steps = COALESCE($2, total_steps),
              checkpoint = $3,
              error = $4,
@@ -920,7 +954,7 @@ export class DirectWsServer {
       await db.query(
         `UPDATE workflows
          SET status = $1,
-             current_step = COALESCE($2, current_step),
+             current_step = GREATEST(current_step, COALESCE($2, current_step)),
              total_steps = COALESCE($3, total_steps),
              checkpoint = $4
          WHERE id = $5
