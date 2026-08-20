@@ -30,6 +30,9 @@ const PLATFORM_APP_IDS: Record<string, string> = {
   tiktok: "com.zhiliaoapp.musically",
   facebook: "com.facebook.katana",
   twitter: "com.twitter.android",
+  chrome: "com.android.chrome",
+  gmail: "com.google.android.gm",
+  youtube: "com.google.android.youtube",
 };
 
 export type HumanWorkflowSafetyClass = "read_only" | "standard" | "destructive";

@@ -106,6 +106,29 @@ export function resolveGeneratedWorkflowScreens(platform: string, provided?: str
     return ALL_SCREEN_IDS.filter((screen) => !screen.startsWith("REDDIT_"));
   }
 
+  if (normalized === "chrome") {
+    // Chrome app on Android uses generic web navigation screens
+    return [
+      "WEB_PAGE",
+      "LOGIN_REQUIRED",
+      "FORM_INPUT",
+      "CONFIRMATION_DIALOG",
+      "UNKNOWN",
+    ];
+  }
+
+  if (normalized === "gmail") {
+    // Gmail app screens
+    return [
+      "GMAIL_INBOX",
+      "GMAIL_COMPOSE",
+      "LOGIN_REQUIRED",
+      "FORM_INPUT",
+      "CONFIRMATION_DIALOG",
+      "UNKNOWN",
+    ];
+  }
+
   return shared;
 }
 
@@ -165,6 +188,9 @@ export function buildGeneratedWorkflowPrompt(input: BuildGeneratedWorkflowPrompt
     "- Include expectedScreen on action steps when a known screen should result.",
     "- If App Map Hints says mapUsable=true, prefer app-map selector targets and set params.bindingSource=\"app_map_selector\"; use params.coordinateSource=\"app_map\" only when no selector is available.",
     "- If App Map Hints says mapUsable=false, do not use app-map selectors or coordinates; use UI-tree/platform skill targets instead.",
+    "- Do NOT generate workflows that only wake/unlock/observe the device — every workflow MUST perform the requested task (e.g., login, post, compose).",
+    "- Do NOT use generic or vague actions like \"tap any element\" — always target specific elements with resource-id, text, or app-map selector.",
+    "- If the intent involves creating an account, include steps for: opening app, clicking sign-up, entering email/username, setting password, confirming.",
     "- Keep runtime LLM calls at zero on the happy path.",
     "- Before calling an LLM for the same goal/context again, call POST /api/workflows/generated/cache/resolve with requestKey.",
     "- After validation, cache compiledPlan.cacheKey and reuse the same validated workflow for identical goals/context.",

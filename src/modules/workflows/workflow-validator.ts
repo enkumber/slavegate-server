@@ -206,6 +206,8 @@ const GENERATED_WORKFLOW_VERIFICATION_STRATEGIES = [
 ] as const;
 
 const GENERATED_WORKFLOW_PLATFORMS = [
+  "chrome",
+  "gmail",
   "instagram",
   "reddit",
   "threads",
