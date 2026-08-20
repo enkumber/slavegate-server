@@ -1,15 +1,36 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { humanWorkflowCompileJobService } from "./compile-job.service";
+import {
+  HumanWorkflowCompileJobConflictError,
+  HumanWorkflowCompileJobPolicyUnavailableError,
+  humanWorkflowCompileJobService,
+} from "./compile-job.service";
 
 const mocks = vi.hoisted(() => ({
   db: {
     query: vi.fn(),
+    connect: vi.fn(),
+  },
+  client: {
+    query: vi.fn(),
+    release: vi.fn(),
   },
 }));
 
 vi.mock("../../db/client", () => ({
   getDb: vi.fn(() => mocks.db),
 }));
+
+function policy() {
+  return {
+    enabled: true,
+    claimLimit: 1,
+    leaseMs: 1000,
+    heartbeatIntervalMs: 100,
+    reconcileIntervalMs: 1000,
+    maxAttempts: 3,
+    serverActor: "test",
+  };
+}
 
 function jobRow(overrides: Record<string, unknown> = {}) {
   return {
@@ -24,8 +45,9 @@ function jobRow(overrides: Record<string, unknown> = {}) {
     source: "llm",
     shortcut_id: null,
     error: null,
+    provider_error_code: null,
     result: null,
-    llm_started_at: new Date(Date.now() - 10_000).toISOString(),
+    llm_started_at: new Date().toISOString(),
     llm_completed_at: null,
     retry_count: 0,
     last_retried_at: null,
@@ -33,59 +55,50 @@ function jobRow(overrides: Record<string, unknown> = {}) {
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
     completed_at: null,
+    owner_token: "claim-token",
+    owner_generation: 1,
+    lease_expires_at: new Date(Date.now() + 1000).toISOString(),
+    worker_attempt_count: 1,
+    last_worker_heartbeat_at: new Date().toISOString(),
     ...overrides,
   };
 }
 
 describe("humanWorkflowCompileJobService", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
-    process.env.HUMAN_WORKFLOW_COMPILE_JOB_STALE_MS = "1000";
+    mocks.db.connect.mockResolvedValue(mocks.client);
+    await humanWorkflowCompileJobService.stopReconciler();
   });
 
-  it("marks stale running jobs as retryable failed when fetched by id", async () => {
-    mocks.db.query
+  it("fails closed when PostgreSQL runtime policy is missing", async () => {
+    mocks.db.query.mockResolvedValueOnce({ rows: [] });
+
+    await expect(humanWorkflowCompileJobService.claimNext("test"))
+      .rejects.toBeInstanceOf(HumanWorkflowCompileJobPolicyUnavailableError);
+  });
+
+  it("uses row locking and owner generation when claiming eligible work", async () => {
+    mocks.db.query.mockImplementation(async (sql: string) => {
+      if (sql.includes("resource_runtime_policies")) return { rows: [{ policy: policy() }] };
+      if (sql.includes("UPDATE human_workflow_compile_jobs job")) return { rows: [jobRow()] };
+      return { rows: [] };
+    });
+
+    const claim = await humanWorkflowCompileJobService.claimNext("test");
+
+    expect(claim?.ownerGeneration).toBe(1);
+    const claimSql = mocks.db.query.mock.calls.find((call) => String(call[0]).includes("FOR UPDATE OF job SKIP LOCKED"))?.[0];
+    expect(claimSql).toContain("owner_generation = job.owner_generation + 1");
+    expect(claimSql).toContain("lease_expires_at = NOW()");
+  });
+
+  it("returns existing rows for the same idempotency payload", async () => {
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [jobRow()] })
-      .mockResolvedValueOnce({ rows: [{ terminal: false }] })
-      .mockResolvedValueOnce({
-        rows: [jobRow({
-          status: "failed",
-          error: "compile job worker expired; retry compile",
-          llm_started_at: new Date(Date.now() - 10_000).toISOString(),
-          completed_at: new Date().toISOString(),
-        })],
-      });
-
-    const job = await humanWorkflowCompileJobService.getById("66666666-6666-4666-8666-666666666666");
-
-    expect(job?.status).toBe("failed");
-    expect(job?.error).toBe("compile job worker expired; retry compile");
-    expect(job?.errorClass).toBe("timeout");
-    expect(mocks.db.query.mock.calls[2][0]).toContain("lifecycle_transitions");
-    expect(mocks.db.query.mock.calls[2][0]).not.toContain("status = 'failed'");
-    expect(JSON.parse(mocks.db.query.mock.calls[2][1][1])).toMatchObject({
-      targetTerminal: true,
-      targetRetryable: true,
-      transitionAutomatic: true,
-    });
-  });
-
-  it("does not mark fresh running jobs as stale", async () => {
-    mocks.db.query.mockResolvedValueOnce({
-      rows: [jobRow({ llm_started_at: new Date().toISOString() })],
-    });
-
-    const job = await humanWorkflowCompileJobService.getByRequestKey("requestkey00000000000001");
-
-    expect(job?.status).toBe("running");
-    expect(mocks.db.query).toHaveBeenCalledTimes(1);
-  });
-
-  it("stores configured timeout when creating compile jobs", async () => {
-    process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS = "90000";
-    mocks.db.query.mockResolvedValueOnce({
-      rows: [jobRow({ status: "queued", llm_started_at: null, timeout_ms: 90000 })],
-    });
+      .mockResolvedValueOnce({ rows: [] });
 
     const job = await humanWorkflowCompileJobService.createOrGet({
       requestKey: "requestkey00000000000001",
@@ -95,78 +108,34 @@ describe("humanWorkflowCompileJobService", () => {
       platform: "reddit",
     });
 
-    expect(job.timeoutMs).toBe(90000);
-    expect(mocks.db.query.mock.calls[0][1]).toContain(90000);
-    delete process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS;
+    expect(job.id).toBe("66666666-6666-4666-8666-666666666666");
   });
 
-  it("requeues failed jobs and increments retry metadata", async () => {
-    mocks.db.query.mockResolvedValueOnce({
-      rows: [jobRow({
-        status: "queued",
-        error: null,
-        retry_count: 2,
-        last_retried_at: "2026-06-18T10:01:00.000Z",
-        llm_completed_at: null,
-        completed_at: null,
-      })],
-    });
-
-    const job = await humanWorkflowCompileJobService.requeueFailed("66666666-6666-4666-8666-666666666666");
-
-    expect(job?.status).toBe("queued");
-    expect(job?.retryCount).toBe(2);
-    expect(job?.lastRetriedAt).toBe("2026-06-18T10:01:00.000Z");
-    expect(mocks.db.query.mock.calls[0][0]).toContain("lifecycle_transitions");
-    expect(mocks.db.query.mock.calls[0][0]).not.toContain("status = 'queued'");
-    expect(JSON.parse(mocks.db.query.mock.calls[0][1][1])).toMatchObject({
-      targetInitial: true,
-      targetDispatchable: true,
-      transitionClearCompleted: true,
-      transitionClearFailure: true,
-    });
-    expect(JSON.parse(mocks.db.query.mock.calls[0][1][2])).toMatchObject({
-      incrementRetry: true,
-      markRetried: true,
-    });
-  });
-
-  it("persists raw LLM debug output and appends it to job history on failure", async () => {
-    const llmDebug = {
-      sensitive: true,
-      compilerCacheVersion: "test-v1",
-      failure: "human workflow undercompiled",
-      attempts: [{
-        attempt: 1,
-        provider: "openai_compatible",
-        model: "qwen-test",
-        endpoint: "http://gx10.example/v1",
-        maxTokens: 4096,
-        rawResponse: "{\"steps\":[{\"action\":\"screen_wake\"}]}",
-        responseTruncated: false,
-        capturedAt: "2026-07-20T08:00:00.000Z",
-      }],
-    };
-    mocks.db.query
-      .mockResolvedValueOnce({ rows: [jobRow({ llm_started_at: null })] })
-      .mockResolvedValueOnce({ rows: [jobRow({ llm_started_at: new Date().toISOString() })] })
+  it("rejects conflicting payloads under the same idempotency key", async () => {
+    mocks.client.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [jobRow({ intent: "other intent" })] })
       .mockResolvedValueOnce({ rows: [] });
 
-    humanWorkflowCompileJobService.runInProcess(
-      "66666666-6666-4666-8666-666666666666",
-      async () => {
-        throw Object.assign(new Error("human workflow undercompiled"), {
-          debugPayload: { llmDebug },
-        });
-      },
-    );
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(humanWorkflowCompileJobService.createOrGet({
+      requestKey: "requestkey00000000000001",
+      deviceId: "11111111-1111-4111-8111-111111111111",
+      accountId: "22222222-2222-4222-8222-222222222222",
+      intent: "open reddit",
+      platform: "reddit",
+    })).rejects.toBeInstanceOf(HumanWorkflowCompileJobConflictError);
+  });
 
-    expect(mocks.db.query).toHaveBeenCalledTimes(3);
-    expect(mocks.db.query.mock.calls[2][0]).toContain("llmDebugHistory");
-    expect(JSON.parse(mocks.db.query.mock.calls[2][1][2])).toMatchObject({
-      error: "human workflow undercompiled",
-      appendDebug: { llmDebug },
-    });
+  it("fences stale owner writes by token and generation", async () => {
+    mocks.db.query.mockResolvedValueOnce({ rows: [] });
+    await expect(humanWorkflowCompileJobService.completeClaim({
+      job: jobRow(),
+      ownerToken: "old",
+      ownerGeneration: 1,
+    }, {
+      ready: true,
+      cacheKey: "aaaaaaaaaaaaaaaaaaaaaaaa",
+    })).rejects.toMatchObject({ code: "HUMAN_WORKFLOW_COMPILE_JOB_LEASE_FENCE" });
   });
 });

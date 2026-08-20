@@ -1,9 +1,14 @@
+import crypto from "crypto";
 import { getDb } from "../../db/client";
 import {
   lifecycleTransitionSelectorPredicate,
   serializeLifecycleTransitionSelector,
   type LifecycleTransitionSelector,
 } from "../lifecycle/lifecycle.service";
+import {
+  getResourceRuntimePolicy,
+  ResourceRuntimePolicyUnavailableError,
+} from "../runtime-policy/resource-runtime-policy.service";
 
 export type HumanWorkflowCompileJobSource = "cache" | "shortcut" | "llm";
 export type HumanWorkflowCompileJobErrorClass = "timeout" | "provider_error" | "validation_error" | "unknown";
@@ -31,6 +36,11 @@ export interface HumanWorkflowCompileJobRecord {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  ownerToken: string | null;
+  ownerGeneration: number;
+  leaseExpiresAt: string | null;
+  workerAttemptCount: number;
+  lastWorkerHeartbeatAt: string | null;
 }
 
 export interface HumanWorkflowCompileJobState {
@@ -41,17 +51,95 @@ export interface HumanWorkflowCompileJobState {
   dispatchable: boolean;
 }
 
-const DEFAULT_STALE_RUNNING_JOB_MS = 150_000;
 const DEFAULT_COMPILE_TIMEOUT_MS = 120_000;
-
-function staleRunningJobMs(): number {
-  const configured = Number.parseInt(process.env.HUMAN_WORKFLOW_COMPILE_JOB_STALE_MS ?? "", 10);
-  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_STALE_RUNNING_JOB_MS;
-}
 
 export function humanWorkflowCompileTimeoutMs(): number {
   const configured = Number.parseInt(process.env.HUMAN_WORKFLOW_COMPILE_TIMEOUT_MS ?? "", 10);
   return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_COMPILE_TIMEOUT_MS;
+}
+
+export class HumanWorkflowCompileJobPolicyUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HumanWorkflowCompileJobPolicyUnavailableError";
+  }
+}
+
+export class HumanWorkflowCompileJobConflictError extends Error {
+  readonly status = 409;
+  readonly code = "HUMAN_WORKFLOW_COMPILE_JOB_IDEMPOTENCY_CONFLICT";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "HumanWorkflowCompileJobConflictError";
+  }
+}
+
+export class HumanWorkflowCompileJobLeaseFenceError extends Error {
+  readonly code = "HUMAN_WORKFLOW_COMPILE_JOB_LEASE_FENCE";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "HumanWorkflowCompileJobLeaseFenceError";
+  }
+}
+
+interface HumanWorkflowCompileJobRuntimePolicy {
+  claimLimit: number;
+  leaseMs: number;
+  heartbeatIntervalMs: number;
+  reconcileIntervalMs: number;
+  maxAttempts: number;
+  serverActor: string;
+}
+
+interface CompileJobClaim {
+  job: HumanWorkflowCompileJobRecord;
+  ownerToken: string;
+  ownerGeneration: number;
+}
+
+export type HumanWorkflowCompileJobRunner = (
+  job: HumanWorkflowCompileJobRecord,
+  claim: CompileJobClaim,
+) => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>;
+
+function positiveInteger(policy: Record<string, unknown>, key: string): number {
+  const value = policy[key];
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new HumanWorkflowCompileJobPolicyUnavailableError(`compile job runtime policy field ${key} must be a positive integer`);
+  }
+  return value;
+}
+
+function nonEmptyString(policy: Record<string, unknown>, key: string): string {
+  const value = policy[key];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new HumanWorkflowCompileJobPolicyUnavailableError(`compile job runtime policy field ${key} must be configured`);
+  }
+  return value.trim();
+}
+
+async function loadCompileJobRuntimePolicy(): Promise<HumanWorkflowCompileJobRuntimePolicy> {
+  try {
+    const policy = await getResourceRuntimePolicy("human_workflow_compile_jobs");
+    if (policy.enabled !== true) {
+      throw new HumanWorkflowCompileJobPolicyUnavailableError("compile job runtime policy is not enabled");
+    }
+    return {
+      claimLimit: positiveInteger(policy, "claimLimit"),
+      leaseMs: positiveInteger(policy, "leaseMs"),
+      heartbeatIntervalMs: positiveInteger(policy, "heartbeatIntervalMs"),
+      reconcileIntervalMs: positiveInteger(policy, "reconcileIntervalMs"),
+      maxAttempts: positiveInteger(policy, "maxAttempts"),
+      serverActor: nonEmptyString(policy, "serverActor"),
+    };
+  } catch (error) {
+    if (error instanceof ResourceRuntimePolicyUnavailableError) {
+      throw new HumanWorkflowCompileJobPolicyUnavailableError(error.message);
+    }
+    throw error;
+  }
 }
 
 function errorClassFromError(error: string | null | undefined): HumanWorkflowCompileJobErrorClass | null {
@@ -61,6 +149,12 @@ function errorClassFromError(error: string | null | undefined): HumanWorkflowCom
   if (normalized.includes("validation")) return "validation_error";
   if (normalized.includes("provider")) return "provider_error";
   return "unknown";
+}
+
+function dbTimestamp(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
 }
 
 function rowToJob(row: Record<string, unknown>): HumanWorkflowCompileJobRecord {
@@ -80,33 +174,20 @@ function rowToJob(row: Record<string, unknown>): HumanWorkflowCompileJobRecord {
     errorClass: errorClassFromError(error),
     providerErrorCode: (row.provider_error_code as string | null) ?? null,
     result: (row.result as Record<string, unknown> | null) ?? null,
-    llmStartedAt: (row.llm_started_at as string | null) ?? null,
-    llmCompletedAt: (row.llm_completed_at as string | null) ?? null,
+    llmStartedAt: dbTimestamp(row.llm_started_at),
+    llmCompletedAt: dbTimestamp(row.llm_completed_at),
     retryCount: Number(row.retry_count ?? 0),
-    lastRetriedAt: (row.last_retried_at as string | null) ?? null,
+    lastRetriedAt: dbTimestamp(row.last_retried_at),
     timeoutMs: Number(row.timeout_ms ?? humanWorkflowCompileTimeoutMs()),
-    createdAt: row.created_at as string,
-    updatedAt: row.updated_at as string,
-    completedAt: (row.completed_at as string | null) ?? null,
+    createdAt: dbTimestamp(row.created_at) ?? "",
+    updatedAt: dbTimestamp(row.updated_at) ?? "",
+    completedAt: dbTimestamp(row.completed_at),
+    ownerToken: (row.owner_token as string | null) ?? null,
+    ownerGeneration: Number(row.owner_generation ?? 0),
+    leaseExpiresAt: dbTimestamp(row.lease_expires_at),
+    workerAttemptCount: Number(row.worker_attempt_count ?? 0),
+    lastWorkerHeartbeatAt: dbTimestamp(row.last_worker_heartbeat_at),
   };
-}
-
-async function isStaleCompileJob(row: Record<string, unknown>): Promise<boolean> {
-  if (!row.llm_started_at) return false;
-  const startedAt = new Date(row.llm_started_at as string).getTime();
-  if (!Number.isFinite(startedAt) || Date.now() - startedAt <= staleRunningJobMs()) {
-    return false;
-  }
-  const result = await getDb().query(
-    `SELECT state.terminal
-       FROM human_workflow_compile_jobs job
-       JOIN lifecycle_state_definitions state
-         ON state.lifecycle_key = job.lifecycle_key
-        AND state.status = job.status
-      WHERE job.id = $1`,
-    [row.id],
-  );
-  return result.rows[0]?.terminal === false;
 }
 
 interface CompileJobPatch {
@@ -120,12 +201,14 @@ interface CompileJobPatch {
   incrementRetry?: boolean;
   markRetried?: boolean;
   clearResult?: boolean;
+  clearOwner?: boolean;
 }
 
 async function transitionCompileJob(
   id: string,
   selector: LifecycleTransitionSelector,
   patch: CompileJobPatch = {},
+  fence?: { ownerToken: string; ownerGeneration: number },
 ): Promise<HumanWorkflowCompileJobRecord | null> {
   const selectorPredicate = lifecycleTransitionSelectorPredicate("transition", "target", "$2");
   const result = await getDb().query(
@@ -133,6 +216,8 @@ async function transitionCompileJob(
        SELECT job.*
          FROM human_workflow_compile_jobs job
         WHERE job.id = $1
+          AND ($4::text IS NULL OR job.owner_token = $4)
+          AND ($5::bigint IS NULL OR job.owner_generation = $5::bigint)
         FOR UPDATE
      ),
      candidates AS (
@@ -224,17 +309,48 @@ async function transitionCompileJob(
               WHEN COALESCE(($3::jsonb->>'markRetried')::boolean, false) THEN NOW()
               ELSE job.last_retried_at
             END,
+            owner_token = CASE
+              WHEN COALESCE(($3::jsonb->>'clearOwner')::boolean, false) THEN NULL
+              ELSE job.owner_token
+            END,
+            lease_expires_at = CASE
+              WHEN COALESCE(($3::jsonb->>'clearOwner')::boolean, false) THEN NULL
+              ELSE job.lease_expires_at
+            END,
             updated_at = NOW()
        FROM selected
       WHERE job.id = selected.id
       RETURNING job.*`,
-    [id, serializeLifecycleTransitionSelector(selector), JSON.stringify(patch)],
+    [
+      id,
+      serializeLifecycleTransitionSelector(selector),
+      JSON.stringify(patch),
+      fence?.ownerToken ?? null,
+      fence?.ownerGeneration ?? null,
+    ],
   );
   return result.rows[0] ? rowToJob(result.rows[0]) : null;
 }
 
+async function compileJobEvent(
+  jobId: string,
+  eventType: string,
+  actor: string,
+  payload: Record<string, unknown> = {},
+  claim?: { ownerToken: string; ownerGeneration: number },
+): Promise<void> {
+  await getDb().query(
+    `INSERT INTO human_workflow_compile_job_events
+       (job_id, event_type, actor, owner_token, owner_generation, payload)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+    [jobId, eventType, actor, claim?.ownerToken ?? null, claim?.ownerGeneration ?? null, JSON.stringify(payload)],
+  );
+}
+
 export class HumanWorkflowCompileJobService {
   private running = new Set<string>();
+  private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  private shuttingDown = false;
 
   async createOrGet(input: {
     requestKey: string;
@@ -243,29 +359,55 @@ export class HumanWorkflowCompileJobService {
     intent: string;
     platform: string;
   }): Promise<HumanWorkflowCompileJobRecord> {
-    const result = await getDb().query(
-      `INSERT INTO human_workflow_compile_jobs
-         (request_key, device_id, account_id, intent, platform, source, timeout_ms)
-       VALUES ($1, $2, $3, $4, $5, 'llm', $6)
-       ON CONFLICT (request_key) DO UPDATE SET updated_at = NOW()
-       RETURNING *`,
-      [input.requestKey, input.deviceId, input.accountId, input.intent, input.platform, humanWorkflowCompileTimeoutMs()],
-    );
-    return rowToJob(result.rows[0]);
+    const client = await getDb().connect();
+    try {
+      await client.query("BEGIN");
+      const inserted = await client.query(
+        `INSERT INTO human_workflow_compile_jobs
+           (request_key, device_id, account_id, intent, platform, source, timeout_ms)
+         VALUES ($1, $2, $3, $4, $5, 'llm', $6)
+         ON CONFLICT (request_key) DO NOTHING
+         RETURNING *`,
+        [input.requestKey, input.deviceId, input.accountId, input.intent, input.platform, humanWorkflowCompileTimeoutMs()],
+      );
+      if (inserted.rows[0]) {
+        await client.query("COMMIT");
+        return rowToJob(inserted.rows[0]);
+      }
+      const existing = await client.query(
+        `SELECT * FROM human_workflow_compile_jobs WHERE request_key = $1 FOR UPDATE`,
+        [input.requestKey],
+      );
+      const row = existing.rows[0];
+      if (!row) throw new Error("compile job idempotency lookup disappeared");
+      if (
+        row.device_id !== input.deviceId
+        || (row.account_id ?? null) !== (input.accountId ?? null)
+        || row.intent !== input.intent
+        || row.platform !== input.platform
+      ) {
+        throw new HumanWorkflowCompileJobConflictError(
+          "request key is already bound to a different human workflow compile payload",
+        );
+      }
+      await client.query("COMMIT");
+      return rowToJob(row);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async getById(id: string): Promise<HumanWorkflowCompileJobRecord | null> {
     const result = await getDb().query(`SELECT * FROM human_workflow_compile_jobs WHERE id = $1`, [id]);
-    if (result.rows.length === 0) return null;
-    if (await isStaleCompileJob(result.rows[0])) return this.markStaleRunningFailed(id);
-    return rowToJob(result.rows[0]);
+    return result.rows[0] ? rowToJob(result.rows[0]) : null;
   }
 
   async getByRequestKey(requestKey: string): Promise<HumanWorkflowCompileJobRecord | null> {
     const result = await getDb().query(`SELECT * FROM human_workflow_compile_jobs WHERE request_key = $1`, [requestKey]);
-    if (result.rows.length === 0) return null;
-    if (await isStaleCompileJob(result.rows[0])) return this.markStaleRunningFailed(result.rows[0].id as string);
-    return rowToJob(result.rows[0]);
+    return result.rows[0] ? rowToJob(result.rows[0]) : null;
   }
 
   async state(job: Pick<HumanWorkflowCompileJobRecord, "id">): Promise<HumanWorkflowCompileJobState | null> {
@@ -287,26 +429,6 @@ export class HumanWorkflowCompileJobService {
       administrative: row.administrative === true,
       dispatchable: row.dispatchable === true,
     } : null;
-  }
-
-  private async markStaleRunningFailed(id: string): Promise<HumanWorkflowCompileJobRecord> {
-    const transitioned = await transitionCompileJob(id, {
-      targetTerminal: true,
-      targetRetryable: true,
-      transitionAutomatic: true,
-      transitionMarkCompleted: true,
-    }, {
-      error: "compile job worker expired; retry compile",
-    });
-    if (!transitioned) {
-      const current = await getDb().query(
-        "SELECT * FROM human_workflow_compile_jobs WHERE id = $1",
-        [id],
-      );
-      if (!current.rows[0]) throw new Error("compile job disappeared while expiring stale worker");
-      return rowToJob(current.rows[0]);
-    }
-    return transitioned;
   }
 
   async requeueFailed(id: string): Promise<HumanWorkflowCompileJobRecord | null> {
@@ -335,48 +457,196 @@ export class HumanWorkflowCompileJobService {
     });
   }
 
-  runInProcess(jobId: string, runner: () => Promise<Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null }>): void {
-    if (this.running.has(jobId)) return;
-    this.running.add(jobId);
-    setImmediate(async () => {
-      try {
-        const current = await this.getById(jobId);
-        if (!current) return;
-        const claimed = await transitionCompileJob(jobId, {
-          targetTerminal: false,
-          transitionMarkStarted: true,
-        });
-        if (!claimed) return;
-        const result = await runner();
-        await transitionCompileJob(jobId, {
-          targetTerminal: true,
-          targetRetryable: false,
-          transitionMarkCompleted: true,
-          transitionClearFailure: true,
-        }, {
-          cacheKey: result.cacheKey ?? null,
-          source: "llm",
-          shortcutId: result.shortcutId ?? null,
-          result,
-        });
-      } catch (err) {
-        const typed = err as Error & { validationErrors?: string[]; debugPayload?: Record<string, unknown> };
-        const validationDetail = Array.isArray(typed.validationErrors) && typed.validationErrors.length > 0
-          ? `: ${typed.validationErrors.slice(0, 6).join("; ")}`
-          : "";
-        await transitionCompileJob(jobId, {
-          targetTerminal: true,
-          targetRetryable: true,
-          transitionAutomatic: true,
-          transitionMarkCompleted: true,
-        }, {
-          error: `${typed.message}${validationDetail}`,
-          appendDebug: typed.debugPayload ?? null,
-        }).catch(() => {});
-      } finally {
-        this.running.delete(jobId);
-      }
+  async claimNext(actor?: string): Promise<CompileJobClaim | null> {
+    const policy = await loadCompileJobRuntimePolicy();
+    const selector = serializeLifecycleTransitionSelector({
+      targetTerminal: false,
+      transitionAutomatic: true,
+      transitionMarkStarted: true,
     });
+    const selectorPredicate = lifecycleTransitionSelectorPredicate("transition", "target", "$3");
+    const ownerToken = crypto.randomUUID();
+    const result = await getDb().query(
+      `WITH candidate AS (
+         SELECT job.id
+           FROM human_workflow_compile_jobs job
+           JOIN lifecycle_state_definitions state
+             ON state.lifecycle_key = job.lifecycle_key
+            AND state.status = job.status
+          WHERE NOT state.terminal
+            AND job.worker_attempt_count < $4
+            AND (
+              (state.initial AND state.dispatchable)
+              OR (job.lease_expires_at IS NOT NULL AND job.lease_expires_at < NOW())
+            )
+          ORDER BY
+            CASE WHEN job.lease_expires_at IS NOT NULL AND job.lease_expires_at < NOW() THEN 0 ELSE 1 END,
+            job.created_at ASC
+          LIMIT 1
+          FOR UPDATE OF job SKIP LOCKED
+       ),
+       selected AS (
+         SELECT job.id, transition.to_status
+           FROM candidate
+           JOIN human_workflow_compile_jobs job ON job.id = candidate.id
+           JOIN lifecycle_transitions transition
+             ON transition.lifecycle_key = job.lifecycle_key
+            AND transition.from_status = job.status
+           JOIN lifecycle_state_definitions target
+             ON target.lifecycle_key = transition.lifecycle_key
+            AND target.status = transition.to_status
+          WHERE ${selectorPredicate}
+          LIMIT 1
+       )
+       UPDATE human_workflow_compile_jobs job
+          SET status = selected.to_status,
+              owner_token = $1,
+              owner_generation = job.owner_generation + 1,
+              lease_expires_at = NOW() + ($2::bigint * INTERVAL '1 millisecond'),
+              last_worker_heartbeat_at = NOW(),
+              worker_attempt_count = job.worker_attempt_count + 1,
+              llm_started_at = NOW(),
+              llm_completed_at = NULL,
+              completed_at = NULL,
+              error = NULL,
+              provider_error_code = NULL,
+              updated_at = NOW()
+         FROM selected
+        WHERE job.id = selected.id
+        RETURNING job.*`,
+      [ownerToken, policy.leaseMs, selector, policy.maxAttempts],
+    );
+    if (!result.rows[0]) return null;
+    const job = rowToJob(result.rows[0]);
+    const claim = { job, ownerToken, ownerGeneration: job.ownerGeneration };
+    await compileJobEvent(job.id, "claimed", actor ?? policy.serverActor, { leaseExpiresAt: job.leaseExpiresAt }, claim);
+    return claim;
+  }
+
+  async heartbeat(claim: CompileJobClaim): Promise<void> {
+    const policy = await loadCompileJobRuntimePolicy();
+    const result = await getDb().query(
+      `UPDATE human_workflow_compile_jobs job
+          SET lease_expires_at = NOW() + ($4::bigint * INTERVAL '1 millisecond'),
+              last_worker_heartbeat_at = NOW(),
+              updated_at = NOW()
+         FROM lifecycle_state_definitions state
+        WHERE job.id = $1
+          AND job.owner_token = $2
+          AND job.owner_generation = $3::bigint
+          AND state.lifecycle_key = job.lifecycle_key
+          AND state.status = job.status
+          AND NOT state.terminal
+        RETURNING job.id`,
+      [claim.job.id, claim.ownerToken, claim.ownerGeneration, policy.leaseMs],
+    );
+    if (!result.rows[0]) throw new HumanWorkflowCompileJobLeaseFenceError("compile job heartbeat was fenced");
+  }
+
+  async completeClaim(
+    claim: CompileJobClaim,
+    result: Record<string, unknown> & { cacheKey?: string; shortcutId?: string | null },
+  ): Promise<HumanWorkflowCompileJobRecord> {
+    const transitioned = await transitionCompileJob(claim.job.id, {
+      targetTerminal: true,
+      targetRetryable: false,
+      transitionAutomatic: true,
+      transitionMarkCompleted: true,
+      transitionClearFailure: true,
+    }, {
+      cacheKey: result.cacheKey ?? null,
+      source: "llm",
+      shortcutId: result.shortcutId ?? null,
+      result,
+      clearOwner: true,
+    }, claim);
+    if (!transitioned) throw new HumanWorkflowCompileJobLeaseFenceError("compile job completion was fenced");
+    await compileJobEvent(claim.job.id, "completed", "human_workflow_compile_reconciler", { cacheKey: transitioned.cacheKey }, claim);
+    return transitioned;
+  }
+
+  async failClaim(
+    claim: CompileJobClaim,
+    err: Error & { validationErrors?: string[]; debugPayload?: Record<string, unknown>; providerErrorCode?: string },
+  ): Promise<HumanWorkflowCompileJobRecord | null> {
+    const validationDetail = Array.isArray(err.validationErrors) && err.validationErrors.length > 0
+      ? `: ${err.validationErrors.slice(0, 6).join("; ")}`
+      : "";
+    const transitioned = await transitionCompileJob(claim.job.id, {
+      targetTerminal: true,
+      targetRetryable: true,
+      transitionAutomatic: true,
+      transitionMarkCompleted: true,
+    }, {
+      error: `${err.message}${validationDetail}`,
+      providerErrorCode: err.providerErrorCode ?? null,
+      appendDebug: err.debugPayload ?? null,
+      clearOwner: true,
+    }, claim);
+    if (transitioned) {
+      await compileJobEvent(claim.job.id, "failed", "human_workflow_compile_reconciler", { error: transitioned.error }, claim);
+    }
+    return transitioned;
+  }
+
+  async reconcileOnce(runner: HumanWorkflowCompileJobRunner, actor?: string): Promise<{ claimed: number }> {
+    if (this.shuttingDown) return { claimed: 0 };
+    const policy = await loadCompileJobRuntimePolicy();
+    let claimed = 0;
+    for (let index = 0; index < policy.claimLimit; index += 1) {
+      const claim = await this.claimNext(actor ?? policy.serverActor);
+      if (!claim) break;
+      claimed += 1;
+      void this.processClaim(claim, runner);
+    }
+    return { claimed };
+  }
+
+  startReconciler(runner: HumanWorkflowCompileJobRunner): void {
+    if (this.reconcileTimer) return;
+    this.shuttingDown = false;
+    const schedule = async (): Promise<void> => {
+      if (this.shuttingDown) return;
+      try {
+        const policy = await loadCompileJobRuntimePolicy();
+        await this.reconcileOnce(runner, policy.serverActor);
+        this.reconcileTimer = setTimeout(schedule, policy.reconcileIntervalMs);
+        this.reconcileTimer.unref();
+      } catch (error) {
+        console.error("[human-workflow-compile] reconciler failed closed:", (error as Error).message);
+        this.reconcileTimer = null;
+      }
+    };
+    void schedule();
+  }
+
+  async stopReconciler(): Promise<void> {
+    this.shuttingDown = true;
+    if (this.reconcileTimer) clearTimeout(this.reconcileTimer);
+    this.reconcileTimer = null;
+  }
+
+  private async processClaim(claim: CompileJobClaim, runner: HumanWorkflowCompileJobRunner): Promise<void> {
+    if (this.running.has(claim.job.id)) return;
+    this.running.add(claim.job.id);
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    try {
+      const policy = await loadCompileJobRuntimePolicy();
+      heartbeatTimer = setInterval(() => {
+        this.heartbeat(claim).catch((error) => {
+          console.error("[human-workflow-compile] heartbeat failed:", (error as Error).message);
+        });
+      }, policy.heartbeatIntervalMs);
+      heartbeatTimer.unref();
+      const result = await runner(claim.job, claim);
+      await this.completeClaim(claim, result);
+    } catch (err) {
+      if (err instanceof HumanWorkflowCompileJobLeaseFenceError) return;
+      await this.failClaim(claim, err as Error & { validationErrors?: string[]; debugPayload?: Record<string, unknown> }).catch(() => {});
+    } finally {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      this.running.delete(claim.job.id);
+    }
   }
 }
 

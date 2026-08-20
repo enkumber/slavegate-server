@@ -713,23 +713,29 @@ export class HumanWorkflowCompilerService {
       return ready;
     }
 
-    const segmentJob = await segmentBuildJobService.createOrGet({
+    const job = await humanWorkflowCompileJobService.createOrGet({
       requestKey,
       deviceId: input.deviceId,
       accountId: input.accountId ?? null,
       intent,
       platform: target.account_platform,
-      capabilityKey: catalogContext.matchedCapabilityKey,
-      reason: "segment_missing",
     });
-    segmentBuildJobService.dispatchInBackground(segmentJob);
+    const jobState = await humanWorkflowCompileJobService.state(job);
+    if (
+      jobState?.terminal === true
+      && jobState.retryable === false
+      && jobState.administrative === false
+      && job.result
+    ) {
+      return job.result as HumanWorkflowCompileReady;
+    }
+    await this.reconcileCompileJobsOnce("human_workflow_compile_request");
     return {
       ready: false,
       requestKey,
-      segmentBuildJobId: segmentJob.id,
+      compileJobId: job.id,
       retryAfterMs: ASYNC_COMPILE_RETRY_AFTER_MS,
-      source: "agent",
-      reason: "segment_missing",
+      source: "llm",
     };
 
   }
@@ -750,12 +756,42 @@ export class HumanWorkflowCompilerService {
     }
     const job = await humanWorkflowCompileJobService.requeueFailed(id);
     if (!job) return existing;
-    humanWorkflowCompileJobService.runInProcess(job.id, () => this.compileWithLlm({
-      requestKey: job.requestKey,
-      intent: job.intent,
-      target,
-    }));
+    await this.reconcileCompileJobsOnce("human_workflow_compile_retry");
     return job;
+  }
+
+  async reconcileCompileJobsOnce(actor?: string): Promise<{ claimed: number }> {
+    return humanWorkflowCompileJobService.reconcileOnce(async (job) => {
+      const target = await this.resolveTarget(job.deviceId, job.accountId, job.intent);
+      if (!target) {
+        throw Object.assign(new Error("Device or account not found"), {
+          status: 400,
+          code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND",
+        });
+      }
+      return this.compileWithLlm({
+        requestKey: job.requestKey,
+        intent: job.intent,
+        target,
+      });
+    }, actor);
+  }
+
+  startCompileJobReconciler(): void {
+    humanWorkflowCompileJobService.startReconciler(async (job) => {
+      const target = await this.resolveTarget(job.deviceId, job.accountId, job.intent);
+      if (!target) {
+        throw Object.assign(new Error("Device or account not found"), {
+          status: 400,
+          code: "HUMAN_WORKFLOW_TARGET_NOT_FOUND",
+        });
+      }
+      return this.compileWithLlm({
+        requestKey: job.requestKey,
+        intent: job.intent,
+        target,
+      });
+    });
   }
 
   async compileShortcut(

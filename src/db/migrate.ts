@@ -53,6 +53,7 @@ export function isFailClosedMigration(fileName: string): boolean {
     fileName.includes("capability_descriptor_coverage") ||
     fileName.includes("generic_workflow_segments") ||
     fileName.includes("segment_builder_agent_jobs") ||
+    fileName.includes("human_workflow_compile_job_reconciler") ||
     fileName.includes("task_status_contract") ||
     fileName.includes("task_lifecycle_db_authoritative") ||
     fileName.includes("generic_resource_lifecycle") ||

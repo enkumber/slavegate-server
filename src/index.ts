@@ -53,6 +53,8 @@ import {
   ensureSegmentBuilderAgentToken,
   segmentBuildJobService,
 } from "./modules/segment-builder/segment-build-job.service";
+import { humanWorkflowCompilerService } from "./modules/human-workflow/human-workflow-compiler.service";
+import { humanWorkflowCompileJobService } from "./modules/human-workflow/compile-job.service";
 import { segmentBuilderRuntimePolicy } from "./modules/segment-builder/runtime-policy";
 import {
   ResourceRuntimePolicyUnavailableError,
@@ -338,6 +340,7 @@ async function bootstrap(): Promise<void> {
   dispatcherService.sweepStaleJobs().catch(err =>
     console.error("[dispatcher] startup lifecycle sweep error:", (err as Error).message)
   );
+  humanWorkflowCompilerService.startCompileJobReconciler();
   if (isPnqV2ShadowRuntimeEnabled()) {
     pnqV2RuntimeService.startPeriodicSweep();
   }
@@ -376,6 +379,7 @@ async function bootstrap(): Promise<void> {
     httpServer.close();
     if (queueSweepTimer) clearInterval(queueSweepTimer);
     if (segmentBuilderRecoveryTimer) clearTimeout(segmentBuilderRecoveryTimer);
+    await humanWorkflowCompileJobService.stopReconciler();
     await stopSegmentBuilderPolicyWatch();
     clearInterval(dispatcherLifecycleTimer);
     if (isPnqV2ShadowRuntimeEnabled()) {
