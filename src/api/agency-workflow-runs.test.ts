@@ -173,6 +173,11 @@ describe("agency workflow runs API", () => {
       canonicalWorkflowId: "agent_generated_reddit_account_health_scan_v1",
     });
 
+    const cacheLookup = mocks.client.query.mock.calls.find(([sql]) =>
+      String(sql).includes("generated_workflow_plan_cache")
+    );
+    expect(cacheLookup?.[0]).toContain("artifact_state = 'promoted'");
+
     const taskInsert = mocks.client.query.mock.calls.find(([sql]) =>
       String(sql).includes("INSERT INTO tasks")
     );
@@ -254,6 +259,7 @@ describe("agency workflow runs API", () => {
       String(sql).includes("generated_workflow_plan_cache")
     );
     expect(cacheLookup?.[0]).toContain("reddit_account_health_scan");
+    expect(cacheLookup?.[0]).toContain("artifact_state = 'promoted'");
 
     const taskInsert = mocks.client.query.mock.calls.find(([sql]) =>
       String(sql).includes("INSERT INTO tasks")

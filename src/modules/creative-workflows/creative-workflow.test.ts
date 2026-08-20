@@ -185,6 +185,9 @@ describe("createCreativeWorkflowRun", () => {
     expect(result.message).toContain(runId);
     expect(result.message).toContain(taskId);
 
+    const cacheLookup = mocks.client.query.mock.calls.find(([sql]) => String(sql).includes("generated_workflow_plan_cache"));
+    expect(cacheLookup?.[0]).toContain("artifact_state = 'promoted'");
+
     const runInsert = mocks.client.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO agency_workflow_runs"));
     expect(runInsert).toBeDefined();
     expect(runInsert![1][0]).toBe("c-1");

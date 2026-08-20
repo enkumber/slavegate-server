@@ -615,9 +615,12 @@ describe("dashboard human workflow routes", () => {
       }),
       requestKey(ASKREDDIT_HOT_INTENT),
       expect.objectContaining({
-        source: "dashboard_human",
-        shortcut: "askreddit_first_hot_read",
-        intent: ASKREDDIT_HOT_INTENT,
+        artifactState: "promoted",
+        sourceMetadata: expect.objectContaining({
+          source: "dashboard_human",
+          shortcut: "askreddit_first_hot_read",
+          intent: ASKREDDIT_HOT_INTENT,
+        }),
       }),
     );
   });
@@ -680,9 +683,12 @@ describe("dashboard human workflow routes", () => {
       }),
       requestKey(OPEN_INSTAGRAM_INTENT),
       expect.objectContaining({
-        source: "dashboard_human",
-        shortcut: "open_app",
-        intent: OPEN_INSTAGRAM_INTENT,
+        artifactState: "promoted",
+        sourceMetadata: expect.objectContaining({
+          source: "dashboard_human",
+          shortcut: "open_app",
+          intent: OPEN_INSTAGRAM_INTENT,
+        }),
       }),
     );
   });
@@ -775,9 +781,12 @@ describe("dashboard human workflow routes", () => {
       }),
       requestKey(REDDIT_FIRST_POST_COMMENTS_INTENT),
       expect.objectContaining({
-        source: "dashboard_human",
-        shortcut: "reddit_first_post_comments",
-        intent: REDDIT_FIRST_POST_COMMENTS_INTENT,
+        artifactState: "promoted",
+        sourceMetadata: expect.objectContaining({
+          source: "dashboard_human",
+          shortcut: "reddit_first_post_comments",
+          intent: REDDIT_FIRST_POST_COMMENTS_INTENT,
+        }),
       }),
     );
   });
@@ -807,9 +816,12 @@ describe("dashboard human workflow routes", () => {
       expect.any(Object),
       requestKey(REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT),
       expect.objectContaining({
-        source: "dashboard_human",
-        shortcut: "reddit_first_post_comments",
-        intent: REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT,
+        artifactState: "promoted",
+        sourceMetadata: expect.objectContaining({
+          source: "dashboard_human",
+          shortcut: "reddit_first_post_comments",
+          intent: REDDIT_FIRST_POST_COMMENT_BUTTON_INTENT,
+        }),
       }),
     );
   });
@@ -856,9 +868,12 @@ describe("dashboard human workflow routes", () => {
       expect.any(Object),
       requestKey(ASKREDDIT_RO_INTENT),
       expect.objectContaining({
-        source: "dashboard_human",
-        shortcut: "askreddit_first_hot_read",
-        intent: ASKREDDIT_RO_INTENT,
+        artifactState: "promoted",
+        sourceMetadata: expect.objectContaining({
+          source: "dashboard_human",
+          shortcut: "askreddit_first_hot_read",
+          intent: ASKREDDIT_RO_INTENT,
+        }),
       }),
     );
   });

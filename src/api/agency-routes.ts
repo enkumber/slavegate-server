@@ -620,6 +620,7 @@ router.post("/reddit/account-health-scans", async (req: Request, res: Response) 
     const cacheResult = await client.query<Record<string, unknown>>(
       `SELECT * FROM generated_workflow_plan_cache
        WHERE platform = 'reddit'
+         AND artifact_state = 'promoted'
          AND COALESCE(compiled_plan #>> '{metadata,intent}', workflow ->> 'intent', source_metadata ->> 'intent') = 'reddit_account_health_scan'
          AND COALESCE(compiled_plan #>> '{metadata,safetyClass}', workflow ->> 'safetyClass', source_metadata ->> 'safetyClass') = 'read_only'
          AND COALESCE(compiled_plan #>> '{llmBudget,happyPathRequests}', '') = '0'
@@ -766,9 +767,12 @@ router.post("/workflow-runs", requireAdminAuth, async (req: Request, res: Respon
 
     const cacheResult = await client.query<Record<string, unknown>>(
       hasCacheKey
-        ? `SELECT * FROM generated_workflow_plan_cache WHERE cache_key = $1`
+        ? `SELECT * FROM generated_workflow_plan_cache
+           WHERE cache_key = $1
+             AND artifact_state = 'promoted'`
         : `SELECT * FROM generated_workflow_plan_cache
            WHERE request_key = $1
+             AND artifact_state = 'promoted'
            ORDER BY updated_at DESC
            LIMIT 1`,
       [hasCacheKey ? body.cacheKey : body.requestKey]

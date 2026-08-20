@@ -89,6 +89,7 @@ async function queueHumanAgencyWorkflowRun(input: {
   target: HumanWorkflowTarget;
   intent: string;
   compiledBy?: unknown;
+  allowCandidateArtifact?: boolean;
 }): Promise<Record<string, unknown>> {
   const db = getDb();
   const client = await db.connect();
@@ -100,9 +101,18 @@ async function queueHumanAgencyWorkflowRun(input: {
     );
     const cacheResult = await client.query<Record<string, unknown>>(
       input.cacheKey
-        ? `SELECT * FROM generated_workflow_plan_cache WHERE cache_key = $1`
-        : `SELECT * FROM generated_workflow_plan_cache WHERE request_key = $1 ORDER BY updated_at DESC LIMIT 1`,
-      [input.cacheKey ?? input.requestKey],
+        ? `SELECT * FROM generated_workflow_plan_cache
+           WHERE cache_key = $1
+             AND artifact_state = ANY($2::text[])`
+        : `SELECT * FROM generated_workflow_plan_cache
+           WHERE request_key = $1
+             AND artifact_state = ANY($2::text[])
+           ORDER BY updated_at DESC
+           LIMIT 1`,
+      [
+        input.cacheKey ?? input.requestKey,
+        input.allowCandidateArtifact ? ["promoted", "candidate"] : ["promoted"],
+      ],
     );
     const cached = cacheResult.rows[0];
     if (!cached) {
@@ -174,7 +184,7 @@ async function queueHumanAgencyWorkflowRun(input: {
       );
       runId = runResult.rows[0].id;
     }
-    const taskParams = {
+    const taskParams: Record<string, unknown> = {
       requestKey: input.requestKey,
       clientId: input.target.client_id,
       agencyWorkflowRunId: runId,
@@ -182,6 +192,7 @@ async function queueHumanAgencyWorkflowRun(input: {
       intent: input.intent,
       source: "dashboard_human",
     };
+    if (input.allowCandidateArtifact === true) taskParams.allowCandidateArtifact = true;
     const taskResult = await client.query<{ id: string }>(
       `INSERT INTO tasks (account_id, device_id, routine, params, scheduled_time, status)
        VALUES ($1, $2, 'generated_workflow', $3, $4, 'queued')
@@ -754,6 +765,7 @@ router.post("/workflows/human/run", requireAdminAuth, async (req, res) => {
       target: compiled.target,
       intent: intent.trim(),
       compiledBy: (req as any).dashboardUser?.sub ?? (req as any).dashboardUser?.userId ?? (req as any).authPrincipal?.userId,
+      allowCandidateArtifact: compiled.source === "llm",
     });
     res.status(201).json({ ok: true, data: run });
   } catch (err) {
@@ -1003,12 +1015,13 @@ router.post("/workflows/generated/cache/resolve", requireAuth, async (req, res) 
       data: {
         cacheHit: false,
         cacheMiss: hadCacheLookup,
-        canExecuteFromCache: shouldPersist,
+        canExecuteFromCache: false,
         requestedCacheKey: cacheKey ?? null,
         requestedRequestKey: requestKey ?? null,
         requestKey: requestKey ?? null,
-        nextAction: shouldPersist ? "reuse_cached_workflow" : "validate_or_persist_before_execution",
+        nextAction: shouldPersist ? "await_promotion_before_execution" : "validate_or_persist_before_execution",
         persisted: shouldPersist,
+        artifactState: shouldPersist ? "candidate" : null,
         ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist, compiledPlan }),
       },
     });
@@ -1164,12 +1177,13 @@ router.post("/workflows/generated", requireAuth, async (req, res) => {
         data: {
           cacheHit,
           canonicalHit: cacheHit,
-          canExecuteFromCache: cacheHit || shouldPersist,
+          canExecuteFromCache: cacheHit,
           cacheKey: resolvedCache?.cacheKey ?? compiledPlan.cacheKey,
           requestKey: resolvedCache?.requestKey ?? requestKey ?? null,
           canonicalWorkflowId: resolvedCache?.canonicalWorkflowId ?? template.id,
           canonicalWorkflowVersion: resolvedCache?.canonicalWorkflowVersion ?? template.version,
           compiledPlanHash: resolvedCache?.compiledPlanHash ?? null,
+          artifactState: resolvedCache?.artifactState ?? (shouldPersist ? "candidate" : null),
           controlPlaneContext,
           ...summarizeGeneratedWorkflowTemplate(template, { dryRun: true, persisted: shouldPersist, compiledPlan }),
         },

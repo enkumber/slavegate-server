@@ -276,7 +276,7 @@ describe("task-runner generated_workflow routine", () => {
         },
       },
     });
-    expect(mocks.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(REQUEST_KEY);
+    expect(mocks.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(REQUEST_KEY, { includeCandidate: false });
     expect(mocks.getGeneratedPlanCache).not.toHaveBeenCalled();
     expect(mocks.agentExecuteTask).not.toHaveBeenCalled();
     expect(mocks.dispatchGeneratedWorkflowTemplate).toHaveBeenCalledWith(expect.objectContaining({
@@ -375,9 +375,25 @@ describe("task-runner generated_workflow routine", () => {
     const result = await executeTaskNow(TASK_ID);
 
     expect(result).toMatchObject({ success: true });
-    expect(mocks.getGeneratedPlanCache).toHaveBeenCalledWith(CACHE_KEY);
+    expect(mocks.getGeneratedPlanCache).toHaveBeenCalledWith(CACHE_KEY, { includeCandidate: false });
     expect(mocks.cacheLookupLabels).toHaveBeenCalledWith("task_runner", "cache_hit");
     expect(mocks.executionLabels).toHaveBeenCalledWith("reddit", "true", "task_runner_cache_key");
+  });
+
+  it("allows candidate lookup only for explicit dashboard human first-run tasks", async () => {
+    const cached = cacheRecord({ artifactState: "candidate" });
+    mockTaskDb(task({
+      requestKey: REQUEST_KEY,
+      source: "dashboard_human",
+      allowCandidateArtifact: true,
+      agencyWorkflowRunId: TASK_ID,
+    }));
+    mocks.getGeneratedPlanCacheByRequestKey.mockResolvedValue(cached);
+
+    const result = await executeTaskNow(TASK_ID);
+
+    expect(result).toMatchObject({ success: true });
+    expect(mocks.getGeneratedPlanCacheByRequestKey).toHaveBeenCalledWith(REQUEST_KEY, { includeCandidate: true });
   });
 
   it("rejects workflow payloads without cache lookup or dispatch", async () => {
